@@ -733,11 +733,13 @@ final class StatusTests: XCTestCase {
     /// a system notification; the third week says nothing new; the streak
     /// resetting back to two later must notify again.
     func testReclaimNotificationFiresOncePerBlockedEpisode() {
-        func reclaim(streak: Int, state: String = "blocked") -> ReclaimState {
+        func reclaim(streak: Int, state: String = "blocked", finished: Int = 1_750_100_000,
+                     sessions: Int? = 9_869, bytes: Int? = 12_900_000_000) -> ReclaimState {
             ReclaimState(kind: "known", state: state, consecutiveBlocked: streak,
-                         heldBackSessions: 9_869, heldBackBytes: 12_900_000_000,
+                         finishedAtUnix: finished,
+                         heldBackSessions: sessions, heldBackBytes: bytes,
                          blocked: [ReclaimBlockedDestination(destination: "r2", kind: "unreachable",
-                                                             sessions: 9_869, bytes: 12_900_000_000,
+                                                             sessions: sessions, bytes: bytes,
                                                              errorKind: "credentials_missing_or_invalid")],
                          unitInstalled: true, why: nil)
         }
@@ -748,6 +750,9 @@ final class StatusTests: XCTestCase {
         // The payload carries the machine's own numbers, not a paraphrase.
         XCTAssertTrue(first?.body.contains("2 times in a row") ?? false)
         XCTAssertTrue(first?.body.contains("r2") ?? false)
+        // The identifier names the attempt that crossed the threshold —
+        // the event key of this episode, checked fully in the episode test.
+        XCTAssertEqual(first?.identifier, "chat-stasher-reclaim-1750100000")
         // The streak keeps growing: already notified, stays quiet.
         XCTAssertNil(reclaimNotificationPayload(reclaim: reclaim(streak: 5), notifiedStreak: 2))
         // An ok streak is not a notification event, and clears nothing here.
@@ -755,7 +760,87 @@ final class StatusTests: XCTestCase {
         // After the ok reset clears the marker, the next episode notifies.
         XCTAssertNotNil(reclaimNotificationPayload(reclaim: reclaim(streak: 2), notifiedStreak: 0))
         // A record the CLI could not read is not a notification event either.
-        XCTAssertNil(reclaimNotificationPayload(reclaim: ReclaimState(kind: "missing", state: nil, consecutiveBlocked: nil, heldBackSessions: nil, heldBackBytes: nil, blocked: nil, unitInstalled: true, why: nil), notifiedStreak: 0))
+        XCTAssertNil(reclaimNotificationPayload(reclaim: ReclaimState(kind: "missing", state: nil, consecutiveBlocked: nil, finishedAtUnix: nil, heldBackSessions: nil, heldBackBytes: nil, blocked: nil, unitInstalled: true, why: nil), notifiedStreak: 0))
+    }
+
+    /// M2 · A refusal never surveyed the stage, so the hold-back is
+    /// unknown (the record and the `--json` document keep the counts
+    /// absent, or an older CLI reports summed-to-nothing zeros): the
+    /// notification body must carry no counts for it — the same omission
+    /// this builder already makes for a structurally absent count — and
+    /// it must not invent a "none" where the CLI said "unknown".
+    func testARefusedRecordNotifiesWithoutFabricatedCounts() {
+        let refused = ReclaimState(kind: "known", state: "refused", consecutiveBlocked: 2,
+                                   finishedAtUnix: 1_750_100_000,
+                                   heldBackSessions: nil, heldBackBytes: nil,
+                                   blocked: nil, unitInstalled: true, why: nil)
+        let payload = reclaimNotificationPayload(reclaim: refused, notifiedStreak: 0)
+        XCTAssertNotNil(payload)
+        XCTAssertFalse(payload?.body.contains("still held") ?? true,
+                       "an unknown hold-back is not a printed count: \(payload?.body ?? "")")
+        XCTAssertFalse(payload?.body.contains("0 conversation") ?? true,
+                       "a refusal's backlog is never a zero: \(payload?.body ?? "")")
+    }
+
+    /// M2 · one identity per blocked *episode*: the attempt that first
+    /// crossed the threshold names the notification. Inside an episode
+    /// the marker (not the identifier) keeps the app quiet; a *later*
+    /// episode crosses two again at a different recorded attempt, and its
+    /// notification must read as new rather than silently replace the
+    /// first request in the notification center.
+    func testReclaimNotificationIdentifierDistinguishesEpisodes() {
+        func payload(finished: Int, streak: Int = 2) -> ReclaimNotification? {
+            reclaimNotificationPayload(reclaim: ReclaimState(
+                kind: "known", state: "blocked", consecutiveBlocked: streak,
+                finishedAtUnix: finished, heldBackSessions: 9_869, heldBackBytes: 12_900_000_000,
+                blocked: [ReclaimBlockedDestination(destination: "r2", kind: "unreachable",
+                                                    sessions: 9_869, bytes: 12_900_000_000,
+                                                    errorKind: "credentials_missing_or_invalid")],
+                unitInstalled: true, why: nil), notifiedStreak: 0)
+        }
+        let first = payload(finished: 1_750_100_000)
+        let second = payload(finished: 1_754_200_000)
+        XCTAssertEqual(first?.identifier, "chat-stasher-reclaim-1750100000")
+        XCTAssertEqual(second?.identifier, "chat-stasher-reclaim-1754200000")
+        XCTAssertNotEqual(first?.identifier, second?.identifier)
+    }
+
+    /// M2 · the "already notified" marker may only count a delivery that
+    /// actually happened: an authorization prompt still pending, a denial
+    /// and a later grant, or a request the notification center refused,
+    /// must leave the marker untouched so the same blocked episode still
+    /// notifies once notifications can reach the person. The pure half of
+    /// that decision is this function; `deliverReclaimNotificationIfDue`
+    /// wires it into UserDefaults from the delivery completion.
+    func testReclaimMarkerIsSetOnlyWhenDeliverySucceeds() {
+        XCTAssertNil(reclaimNotifiedMarkerAfterDelivery(delivered: false, streak: 2),
+                     "an undelivered notification must not suppress the next attempt")
+        XCTAssertEqual(reclaimNotifiedMarkerAfterDelivery(delivered: true, streak: 2), 2)
+        XCTAssertEqual(reclaimNotifiedMarkerAfterDelivery(delivered: true, streak: 3), 3)
+    }
+
+    /// L2 · the machinery ranking the comment claims and the panel's own
+    /// `destinationStatusRank` already encode: a red "backlog held, disk
+    /// growing" must outrank a merely quiet machine, and a yellow
+    /// machinery finding beats a silent one too — costs already being
+    /// paid, not a machine that has merely gone quiet.
+    func testMachineryAlertsOutrankASilentMachine() {
+        var red = cleanLocal
+        red.destAlerts = [DestAlertRow(
+            severity: "red",
+            sentence: "[reclaim] the weekly stage clean-up is blocked 2 times in a row — what it holds back is unknown; nothing was deleted and the stage keeps every byte it archives",
+            fix: nil)]
+        let status = archiveStatus(snapshot: snapshot(age: 9 * 86_400), local: red, failure: nil, now: now)
+        XCTAssertEqual(status.severity, .error)
+        XCTAssertTrue(status.sentence.contains("blocked 2 times in a row"),
+                      "the red machinery finding is the headline, not the quiet machine: \(status.sentence)")
+
+        var yellow = cleanLocal
+        yellow.destAlerts = [DestAlertRow(
+            severity: "yellow", sentence: "[dest] r2: declared, but no installed timer pushes it", fix: nil)]
+        let yellowStatus = archiveStatus(snapshot: snapshot(age: 9 * 86_400), local: yellow, failure: nil, now: now)
+        XCTAssertEqual(yellowStatus.sentence, "[dest] r2: declared, but no installed timer pushes it")
+        XCTAssertEqual(yellowStatus.severity, .warning)
     }
 
     /// The decode contract: a `status --json` document carrying `dest_alerts`

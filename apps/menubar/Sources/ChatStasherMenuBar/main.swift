@@ -81,18 +81,20 @@ private final class DemoWindowDelegate: NSObject, NSApplicationDelegate {
 /// one local notification when the streak first reaches two.
 ///
 /// The *decision* is pure (`reclaimNotificationPayload`) and unit-tested;
-/// this object is only the plumbing: authorization is asked once (a denial
-/// degrades to the panel's dot, which already reflects the same facts,
-/// rather than to nagging), and delivery never runs unless this process is
-/// an app bundle. That last guard is what keeps `swift run`, the test
-/// runner and `--resolve-cli` off the system's notification surface — those
-/// environments carry no bundle identity for the notification center to
-/// speak through.
+/// this object is only the plumbing: authorization is resolved against
+/// the notification center each time (a denial that becomes a grant through
+/// System Settings is noticed within the same episode, not at next launch),
+/// and delivery never runs unless this process is an app bundle. That last
+/// guard is what keeps `swift run`, the test runner and `--resolve-cli`
+/// off the system's notification surface — those environments carry no
+/// bundle identity for the notification center to speak through.
+///
+/// `deliver` reports back through its completion whether the request was
+/// accepted: the "already notified" marker (`deliverReclaimNotificationIfDue`)
+/// counts deliveries that happened, not attempts, so a blocked episode
+/// still notifies once permission exists.
 @MainActor
 enum ReclaimNotifier {
-    private static var authorizationResolved = false
-    private static var authorized = false
-
     /// Whether this process is an app bundle UserNotifications can speak
     /// through. A bare executable is not one, and SwiftPM's debug layout
     /// (`--demo-window`) is deliberately excluded too: the screenshot bundle
@@ -104,10 +106,13 @@ enum ReclaimNotifier {
         return !path.contains(".build/debug/") && !path.contains(".build/release/")
     }
 
-    static func deliver(_ payload: ReclaimNotification) {
-        guard canPostNotifications else { return }
-        requestAuthorizationIfNeeded { granted in
-            guard granted else { return }
+    static func deliver(
+        _ payload: ReclaimNotification,
+        completion: @escaping (_ delivered: Bool) -> Void = { _ in }
+    ) {
+        guard canPostNotifications else { completion(false); return }
+        resolveAuthorization { granted in
+            guard granted else { completion(false); return }
             let content = UNMutableNotificationContent()
             content.title = payload.title
             content.body = payload.body
@@ -117,20 +122,33 @@ enum ReclaimNotifier {
                 content: content,
                 trigger: nil
             )
-            UNUserNotificationCenter.current().add(request)
+            UNUserNotificationCenter.current().add(request) { error in
+                // Delivered means the center accepted the request. Nothing
+                // before this point counts: an authorization prompt
+                // pending, a denial, a bare executable — all completion
+                // (false), all "try again next refresh".
+                Task { @MainActor in completion(error == nil) }
+            }
         }
     }
 
-    private static func requestAuthorizationIfNeeded(_ completion: @escaping (Bool) -> Void) {
-        if authorizationResolved {
-            completion(authorized)
-            return
-        }
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
-            Task { @MainActor in
-                authorizationResolved = true
-                authorized = granted
-                completion(granted)
+    /// The authorization truth at the moment it matters, read from the
+    /// center rather than cached: a denial flips back to granted through
+    /// System Settings while the app keeps running, and a cached `false`
+    /// would postpone that episode's notification to the next launch.
+    /// `.notDetermined` is the only state that prompts, so the user is
+    /// still asked once — the first time a delivery needs them.
+    private static func resolveAuthorization(_ completion: @escaping (Bool) -> Void) {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            switch settings.authorizationStatus {
+            case .notDetermined:
+                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                    Task { @MainActor in completion(granted) }
+                }
+            case .authorized, .provisional, .ephemeral:
+                Task { @MainActor in completion(true) }
+            default:
+                Task { @MainActor in completion(false) }
             }
         }
     }
@@ -299,6 +317,13 @@ struct ReclaimState: Decodable {
     /// Consecutive non-ok attempts ending at this record; the number C2's
     /// two-in-a-row notification counts from.
     let consecutiveBlocked: Int?
+    /// The unix time the recorded attempt ended — the event key C2's
+    /// notification identifier is built from. Absent only in a document
+    /// that predates the field or strips it.
+    let finishedAtUnix: Int?
+    /// What the blocked destinations hold back. Absent when the recorded
+    /// attempt never surveyed the stage (a refusal) — an unknown, not a
+    /// measured zero, and the notification body omits it the same way.
     let heldBackSessions: Int?
     let heldBackBytes: Int?
     let blocked: [ReclaimBlockedDestination]?
@@ -310,6 +335,7 @@ struct ReclaimState: Decodable {
     enum CodingKeys: String, CodingKey {
         case kind, state, why, blocked
         case consecutiveBlocked = "consecutive_blocked"
+        case finishedAtUnix = "finished_at_unix"
         case heldBackSessions = "held_back_sessions"
         case heldBackBytes = "held_back_bytes"
         case unitInstalled = "unit_installed"
@@ -624,6 +650,25 @@ func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, fail
     if waiting > 0 { return .waiting(waiting) }
     if local.scheduleInstalled != true { return .setup("Set up scheduled backups", nil) }
     if local.lastRunFailed { return .localFailure("The last scheduled run failed.") }
+    // W1012 / SG-1 C1: the machinery facts — a destination no timer
+    // pushes, credentials a timer cannot resolve, a reclaim blocked twice
+    // or more, no recorded successful push — outrank the archive findings
+    // below them (a machine gone quiet, per-source stops, extension
+    // reports), because unlike those these are costs already being paid:
+    // a red "backlog held, disk growing" cannot sit beneath a merely
+    // quiet machine. Every red alert outranks every yellow one in the
+    // same pass; ties keep the CLI's own order, which is destination
+    // order — the same comparison `destinationStatusRank` encodes for
+    // the multi-destination pass. The local-pipeline checks above keep
+    // precedence: a machine whose stage state the CLI could not
+    // establish cannot have its machinery facts trusted past that
+    // honesty.
+    if let alert = local.destAlerts.first(where: \.isError) {
+        return .destAlert(alert.sentence, .error)
+    }
+    if let alert = local.destAlerts.first {
+        return .destAlert(alert.sentence, .warning)
+    }
     let attention = Set(snapshot.machines.filter {
         $0.health == "missing_index" || $0.health == "writer_behind"
     }.map(\.machine))
@@ -635,18 +680,6 @@ func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, fail
         return (machine.machine, Int((age + 86_399) / 86_400), age)
     }.max { $0.2 < $1.2 }
     if let silent { return .silent(silent.0, silent.1) }
-    // W1012 / SG-1 C1: the machinery facts — a destination no timer pushes,
-    // credentials a timer cannot resolve, a reclaim blocked twice or more —
-    // rank above the per-source and extension facts, because unlike them
-    // these are costs already being paid. Every red alert outranks every
-    // yellow one in the same pass; ties keep the CLI's own order, which is
-    // destination order.
-    if let alert = local.destAlerts.first(where: \.isError) {
-        return .destAlert(alert.sentence, .error)
-    }
-    if let alert = local.destAlerts.first {
-        return .destAlert(alert.sentence, .warning)
-    }
     if let stopped = snapshot.sourceDetails.first(where: {
         $0.regularlyUsed && sourceHealth(activeDays: 3, lastSavedUnix: $0.lastSavedUnix,
                                         silenceAfterDays: silenceThresholdOverrideDays ?? $0.silenceAfterDays,
@@ -790,11 +823,15 @@ func dashboardDestination(environment: String?, displayed: String?) -> String? {
 struct ReclaimNotification {
     let title: String
     let body: String
-    /// One identity per streak episode: notifying again while the same
-    /// streak continues would be the nagging this threshold exists to
-    /// avoid, and the streak resets to zero on the first ok attempt, so
-    /// the *next* blocked streak notifies again.
+    /// One identity per blocked streak *episode*: notifying again while
+    /// the same streak continues would be the nagging this threshold
+    /// exists to avoid, and the streak resets to zero on the first ok
+    /// attempt, so the *next* blocked streak notifies again.
     let identifier: String
+    /// The consecutive-blocked count this payload is the alarm for — the
+    /// value the "already notified" marker stores when the delivery
+    /// succeeds.
+    let streak: Int
 }
 
 /// Decide whether the reclaim state asks for a system notification (pure,
@@ -828,7 +865,19 @@ func reclaimNotificationPayload(reclaim: ReclaimState?, notifiedStreak: Int?) ->
     return ReclaimNotification(
         title: "Chat Stasher: stage reclaim is still blocked",
         body: body,
-        identifier: "chat-stasher-reclaim-blocked"
+        // One identity per blocked *episode*: the attempt that first
+        // crossed the threshold names it. Inside an episode the notified
+        // marker keeps the app quiet rather than the identifier; a later
+        // episode crosses two again at a different recorded attempt, so
+        // its notification reads as new instead of silently replacing the
+        // first request still sitting in the notification center. A
+        // kind-known document always carries `finished_at_unix` from the
+        // CLI; the fixed fallback only serves a document that predates
+        // the field, and prefers a stable identity over a guess.
+        identifier: reclaim.finishedAtUnix
+            .map { "chat-stasher-reclaim-\($0)" }
+            ?? "chat-stasher-reclaim-blocked",
+        streak: consecutive
     )
 }
 
@@ -838,6 +887,19 @@ func reclaimHeldBackBytes(_ bytes: Int) -> String {
     let formatter = ByteCountFormatter()
     formatter.countStyle = .binary
     return formatter.string(fromByteCount: Int64(bytes))
+}
+
+/// M2 · C2's "already notified" marker after ONE delivery attempt for
+/// `streak`: the streak when the notification center accepted the request,
+/// and nil — leave the marker untouched — when it did not. A deliver step
+/// that posted nothing (this process cannot post, authorization is
+/// pending or denied, `add` rejected the request) must not suppress the
+/// next attempt: the person whose reclaim is blocked has to be notified
+/// the moment notifications can actually reach them, including after
+/// granting permission mid-episode. Pure; the delivery completion in
+/// `deliverReclaimNotificationIfDue` writes its answer into UserDefaults.
+func reclaimNotifiedMarkerAfterDelivery(delivered: Bool, streak: Int) -> Int? {
+    delivered ? streak : nil
 }
 
 func machineNeedsAttention(_ machine: MachineFreshness, now: Date, silenceThresholdOverrideDays: Int? = nil) -> Bool {
@@ -938,7 +1000,12 @@ private final class ArchiveModel: ObservableObject {
 
     /// The C2 delivery step: one notification per blocked streak episode.
     /// `lastNotifiedStreak` persists across launches, so a restart does not
-    /// re-notify about a streak that was already announced.
+    /// re-notify about a streak that was already announced — and it is
+    /// written only from the delivery completion (M2): a notification that
+    /// could not be posted — authorization still pending or denied, the
+    /// request refused — leaves the marker untouched, so the same blocked
+    /// episode notifies the moment notifications can actually reach the
+    /// person, including right after they grant permission.
     func deliverReclaimNotificationIfDue(_ reclaim: ReclaimState?) {
         let notified = UserDefaults.standard.integer(forKey: "reclaimNotifiedStreak")
         guard let payload = reclaimNotificationPayload(reclaim: reclaim, notifiedStreak: notified) else {
@@ -950,8 +1017,11 @@ private final class ArchiveModel: ObservableObject {
             }
             return
         }
-        UserDefaults.standard.set(reclaim?.consecutiveBlocked ?? 0, forKey: "reclaimNotifiedStreak")
-        ReclaimNotifier.deliver(payload)
+        ReclaimNotifier.deliver(payload) { delivered in
+            if let marker = reclaimNotifiedMarkerAfterDelivery(delivered: delivered, streak: payload.streak) {
+                UserDefaults.standard.set(marker, forKey: "reclaimNotifiedStreak")
+            }
+        }
     }
 
     func checkForUpdates() {
@@ -1063,6 +1133,7 @@ private final class ArchiveModel: ObservableObject {
                 ],
                 reclaim: ReclaimState(
                     kind: "known", state: "blocked", consecutiveBlocked: 4,
+                    finishedAtUnix: 1_750_400_000,
                     heldBackSessions: 9_869, heldBackBytes: 12_900_000_000,
                     blocked: [ReclaimBlockedDestination(
                         destination: "r2", kind: "unreachable", sessions: 9_869,
