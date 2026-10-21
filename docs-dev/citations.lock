@@ -667,20 +667,20 @@ crates/chat-stasher/src/destinit.rs:122-141  8546544e08a8  lines=20
   <- docs-dev/threat-model.md:873  :: /// How a run was able (or unable) to account for one exist…
 crates/chat-stasher/src/destinit.rs:391-399  d2438d975abb  lines=9
   <- docs-dev/threat-model.md:873  :: Ok(true) => continue,
-crates/chat-stasher/src/doctor.rs:1734-1744  16ea4d171cb7  lines=11
-  <- docs-dev/install.md:1063, docs-dev/install.md:1072  :: /// producing it.
-crates/chat-stasher/src/doctor.rs:1762-1869  88e3807e5ee0  lines=108
-  <- docs-dev/install.md:1067  :: pub duplicate_shards: usize,
-crates/chat-stasher/src/doctor.rs:1872-1893  fe4d1f9f0b5b  lines=22
-  <- docs-dev/install.md:1063, docs-dev/install.md:1072  :: stale,
-crates/chat-stasher/src/doctor.rs:2025-2078  754843b6ef77  lines=54
-  <- docs-dev/install.md:1063, docs-dev/install.md:1072  :: }
-crates/chat-stasher/src/doctor.rs:2251-2301  4b5596c69341  lines=51
-  <- docs-dev/install.md:311  :: /// The report for a config file that exists and cannot be …
-crates/chat-stasher/src/doctor.rs:2718-2719  b564f9110d4c  lines=2
-  <- docs-dev/install.md:1070  :: &claude,
-crates/chat-stasher/src/doctor.rs:3251-3313  1d20a0327a8a  lines=63
-  <- docs-dev/install.md:1070  :: Err(e) => {
+crates/chat-stasher/src/doctor.rs:1746-1756  e88e5fd731c5  lines=11
+  <- docs-dev/install.md:1063, docs-dev/install.md:1072  :: /// What one read-only connection to a declared destination…
+crates/chat-stasher/src/doctor.rs:1774-1881  bbabec918aa9  lines=108
+  <- docs-dev/install.md:1067  :: /// Whether the activity indexes a destination carries were…
+crates/chat-stasher/src/doctor.rs:1884-1905  7b4d69687a1b  lines=22
+  <- docs-dev/install.md:1063, docs-dev/install.md:1072  :: pub enum DestinationOutcome {
+crates/chat-stasher/src/doctor.rs:2037-2090  4176d416bb38  lines=54
+  <- docs-dev/install.md:1063, docs-dev/install.md:1072  :: pub fn probe_destinations(config: &Config) -> Vec<Destinati…
+crates/chat-stasher/src/doctor.rs:2264-2317  e15e4a10d586  lines=54
+  <- docs-dev/install.md:311  :: pub fn config_unreadable(error: String) -> DoctorReport {
+crates/chat-stasher/src/doctor.rs:2734-2735  c49d6fc9ccfa  lines=2
+  <- docs-dev/install.md:1070  :: // D10 — local-only, no repository connection and no docume…
+crates/chat-stasher/src/doctor.rs:3302-3364  0d89a3dbd659  lines=63
+  <- docs-dev/install.md:1070  :: /// D10 — inspect only local index files; this never opens …
 crates/chat-stasher/src/export.rs:962-979  bd664b7c0646  lines=18
   <- docs-dev/openclaw-scanner.md:99  :: // `.jsonl` is appended here, so this file name is one path…
 crates/chat-stasher/src/fts.rs:1-6  b20dd3f20d50  lines=6
@@ -825,36 +825,36 @@ crates/chat-stasher/src/main.rs:6763-6771  91c920ea60b9  lines=9
   <- docs-dev/threat-model.md:877  :: Ok(config) => config,
 crates/chat-stasher/src/main.rs:7952-8007  b580b6b1c776  lines=56
   <- docs-dev/install.md:961  :: // W880: one summary line per pass, on every outcome — the
-crates/chat-stasher/src/main.rs:8709-8714  b9aff1d582b4  lines=6
-  <- docs-dev/privacy.md:1207  :: Ok(paths) => {
-crates/chat-stasher/src/main.rs:8827-8832  41b9e0619137  lines=6
-  <- docs-dev/privacy.md:842  :: eprintln!("schedule incomplete: inbox configuration unavail…
-crates/chat-stasher/src/main.rs:8897-8902  a69652ec2b07  lines=6
-  <- docs-dev/install.md:607  :: "[schedule] wrote template: {} (install as {})",
-crates/chat-stasher/src/main.rs:9112-9119  061d665b3a4b  lines=8
-  <- SECURITY.md:70, docs-dev/threat-model.md:866  :: short_session_id(&d.id),
-crates/chat-stasher/src/main.rs:9139-9143  d3532013427a  lines=5
-  <- SECURITY.md:70, docs-dev/threat-model.md:864  :: if let Some(level) = c.identity_level.as_deref() {
-crates/chat-stasher/src/main.rs:9652-9812  45dc22e27461  lines=161
-  <- docs-dev/threat-model.md:928  :: },
-crates/chat-stasher/src/main.rs:13750-13758  6493cdbb9b06  lines=9
-  <- docs-dev/install.md:304  :: assert_eq!(out, "0123456789abcdef0123456789abcdef");
-crates/chat-stasher/src/main.rs:13768-13791  6b0bdc3a5864  lines=24
-  <- docs-dev/install.md:304  :: #[test]
-crates/chat-stasher/src/main.rs:14929-14943  eca60d5575c5  lines=15
-  <- docs-dev/install.md:626  :: let credentials = setup_remote_credentials(&remote);
-crates/chat-stasher/src/main.rs:15366-15373  a44cc13bc122  lines=8
-  <- docs-dev/install.md:625  :: return ExitCode::from(exit_code);
-crates/chat-stasher/src/main.rs:17904-17938  cf4a150e89db  lines=35
-  <- docs-dev/install.md:1033  :: }),
-crates/chat-stasher/src/main.rs:18365-18370  5473f7e21bd2  lines=6
-  <- docs-dev/install.md:1023  :: // `status` is two things at once. The body is a dashboard …
-crates/chat-stasher/src/main.rs:18378-18446  fd85bedbef0d  lines=69
-  <- docs-dev/install.md:1010  :: // never run it either, and that user is fine, not broken" …
-crates/chat-stasher/src/main.rs:18383-18384  e0949302ab80  lines=2
-  <- docs-dev/install.md:994  :: // both before the timer is installed and after it dies — t…
-crates/chat-stasher/src/main.rs:18389-18390  c5459107bb0e  lines=2
-  <- docs-dev/install.md:989  :: // whole report goes to *stderr*, so it is usually read thr…
+crates/chat-stasher/src/main.rs:8717-8722  277527308823  lines=6
+  <- docs-dev/privacy.md:1207  :: return ExitCode::FAILURE;
+crates/chat-stasher/src/main.rs:8852-8857  52d4b7130c7c  lines=6
+  <- docs-dev/privacy.md:842  :: eprintln!("schedule: {error:#}");
+crates/chat-stasher/src/main.rs:8922-8927  581bf6c44307  lines=6
+  <- docs-dev/install.md:607  :: /// (and a wrapper) inject through. One place names each va…
+crates/chat-stasher/src/main.rs:9137-9144  b54ca1b3e4d5  lines=8
+  <- SECURITY.md:70, docs-dev/threat-model.md:866  :: let mut levels: BTreeMap<&str, usize> = BTreeMap::new();
+crates/chat-stasher/src/main.rs:9164-9168  0d25cb363ccc  lines=5
+  <- SECURITY.md:70, docs-dev/threat-model.md:864  :: config::default_data_root()
+crates/chat-stasher/src/main.rs:10117-10292  0ef39e3bedf1  lines=176
+  <- docs-dev/threat-model.md:928  :: fn cmd_read(
+crates/chat-stasher/src/main.rs:13906-13914  55fd954d72cf  lines=9
+  <- docs-dev/install.md:304  :: .join("000");
+crates/chat-stasher/src/main.rs:13924-13947  b78b3335ba4d  lines=24
+  <- docs-dev/install.md:304  :: ],
+crates/chat-stasher/src/main.rs:15085-15099  9e66de89cc0e  lines=15
+  <- docs-dev/install.md:626  :: // about either, for the same reason as the local key above…
+crates/chat-stasher/src/main.rs:15522-15529  393343fb317f  lines=8
+  <- docs-dev/install.md:625  :: repository and masterkey for you to copy failed ({error}), …
+crates/chat-stasher/src/main.rs:18060-18094  128ff4615579  lines=35
+  <- docs-dev/install.md:1033  :: });
+crates/chat-stasher/src/main.rs:18535-18540  84dbce637d8a  lines=6
+  <- docs-dev/install.md:1023  :: /// verdict line and the `--json` object are derived from t…
+crates/chat-stasher/src/main.rs:18548-18616  f1161f7029d2  lines=69
+  <- docs-dev/install.md:1010  :: /// explicit value is an unknown timer verdict, not permiss…
+crates/chat-stasher/src/main.rs:18553-18554  1c2a7e49dfee  lines=2
+  <- docs-dev/install.md:994  :: let state_dir = chat_stasher::collect::default_state_dir();
+crates/chat-stasher/src/main.rs:18559-18560  90cec3cab80c  lines=2
+  <- docs-dev/install.md:989  :: // after the gate's second blind spot was fixed (B93). It n…
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:436, docs-dev/threat-model.md:717  :: //! ADR-022: content-addressed hash tracking for stage meta…
 crates/chat-stasher/src/nativehost.rs:155-168  b160255bd493  lines=14
@@ -975,14 +975,14 @@ crates/chat-stasher/src/provenance.rs:22-55  a5096e190884  lines=34
   <- docs-dev/privacy.md:516  :: /// The optional dimensions used to describe a session's ob…
 crates/chat-stasher/src/reap.rs:1-12  f3c5250f1f63  lines=12
   <- docs-dev/threat-model.md:80, docs-dev/threat-model.md:821  :: //! Connection reaping for remote SSH backends.
-crates/chat-stasher/src/remote_err.rs:101-112  319cfe55db83  lines=12
-  <- docs-dev/install.md:705  :: return (Some(ipv6.to_string()), port);
-crates/chat-stasher/src/remote_err.rs:180-187  e6ba437a87c8  lines=8
-  <- docs-dev/install.md:666  :: {
-crates/chat-stasher/src/remote_err.rs:465-494  9467fca12953  lines=30
-  <- docs-dev/install.md:666  :: /// Probe a remote destination with error classification.
-crates/chat-stasher/src/remote_err.rs:514-547  025570d46ce8  lines=34
-  <- docs-dev/install.md:695  :: /// recorded) and a host whose key has **changed** (which i…
+crates/chat-stasher/src/remote_err.rs:116-127  8dc19707e181  lines=12
+  <- docs-dev/install.md:705  :: // 🔴 Host key changed MUST be checked before HostUntrusted,…
+crates/chat-stasher/src/remote_err.rs:231-238  8cb30e34f60d  lines=8
+  <- docs-dev/install.md:666  :: RemoteErrorKind::HostUntrusted => vec![
+crates/chat-stasher/src/remote_err.rs:548-577  59ae8290fc6f  lines=30
+  <- docs-dev/install.md:666  :: fn print_first_connection_guidance(cfg: &StoreConfig, prefi…
+crates/chat-stasher/src/remote_err.rs:597-630  c531f63130e8  lines=34
+  <- docs-dev/install.md:695  :: pub fn trust_host(cfg: &StoreConfig, known_hosts: &Path) ->…
 crates/chat-stasher/src/runstate.rs:1-11  04391d8ccc80  lines=11
   <- docs-dev/install.md:1287  :: //! Timer-visibility state: what happened on the last `run-…
 crates/chat-stasher/src/runstate.rs:315-363  036d69fcbd03  lines=49
@@ -1001,7 +1001,7 @@ crates/chat-stasher/src/schedule.rs:287-391  0146bafd68ef  lines=105
   <- docs-dev/install.md:941  :: /// Render the templates for one scheduled job. `unit` pick…
 crates/chat-stasher/src/schedule.rs:598-1019  a3de767913be  lines=422
   <- docs-dev/install.md:949, docs-dev/install.md:1252  :: /// One agent file [`install_launchd_agents`] changed, and …
-crates/chat-stasher/src/schedule.rs:1072-1242  e5e95ef85c57  lines=171
+crates/chat-stasher/src/schedule.rs:1072-1566  ece609d656a4  lines=495
   <- docs-dev/install.md:954  :: /// The state of one scheduled job on this machine, from th…
 crates/chat-stasher/src/search.rs:16-38  b967cd30c55b  lines=23
   <- docs-dev/threat-model.md:939, docs-dev/threat-model.md:955  :: //! * **metadata tier** (this module): snapshot files + ind…
