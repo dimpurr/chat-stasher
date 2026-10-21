@@ -193,13 +193,28 @@ fn scheduler_scope_of_this_machine() -> (&'static str, &'static str) {
     }
 }
 
+/// Whether this machine runs on the platform whose scheduler this build
+/// has no reader for (the reconciliation's `scheduler_readable: false`,
+/// where the CLI decides through `schedule_platform_refusal`). Tests that
+/// branch on this assert each platform's *correct* behavior — the
+/// planted files are the verdict's evidence where the scheduler is
+/// readable, and are not claimed at all where reading nothing must not
+/// become "nothing is installed". Both arms compile and run the same
+/// test: no platform's behavior is compiled out.
+fn scheduler_is_unreadable_on_this_platform() -> bool {
+    cfg!(target_os = "windows")
+}
+
 /// `status` reports the machine's four facts in prose: the destination no
 /// timer pushes, the credentials a timer cannot resolve, and the recorded
 /// reclaim blocked twice in a row — the sentences `doctor` shows and
 /// `status --json` hands the menu bar app. The covered destination stays
 /// silent, and the exit code keeps its documented meaning ("is the
 /// scheduled run healthy"), which this machine's never-run timer answers
-/// with its usual non-zero.
+/// with its usual non-zero. On the platform whose scheduler this build
+/// cannot read, the same run asserts the other half of the contract: the
+/// planted unit files are not claimed, and the answer is the worded
+/// unknown — never "no timer" read out of silence.
 #[test]
 fn status_names_the_destination_the_timers_do_not_push() {
     let machine = Machine::new();
@@ -237,22 +252,44 @@ fn status_names_the_destination_the_timers_do_not_push() {
 
     let output = machine.run(&["status"]);
     let text = combined(&output);
-    let (scope_noun, scope_dir) = scheduler_scope_of_this_machine();
-    let uncovered =
-        format!("[dest] r2: declared, but no installed {scope_noun} ({scope_dir}) pushes it");
+    if scheduler_is_unreadable_on_this_platform() {
+        // Reading nothing must not become "nothing is installed": the
+        // planted unit files are exactly the evidence this platform's
+        // verdict must not claim.
+        assert!(
+            text.contains("could not be established"),
+            "an unreadable scheduler answers unknown, worded, in every surface: {text}"
+        );
+        assert!(
+            !text.contains("no installed"),
+            "no coverage claim is made against a scheduler that was not read: {text}"
+        );
+    } else {
+        let (scope_noun, scope_dir) = scheduler_scope_of_this_machine();
+        let uncovered =
+            format!("[dest] r2: declared, but no installed {scope_noun} ({scope_dir}) pushes it");
+        assert!(
+            text.contains(&uncovered),
+            "the uncovered destination is named, with the scope the claim was read from: {text}"
+        );
+        assert!(
+            !text.contains(&format!(
+                "[dest] storagebox: declared, but no installed {scope_noun} ({scope_dir}) pushes it"
+            )),
+            "the covered destination stays silent: {text}"
+        );
+    }
+    let shell_only_sentence = if scheduler_is_unreadable_on_this_platform() {
+        // The config's own shell-only reference still surfaces — worded
+        // as an unknown about whether a timer would resolve it, never as
+        // a timer verdict nobody could read.
+        "shell-only credentials (CHAT_STASHER_R2_ACCESS_KEY_ID)"
+    } else {
+        SHELL_ONLY_R2_SENTENCE
+    };
     assert!(
-        text.contains(&uncovered),
-        "the uncovered destination is named, with the scope the claim was read from: {text}"
-    );
-    assert!(
-        !text.contains(&format!(
-            "[dest] storagebox: declared, but no installed {scope_noun} ({scope_dir}) pushes it"
-        )),
-        "the covered destination stays silent: {text}"
-    );
-    assert!(
-        text.contains(SHELL_ONLY_R2_SENTENCE),
-        "the shell-only credentials sentence, in the one wording all three surfaces share: {text}"
+        text.contains(shell_only_sentence),
+        "the shell-only credentials finding, in the one wording all three surfaces share: {text}"
     );
     assert!(
         text.contains("[reclaim] the weekly stage clean-up is blocked 2 times in a row"),
@@ -303,10 +340,26 @@ fn status_json_carries_the_reconciliation_and_the_reclaim_record() {
         .iter()
         .find(|row| row["name"] == "r2")
         .expect("one row per declared destination");
-    assert_eq!(r2["push_coverage"]["kind"], "no_scheduled_push");
+    // The kinds each platform's verdict produces: file-derived facts are
+    // unknown where no scheduler can be read, and claimed where it can.
+    let unreadable = scheduler_is_unreadable_on_this_platform();
     assert_eq!(
-        r2["credentials"]["kind"], "not_resolvable_in_timer",
-        "r2's fact 2 says the timer cannot resolve it: {r2}"
+        r2["push_coverage"]["kind"],
+        if unreadable {
+            "unknown"
+        } else {
+            "no_scheduled_push"
+        },
+        "r2's fact 1, in the shape this platform's verdict produces: {r2}"
+    );
+    assert_eq!(
+        r2["credentials"]["kind"],
+        if unreadable {
+            "unknown"
+        } else {
+            "not_resolvable_in_timer"
+        },
+        "r2's fact 2 says what this platform's reading supports: {r2}"
     );
     assert_eq!(r2["last_push"]["kind"], "no_record");
     assert_eq!(
@@ -317,7 +370,12 @@ fn status_json_carries_the_reconciliation_and_the_reclaim_record() {
         .iter()
         .find(|row| row["name"] == "storagebox")
         .expect("the covered destination has a row too");
-    assert_eq!(storagebox["push_coverage"]["kind"], "covered");
+    assert_eq!(
+        storagebox["push_coverage"]["kind"],
+        if unreadable { "unknown" } else { "covered" },
+        "the planted timer files are claimed as coverage only where the \
+         scheduler that reads them exists: {storagebox}"
+    );
     assert_eq!(storagebox["credentials"]["kind"], "shell_independent");
     assert_eq!(storagebox["last_push"]["kind"], "known");
     assert_eq!(storagebox["last_push"]["snapshots_in_repo"], 42);
@@ -325,14 +383,23 @@ fn status_json_carries_the_reconciliation_and_the_reclaim_record() {
     let alerts = local["dest_alerts"]
         .as_array()
         .expect("local.dest_alerts carries the pre-worded sentences");
+    // The push-coverage alert this platform produces: the scope-named
+    // claim where the scheduler is readable, the worded unknown where it
+    // is not — both yellow, both matching this build's contract.
+    let unreadable = scheduler_is_unreadable_on_this_platform();
     let (scope_noun, scope_dir) = scheduler_scope_of_this_machine();
+    let claims_coverage = |sentence: &str| {
+        if unreadable {
+            sentence.contains("could not be established")
+        } else {
+            sentence.contains(&format!(
+                "[dest] r2: declared, but no installed {scope_noun} ({scope_dir})"
+            ))
+        }
+    };
     assert!(
         alerts.iter().any(|alert| alert["severity"] == "yellow"
-            && alert["sentence"]
-                .as_str()
-                .is_some_and(|s| s.contains(&format!(
-                    "[dest] r2: declared, but no installed {scope_noun} ({scope_dir})"
-                )))),
+            && alert["sentence"].as_str().is_some_and(claims_coverage)),
         "the push-coverage alert with its severity: {alerts:?}"
     );
     assert_eq!(
@@ -340,8 +407,12 @@ fn status_json_carries_the_reconciliation_and_the_reclaim_record() {
         "no reclaim record exists on this machine, and the record says so in shape"
     );
     assert_eq!(
-        local["reclaim"]["unit_installed"], true,
-        "the planted timer file is reported present"
+        local["reclaim"]["unit_installed"],
+        // The planted reclaim timer file is claimed only where the
+        // scheduler that reads it exists.
+        serde_json::json!(!unreadable),
+        "unit_installed matches what this platform's reading supports: {}",
+        local["reclaim"]
     );
 }
 
