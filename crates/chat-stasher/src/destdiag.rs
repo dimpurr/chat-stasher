@@ -226,6 +226,12 @@ pub enum ReclaimJobRecord {
 pub struct Reconciliation {
     pub destinations: Vec<DestinationFacts>,
     pub reclaim: ReclaimJobFacts,
+    /// The scheduler format the unit-file facts were read in — the scope
+    /// the coverage claims are worded against, so a sentence that says
+    /// "nothing pushes it" names which files were read ("launchd agent
+    /// (~/Library/LaunchAgents)" / "systemd user unit
+    /// (~/.config/systemd/user)") instead of claiming the whole platform.
+    pub format: Format,
     /// One alert per destination with something wrong, destination order.
     pub alerts: Vec<Alert>,
     /// Machine-level alerts (the reclaim job), after the destination ones.
@@ -256,20 +262,42 @@ pub struct Inputs<'a> {
     /// age sentence is assertable without waiting (same rule as
     /// `runstate::summarize`).
     pub now_unix: u64,
+    /// Whether this build can read the platform's scheduler at all. A
+    /// platform the product *does* support scheduling on, but through a
+    /// scheduler this code has no reader for (Windows: a documented
+    /// `schtasks` task, and `schedule install` that refuses), must not have
+    /// an unread directory interpreted as "no timer": `false` keeps every
+    /// file-derived coverage and credential claim in its unknown state and
+    /// leaves the record-based facts (③'s absence, the reclaim records) to
+    /// speak, because those it can read.
+    pub scheduler_readable: bool,
 }
 
 /// The one function (C1): read the local, read-only facts and turn them into
 /// per-destination verdicts plus the worded alerts.
 pub fn reconcile(inputs: &Inputs) -> Reconciliation {
-    let run_once_units = schedule::installed_run_once_units(inputs.format, inputs.home);
-    let reclaim_units = schedule::installed_reclaim_units(inputs.format, inputs.home);
+    let (run_once_units, reclaim_units) = if inputs.scheduler_readable {
+        (
+            schedule::installed_run_once_units(inputs.format, inputs.home),
+            schedule::installed_reclaim_units(inputs.format, inputs.home),
+        )
+    } else {
+        // A scheduler this build cannot read is a platform fact, not an
+        // empty machine: reading nothing must not be laundered into
+        // "nothing is installed". The file-derived facts answer unknown
+        // below instead of mining an unread platform for a negative, and
+        // the reclaim-job findings stay quiet the way an unobservable
+        // job's already do — the record-based facts still speak, because
+        // the state files they read are platform-independent.
+        (Vec::new(), Vec::new())
+    };
     let read_failures: Vec<&schedule::UnitObservation> = run_once_units
         .iter()
         .chain(reclaim_units.iter())
         .filter(|unit| unit.parse_note.is_some())
         .collect();
 
-    let raw_refs = raw_env_option_refs();
+    let raw_scan = raw_env_option_refs();
 
     // The destination set is the declared set; a config with no destinations
     // table gets the single row for the repository a destination-less timer
@@ -288,8 +316,21 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
 
     let mut destinations = Vec::with_capacity(names.len());
     for name in &names {
-        // ①  from the installed unit files.
-        let push_coverage = push_coverage_of(name, &run_once_units, &read_failures);
+        // ①  from the installed unit files — unless the platform's
+        // scheduler is not one this build can read at all, in which case
+        // the absence of files in *this* reader's directory proves
+        // nothing about the platform's timers.
+        let push_coverage = if inputs.scheduler_readable {
+            push_coverage_of(name, &run_once_units, &read_failures)
+        } else {
+            PushCoverage::Unknown {
+                why: format!(
+                    "this build cannot read this platform's scheduler, so whether a timer \
+                     pushes `{name}` could not be established — the schedule the platform \
+                     documents (docs/schedule.md) may name it, and unknown is not none"
+                ),
+            }
+        };
         // ② the unit files that would contact this destination: whichever
         // hourly unit pushes it, plus every installed reclaim unit (the
         // weekly job consults every declared destination, named or not).
@@ -302,7 +343,37 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
             .cloned()
             .collect();
         contacting.extend(reclaim_units.iter().cloned());
-        let credentials = credentials_of(name, &contacting, &raw_refs);
+        let credentials = if let Some(why) = &raw_scan.why_unparsed {
+            // The raw re-read answers at all or it does not: a config
+            // whose text failed this scan's own narrow parse leaves
+            // *which* destinations carry shell-only references unknown,
+            // and an empty map would answer "none" — silently.
+            CredentialResolution::Unknown {
+                why: format!(
+                    "{why}, so whether `{name}`'s credentials include shell-only `env:` \
+                     references could not be established"
+                ),
+            }
+        } else if !inputs.scheduler_readable {
+            match raw_scan.refs.get(name) {
+                Some(refs) => CredentialResolution::Unknown {
+                    why: format!(
+                        "the config declares shell-only credentials ({}), and this build \
+                         cannot read this platform's scheduler, so whether a timer would \
+                         resolve them could not be established",
+                        refs.join(", ")
+                    ),
+                },
+                // reason: a destination whose references are all
+                // `file:` / `env-file:` / `keychain:` / literal resolves
+                // without a shell or a timer — that fact does not depend
+                // on reading any scheduler, so an unread scheduler does
+                // not make it unknown.
+                None => CredentialResolution::ShellIndependent,
+            }
+        } else {
+            credentials_of(name, &contacting, &raw_scan.refs)
+        };
         // ③ the durable push record.
         let last_push = match &push_records {
             crate::pushstate::PushStateRead::Present(state) => match state.pushes.get(name) {
@@ -351,6 +422,7 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
     let reconciliation = Reconciliation {
         destinations,
         reclaim,
+        format: inputs.format,
         alerts: Vec::new(),
         job_alerts: Vec::new(),
     };
@@ -394,20 +466,40 @@ fn push_coverage_of(
     PushCoverage::NoScheduledPush
 }
 
+/// The raw `env:NAME` re-read of the config file, with the two states a
+/// reader must keep apart: the per-destination references the scan found,
+/// and — when the file's text exists but did not parse back as this
+/// scan's own (deliberately narrow) shape — the reason it did not. The
+/// narrow-parse failure is an *unknown about the references*, never the
+/// answer "no destination has shell-only credentials": the product's own
+/// `Config` loader is more permissive than this scan, `schedule install`
+/// warning arms in this module are fed from the same scan, and a machine
+/// whose loaded config survives while this re-read fails (a nested table
+/// in `options`, an unescaped Windows path in `repo`) must not have its
+/// fact ② quietly turned green by an empty map.
+#[derive(Debug, Default)]
+pub struct RawEnvScan {
+    /// Destinations carrying `env:NAME` references, the names verbatim.
+    pub refs: BTreeMap<String, Vec<String>>,
+    /// Why the config file's text could not be re-read into this scan,
+    /// when it could not be — `None` means the scan answered.
+    pub why_unparsed: Option<String>,
+}
+
 /// Raw `env:NAME` option references per destination, re-read from the
 /// config file's own text. The loaded `Config` has already replaced or
 /// dropped these, so this is the only place the machine's *configured*
 /// credential shape is still visible. Public for the install-time warning:
 /// `schedule install` reads it to tell the user, before the first scheduled
 /// run fails, that the timer it just wrote cannot carry these.
-pub fn raw_env_option_refs() -> BTreeMap<String, Vec<String>> {
+pub fn raw_env_option_refs() -> RawEnvScan {
     let mut out = BTreeMap::new();
     let text = match std::fs::read_to_string(crate::config::config_path()) {
         Ok(text) => text,
         // The config itself is unreadable: report no refs — callers word
         // that condition from the config error they already have, and a
         // per-destination unknown would only repeat it one row at a time.
-        Err(_) => return out,
+        Err(_) => return RawEnvScan::default(),
     };
     #[derive(Deserialize)]
     struct RawDestination {
@@ -417,8 +509,23 @@ pub fn raw_env_option_refs() -> BTreeMap<String, Vec<String>> {
     struct RawFile {
         destinations: Option<BTreeMap<String, RawDestination>>,
     }
-    let Ok(file) = toml::from_str::<RawFile>(&text) else {
-        return out;
+    let file = match toml::from_str::<RawFile>(&text) {
+        Ok(file) => file,
+        // The file exists and its text was read, but it does not parse
+        // back as this scan's own narrow shape — a shape the product's
+        // more permissive loader can survive. Which destinations carry
+        // shell-only references is then unknown, which is not "none of
+        // them do" (an empty map would answer exactly that, silently).
+        Err(_) => {
+            return RawEnvScan {
+                refs: BTreeMap::new(),
+                why_unparsed: Some(
+                    "the config file's text exists but could not be re-read for the \
+                     environment-reference scan"
+                        .to_string(),
+                ),
+            }
+        }
     };
     // reason: an absent [destinations] table genuinely means "nothing is
     // written there" — the table's own absence is a configuration fact, not
@@ -442,7 +549,10 @@ pub fn raw_env_option_refs() -> BTreeMap<String, Vec<String>> {
             out.insert(name, refs);
         }
     }
-    out
+    RawEnvScan {
+        refs: out,
+        why_unparsed: None,
+    }
 }
 
 /// ② for one destination, decided against the environment declarations of
@@ -485,6 +595,20 @@ fn credentials_of(
     }
 }
 
+/// The scheduler the unit files were read from, in the two words a claim
+/// about them names: what was read and where. A "nothing pushes it"
+/// finding worded against the reader's own scope states its limits — a
+/// user with system-scope units (`/Library/LaunchDaemons`,
+/// `/etc/systemd/system`) or a hand-installed
+/// timer (`schedule --output`) can read what was *not* looked at, instead
+/// of being told no timer exists.
+fn scheduler_scope(format: Format) -> (&'static str, &'static str) {
+    match format {
+        Format::Launchd => ("launchd agent", "~/Library/LaunchAgents"),
+        Format::Systemd => ("systemd user unit", "~/.config/systemd/user"),
+    }
+}
+
 /// The machine-level reclaim facts.
 fn reclaim_job_facts(
     reclaim_units: &[schedule::UnitObservation],
@@ -518,17 +642,20 @@ fn reclaim_job_facts(
 }
 
 /// Build the alerts — the sentences all three surfaces share. One alert per
-/// destination, the most serious first-order finding it has; the reclaim
-/// share adds a second alert when it is the consequence that has already
-/// arrived.
+/// destination per first-order fact that is not right (① coverage, ②
+/// timer-visible credentials, ③ a recorded successful push); the reclaim
+/// share adds the consequence that has already arrived, and the reclaim
+/// job record speaks at machine level.
 ///
 /// A quiet row is no alerts at all: `status`'s body stays byte-identical on
 /// a machine whose destinations are all covered, all resolvable from a
-/// timer and currently reclaiming — the reconciliation is a new sound,
+/// timer, record-successful and currently reclaiming — the reconciliation
+/// is a new sound,
 /// not a new hum (same rule as `doctor::key_alert_lines`).
 fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
     let destinations = reconciliation.destinations.clone();
     let reclaim = reconciliation.reclaim.clone();
+    let format = reconciliation.format;
 
     for facts in &destinations {
         // The implicit "default" row is not a declared destination: a
@@ -542,15 +669,22 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
         // are declared-set findings, and there is no declared set here.
         let declared_row = facts.name != crate::pushstate::DEFAULT_DESTINATION;
         if declared_row {
+            // The wording names the scheduler and directory the facts were
+            // read from, worded against what was read rather than against
+            // the platform as a whole: a user with system-scope units or a
+            // hand-installed timer can read the claim's scope off the
+            // sentence instead of being told "no timer exists".
+            let (scope_noun, scope_dir) = scheduler_scope(format);
             match &facts.push_coverage {
                 PushCoverage::Covered { .. } => {}
                 PushCoverage::NoScheduledPush => reconciliation.alerts.push(Alert {
                     severity: Severity::Yellow,
                     sentence: format!(
-                        "[dest] {name}: declared, but no installed timer pushes it — a push \
-                         reaches it only when a command names it by hand; the weekly stage \
-                         clean-up consults every declared destination, so the stage keeps \
-                         growing until `{name}` holds a copy or the declaration is removed",
+                        "[dest] {name}: declared, but no installed {scope_noun} ({scope_dir}) \
+                         pushes it — a push reaches it only when a command names it by hand; the \
+                         weekly stage clean-up consults every declared destination, so the \
+                         stage keeps growing until `{name}` holds a copy or the declaration is \
+                         removed",
                         name = facts.name
                     ),
                     fix: Some(format!(
@@ -585,7 +719,46 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                     fix: None,
                 });
             }
+            CredentialResolution::Unknown { why } if declared_row => {
+                // The mirror of ①'s Unknown arm: an unreadable config
+                // re-read or an unreadable scheduler is worded as what it
+                // is, never as the all-clear an empty map would print.
+                reconciliation.alerts.push(Alert {
+                    severity: Severity::Yellow,
+                    sentence: format!("`{}`: {why}", facts.name),
+                    fix: None,
+                });
+            }
             _ => {}
+        }
+        // ③ the covered-but-never-successfully-pushed destination (§4.7's
+        // fixture shape): the machinery looks right — a timer covers it,
+        // the credentials resolve — yet no push has been recorded to have
+        // succeeded. Before this arm, ③ surfaced only in `--json` facts
+        // and `doctor`'s table, never as an alert, so `status` stayed
+        // green until a weekly reclaim happened to block on the gap. An
+        // uncovered destination does not get this alert: its coverage
+        // finding already speaks, and the push that follows the fix is
+        // the same sentence's happy ending.
+        if declared_row
+            && matches!(facts.push_coverage, PushCoverage::Covered { .. })
+            && matches!(facts.last_push, LastPush::NoRecord)
+        {
+            reconciliation.alerts.push(Alert {
+                severity: Severity::Yellow,
+                sentence: format!(
+                    "[dest] {}: {} — the timer covers it, and until a push succeeds no copy \
+                     beyond this machine is known to exist; the first successful push ends the \
+                     finding",
+                    facts.name,
+                    no_record_why(&facts.name),
+                ),
+                fix: Some(format!(
+                    "chat-stasher push --destination {} --stage <stage>   # a push by hand now \
+                     records the first success",
+                    facts.name
+                )),
+            });
         }
         match &facts.reclaim_share {
             ReclaimShare::NotBlocking => {}
@@ -648,13 +821,33 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
             } else {
                 Severity::Yellow
             };
-            let held: usize = attempt.blocked.iter().map(|b| b.sessions).sum();
-            let bytes: u64 = attempt.blocked.iter().map(|b| b.bytes).sum();
-            let destinations_held: Vec<&str> = attempt
-                .blocked
-                .iter()
-                .map(|b| b.destination.as_str())
-                .collect();
+            // A `Refused` attempt ended before the destinations were
+            // consulted, so nothing about the stage was measured — the
+            // record keeps `candidates` absent for exactly that reason,
+            // and the alert must not launder the refusal's empty
+            // `blocked` list into `0 session(s) / 0 B held back for ;`: a
+            // fabricated measurement with a dangling list. Counts print
+            // only for the outcome that measured them, and the refusal
+            // reason lives in this one line rather than in a second,
+            // milder alert that would contradict its own severity.
+            let held_back = if attempt.blocked.is_empty() {
+                "what it holds back is unknown — the attempt ended before the destinations \
+                 were consulted"
+                    .to_string()
+            } else {
+                let held: usize = attempt.blocked.iter().map(|b| b.sessions).sum();
+                let bytes: u64 = attempt.blocked.iter().map(|b| b.bytes).sum();
+                let destinations_held: Vec<&str> = attempt
+                    .blocked
+                    .iter()
+                    .map(|b| b.destination.as_str())
+                    .collect();
+                format!(
+                    "{held} session(s) / {} held back for {}",
+                    fmt_bytes(bytes),
+                    destinations_held.join(", ")
+                )
+            };
             let noun = if streak == 1 {
                 "blocked once in a row".to_string()
             } else {
@@ -663,11 +856,8 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
             reconciliation.job_alerts.push(Alert {
                 severity,
                 sentence: format!(
-                    "[reclaim] the weekly stage clean-up is {noun} — {held} session(s) / {} held \
-                     back for {names}; nothing was deleted and the stage keeps every byte it \
-                     archives",
-                    fmt_bytes(bytes),
-                    names = destinations_held.join(", "),
+                    "[reclaim] the weekly stage clean-up is {noun} — {held_back}; nothing was \
+                     deleted and the stage keeps every byte it archives"
                 ),
                 fix: Some(
                     "chat-stasher reclaim-stage --stage <stage>   # dry run: names the \
@@ -675,17 +865,6 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                         .to_string(),
                 ),
             });
-            // Refuse-shape: the run ended before consulting anything, which
-            // itself says the stage was not reclaimed this week.
-            if attempt.outcome == crate::reclaimstate::ReclaimOutcome::Refused {
-                reconciliation.job_alerts.push(Alert {
-                    severity: Severity::Yellow,
-                    sentence: "[reclaim] the last recorded attempt ended before the destinations \
-                              were consulted (a refusal in its own output)"
-                        .to_string(),
-                    fix: None,
-                });
-            }
         }
     }
 
@@ -877,7 +1056,20 @@ pub fn install_warnings(
 /// one's.
 fn shell_only_credential_warnings(covered: &std::collections::BTreeSet<&str>) -> Vec<String> {
     let mut lines = Vec::new();
-    for (name, refs) in raw_env_option_refs() {
+    let scan = raw_env_option_refs();
+    if let Some(why) = &scan.why_unparsed {
+        // The scan could not look, and a warning list that stays empty
+        // would read as "nothing to warn about": name the unknown the way
+        // the reconciliation's fact ② does.
+        lines.push(
+            "schedule install: WARNING ⚠ the config file's raw text could not be re-read to \
+             check for shell-only `env:` credentials, so shell-only forms cannot be ruled out"
+                .to_string(),
+        );
+        lines.push(format!("schedule install:   {why}"));
+        return lines;
+    }
+    for (name, refs) in scan.refs {
         if !covered.contains(name.as_str()) || refs.is_empty() {
             continue;
         }
@@ -1023,25 +1215,48 @@ fn reclaim_json(r: &Reconciliation) -> serde_json::Value {
             "kind": "unreadable",
             "why": why,
         }),
-        ReclaimJobRecord::Present { attempt, age_secs } => serde_json::json!({
-            "kind": "known",
-            "state": attempt.outcome.slug(),
-            "apply": attempt.apply,
-            "consecutive_blocked": attempt.consecutive_blocked,
-            "finished_at_unix": attempt.finished_at_unix,
-            "age_secs": age_secs,
-            "overdue": *age_secs > crate::reclaimstate::RECLAIM_OVERDUE_SECS,
-            "overdue_after_secs": crate::reclaimstate::RECLAIM_OVERDUE_SECS,
-            "held_back_sessions": attempt.blocked.iter().map(|b| b.sessions).sum::<usize>(),
-            "held_back_bytes": attempt.blocked.iter().map(|b| b.bytes).sum::<u64>(),
-            "blocked": attempt.blocked.iter().map(|b| serde_json::json!({
-                "destination": b.destination,
-                "kind": b.kind,
-                "error_kind": b.error_kind,
-                "sessions": b.sessions,
-                "bytes": b.bytes,
-            })).collect::<Vec<_>>(),
-        }),
+        ReclaimJobRecord::Present { attempt, age_secs } => {
+            let mut value = serde_json::json!({
+                "kind": "known",
+                "state": attempt.outcome.slug(),
+                "apply": attempt.apply,
+                "consecutive_blocked": attempt.consecutive_blocked,
+                "finished_at_unix": attempt.finished_at_unix,
+                "age_secs": age_secs,
+                "overdue": *age_secs > crate::reclaimstate::RECLAIM_OVERDUE_SECS,
+                "overdue_after_secs": crate::reclaimstate::RECLAIM_OVERDUE_SECS,
+                "blocked": attempt.blocked.iter().map(|b| serde_json::json!({
+                    "destination": b.destination,
+                    "kind": b.kind,
+                    "error_kind": b.error_kind,
+                    "sessions": b.sessions,
+                    "bytes": b.bytes,
+                })).collect::<Vec<_>>(),
+            });
+            // The same honesty the record itself keeps (its `candidates`
+            // are absent for a refusal): a run that never surveyed the
+            // stage has no held-back total, and absent — not summed-over-
+            // nothing to zero — is how a JSON consumer reads it. The menu
+            // bar's notification builder treats an absent count the same
+            // way it already treats a structural absence.
+            if !attempt.blocked.is_empty() {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "held_back_sessions".to_string(),
+                        serde_json::json!(attempt
+                            .blocked
+                            .iter()
+                            .map(|b| b.sessions)
+                            .sum::<usize>()),
+                    );
+                    object.insert(
+                        "held_back_bytes".to_string(),
+                        serde_json::json!(attempt.blocked.iter().map(|b| b.bytes).sum::<u64>()),
+                    );
+                }
+            }
+            value
+        }
     };
     let mut out = value;
     if let Some(object) = out.as_object_mut() {
@@ -1079,13 +1294,15 @@ pub fn doctor_lines(r: &Reconciliation) -> Vec<String> {
     }
     for facts in &r.destinations {
         lines.push(format!("  {}", facts.name));
-        // ①
+        // ① — worded against what was read, the same scope mirroring the
+        // alert sentence's.
+        let (scope_noun, scope_dir) = scheduler_scope(r.format);
         lines.push(format!(
             "    timer push     : {}",
             match &facts.push_coverage {
                 PushCoverage::Covered { units } => units.join(", "),
                 PushCoverage::NoScheduledPush => {
-                    "no installed timer names this destination".to_string()
+                    format!("no installed {scope_noun} ({scope_dir}) names this destination")
                 }
                 PushCoverage::Unknown { why } => format!("unknown — {why}"),
             }
@@ -1326,6 +1543,7 @@ mod tests {
             home: home.path(),
             state_dir: state.path(),
             now_unix: 1_750_100_200,
+            scheduler_readable: true,
         });
         restore_config_home(&old_xdg);
 
@@ -1367,10 +1585,11 @@ mod tests {
         // sentences `status` prints, `doctor` prints and `status --json`
         // hands the menu bar app, one wording for all three.
         assert!(
-            sentences
-                .iter()
-                .any(|s| s.contains("[dest] r2: declared, but no installed timer pushes it")),
-            "no push-coverage alert: {sentences:?}"
+            sentences.iter().any(|s| s.contains(
+                "[dest] r2: declared, but no installed launchd agent (~/Library/LaunchAgents) \
+                 pushes it"
+            )),
+            "no push-coverage alert, worded against the directory the reader reads: {sentences:?}"
         );
         assert!(
             sentences
@@ -1418,6 +1637,7 @@ mod tests {
             home: home.path(),
             state_dir: state.path(),
             now_unix: 1_750_000_000,
+            scheduler_readable: true,
         });
         let [row] = out.destinations.as_slice() else {
             panic!("one row for the default repository: {:?}", out.destinations)
@@ -1446,6 +1666,7 @@ mod tests {
             home: home.path(),
             state_dir: state.path(),
             now_unix: 1_750_000_000,
+            scheduler_readable: true,
         });
         let streak = out
             .all_alerts()
@@ -1591,6 +1812,7 @@ mod tests {
             home: home.path(),
             state_dir: state.path(),
             now_unix: 1_750_000_000,
+            scheduler_readable: true,
         });
         let stale_alert = out
             .all_alerts()
@@ -1599,5 +1821,307 @@ mod tests {
             .cloned()
             .expect("staleness alert");
         assert_eq!(stale_alert.severity, Severity::Red);
+    }
+
+    /// H2 · A `Refused` attempt never surveyed the stage, so its hold-back
+    /// is unknown — the record keeps `candidates` absent for exactly that
+    /// reason. The streak alert must word the unknown instead of printing
+    /// `0 session(s) / 0 B held back for ;` (a fabricated measurement plus a
+    /// dangling list), and must not raise a second, milder alert that
+    /// contradicts it: the refusal reason belongs in the one red line.
+    #[test]
+    fn a_refused_streak_words_its_unknown_backlog() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        plant_units(home.path(), None);
+        let config = crate::config::Config::default();
+        let refused = |finished_at: u64| crate::reclaimstate::ReclaimAttempt {
+            version: crate::reclaimstate::RECLAIM_STATE_VERSION,
+            finished_at_unix: finished_at,
+            apply: true,
+            outcome: crate::reclaimstate::ReclaimOutcome::Refused,
+            blocked: Vec::new(),
+            consecutive_blocked: 0,
+            candidates: None,
+            candidate_bytes: None,
+        };
+        let state_dir = state.path();
+        crate::reclaimstate::record(state_dir, &refused(1_750_000_000)).unwrap();
+        crate::reclaimstate::record(state_dir, &refused(1_750_100_000)).unwrap();
+
+        let out = reconcile(&Inputs {
+            config: &config,
+            format: Format::Launchd,
+            home: home.path(),
+            state_dir,
+            now_unix: 1_750_100_200,
+            scheduler_readable: true,
+        });
+        let streak_alerts: Vec<&Alert> = out
+            .job_alerts
+            .iter()
+            .filter(|a| a.sentence.contains("[reclaim] the weekly stage clean-up"))
+            .collect();
+        assert_eq!(
+            streak_alerts.len(),
+            1,
+            "one job alert for the streak, not a contradicting second: {:?}",
+            out.job_alerts
+        );
+        let alert = streak_alerts[0];
+        assert_eq!(
+            alert.severity,
+            Severity::Red,
+            "two failures in a row stay red even when the backlog is unknown"
+        );
+        assert!(
+            alert.sentence.contains("blocked 2 times in a row"),
+            "{}",
+            alert.sentence
+        );
+        assert!(
+            alert
+                .sentence
+                .contains("ended before the destinations were consulted"),
+            "the refusal reason is the alert's own, not a second line's: {}",
+            alert.sentence
+        );
+        assert!(
+            !alert.sentence.contains("0 session"),
+            "an unknown backlog is never a printed zero: {}",
+            alert.sentence
+        );
+        assert!(
+            !alert.sentence.contains("held back for ;"),
+            "an empty destination list must not dangle: {}",
+            alert.sentence
+        );
+    }
+
+    /// M1 · Fact ③, the coverage-shaped gap §4.7's fixture is built on: the
+    /// timer covers the destination and yet no push has ever been recorded
+    /// against it. Before this, ③ surfaced only in `--json` facts and
+    /// `doctor`'s table — never as an alert — so `status` and the panel
+    /// stayed green on exactly the machine the reconciliation exists for.
+    /// An uncovered destination does not get the alert: its coverage
+    /// finding already speaks, and the §5.3 rule is a finding per fact,
+    /// not a doubling per destination.
+    #[test]
+    fn a_covered_destination_with_no_recorded_push_alerts_fact_three() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        write_config(
+            home.path(),
+            "[destinations.storagebox]\nrepo = \"opendal:sftp\"\n\n[destinations.r2]\nrepo = \
+             \"opendal:s3\"\n",
+        );
+        // An hourly timer covers storagebox; nothing covers r2. No push
+        // record has ever been written for either.
+        plant_units(home.path(), Some("storagebox"));
+        let old_xdg = pin_config_home(home.path());
+        let out = reconcile(&Inputs {
+            config: &config_with_two("storagebox", "r2"),
+            format: Format::Launchd,
+            home: home.path(),
+            state_dir: state.path(),
+            now_unix: 1_750_100_200,
+            scheduler_readable: true,
+        });
+        restore_config_home(&old_xdg);
+
+        let all = out.all_alerts();
+        let no_push_alerts: Vec<&Alert> = all
+            .iter()
+            .filter(|a| a.sentence.contains("[dest] storagebox: no push"))
+            .collect();
+        assert_eq!(
+            no_push_alerts.len(),
+            1,
+            "one alert for the covered-but-never-pushed destination: {:?}",
+            all
+        );
+        let alert = no_push_alerts[0];
+        assert_eq!(alert.severity, Severity::Yellow);
+        assert!(
+            alert
+                .sentence
+                .contains("started keeping the per-destination push record"),
+            "the absence names the version and stays an absence, never 'never pushed': {}",
+            alert.sentence
+        );
+        assert!(
+            all.iter()
+                .all(|a| !a.sentence.contains("[dest] r2: no push")),
+            "the uncovered destination's story is its coverage finding, not a doubling: {:?}",
+            all
+        );
+        assert!(
+            alert
+                .fix
+                .as_deref()
+                .is_some_and(|fix| fix.contains("push --destination storagebox")),
+            "the fix is the push that records the first success: {:?}",
+            alert.fix
+        );
+    }
+
+    /// H3 · A platform whose scheduler this build has no reader for (the
+    /// product documents a `schtasks` task for Windows and refuses `schedule
+    /// install` there) must not read an empty systemd directory as "no
+    /// timer pushes it" — for every declared destination, that silence is
+    /// "could not be established", and the timer files planted under the
+    /// other format's directory are exactly the ones the reader must not
+    /// pretend it read. Record-based facts (③'s absence, the staleness and
+    /// streak alerts) stay: those it can read.
+    #[test]
+    fn a_scheduler_this_build_cannot_read_does_not_claim_no_timer() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        // Files exist on disk; with the scheduler unreadable they must be
+        // left unclaimed rather than mined from the wrong format's seat.
+        plant_units(home.path(), Some("storagebox"));
+        write_config(
+            home.path(),
+            "[destinations.storagebox]\nrepo = \"opendal:sftp\"\n\n[destinations.r2]\nrepo = \
+             \"opendal:s3\"\noptions = { access_key_id = \
+             \"env:CHAT_STASHER_R2_ACCESS_KEY_ID\" }\n",
+        );
+        let config = config_with_two("storagebox", "r2");
+        let old_xdg = pin_config_home(home.path());
+        let out = reconcile(&Inputs {
+            config: &config,
+            format: Format::Launchd,
+            home: home.path(),
+            state_dir: state.path(),
+            now_unix: 1_750_100_200,
+            scheduler_readable: false,
+        });
+        restore_config_home(&old_xdg);
+
+        for row in &out.destinations {
+            assert!(
+                matches!(row.push_coverage, PushCoverage::Unknown { .. }),
+                "coverage is unknown, not a known negative: {:?}",
+                row.push_coverage
+            );
+        }
+        let sentences: Vec<String> = out
+            .all_alerts()
+            .into_iter()
+            .map(|a| a.sentence.clone())
+            .collect();
+        assert!(
+            sentences
+                .iter()
+                .any(|s| s.contains("could not be established")),
+            "the unknown names itself: {sentences:?}"
+        );
+        assert!(
+            sentences.iter().all(|s| !s.contains("no installed")),
+            "no claim is made against a scheduler that was not read: {sentences:?}"
+        );
+        assert!(
+            out.all_alerts()
+                .iter()
+                .any(|a| a.sentence.contains("shell-only")
+                    && a.sentence.contains("CHAT_STASHER_R2_ACCESS_KEY_ID")),
+            "the raw config's own shell-only reference still surfaces, worded as not resolvable: \
+             {sentences:?}"
+        );
+        // The reclaim-job facts stay quiet the way an unobservable job's
+        // already do — and a *recorded* attempt still alerts, because the
+        // state file is platform-independent.
+        assert!(!out.reclaim.unit_installed, "no unit file was read");
+        assert!(
+            out.job_alerts.is_empty(),
+            "a job whose scheduler cannot be read stays quiet, not guessed: {:?}",
+            out.job_alerts
+        );
+        crate::reclaimstate::record(state.path(), &blocked_attempt(1_750_000_000)).unwrap();
+        let old_xdg = pin_config_home(home.path());
+        let out = reconcile(&Inputs {
+            config: &config,
+            format: Format::Launchd,
+            home: home.path(),
+            state_dir: state.path(),
+            now_unix: 1_750_000_100,
+            scheduler_readable: false,
+        });
+        restore_config_home(&old_xdg);
+        assert!(
+            out.all_alerts()
+                .iter()
+                .any(|a| a.sentence.contains("blocked once in a row")),
+            "record-based streaks alert regardless of the scheduler: {:?}",
+            out.all_alerts()
+        );
+    }
+
+    /// L1 · The raw `env:` re-read is a strictly-shaped second parse, and a
+    /// config the product loads can still fail it. That failure is an
+    /// unknown about which destinations carry shell-only references — never
+    /// the answer "none of them do", which silently turns fact ② quiet and
+    /// (on Windows, where an unescaped path fails the parse) was exactly
+    /// the bug commit 277e4f17 worked around at the fixture level.
+    #[test]
+    fn an_unparsable_config_scan_is_unknown_not_no_env_refs() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        // `options` holds a nested table, which the product's `Config`
+        // tolerates and this scan's strict `BTreeMap<String, String>` does
+        // not — the file is readable and still fails the re-read.
+        write_config(
+            home.path(),
+            "[destinations.storagebox]\nrepo = \"opendal:sftp\"\noptions = { nested = { deep = \
+             \"table\" } }\n",
+        );
+        let config = config_with_two("storagebox", "r2");
+        let old_xdg = pin_config_home(home.path());
+        let out = reconcile(&Inputs {
+            config: &config,
+            format: Format::Launchd,
+            home: home.path(),
+            state_dir: state.path(),
+            now_unix: 1_750_000_000,
+            scheduler_readable: true,
+        });
+        for name in ["storagebox", "r2"] {
+            let row = out
+                .destinations
+                .iter()
+                .find(|row| row.name == name)
+                .expect("row");
+            assert!(
+                matches!(row.credentials, CredentialResolution::Unknown { .. }),
+                "{name}'s fact ② is unknown, not silently shell-independent: {:?}",
+                row.credentials
+            );
+        }
+        assert!(
+            out.all_alerts()
+                .iter()
+                .any(|a| a.sentence.contains("could not be re-read")),
+            "the unreadable re-read is worded: {:?}",
+            out.all_alerts()
+        );
+        // The install-time half keeps its honesty too: a scan that cannot
+        // look says so rather than warning about nothing.
+        let warnings = install_warnings(
+            &config,
+            schedule::Unit::RunOnce,
+            Format::Launchd,
+            home.path(),
+        );
+        restore_config_home(&old_xdg);
+        assert!(
+            warnings
+                .iter()
+                .any(|line| line.contains("could not be re-read")),
+            "the install warning names what it cannot check: {warnings:?}"
+        );
     }
 }

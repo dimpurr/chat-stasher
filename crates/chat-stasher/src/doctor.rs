@@ -2773,6 +2773,13 @@ pub fn run() -> DoctorReport {
         home: &home,
         state_dir: &crate::collect::default_state_dir(),
         now_unix,
+        // The lib-side half of the same platform fact the CLI decides
+        // through `schedule_platform_refusal`: Windows schedules through a
+        // Task Scheduler this build has no reader for, so the
+        // reconciliation must not read any directory's silence there as
+        // "no timer pushes". `cfg!` keeps both arms compiled and tested
+        // on every platform.
+        scheduler_readable: !cfg!(target_os = "windows"),
     });
 
     DoctorReport {

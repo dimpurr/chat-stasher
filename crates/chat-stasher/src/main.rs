@@ -18799,6 +18799,10 @@ fn dest_reconciliation(
         home: &config::home_dir(),
         state_dir: &chat_stasher::collect::default_state_dir(),
         now_unix: info.now_unix,
+        // The same fact `schedule_platform_refusal` encodes one command
+        // over: a platform whose scheduler this build cannot read must not
+        // have the reconciliation read its silence as "no timer".
+        scheduler_readable: schedule_platform_refusal(std::env::consts::OS).is_none(),
     })
 }
 

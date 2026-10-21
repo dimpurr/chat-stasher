@@ -171,7 +171,7 @@ A `[keys]` line is added for each **destination** whose key needs attention: one
 | Flag | Meaning |
 |---|---|
 | `--sessions` | Add one line per session found (tool, size, date, short id). Can be hundreds of lines. |
-`[dest]` and `[reclaim]` lines are added when a declared destination disagrees with what the machine's timers and the weekly stage clean-up actually do: a destination no installed timer pushes, one whose `env:` credentials a timer cannot resolve, or a reclaim blocked for several weeks running. Each line is the same sentence `doctor` reports and the menu bar app shows, with the fix command beneath it. A machine whose destinations are all covered, timer-resolvable and currently reclaiming prints no such line — and the lines do not change the exit code, which stays the timer verdict documented above.
+`[dest]` and `[reclaim]` lines are added when a declared destination disagrees with what the machine's timers and the weekly stage clean-up actually do: a destination no installed timer pushes, one whose `env:` credentials a timer cannot resolve, one a timer covers but no push has been recorded against, or a reclaim blocked for several weeks running. Each line is the same sentence `doctor` reports and the menu bar app shows, with the fix command beneath it. A machine whose destinations are all covered, timer-resolvable, record-successful and currently reclaiming prints no such line — and the lines do not change the exit code, which stays the timer verdict documented above.
 
 | Flag | Meaning |
 |---|---|

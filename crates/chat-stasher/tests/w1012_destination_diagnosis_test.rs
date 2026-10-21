@@ -182,6 +182,17 @@ fn combined(output: &std::process::Output) -> String {
     )
 }
 
+/// The scheduler this build's reconciliation reads for the machine the
+/// test runs on, in the two words its claims name — the sentences are
+/// worded against the directory the reader reads, so the assertion uses
+/// the same noun the reader would print.
+fn scheduler_scope_of_this_machine() -> (&'static str, &'static str) {
+    match format_of_this_machine() {
+        chat_stasher::schedule::Format::Launchd => ("launchd agent", "~/Library/LaunchAgents"),
+        chat_stasher::schedule::Format::Systemd => ("systemd user unit", "~/.config/systemd/user"),
+    }
+}
+
 /// `status` reports the machine's four facts in prose: the destination no
 /// timer pushes, the credentials a timer cannot resolve, and the recorded
 /// reclaim blocked twice in a row — the sentences `doctor` shows and
@@ -226,12 +237,17 @@ fn status_names_the_destination_the_timers_do_not_push() {
 
     let output = machine.run(&["status"]);
     let text = combined(&output);
+    let (scope_noun, scope_dir) = scheduler_scope_of_this_machine();
+    let uncovered =
+        format!("[dest] r2: declared, but no installed {scope_noun} ({scope_dir}) pushes it");
     assert!(
-        text.contains("[dest] r2: declared, but no installed timer pushes it"),
-        "the uncovered destination must be named: {text}"
+        text.contains(&uncovered),
+        "the uncovered destination is named, with the scope the claim was read from: {text}"
     );
     assert!(
-        !text.contains("[dest] storagebox: declared, but no installed timer pushes it"),
+        !text.contains(&format!(
+            "[dest] storagebox: declared, but no installed {scope_noun} ({scope_dir}) pushes it"
+        )),
         "the covered destination stays silent: {text}"
     );
     assert!(
@@ -309,11 +325,14 @@ fn status_json_carries_the_reconciliation_and_the_reclaim_record() {
     let alerts = local["dest_alerts"]
         .as_array()
         .expect("local.dest_alerts carries the pre-worded sentences");
+    let (scope_noun, scope_dir) = scheduler_scope_of_this_machine();
     assert!(
         alerts.iter().any(|alert| alert["severity"] == "yellow"
             && alert["sentence"]
                 .as_str()
-                .is_some_and(|s| s.contains("[dest] r2: declared, but no installed timer"))),
+                .is_some_and(|s| s.contains(&format!(
+                    "[dest] r2: declared, but no installed {scope_noun} ({scope_dir})"
+                )))),
         "the push-coverage alert with its severity: {alerts:?}"
     );
     assert_eq!(
