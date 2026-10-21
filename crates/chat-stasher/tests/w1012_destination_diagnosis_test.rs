@@ -158,9 +158,13 @@ fn install_agents_dir(home: &Path) -> PathBuf {
 }
 
 /// The config text of the machine's bad shape: two destinations, one whose
-/// credentials are written as the shell-only `env:` form. `modern_repos`
-/// points both at sandbox-local paths so that not one test dials a
-/// network endpoint.
+/// credentials are written as the shell-only `env:` form. Both `repo`
+/// paths are sandbox-local so that not one test dials a network endpoint,
+/// and their backslashes are escaped the way `config_explicit_root_test`
+/// escapes its root: the reconciliation's raw `env:` scan strict-parses
+/// this same file, so on Windows an unescaped `C:\Users\...` fails that
+/// parse and quietly turns the shell-only destination into an ordinary
+/// one.
 fn bad_shape_config(repo_one: &Path, repo_two: &Path) -> String {
     format!(
         "[destinations.storagebox]\n\
@@ -169,8 +173,8 @@ fn bad_shape_config(repo_one: &Path, repo_two: &Path) -> String {
          [destinations.r2]\n\
          repo = \"{repo_two}\"\n\
          options = {{ access_key_id = \"env:CHAT_STASHER_R2_ACCESS_KEY_ID\" }}\n",
-        repo_one = repo_one.display(),
-        repo_two = repo_two.display()
+        repo_one = repo_one.display().to_string().replace('\\', "\\\\"),
+        repo_two = repo_two.display().to_string().replace('\\', "\\\\")
     )
 }
 
