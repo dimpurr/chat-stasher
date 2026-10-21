@@ -408,12 +408,29 @@ fn status_json_carries_the_reconciliation_and_the_reclaim_record() {
     );
     assert_eq!(
         local["reclaim"]["unit_installed"],
-        // The planted reclaim timer file is claimed only where the
-        // scheduler that reads it exists.
-        serde_json::json!(!unreadable),
-        "unit_installed matches what this platform's reading supports: {}",
+        // A machine whose scheduler this build cannot read gets `null`
+        // plus a `unit_installed_why`: the empty unit list is a fact about
+        // the reader, and `false` there would be the measured negative
+        // H3 fixed for coverage. A readable platform still answers yes or
+        // no from what it read.
+        if unreadable {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(!unreadable)
+        },
+        "unit_installed is what this platform's reading supports, never a \
+         silence read out of a machine this build could not look at: {}",
         local["reclaim"]
     );
+    if unreadable {
+        assert_eq!(
+            local["reclaim"]["unit_installed_why"].as_str(),
+            Some("this build cannot read this platform's scheduler, so whether a \
+                  reclaim job is installed could not be established"),
+            "the null carries its reason, so the panel does not guess: {}",
+            local["reclaim"]
+        );
+    }
 }
 
 /// A quiet machine stays byte-quiet: no destinations declared, no timers,

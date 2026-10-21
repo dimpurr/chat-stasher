@@ -741,11 +741,11 @@ final class StatusTests: XCTestCase {
                          blocked: [ReclaimBlockedDestination(destination: "r2", kind: "unreachable",
                                                              sessions: sessions, bytes: bytes,
                                                              errorKind: "credentials_missing_or_invalid")],
-                         unitInstalled: true, why: nil)
+                         unitInstalled: true, why: nil, blockedStreakAlarm: 2)
         }
-        XCTAssertNil(reclaimNotificationPayload(reclaim: nil, notifiedStreak: 0))
-        XCTAssertNil(reclaimNotificationPayload(reclaim: reclaim(streak: 1), notifiedStreak: 0))
-        let first = reclaimNotificationPayload(reclaim: reclaim(streak: 2), notifiedStreak: 0)
+        XCTAssertNil(reclaimNotificationPayload(reclaim: nil, notifiedStreak: 0, blockedStreakAlarm: 2))
+        XCTAssertNil(reclaimNotificationPayload(reclaim: reclaim(streak: 1), notifiedStreak: 0, blockedStreakAlarm: 2))
+        let first = reclaimNotificationPayload(reclaim: reclaim(streak: 2), notifiedStreak: 0, blockedStreakAlarm: 2)
         XCTAssertNotNil(first)
         // The payload carries the machine's own numbers, not a paraphrase.
         XCTAssertTrue(first?.body.contains("2 times in a row") ?? false)
@@ -754,13 +754,13 @@ final class StatusTests: XCTestCase {
         // the event key of this episode, checked fully in the episode test.
         XCTAssertEqual(first?.identifier, "chat-stasher-reclaim-1750100000")
         // The streak keeps growing: already notified, stays quiet.
-        XCTAssertNil(reclaimNotificationPayload(reclaim: reclaim(streak: 5), notifiedStreak: 2))
+        XCTAssertNil(reclaimNotificationPayload(reclaim: reclaim(streak: 5), notifiedStreak: 2, blockedStreakAlarm: 2))
         // An ok streak is not a notification event, and clears nothing here.
-        XCTAssertNil(reclaimNotificationPayload(reclaim: reclaim(streak: 0, state: "ok"), notifiedStreak: 2))
+        XCTAssertNil(reclaimNotificationPayload(reclaim: reclaim(streak: 0, state: "ok"), notifiedStreak: 2, blockedStreakAlarm: 2))
         // After the ok reset clears the marker, the next episode notifies.
-        XCTAssertNotNil(reclaimNotificationPayload(reclaim: reclaim(streak: 2), notifiedStreak: 0))
+        XCTAssertNotNil(reclaimNotificationPayload(reclaim: reclaim(streak: 2), notifiedStreak: 0, blockedStreakAlarm: 2))
         // A record the CLI could not read is not a notification event either.
-        XCTAssertNil(reclaimNotificationPayload(reclaim: ReclaimState(kind: "missing", state: nil, consecutiveBlocked: nil, finishedAtUnix: nil, heldBackSessions: nil, heldBackBytes: nil, blocked: nil, unitInstalled: true, why: nil), notifiedStreak: 0))
+        XCTAssertNil(reclaimNotificationPayload(reclaim: ReclaimState(kind: "missing", state: nil, consecutiveBlocked: nil, finishedAtUnix: nil, heldBackSessions: nil, heldBackBytes: nil, blocked: nil, unitInstalled: true, why: nil, blockedStreakAlarm: 2), notifiedStreak: 0, blockedStreakAlarm: 2))
     }
 
     /// M2 · A refusal never surveyed the stage, so the hold-back is
@@ -773,8 +773,8 @@ final class StatusTests: XCTestCase {
         let refused = ReclaimState(kind: "known", state: "refused", consecutiveBlocked: 2,
                                    finishedAtUnix: 1_750_100_000,
                                    heldBackSessions: nil, heldBackBytes: nil,
-                                   blocked: nil, unitInstalled: true, why: nil)
-        let payload = reclaimNotificationPayload(reclaim: refused, notifiedStreak: 0)
+                                   blocked: nil, unitInstalled: true, why: nil, blockedStreakAlarm: 2)
+        let payload = reclaimNotificationPayload(reclaim: refused, notifiedStreak: 0, blockedStreakAlarm: 2)
         XCTAssertNotNil(payload)
         XCTAssertFalse(payload?.body.contains("still held") ?? true,
                        "an unknown hold-back is not a printed count: \(payload?.body ?? "")")
@@ -795,8 +795,8 @@ final class StatusTests: XCTestCase {
                 finishedAtUnix: finished, heldBackSessions: 9_869, heldBackBytes: 12_900_000_000,
                 blocked: [ReclaimBlockedDestination(destination: "r2", kind: "unreachable",
                                                     sessions: 9_869, bytes: 12_900_000_000,
-                                                    errorKind: "credentials_missing_or_invalid")],
-                unitInstalled: true, why: nil), notifiedStreak: 0)
+errorKind: "credentials_missing_or_invalid")],
+                 unitInstalled: true, why: nil, blockedStreakAlarm: 2), notifiedStreak: 0, blockedStreakAlarm: 2)
         }
         let first = payload(finished: 1_750_100_000)
         let second = payload(finished: 1_754_200_000)
@@ -878,6 +878,6 @@ final class StatusTests: XCTestCase {
         // the panel shows nothing rather than a finding.
         XCTAssertTrue((olderDocument.destAlerts?.count ?? 0) == 0)
         XCTAssertNil(olderDocument.reclaim)
-        XCTAssertNil(reclaimNotificationPayload(reclaim: olderDocument.reclaim, notifiedStreak: 0))
+        XCTAssertNil(reclaimNotificationPayload(reclaim: olderDocument.reclaim, notifiedStreak: 0, blockedStreakAlarm: 2))
     }
 }

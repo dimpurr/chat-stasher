@@ -102,9 +102,17 @@ pub enum PushCoverage {
     /// Declared, and no installed unit names it: a push reaches this
     /// destination only when a command names one by hand.
     NoScheduledPush,
-    /// The relevant unit files could not all be read, so the question has
-    /// no answer here — which is not the same claim as "no timer".
+    /// A relevant unit file exists but could not be read, so the question
+    /// has no answer here — which is not the same claim as "no timer".
+    /// This is a local anomaly the user can act on, so it is worded as a
+    /// `[dest]` alert (see `word_alerts`).
     Unknown { why: String },
+    /// This build has no reader for this platform's scheduler at all, so
+    /// the question has no answer here — every machine on that platform
+    /// gets this, it is nothing the user can fix, and it therefore stays
+    /// quiet in the alerts the way [`ReclaimShare::UnknownRun`] does. The
+    /// unknown is still visible, worded, in `doctor`'s table and `--json`.
+    UnreadablePlatform { why: String },
 }
 
 /// ② Whether the destination's credential references resolve where a
@@ -131,8 +139,15 @@ pub enum CredentialResolution {
     /// without inventing a timer that would fail.
     ShellOnlyWithNoTimer,
     /// The config file's own text could not be re-read, so its references
-    /// are unknown — an unknown, not "none".
+    /// are unknown — an unknown, not "none". A local anomaly the user can
+    /// act on, so it is worded as a `[dest]` alert (see `word_alerts`).
     Unknown { why: String },
+    /// The config declares shell-only references, and this build has no
+    /// reader for this platform's scheduler at all, so whether a timer
+    /// would resolve them has no answer here. Like ①'s
+    /// [`PushCoverage::UnreadablePlatform`], it is a platform fact rather
+    /// than a finding, and stays quiet in the alerts.
+    UnreadablePlatform { why: String },
 }
 
 /// ③ When a push last succeeded against this destination.
@@ -148,6 +163,14 @@ pub enum LastPush {
     /// machine that pushed before this CLI kept records — or from another
     /// process shape — leaves the same empty file behind.
     NoRecord,
+    /// The record file exists but could not be read — malformed, or a
+    /// version this build does not know. That is an unknown about what it
+    /// says, which is not the same claim as [`LastPush::NoRecord`]: an
+    /// absence read from a file that answered is a measurement, and one
+    /// read out of a failed parse is not. The ③ alert stays quiet for it
+    /// the way an unanswerable question does, and the fact keeps its
+    /// unknown shape in `doctor`'s table and `--json`.
+    Unknown { why: String },
 }
 
 /// ④ What the latest recorded reclaim attempt says about this
@@ -190,8 +213,11 @@ pub struct DestinationFacts {
 pub struct ReclaimJobFacts {
     /// Whether a reclaim-stage unit file is installed at all. A machine
     /// without one has no weekly job to diagnose — its reclaim facts stay
-    /// quiet rather than becoming a false alarm.
-    pub unit_installed: bool,
+    /// quiet rather than becoming a false alarm. `None` when this build
+    /// cannot read the platform's scheduler: an empty unit list is then a
+    /// fact about the reader, not about the machine, and `false` would be
+    /// the same "read out of silence" the coverage fact refuses.
+    pub unit_installed: Option<bool>,
     /// Age of the oldest installed unit file: the "how long has this job
     /// been here" anchor for the never-recorded case, where no record
     /// exists to date anything from. `None` when not installed or the file
@@ -323,7 +349,7 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
         let push_coverage = if inputs.scheduler_readable {
             push_coverage_of(name, &run_once_units, &read_failures)
         } else {
-            PushCoverage::Unknown {
+            PushCoverage::UnreadablePlatform {
                 why: format!(
                     "this build cannot read this platform's scheduler, so whether a timer \
                      pushes `{name}` could not be established — the schedule the platform \
@@ -356,7 +382,7 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
             }
         } else if !inputs.scheduler_readable {
             match raw_scan.refs.get(name) {
-                Some(refs) => CredentialResolution::Unknown {
+                Some(refs) => CredentialResolution::UnreadablePlatform {
                     why: format!(
                         "the config declares shell-only credentials ({}), and this build \
                          cannot read this platform's scheduler, so whether a timer would \
@@ -374,7 +400,11 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
         } else {
             credentials_of(name, &contacting, &raw_scan.refs)
         };
-        // ③ the durable push record.
+        // ③ the durable push record. The file's three read states stay three
+        // facts: a readable file with no row for this destination is an
+        // absence, and a file that failed to parse is an unknown — never the
+        // same absence, which would assert "no push is on record" out of a
+        // read that never happened.
         let last_push = match &push_records {
             crate::pushstate::PushStateRead::Present(state) => match state.pushes.get(name) {
                 Some(record) => LastPush::At {
@@ -383,7 +413,10 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
                 },
                 None => LastPush::NoRecord,
             },
-            _ => LastPush::NoRecord,
+            crate::pushstate::PushStateRead::Unreadable(why) => {
+                LastPush::Unknown { why: why.clone() }
+            }
+            crate::pushstate::PushStateRead::Missing => LastPush::NoRecord,
         };
         // ④ from the latest recorded reclaim attempt.
         let reclaim_share = match &reclaim_read {
@@ -417,7 +450,12 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
         });
     }
 
-    let reclaim = reclaim_job_facts(&reclaim_units, &reclaim_read, inputs.now_unix);
+    let reclaim = reclaim_job_facts(
+        &reclaim_units,
+        &reclaim_read,
+        inputs.now_unix,
+        inputs.scheduler_readable,
+    );
 
     let reconciliation = Reconciliation {
         destinations,
@@ -614,8 +652,14 @@ fn reclaim_job_facts(
     reclaim_units: &[schedule::UnitObservation],
     read: &crate::reclaimstate::ReclaimStateRead,
     now_unix: u64,
+    scheduler_readable: bool,
 ) -> ReclaimJobFacts {
-    let unit_installed = !reclaim_units.is_empty();
+    // An unreadable scheduler leaves the question unanswered rather than
+    // answered "no": the caller passes an empty list for a platform this
+    // build has no reader for, and `!is_empty()` would turn that into a
+    // measured negative about a machine that may well have the documented
+    // `schtasks` task.
+    let unit_installed = scheduler_readable.then(|| !reclaim_units.is_empty());
     // How old the oldest installed unit file is — the one honest "how long
     // has this job been on the machine" anchor for the never-recorded
     // case, where no record exists to date anything from.
@@ -692,11 +736,20 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                         facts.name
                     )),
                 }),
+                // A file that exists but could not be read is a local anomaly
+                // with a fix, so it speaks — tagged like every other alert.
                 PushCoverage::Unknown { why } => reconciliation.alerts.push(Alert {
                     severity: Severity::Yellow,
-                    sentence: format!("`{}`: {}", facts.name, why),
+                    sentence: format!("[dest] {}: {why}", facts.name),
                     fix: None,
                 }),
+                // A platform this build cannot read is not a finding about
+                // this machine: it is the same on every machine there, and
+                // nothing the user can act on, so it stays quiet the way
+                // `ReclaimShare::UnknownRun` and an unobservable reclaim job
+                // do. The unknown still shows in `doctor`'s table and
+                // `--json`.
+                PushCoverage::UnreadablePlatform { .. } => {}
             }
         }
         match &facts.credentials {
@@ -720,15 +773,19 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                 });
             }
             CredentialResolution::Unknown { why } if declared_row => {
-                // The mirror of ①'s Unknown arm: an unreadable config
-                // re-read or an unreadable scheduler is worded as what it
-                // is, never as the all-clear an empty map would print.
+                // A config re-read that failed is a local anomaly with a
+                // fix (re-word the config), so it speaks — tagged like every
+                // other alert, and worded as what it is, never as the
+                // all-clear an empty map would print.
                 reconciliation.alerts.push(Alert {
                     severity: Severity::Yellow,
-                    sentence: format!("`{}`: {why}", facts.name),
+                    sentence: format!("[dest] {}: {why}", facts.name),
                     fix: None,
                 });
             }
+            // ②'s platform arm is silent for ①'s platform arm's reason: an
+            // unreadable scheduler is not a per-machine finding.
+            CredentialResolution::UnreadablePlatform { .. } => {}
             _ => {}
         }
         // ③ the covered-but-never-successfully-pushed destination (§4.7's
@@ -877,7 +934,7 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
     // The unit file's own age is the anchor; a file whose mtime could not
     // be read keeps the finding quiet in `doctor`'s table rather than
     // firing an alarm an unknown age cannot justify.
-    if reclaim.unit_installed {
+    if reclaim.unit_installed == Some(true) {
         match &reclaim.record {
             ReclaimJobRecord::Missing
                 if reclaim
@@ -1135,10 +1192,14 @@ fn destination_facts_json(facts: &DestinationFacts) -> serde_json::Value {
                 "units": units,
             }),
             PushCoverage::NoScheduledPush => serde_json::json!({ "kind": "no_scheduled_push" }),
-            PushCoverage::Unknown { why } => serde_json::json!({
-                "kind": "unknown",
-                "why": why,
-            }),
+            // Both unknown arms carry the same machine-readable shape: the
+            // difference is only whether the prose surfaces alert on it.
+            PushCoverage::Unknown { why } | PushCoverage::UnreadablePlatform { why } => {
+                serde_json::json!({
+                    "kind": "unknown",
+                    "why": why,
+                })
+            }
         },
         "credentials": match &facts.credentials {
             CredentialResolution::ShellIndependent => serde_json::json!({
@@ -1156,10 +1217,12 @@ fn destination_facts_json(facts: &DestinationFacts) -> serde_json::Value {
             CredentialResolution::ShellOnlyWithNoTimer => serde_json::json!({
                 "kind": "shell_only_with_no_timer",
             }),
-            CredentialResolution::Unknown { why } => serde_json::json!({
-                "kind": "unknown",
-                "why": why,
-            }),
+            CredentialResolution::Unknown { why } | CredentialResolution::UnreadablePlatform { why } => {
+                serde_json::json!({
+                    "kind": "unknown",
+                    "why": why,
+                })
+            }
         },
         "last_push": match &facts.last_push {
             LastPush::At {
@@ -1173,6 +1236,10 @@ fn destination_facts_json(facts: &DestinationFacts) -> serde_json::Value {
             LastPush::NoRecord => serde_json::json!({
                 "kind": "no_record",
                 "why": no_record_why(&facts.name),
+            }),
+            LastPush::Unknown { why } => serde_json::json!({
+                "kind": "unknown",
+                "why": why,
             }),
         },
         "reclaim_share": match &facts.reclaim_share {
@@ -1203,9 +1270,12 @@ fn alert_json(alert: &Alert) -> serde_json::Value {
 /// The reclaim job's machine-readable half — the object the menu bar app
 /// reads for C2's notification decision. A machine with no job installed
 /// says `unit_installed: false` and stops: state about a job that does not
-/// exist would be another way to invent "never ran".
+/// exist would be another way to invent "never ran". A machine whose
+/// scheduler this build cannot read says `unit_installed: null` plus a
+/// `unit_installed_why`: an empty unit list is a fact about the reader, and
+/// `false` there would be the same "read out of silence" the coverage fact
+/// refuses.
 fn reclaim_json(r: &Reconciliation) -> serde_json::Value {
-    let base = serde_json::json!({ "unit_installed": r.reclaim.unit_installed });
     let value = match &r.reclaim.record {
         ReclaimJobRecord::Missing => serde_json::json!({
             "kind": "missing",
@@ -1260,10 +1330,31 @@ fn reclaim_json(r: &Reconciliation) -> serde_json::Value {
     };
     let mut out = value;
     if let Some(object) = out.as_object_mut() {
-        object.insert("unit_installed".to_string(), base["unit_installed"].clone());
+        match r.reclaim.unit_installed {
+            Some(installed) => {
+                object.insert("unit_installed".to_string(), serde_json::json!(installed));
+            }
+            None => {
+                object.insert("unit_installed".to_string(), serde_json::Value::Null);
+                object.insert(
+                    "unit_installed_why".to_string(),
+                    serde_json::json!(
+                        "this build cannot read this platform's scheduler, so whether a \
+                         reclaim job is installed could not be established"
+                    ),
+                );
+            }
+        }
         if let Some(age) = r.reclaim.unit_age_secs {
             object.insert("unit_age_secs".to_string(), serde_json::json!(age));
         }
+        // The consecutive-blocked threshold C2 notifies from lives in Rust
+        // (`BLOCKED_STREAK_ALARM`); exposing it here is what keeps the menu
+        // bar app's copy of the number from drifting away from this one.
+        object.insert(
+            "blocked_streak_alarm".to_string(),
+            serde_json::json!(BLOCKED_STREAK_ALARM),
+        );
     }
     out
 }
@@ -1305,6 +1396,7 @@ pub fn doctor_lines(r: &Reconciliation) -> Vec<String> {
                     format!("no installed {scope_noun} ({scope_dir}) names this destination")
                 }
                 PushCoverage::Unknown { why } => format!("unknown — {why}"),
+                PushCoverage::UnreadablePlatform { why } => format!("unknown — {why}"),
             }
         ));
         // ②
@@ -1328,6 +1420,7 @@ pub fn doctor_lines(r: &Reconciliation) -> Vec<String> {
                         .to_string()
                 }
                 CredentialResolution::Unknown { why } => format!("unknown — {why}"),
+                CredentialResolution::UnreadablePlatform { why } => format!("unknown — {why}"),
             }
         ));
         // ③
@@ -1341,6 +1434,7 @@ pub fn doctor_lines(r: &Reconciliation) -> Vec<String> {
                     "unix {finished_at_unix} ({snapshots_in_repo} snapshot(s) in the destination)"
                 ),
                 LastPush::NoRecord => no_record_why(&facts.name),
+                LastPush::Unknown { why } => format!("unknown — {why}"),
             }
         ));
         // ④
@@ -2003,38 +2097,44 @@ mod tests {
 
         for row in &out.destinations {
             assert!(
-                matches!(row.push_coverage, PushCoverage::Unknown { .. }),
+                matches!(row.push_coverage, PushCoverage::UnreadablePlatform { .. }),
                 "coverage is unknown, not a known negative: {:?}",
                 row.push_coverage
             );
         }
-        let sentences: Vec<String> = out
-            .all_alerts()
-            .into_iter()
-            .map(|a| a.sentence.clone())
-            .collect();
         assert!(
-            sentences
-                .iter()
-                .any(|s| s.contains("could not be established")),
-            "the unknown names itself: {sentences:?}"
+            matches!(
+                out.destinations[0].credentials,
+                CredentialResolution::UnreadablePlatform { .. }
+            ),
+            "② rides the same platform arm as ①: {:?}",
+            out.destinations[0].credentials
         );
+        // Both unknown arms are silent at the alert level — an unreadable
+        // scheduler is not a per-machine finding, and the machine's panel
+        // stays quiet the way `ReclaimShare::UnknownRun` and an
+        // unobservable reclaim job do. The unknown is still worded in
+        // `doctor`'s table and `--json` (see the next two assertions).
         assert!(
-            sentences.iter().all(|s| !s.contains("no installed")),
-            "no claim is made against a scheduler that was not read: {sentences:?}"
-        );
-        assert!(
+            out.all_alerts().iter().all(|a| {
+                !a.sentence.contains("could not be established")
+                    && !a.sentence.contains("no installed")
+            }),
+            "no coverage or credentials finding is raised against a scheduler \
+             that was not read: {:?}",
             out.all_alerts()
-                .iter()
-                .any(|a| a.sentence.contains("shell-only")
-                    && a.sentence.contains("CHAT_STASHER_R2_ACCESS_KEY_ID")),
-            "the raw config's own shell-only reference still surfaces, worded as not resolvable: \
-             {sentences:?}"
         );
         // The reclaim-job facts stay quiet the way an unobservable job's
         // already do — and a *recorded* attempt still alerts, because the
-        // state file is platform-independent.
-        assert!(!out.reclaim.unit_installed, "no unit file was read");
+        // state file is platform-independent. A machine whose scheduler this
+        // build cannot read gets `None`: the empty unit list is a fact about
+        // the reader, and `false` there would be the measured negative this
+        // whole test exists to refuse.
+        assert_eq!(
+            out.reclaim.unit_installed, None,
+            "no unit file was read, and the answer is not a guessed no: {:?}",
+            out.reclaim
+        );
         assert!(
             out.job_alerts.is_empty(),
             "a job whose scheduler cannot be read stays quiet, not guessed: {:?}",

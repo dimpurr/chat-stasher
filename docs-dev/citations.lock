@@ -832,9 +832,13 @@ crates/chat-stasher/src/main.rs:8852-8857  52d4b7130c7c  lines=6
 crates/chat-stasher/src/main.rs:8922-8927  581bf6c44307  lines=6
   <- docs-dev/install.md:607  :: /// (and a wrapper) inject through. One place names each va…
 crates/chat-stasher/src/main.rs:9137-9144  b54ca1b3e4d5  lines=8
-  <- SECURITY.md:70, docs-dev/threat-model.md:866  :: let mut levels: BTreeMap<&str, usize> = BTreeMap::new();
+  <- docs-dev/threat-model.md:866  :: let mut levels: BTreeMap<&str, usize> = BTreeMap::new();
 crates/chat-stasher/src/main.rs:9164-9168  0d25cb363ccc  lines=5
-  <- SECURITY.md:70, docs-dev/threat-model.md:864  :: config::default_data_root()
+  <- docs-dev/threat-model.md:864  :: config::default_data_root()
+crates/chat-stasher/src/main.rs:9552-9568  0c64dabbb8b1  lines=17
+  <- SECURITY.md:70  :: // W880: push preflight — the empty-stage safety scan.
+crates/chat-stasher/src/main.rs:9680-9685  5c6f7b503597  lines=6
+  <- SECURITY.md:70  :: "push: refusing empty snapshot: consumed files are not prov…
 crates/chat-stasher/src/main.rs:10117-10292  0ef39e3bedf1  lines=176
   <- docs-dev/threat-model.md:928  :: fn cmd_read(
 crates/chat-stasher/src/main.rs:13906-13914  55fd954d72cf  lines=9

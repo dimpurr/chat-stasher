@@ -331,6 +331,13 @@ struct ReclaimState: Decodable {
     /// one has no reclaim job to alarm about.
     let unitInstalled: Bool?
     let why: String?
+    /// The consecutive-blocked count the app notifies from — the same
+    /// `BLOCKED_STREAK_ALARM` the CLI's alerting tier reads. Absent from a
+    /// document the app is talking to a CLI that predates the field, in
+    /// which case the app keeps its own copy (the two are not allowed to
+    /// drift: the number is owned by Rust, and this is the only way the
+    /// app learns it).
+    let blockedStreakAlarm: Int?
 
     enum CodingKeys: String, CodingKey {
         case kind, state, why, blocked
@@ -339,6 +346,7 @@ struct ReclaimState: Decodable {
         case heldBackSessions = "held_back_sessions"
         case heldBackBytes = "held_back_bytes"
         case unitInstalled = "unit_installed"
+        case blockedStreakAlarm = "blocked_streak_alarm"
     }
 }
 
@@ -842,13 +850,13 @@ struct ReclaimNotification {
 /// threshold is two because one blocked week can be a bad weekend, and the
 /// payload carries the machine's own numbers rather than a paraphrase —
 /// the same discipline the panel's sentences come from.
-func reclaimNotificationPayload(reclaim: ReclaimState?, notifiedStreak: Int?) -> ReclaimNotification? {
+func reclaimNotificationPayload(reclaim: ReclaimState?, notifiedStreak: Int?, blockedStreakAlarm: Int?) -> ReclaimNotification? {
     guard let reclaim, reclaim.kind == "known", reclaim.state != "ok",
           let consecutive = reclaim.consecutiveBlocked,
-          consecutive >= 2 else { return nil }
+          let threshold = blockedStreakAlarm, consecutive >= threshold else { return nil }
     // Re-notifying while the same streak grows keeps the user's attention
     // on a fact they have seen; the streak crossing is the moment to speak.
-    guard (notifiedStreak ?? 0) < 2 else { return nil }
+    guard (notifiedStreak ?? 0) < threshold else { return nil }
     let names = (reclaim.blocked ?? []).map(\.destination)
     var body = "The weekly stage clean-up has been blocked \(consecutive) times in a row"
     if let sessions = reclaim.heldBackSessions, sessions > 0 {
@@ -1006,9 +1014,20 @@ private final class ArchiveModel: ObservableObject {
     /// request refused — leaves the marker untouched, so the same blocked
     /// episode notifies the moment notifications can actually reach the
     /// person, including right after they grant permission.
+    /// The consecutive-blocked count the app notifies from. The number itself
+    /// lives in Rust (`BLOCKED_STREAK_ALARM`, `destdiag.rs:95`), which is why
+    /// the CLI now carries it into every `status --json` document and the
+    /// app reads it rather than keeping its own copy — the two were never
+    /// wired together, and drift between them is how a threshold quietly
+    /// moves. This default only serves a document the app is talking to a
+    /// CLI that predates the field; it must match the Rust constant, and
+    /// the field existing is what keeps it honest.
+    static let defaultBlockedStreakAlarm = 2
+
     func deliverReclaimNotificationIfDue(_ reclaim: ReclaimState?) {
         let notified = UserDefaults.standard.integer(forKey: "reclaimNotifiedStreak")
-        guard let payload = reclaimNotificationPayload(reclaim: reclaim, notifiedStreak: notified) else {
+        let alarm = reclaim?.blockedStreakAlarm ?? Self.defaultBlockedStreakAlarm
+        guard let payload = reclaimNotificationPayload(reclaim: reclaim, notifiedStreak: notified, blockedStreakAlarm: alarm) else {
             // The record's streak dropping back below the threshold (the
             // reclaim resolved) clears the marker so a future episode
             // notifies again.
@@ -1128,7 +1147,7 @@ private final class ArchiveModel: ObservableObject {
                 cliVersion: "0.5.0", cliNeedsUpdate: false,
                 destAlerts: [
                     DestAlertRow(severity: "red", sentence: "[reclaim] the weekly stage clean-up is blocked 4 times in a row — 9,869 session(s) / 12.0 GiB held back for r2; nothing was deleted and the stage keeps every byte it archives", fix: "'chat-stasher reclaim-stage --stage <stage>'   # dry run: names the destination and the reason in its output"),
-                    DestAlertRow(severity: "yellow", sentence: "[dest] r2: declared, but no installed timer pushes it — a push reaches it only when a command names it by hand; the weekly stage clean-up consults every declared destination, so the stage keeps growing until `r2` holds a copy or the declaration is removed", fix: "chat-stasher schedule install --destination r2 --stage <stage>"),
+                    DestAlertRow(severity: "yellow", sentence: "[dest] r2: declared, but no installed launchd agent (~/Library/LaunchAgents) pushes it — a push reaches it only when a command names it by hand; the weekly stage clean-up consults every declared destination, so the stage keeps growing until `r2` holds a copy or the declaration is removed", fix: "chat-stasher schedule install --destination r2 --stage <stage>"),
                     DestAlertRow(severity: "yellow", sentence: "[dest] r2: credentials are shell-only (CHAT_STASHER_R2_ACCESS_KEY_ID) — the timer file(s) com.chat-stasher.reclaim-stage.plist declare none of them, and a launchd / systemd job does not inherit your shell, so a scheduled run cannot authenticate to `r2`; write the same credentials in a form that resolves without a shell (`file:PATH`, `env-file:PATH:NAME`, on macOS `keychain:ACCOUNT`)", fix: nil),
                 ],
                 reclaim: ReclaimState(
@@ -1138,7 +1157,7 @@ private final class ArchiveModel: ObservableObject {
                     blocked: [ReclaimBlockedDestination(
                         destination: "r2", kind: "unreachable", sessions: 9_869,
                         bytes: 12_900_000_000, errorKind: "credentials_missing_or_invalid")],
-                    unitInstalled: true, why: nil
+                    unitInstalled: true, why: nil, blockedStreakAlarm: 2
                 )
             )
             loadDemoArchive(mode: mode, now: Date())
