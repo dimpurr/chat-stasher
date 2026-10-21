@@ -425,8 +425,10 @@ fn status_json_carries_the_reconciliation_and_the_reclaim_record() {
     if unreadable {
         assert_eq!(
             local["reclaim"]["unit_installed_why"].as_str(),
-            Some("this build cannot read this platform's scheduler, so whether a \
-                  reclaim job is installed could not be established"),
+            Some(
+                "this build cannot read this platform's scheduler, so whether a \
+                  reclaim job is installed could not be established"
+            ),
             "the null carries its reason, so the panel does not guess: {}",
             local["reclaim"]
         );
