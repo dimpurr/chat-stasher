@@ -30,10 +30,6 @@ const SHELL_ONLY_R2_SENTENCE: &str =
 /// lines must not move it (docs-dev/install.md's contract for the integer).
 const NEVER_RAN: i32 = 1;
 
-fn sandbox_root(sandbox: &Path) -> &Path {
-    sandbox
-}
-
 /// One sandboxed machine, with the ambient environment `run` points at.
 struct Machine {
     dir: tempfile::TempDir,
