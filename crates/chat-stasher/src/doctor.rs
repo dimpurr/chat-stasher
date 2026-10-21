@@ -5943,6 +5943,13 @@ mod json_tests {
     /// Desktop/Cowork retention probe is a distinct check (its own sources,
     /// its own three-state vocabulary, `checked: false` when the registry
     /// declares no probe) that has no half of an existing field to live in.
+    ///
+    /// W1012 (SG-1 C1) adds `destination_reconciliation` the same way: the
+    /// four-fact per-destination reconciliation is a new check with its own
+    /// tri-state vocabulary (`checked: false` when the config was never
+    /// read), reported beside `destinations` — D7's live probes and the
+    /// reconciliation's file-derived facts answer different questions about
+    /// the same names, so neither could live in the other.
     #[test]
     fn doctor_json_top_level_field_names_are_stable() {
         let v = report_to_json(&report());
@@ -5958,6 +5965,7 @@ mod json_tests {
                 "config_error",
                 "config_source",
                 "desktop_retention",
+                "destination_reconciliation",
                 "destinations",
                 "footprints",
                 "fts_indexes",
