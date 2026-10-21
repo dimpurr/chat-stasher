@@ -255,14 +255,23 @@ fn status_names_the_destination_the_timers_do_not_push() {
     if scheduler_is_unreadable_on_this_platform() {
         // Reading nothing must not become "nothing is installed": the
         // planted unit files are exactly the evidence this platform's
-        // verdict must not claim.
+        // verdict must not claim. The human `status` panel is silent there
+        // — the unknown is worded in the `--json` reclaim row's null +
+        // `unit_installed_why` (see the JSON test below) and in `doctor`'s
+        // table, not raised as a coverage or credentials finding, because
+        // it is the same on every machine here and nothing the user can
+        // act on. So the assertion here is silence, not a sentence.
         assert!(
-            text.contains("could not be established"),
-            "an unreadable scheduler answers unknown, worded, in every surface: {text}"
+            !text.contains("[dest]"),
+            "the panel is silent where the scheduler was not read: {text}"
         );
         assert!(
             !text.contains("no installed"),
             "no coverage claim is made against a scheduler that was not read: {text}"
+        );
+        assert!(
+            !text.contains("[reclaim] blocked by"),
+            "the unreadable scheduler does not invent a per-destination block: {text}"
         );
     } else {
         let (scope_noun, scope_dir) = scheduler_scope_of_this_machine();
@@ -282,15 +291,20 @@ fn status_names_the_destination_the_timers_do_not_push() {
     let shell_only_sentence = if scheduler_is_unreadable_on_this_platform() {
         // The config's own shell-only reference still surfaces — worded
         // as an unknown about whether a timer would resolve it, never as
-        // a timer verdict nobody could read.
-        "shell-only credentials (CHAT_STASHER_R2_ACCESS_KEY_ID)"
+        // a timer verdict nobody could read. It does so in the reclaim
+        // row's null + `unit_installed_why` and in `doctor`'s table; the
+        // `status` panel itself is silent there, so this sentence is not
+        // asserted against it.
+        None
     } else {
-        SHELL_ONLY_R2_SENTENCE
+        Some(SHELL_ONLY_R2_SENTENCE)
     };
-    assert!(
-        text.contains(shell_only_sentence),
-        "the shell-only credentials finding, in the one wording all three surfaces share: {text}"
-    );
+    if let Some(shell_only_sentence) = shell_only_sentence {
+        assert!(
+            text.contains(shell_only_sentence),
+            "the shell-only credentials finding, in the one wording all three surfaces share: {text}"
+        );
+    }
     assert!(
         text.contains("[reclaim] the weekly stage clean-up is blocked 2 times in a row"),
         "the recorded streak is reported, not just the log's: {text}"
@@ -383,25 +397,32 @@ fn status_json_carries_the_reconciliation_and_the_reclaim_record() {
     let alerts = local["dest_alerts"]
         .as_array()
         .expect("local.dest_alerts carries the pre-worded sentences");
-    // The push-coverage alert this platform produces: the scope-named
-    // claim where the scheduler is readable, the worded unknown where it
-    // is not — both yellow, both matching this build's contract.
+    // The push-coverage finding this platform surfaces: the scope-named
+    // claim where the scheduler is readable, the worded unknown where it is
+    // not — both yellow, both matching this build's contract. A machine
+    // whose scheduler this build cannot read (Windows CI) is silent at the
+    // alert level: the unknown is worded in the reclaim row's null and in
+    // `doctor`'s table, not raised as a finding, because it is the same on
+    // every machine there and nothing the user can act on.
     let unreadable = scheduler_is_unreadable_on_this_platform();
-    let (scope_noun, scope_dir) = scheduler_scope_of_this_machine();
-    let claims_coverage = |sentence: &str| {
-        if unreadable {
-            sentence.contains("could not be established")
-        } else {
-            sentence.contains(&format!(
-                "[dest] r2: declared, but no installed {scope_noun} ({scope_dir})"
-            ))
-        }
-    };
-    assert!(
-        alerts.iter().any(|alert| alert["severity"] == "yellow"
-            && alert["sentence"].as_str().is_some_and(claims_coverage)),
-        "the push-coverage alert with its severity: {alerts:?}"
-    );
+    if unreadable {
+        assert!(
+            alerts.is_empty(),
+            "an unreadable scheduler raises no coverage or credentials \
+             finding at the alert level: {alerts:?}"
+        );
+    } else {
+        let (scope_noun, scope_dir) = scheduler_scope_of_this_machine();
+        assert!(
+            alerts.iter().any(|alert| alert["severity"] == "yellow"
+                && alert["sentence"].as_str().is_some_and(|sentence| {
+                    sentence.contains(&format!(
+                        "[dest] r2: declared, but no installed {scope_noun} ({scope_dir})"
+                    ))
+                })),
+            "the push-coverage alert with its severity: {alerts:?}"
+        );
+    }
     assert_eq!(
         local["reclaim"]["kind"], "missing",
         "no reclaim record exists on this machine, and the record says so in shape"
