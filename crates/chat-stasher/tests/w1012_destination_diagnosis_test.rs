@@ -269,10 +269,10 @@ fn status_names_the_destination_the_timers_do_not_push() {
             !text.contains("no installed"),
             "no coverage claim is made against a scheduler that was not read: {text}"
         );
-        assert!(
-            !text.contains("[reclaim] blocked by"),
-            "the unreadable scheduler does not invent a per-destination block: {text}"
-        );
+        // Record-based findings (the blocked reclaim and its streak) still
+        // surface — H3 keeps those, because the state file is
+        // platform-independent. Only the coverage and credentials findings
+        // an unreadable scheduler cannot support stay quiet.
     } else {
         let (scope_noun, scope_dir) = scheduler_scope_of_this_machine();
         let uncovered =
