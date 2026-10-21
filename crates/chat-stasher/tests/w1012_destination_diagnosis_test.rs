@@ -65,7 +65,7 @@ impl Machine {
     /// same renderer the product installs with: one hourly `run-once` for
     /// `storagebox`, one weekly `reclaim-stage`.
     fn plant_timer_files(&self) {
-        let dir = install_agents_dir(self.root(), &self.home());
+        let dir = install_agents_dir(&self.home());
         fs::create_dir_all(&dir).expect("LaunchAgents dir");
         let stage = self.root().join("stage");
         fs::create_dir_all(&stage).expect("stage dir");
@@ -143,13 +143,17 @@ fn format_of_this_machine() -> chat_stasher::schedule::Format {
 }
 
 /// The scheduler's install directory *inside the sandbox* — the launchd
-/// directory on macOS, the systemd directory otherwise. The renderer's
-/// format and this directory must agree for the observation code to find
-/// the planted files, which is the same coupling the real install has.
-fn install_agents_dir(root: &Path, home: &Path) -> PathBuf {
+/// directory on macOS, the systemd directory otherwise — always under the
+/// sandbox home, because the observation code resolves both formats'
+/// directories from the same home the product installs into
+/// (`Library/LaunchAgents` under launchd, `.config/systemd/user` under
+/// systemd). The renderer's format and this directory must agree for the
+/// planted files to be found, which is the same coupling the real
+/// install has.
+fn install_agents_dir(home: &Path) -> PathBuf {
     match format_of_this_machine() {
         chat_stasher::schedule::Format::Launchd => home.join("Library/LaunchAgents"),
-        chat_stasher::schedule::Format::Systemd => root.join(".config/systemd/user"),
+        chat_stasher::schedule::Format::Systemd => home.join(".config/systemd/user"),
     }
 }
 
