@@ -26,6 +26,19 @@ pub enum RemoteErrorKind {
     AuthDenied,
     /// Remote host unreachable (DNS resolution failure, timeout, connection refused, network down).
     Unreachable,
+    /// Credentials missing or invalid on an object-store destination (W1012 /
+    /// SG-1 C3): an S3-style backend rejected the request before it became a
+    /// conversation about the host — the request never carried usable
+    /// credentials (an unsigned request answered `400`, or the S3 signer
+    /// failed to load any at all).
+    ///
+    /// Deliberately its own class and not [`Self::AuthDenied`]: AuthDenied's
+    /// fix is an openssh one (check the key file's mode and the server's
+    /// authorized_keys), every word of which is nonsense for an object
+    /// store whose parameterless `env:`-form credentials a launchd job
+    /// cannot see — the exact misconfiguration SG-1 diagnosed, where the
+    /// wrong advice would send the user to chmod a key file that exists.
+    CredentialsMissingOrInvalid,
 }
 
 impl RemoteErrorKind {
@@ -36,6 +49,7 @@ impl RemoteErrorKind {
             RemoteErrorKind::HostUntrusted => "host untrusted (strict checking)",
             RemoteErrorKind::AuthDenied => "authentication denied",
             RemoteErrorKind::Unreachable => "remote host unreachable",
+            RemoteErrorKind::CredentialsMissingOrInvalid => "credentials missing or invalid",
         }
     }
 
@@ -50,6 +64,7 @@ impl RemoteErrorKind {
             RemoteErrorKind::HostUntrusted => "host_untrusted",
             RemoteErrorKind::AuthDenied => "auth_denied",
             RemoteErrorKind::Unreachable => "unreachable",
+            RemoteErrorKind::CredentialsMissingOrInvalid => "credentials_missing_or_invalid",
         }
     }
 }
@@ -144,6 +159,28 @@ pub fn classify_error_str(err: &str) -> Option<RemoteErrorKind> {
         return Some(RemoteErrorKind::Unreachable);
     }
 
+    // Credentials missing or invalid on an object-store destination
+    // (W1012 / SG-1 C3). Both shapes below were captured from a real
+    // Cloudflare-R2 destination configured with `env:NAME` credentials a
+    // launchd job cannot see:
+    //
+    //   * the S3 request signer failing before anything is sent —
+    //     `failed to load signing credential` (the config loader dropped the
+    //     `env:` options that named the credentials, so reqsign has nothing
+    //     to sign with);
+    //   * the unsigned request sent anyway and answered `400` —
+    //     `response: Parts { status: 400, ... service: s3`.
+    //
+    // The HTTP-400 match requires the S3 service marker on purpose: a bare
+    // `status: 400` from some other transport could be a malformed request
+    // that credentials have nothing to do with, and this class's fix advice
+    // is entirely about credentials.
+    if err.contains("failed to load signing credential")
+        || (err.contains("status: 400") && err.contains("service: s3"))
+    {
+        return Some(RemoteErrorKind::CredentialsMissingOrInvalid);
+    }
+
     None
 }
 
@@ -156,6 +193,20 @@ pub fn format_remote_error(prefix: &str, err: &anyhow::Error, cfg: &StoreConfig)
         return format!("{prefix}: {err_str}");
     };
 
+    // Advice first, original error second: the raw chain stays in the output.
+    let mut out = String::new();
+    for line in advice_lines_for(kind, cfg) {
+        out.push_str(&format!("{prefix}: {line}\n"));
+    }
+    out.push_str(&format!("{prefix}: original error: {err_str}"));
+    out
+}
+
+/// The classified advice block for one failure kind — the half of
+/// [`format_remote_error`] every renderer shares, so a wrapped failure and a
+/// live one can never disagree about the fix. `kind`'s advice is keyed to the
+/// destination's own options (`endpoint`, `key`), never to a guessed host.
+fn advice_lines_for(kind: RemoteErrorKind, cfg: &StoreConfig) -> Vec<String> {
     let endpoint = cfg
         .options
         .get("endpoint")
@@ -169,7 +220,7 @@ pub fn format_remote_error(prefix: &str, err: &anyhow::Error, cfg: &StoreConfig)
         .map(|s| s.as_str())
         .unwrap_or("<unspecified-key>"); // reason: placeholder when key not set in options
 
-    let advice_lines: Vec<String> = match kind {
+    match kind {
         RemoteErrorKind::HostKeyChanged => vec![
             "🔴 [SECURITY ALERT] REMOTE HOST IDENTIFICATION HAS CHANGED!".to_string(),
             format!("   Potential Man-in-the-Middle (MITM) attack detected for host `{host}`!"),
@@ -183,7 +234,7 @@ pub fn format_remote_error(prefix: &str, err: &anyhow::Error, cfg: &StoreConfig)
             "   To see the key the network presents (inspect only; ssh-keyscan is not authenticated):".to_string(),
             format!("     ssh-keyscan -p {port} {host}"),
             "   Once it matches the published fingerprint, record it with `--trust-host`:".to_string(),
-            "     chat-stasher dest-init --destination <name> --stage <stage> --trust-host".to_string(),
+            format!("     chat-stasher dest-init --destination <name> --stage <stage> --trust-host"),
         ],
         RemoteErrorKind::AuthDenied => vec![
             format!("remote authentication denied by `{host}:{port}`: permission denied"),
@@ -196,20 +247,52 @@ pub fn format_remote_error(prefix: &str, err: &anyhow::Error, cfg: &StoreConfig)
             format!("cannot reach remote host `{host}:{port}`"),
             "   Please check your network connection, DNS resolution, and verify the remote port is accessible.".to_string(),
         ],
-    };
-
-    // The raw error chain stays in the output: advice first, original text after it.
-    let mut out = String::new();
-    for line in advice_lines {
-        out.push_str(&format!("{prefix}: {line}\n"));
+        RemoteErrorKind::CredentialsMissingOrInvalid => vec![
+            "the destination store refused the request: credentials missing or invalid".to_string(),
+            "   An S3-style store answers a request that carries no usable credentials with 400 (or the signer refuses".to_string(),
+            "   to build one at all). The host is not the problem and the store is not reporting a chat-stasher bug.".to_string(),
+            "   If the credentials are written as `env:NAME`, they resolve only in a process that inherited your shell —".to_string(),
+            "   a timer (launchd / systemd) and the menu bar app see no such variable. Write the same credentials in a".to_string(),
+            "   form that resolves without a shell: `file:PATH`, `env-file:PATH:NAME`, or on macOS `keychain:ACCOUNT`.".to_string(),
+            "   `chat-stasher doctor` and `chat-stasher status` name the destinations whose timer cannot resolve them.".to_string(),
+        ],
     }
-    out.push_str(&format!("{prefix}: original error: {err_str}"));
-    out
 }
 
 /// Print formatted remote error to standard error.
 pub fn eprint_remote_error(prefix: &str, err: &anyhow::Error, cfg: &StoreConfig) {
     eprintln!("{}", format_remote_error(prefix, err, cfg));
+}
+
+/// Wrap an error text the caller already rendered (reports keep formatted
+/// `{:#}` chains, which cannot be handed back to anyhow without inventing
+/// context) in the same classified advice [`format_remote_error`] puts
+/// around live errors.
+///
+/// This is C3's wrapper for third-party chains a reclaim consult drags in:
+/// a rustic blob that opens with "We believe this is a bug" gets the
+/// classifier's verdict in front of it — saying what the failure actually
+/// is and where the fix lives — while the original text stays whole behind
+/// it, per ADR-023's never-drop-the-chain rule. A failure the classifier
+/// does not recognise is returned unchanged: wrapping is for the cases we
+/// can name, and anything else must not gain a generic guess of a prefix.
+pub fn wrap_rendered_error(prefix: &str, err_text: &str, cfg: &StoreConfig) -> String {
+    let Some(kind) = classify_error_str(err_text) else {
+        return err_text.to_string();
+    };
+    let mut out = String::new();
+    for line in advice_lines_for(kind, cfg) {
+        out.push_str(&format!("{prefix}: {line}\n"));
+    }
+    out.push_str(&format!("{prefix}: original error: {err_text}"));
+    out
+}
+
+/// The classifier's verdict for an error text the caller already rendered,
+/// for reports that carry the classification but not the advice. Same
+/// classifier, so a report's kind and its wrapped advice cannot disagree.
+pub fn classify_rendered_error(err_text: &str) -> Option<RemoteErrorKind> {
+    classify_error_str(err_text)
 }
 
 /// Default path for ~/.ssh/known_hosts, respecting $HOME expansion.
@@ -680,8 +763,8 @@ mod tests {
     /// The point of a classifier is that different causes come out different.
     /// A function that answered one bucket for everything would satisfy every
     /// single-class test above while being useless, so this pins the whole
-    /// partition at once: four real openssh messages, four distinct verdicts,
-    /// four distinct `--json` slugs.
+    /// partition at once: five real failure messages, five distinct verdicts,
+    /// five distinct `--json` slugs.
     #[test]
     fn test_every_class_gets_a_distinct_kind_and_slug() {
         let cases = [
@@ -705,6 +788,16 @@ mod tests {
                 "ssh: connect to host example.com port 22: Connection refused",
                 RemoteErrorKind::Unreachable,
             ),
+            (
+                "Credentials missing or invalid — signer",
+                "Unexpected (persistent) at stat, context: { called: reqsign::Sign, service: s3, path: config } => signing http request, source: failed to load signing credential",
+                RemoteErrorKind::CredentialsMissingOrInvalid,
+            ),
+            (
+                "Credentials missing or invalid — HTTP 400",
+                "Unexpected (persistent) at stat, context: { uri: https://example.invalid/config response: Parts { status: 400, version: HTTP/1.1 }, service: s3, path: config }",
+                RemoteErrorKind::CredentialsMissingOrInvalid,
+            ),
         ];
 
         let mut kinds: Vec<RemoteErrorKind> = Vec::new();
@@ -721,15 +814,86 @@ mod tests {
 
         kinds.sort_by_key(|k| k.slug());
         kinds.dedup();
-        assert_eq!(kinds.len(), 4, "two classes collapsed onto one verdict");
+        assert_eq!(kinds.len(), 5, "two classes collapsed onto one verdict");
 
         labels.sort_unstable();
         labels.dedup();
-        assert_eq!(labels.len(), 4, "two classes share one human label");
+        assert_eq!(labels.len(), 5, "two classes share one human label");
 
         slugs.sort_unstable();
         slugs.dedup();
-        assert_eq!(slugs.len(), 4, "two classes share one --json slug");
+        assert_eq!(slugs.len(), 5, "two classes share one --json slug");
+    }
+
+    /// C3 · the two real R2 failure shapes (W1012 / 46-STAGE-GROWTH §2) both
+    /// land in the credentials class, and neither lands in AuthDenied: the
+    /// fix directions are entirely different (openssh key file vs the form
+    /// of a credential reference), and the whole bug SG-1 fixes is that
+    /// they were shown to the user as a third-party "We believe this is a
+    /// bug" blob with no direction at all. Both strings below are the real
+    /// chains a Cloudflare-R2 destination produced with `env:NAME`
+    /// credentials a launchd job cannot see — with the endpoint replaced by
+    /// a placeholder — so the classifier is pinned to the failure as it
+    /// actually renders, not a cleaned-up summary of it.
+    #[test]
+    fn test_r2_misconfiguration_classifies_as_credentials_not_a_bug_report() {
+        // The shape the live writer-version probe produces: the S3 signer
+        // cannot load any credential, nothing is sent.
+        let signer = "open repository for writer versions: open existing repository: `rustic_core` experienced an error related to `the backend`.\n\nMessage:\nPath `config` does not exist.\n\nWe believe this is a bug, please report it by opening an issue at:\nhttps://github.com/rustic-rs/rustic_core/issues/new\n\nCaused by:\nUnexpected (persistent) at stat, context: { called: reqsign::Sign, service: s3, path: config } => signing http request, source: failed to load signing credential";
+        assert_eq!(
+            classify_error_str(signer),
+            Some(RemoteErrorKind::CredentialsMissingOrInvalid),
+        );
+
+        // The shape a reclaim consult produced (three weekly runs of it are
+        // in the machine's reclaim-stage.log): the unsigned request goes
+        // out and R2 answers 400.
+        let http400 = "open repository for read-all: `rustic_core` experienced an error related to `the backend`.\n\nMessage:\nPath `config` does not exist.\n\nWe believe this is a bug, please report it by opening an issue at:\nhttps://github.com/rustic-rs/rustic_core/issues/new\n\nCaused by:\nUnexpected (persistent) at stat, context: { uri: https://example.invalid/chat-stasher/config response: Parts { status: 400, version: HTTP/1.1 }, service: s3, path: config }";
+        assert_eq!(
+            classify_error_str(http400),
+            Some(RemoteErrorKind::CredentialsMissingOrInvalid),
+        );
+
+        // And neither may be downgraded into a store-rejected-key story.
+        assert_ne!(
+            classify_error_str(signer),
+            Some(RemoteErrorKind::AuthDenied)
+        );
+    }
+
+    /// C3 · the wrapper, not the delete-copy: the third-party chain keeps
+    /// every byte below the classified advice, including the "We believe
+    /// this is a bug" ask that this change exists to keep from being the
+    /// first thing the user reads. The advice names the timer shape and the
+    /// shell-free credential forms; the original text answers "but what did
+    /// the library actually say".
+    #[test]
+    fn test_wrap_rendered_error_leads_with_advice_and_keeps_the_chain() {
+        let cfg = StoreConfig {
+            repo_root: "opendal:s3".to_string(),
+            options: BTreeMap::new(),
+            ..Default::default()
+        };
+        let err_text = "open repository for read-all: `rustic_core` experienced an error related to `the backend`.\n\nMessage:\nPath `config` does not exist.\n\nWe believe this is a bug, please report it by opening an issue at:\nhttps://github.com/rustic-rs/rustic_core/issues/new\n\nCaused by:\nUnexpected (persistent) at stat, context: { called: reqsign::Sign, service: s3, path: config } => signing http request, source: failed to load signing credential";
+        let wrapped = wrap_rendered_error("reclaim-stage", err_text, &cfg);
+        let first_line = wrapped.lines().next().unwrap_or("");
+        assert!(
+            first_line.contains("credentials missing or invalid"),
+            "the advice must lead, not the third-party chain: {wrapped}"
+        );
+        // "We believe" must not be gone — wrapped, not replaced.
+        assert!(wrapped.contains("We believe this is a bug"));
+        // The fix names the shell-free forms a timer can resolve; the raw
+        // chain would send the user to the rustic issue tracker instead.
+        assert!(wrapped.contains("env-file:PATH:NAME"));
+        assert!(wrapped.contains("keychain:ACCOUNT"));
+        // The unclassified case is returned untouched, so an unrecognised
+        // third-party chain cannot gain a fabricated diagnosis.
+        let unclassified = "custom rustic internal index failure";
+        assert_eq!(
+            wrap_rendered_error("push", unclassified, &cfg),
+            unclassified.to_string()
+        );
     }
 
     /// A destination's host comes from its `endpoint` option, and an absent or

@@ -70,6 +70,21 @@ under its own heading below.
   a phase the pass never reached reads `0`, which is a measurement of
   "did not run", never a fallback. No pass behaviour changes: the
   timings and counts are recorded, nothing about what the pass does.
+- **A destination that disagrees with its timers and the weekly clean-up is
+  named in `status`.** A `[dest]` or `[reclaim]` line appears when a declared
+  destination disagrees with what the machine's timers and the weekly stage
+  clean-up actually do: no installed timer pushes it, its `env:` credentials a
+  timer cannot resolve, a timer covers it but no push has been recorded
+  against it, its `push-state` record exists but cannot be read, or a reclaim
+  blocked for several weeks running. Each line is the one sentence `doctor`
+  reports and the menu bar app shows, with the fix command beneath it, and the
+  same findings are the `dest_alerts` array of `status --json`, each with its
+  severity and fix; the weekly clean-up's own record — its state, consecutive
+  blocked runs, and what is held back and which destination blocks it — is the
+  `reclaim` field beside it. The lines never change the exit code, which stays
+  the timer verdict; a machine whose destinations are all covered,
+  timer-resolvable, record-successful and currently reclaiming prints none of
+  them.
 - **Repair the duplicated-session read path.** Users who ran `setup` step 4,
   `dest-init`, or added a new destination on `v0.2.0` through `v0.5.0-rc.2`
   may see duplicated turns in those older builds. In `read`, `export`, FTS

@@ -8688,6 +8688,14 @@ fn cmd_schedule(
                         results.len() - unchanged
                     );
                 }
+                // W1012 / SG-1 C1, the acceptance item: the install just changed the
+                // machine's timer set, so the declared set is re-reconciled
+                // against it while the user is still watching. `schedule
+                // install` succeeds and stays quiet about nothing it can
+                // see: a declared destination this machine's timers then
+                // never push is the misconfiguration whose consequence
+                // surfaces nowhere else until the disk fills.
+                warn_after_schedule_install(&config, unit, format);
                 return ExitCode::SUCCESS;
             }
             Err(error) => {
@@ -8742,6 +8750,23 @@ fn cmd_schedule(
         println!("{}", schedule::install_command(unit, format, &paths));
     }
     ExitCode::SUCCESS
+}
+
+/// W1012 / SG-1 C1, the `schedule install` half: after an install changes
+/// the machine's timer set, the declared destinations are reconciled
+/// against what was just written while the operator is still watching.
+///
+/// The wording lives in [`chat_stasher::destdiag::install_warnings`] — the
+/// library function is what the wording-level test pins, and this wiring
+/// is printing rather than deciding. Warnings, not refusals: the install
+/// did what it was asked to, and the finding is about the declared set's
+/// shape — the same reason this repo's diagnostics report rather than
+/// fail.
+fn warn_after_schedule_install(config: &Config, unit: schedule::Unit, format: schedule::Format) {
+    for line in chat_stasher::destdiag::install_warnings(config, unit, format, &config::home_dir())
+    {
+        eprintln!("{line}");
+    }
 }
 
 /// Pull schedules are explicit named jobs; destination selection and archive
@@ -9795,6 +9820,35 @@ fn cmd_push(
         meta_hash_before.as_deref(),
     ) {
         eprintln!("[push] warning: could not save pushed meta hash: {e:#}");
+    }
+    // W1012 / SG-1 C1③: this success is the durable fact "last successful
+    // push to this destination", which `status` and `doctor` reconcile
+    // against the declared set. Filed only on the success path: a push that
+    // failed must not move any destination's "last successful push" forward.
+    // Failure to record is a warning, not a failed push — the archive write
+    // already happened and undoing it for the sake of a state file would be
+    // backwards.
+    let finished_at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // reason: NOT an honest default — same (a)-fragile clock-before-1970
+        // branch `runstate::now_unix` documents; a wrong stamp here can only
+        // make the reconciler report the push as ancient, not as fresh.
+        .unwrap_or(0);
+    let pushed_destination = destination
+        .clone()
+        .unwrap_or_else(|| chat_stasher::pushstate::DEFAULT_DESTINATION.to_string());
+    if let Err(e) = chat_stasher::pushstate::record_success(
+        &state_dir,
+        &pushed_destination,
+        &machine,
+        summary.snapshots_in_repo as u64,
+        finished_at_unix,
+    ) {
+        eprintln!(
+            "[push] warning: last-successful-push record not written, so `status` will not \
+             know this destination was just pushed: {e:#}"
+        );
     }
     reap_remote(&cfg, keep_ssh_masters);
     ExitCode::SUCCESS
@@ -11453,6 +11507,17 @@ fn cmd_reclaim_stage(
                 .map(|d| &d.cfg)
                 .unwrap_or(&destinations[0].cfg);
             chat_stasher::remote_err::eprint_remote_error("reclaim-stage", &e, primary_cfg);
+            // The refusal is durably recorded too (SG-1): a run that ends
+            // here is a week the stage was not reclaimed, and the
+            // consecutive-streak counter must not reset on it. The counts
+            // stay absent — this run ended before it surveyed the stage.
+            record_reclaim_state(
+                apply,
+                chat_stasher::reclaimstate::ReclaimOutcome::Refused,
+                Vec::new(),
+                None,
+                None,
+            );
             for dest in &destinations {
                 reap_remote(&dest.cfg, keep_ssh_masters);
             }
@@ -11478,10 +11543,19 @@ fn cmd_reclaim_stage(
     if report.blocked() {
         for block in &report.blocked {
             let word = match &block.kind {
-                BlockedKind::Unreachable { .. } => "unreachable",
-                BlockedKind::PartialRead { .. } => "could not be fully read",
-                BlockedKind::SessionNotHeld => "does not hold the archived session(s)",
-                BlockedKind::TripleMismatch => "holds a different digest for the session(s)",
+                BlockedKind::Unreachable { kind, .. } => match kind {
+                    // SG-1 C3: a classified failure is named, so the
+                    // weekly log's signature line stops reading "some
+                    // network thing" for what is usually a credential
+                    // reference a timer cannot resolve.
+                    Some(k) => format!("unreachable ({})", k.label()),
+                    None => "unreachable".to_string(),
+                },
+                BlockedKind::PartialRead { .. } => "could not be fully read".to_string(),
+                BlockedKind::SessionNotHeld => "does not hold the archived session(s)".to_string(),
+                BlockedKind::TripleMismatch => {
+                    "holds a different digest for the session(s)".to_string()
+                }
             };
             println!(
                 "  blocked: destination \"{}\" {word} — {} session(s) / {} held back",
@@ -11489,9 +11563,29 @@ fn cmd_reclaim_stage(
                 block.sessions,
                 fmt_bytes(block.bytes)
             );
+            let dest_cfg = destinations
+                .iter()
+                .find(|d| d.name == block.destination)
+                .map(|d| &d.cfg);
             match &block.kind {
-                BlockedKind::Unreachable { error } => {
-                    println!("    reason: could not read the destination: {error}");
+                BlockedKind::Unreachable { error, .. } => {
+                    match dest_cfg {
+                        // The advice leads for a classified failure (SG-1
+                        // C3); the original chain keeps whatever the
+                        // third-party crate said, whole, underneath it.
+                        Some(cfg) => {
+                            for line in chat_stasher::remote_err::wrap_rendered_error(
+                                "reclaim-stage",
+                                error,
+                                cfg,
+                            )
+                            .lines()
+                            {
+                                println!("    {line}");
+                            }
+                        }
+                        None => println!("    reason: could not read the destination: {error}"),
+                    }
                 }
                 BlockedKind::PartialRead { detail } => {
                     println!("    reason: destination was read but not to completion: {detail}");
@@ -11502,8 +11596,23 @@ fn cmd_reclaim_stage(
         println!(
             "[reclaim-stage] RESULT       : BLOCKED — nothing was deleted; fix the destination(s) above and re-run"
         );
+        record_reclaim_state(
+            apply,
+            chat_stasher::reclaimstate::ReclaimOutcome::Blocked,
+            stagereclaim::blocks_as_state(&report.blocked),
+            Some(report.candidates.len()),
+            Some(report.candidate_bytes),
+        );
         return ExitCode::FAILURE;
     }
+
+    record_reclaim_state(
+        apply,
+        chat_stasher::reclaimstate::ReclaimOutcome::Ok,
+        Vec::new(),
+        Some(report.candidates.len()),
+        Some(report.candidate_bytes),
+    );
 
     if !apply {
         println!(
@@ -11535,6 +11644,53 @@ fn cmd_reclaim_stage(
     );
     println!("[reclaim-stage] RESULT       : OK");
     ExitCode::SUCCESS
+}
+
+/// Persist one reclaim attempt's durable record (W1012 / SG-1 C1④ + C2).
+///
+/// Erasure is the failure mode this file exists against: before it, a blocked
+/// weekly reclaim left exactly one trace — lines in a log nobody reads (46
+/// §2) — so `status`, `doctor` and the menu bar read this record instead of
+/// the log, and the menu bar counts `consecutive_blocked` here for its
+/// two-blocks-in-a-row notification.
+///
+/// A failure to write the record is a warning, never a failed reclaim: the
+/// reclaim itself already ran (or already refused) and its data decision is
+/// what must not be undone — the state file is observability, so a broken
+/// state dir degrades the *alarm*, and loudly, not the reclaim.
+fn record_reclaim_state(
+    apply: bool,
+    outcome: chat_stasher::reclaimstate::ReclaimOutcome,
+    blocks: Vec<chat_stasher::reclaimstate::ReclaimBlock>,
+    candidates: Option<usize>,
+    candidate_bytes: Option<u64>,
+) {
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let finished_at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // reason: NOT an honest default — same (a)-fragile clock-before-1970
+        // branch `runstate::now_unix` documents. Reached only by a machine
+        // whose clock predates the epoch; the record would then claim a
+        // 1970-01-01 finish, which is wrong in the harmless direction (the
+        // staleness check reports it as ancient rather than as fresh).
+        .unwrap_or(0);
+    let attempt = chat_stasher::reclaimstate::ReclaimAttempt {
+        version: chat_stasher::reclaimstate::RECLAIM_STATE_VERSION,
+        finished_at_unix,
+        apply,
+        outcome,
+        blocked: blocks,
+        consecutive_blocked: 0,
+        candidates,
+        candidate_bytes,
+    };
+    if let Err(e) = chat_stasher::reclaimstate::record(&state_dir, &attempt) {
+        eprintln!(
+            "[reclaim-stage] warning: reclaim state not recorded, so `status` / the menu bar \
+             cannot report this run: {e:#}"
+        );
+    }
 }
 
 /// The capability gaps that make `prune-orphans --apply` a refusal rather than a
@@ -18336,6 +18492,20 @@ fn cmd_status(
     for line in chat_stasher::doctor::key_alert_lines(&config) {
         eprintln!("{line}");
     }
+    // W1012 / SG-1 C1: the four-fact destination reconciliation, surfaced
+    // instead of leaving the weekly log as its only address. Same rules as
+    // the key alerts above: one line per finding, byte-identical silence on
+    // a machine whose destinations are all covered, timer-resolvable,
+    // recorded and currently reclaiming; and it does not move the exit
+    // code, which this command documents as "is the timer healthy" — a
+    // destination that cannot be reached is a fact about coverage, and
+    // `doctor` is the command that fails on it.
+    for alert in dest_reconciliation(&config, &info).all_alerts() {
+        eprintln!("{}", alert.sentence);
+        if let Some(fix) = &alert.fix {
+            eprintln!("    fix: {fix}");
+        }
+    }
     if let Some(error) = &writer_version_error {
         eprintln!("[status] writer versions unavailable: {error}");
     }
@@ -18580,7 +18750,7 @@ fn local_layer_json(config: &Config, info: &RunStateInfo) -> serde_json::Value {
         }
     };
 
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "schedule": {
             "kind": schedule_kind,
             "installed": installed,
@@ -18595,6 +18765,44 @@ fn local_layer_json(config: &Config, info: &RunStateInfo) -> serde_json::Value {
             info.stale_after_secs,
         ),
         "stage": stage_json,
+    });
+    // W1012 / SG-1 C1: the destination reconciliation rides the local layer
+    // because every fact it reads is machinery on this machine (installed
+    // timer files, state records) — the archived half never could answer
+    // them. `destinations` and `reclaim` are the machine-readable facts;
+    // `dest_alerts` carries the alert sentences already worded, so the
+    // menu bar app displays the same words `status` prints.
+    let reconciled = chat_stasher::destdiag::destinations_json(&dest_reconciliation(config, info));
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "destinations".to_string(),
+            reconciled["destinations"].clone(),
+        );
+        object.insert("dest_alerts".to_string(), reconciled["alerts"].clone());
+        object.insert("reclaim".to_string(), reconciled["reclaim"].clone());
+    }
+    value
+}
+
+/// W1012 / SG-1 C1: the four-fact destination reconciliation `status`
+/// reports — the same computation the prose half prints and `doctor` shows,
+/// from the one function that owns the wording. Computed once per half;
+/// both read the same machine state, so a prose line and a `--json` alert
+/// cannot disagree.
+fn dest_reconciliation(
+    config: &Config,
+    info: &RunStateInfo,
+) -> chat_stasher::destdiag::Reconciliation {
+    chat_stasher::destdiag::reconcile(&chat_stasher::destdiag::Inputs {
+        config,
+        format: setup_schedule_format(),
+        home: &config::home_dir(),
+        state_dir: &chat_stasher::collect::default_state_dir(),
+        now_unix: info.now_unix,
+        // The same fact `schedule::scheduler_readable_on` encodes one command
+        // over: a platform whose scheduler this build cannot read must not
+        // have the reconciliation read its silence as "no timer".
+        scheduler_readable: chat_stasher::schedule::scheduler_readable_on(std::env::consts::OS),
     })
 }
 

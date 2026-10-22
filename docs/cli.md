@@ -110,7 +110,7 @@ Exit codes: `0` done · `1` a step did not finish · `2` missing parameter or ma
 
 ### `doctor`
 
-Read-only. Reports each AI tool on this machine, whether its settings delete old sessions, each declared destination (reached or not, with the reason), identical duplicate shards in the configured local stage, the browser host registration, local cache sizes, and the key files this machine holds — one per archive copy, with whether each is present here and whether you have declared a copy of it. Prints paths, counts, sizes and dates, never conversation text. To inspect archived destinations for duplicates, run [`repair-duplicates`](#repair-duplicates).
+Read-only. Reports each AI tool on this machine, whether its settings delete old sessions, each declared destination (reached or not, with the reason), identical duplicate shards in the configured local stage, the browser host registration, local cache sizes, and the key files this machine holds — one per archive copy, with whether each is present here and whether you have declared a copy of it — and how the declared set agrees with what the timers and the weekly stage clean-up actually do: push coverage, credentials a timer can resolve, the last recorded push per destination, and the latest recorded reclaim. Prints paths, counts, sizes and dates, never conversation text. To inspect archived destinations for duplicates, run [`repair-duplicates`](#repair-duplicates).
 
 | Flag | Meaning |
 |---|---|
@@ -171,8 +171,10 @@ A `[keys]` line is added for each **destination** whose key needs attention: one
 | Flag | Meaning |
 |---|---|
 | `--sessions` | Add one line per session found (tool, size, date, short id). Can be hundreds of lines. |
-| `--json` | One JSON object, including a `local` section: whether the timer is installed (`installed` needs the units present *and*, on Linux, systemd confirming each timer active — otherwise `unconfirmed`), the next run and why, and the sessions still staged and waiting to upload. The last pass is its own field, `run_state`. A `keys` section carries the full inventory — the local key and every destination's, with each file's path, whether it is on this machine, and whether you have declared a copy. |
+| `--json` | One JSON object, including a `local` section: whether the timer is installed (`installed` needs the units present *and*, on Linux, systemd confirming each timer active — otherwise `unconfirmed`), the next run and why, and the sessions still staged and waiting to upload. The last pass is its own field, `run_state`. A `keys` section carries the full inventory — the local key and every destination's, with each file's path, whether it is on this machine, and whether you have declared a copy. The same section also carries `destinations` (the four facts per destination: installed-timer push coverage, credentials a timer can resolve, the last recorded successful push, and its share of the latest recorded reclaim), `dest_alerts` (the same findings as the `[dest]`/`[reclaim]` lines, each with `severity` and fix), and `reclaim` (the weekly clean-up's durable record: state, consecutive blocked runs, what is held back and which destination blocks it). |
 | `--destination <name>` | Also list the chat-stasher version each machine last archived with, and flag machines behind the newest. |
+
+`[dest]` and `[reclaim]` lines are added when a declared destination disagrees with what the machine's timers and the weekly stage clean-up actually do: a destination no installed timer pushes, one whose `env:` credentials a timer cannot resolve, one a timer covers but no push has been recorded against, one whose `push-state` record exists but cannot be read, or a reclaim blocked for several weeks running. Each line is the same sentence `doctor` reports and the menu bar app shows, with the fix command beneath it. A machine whose destinations are all covered, timer-resolvable, record-successful and currently reclaiming prints no such line — and the lines do not change the exit code, which stays the timer verdict documented above.
 
 ### `dest-init`
 

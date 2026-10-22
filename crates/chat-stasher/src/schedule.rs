@@ -82,6 +82,29 @@ pub enum Format {
     Systemd,
 }
 
+/// Whether this build can read this platform's scheduler at all.
+///
+/// The one fact three call sites used to each encode in its own way:
+/// `main.rs`'s `status`/`doctor` reconciliation passed
+/// `schedule_platform_refusal(std::env::consts::OS).is_none()`,
+/// `doctor.rs` passed `!cfg!(target_os = "windows")`, and the w1012 suite
+/// branched on `cfg!(target_os = "windows")` to decide which assertion set
+/// runs. The first two agreed only by inspection, and the third decides the
+/// suite's expectations, so a fourth platform — or a real Windows reader
+/// landing — would silently re-point the suite's expectations instead of
+/// redding them. One function, named after the question it answers, so the
+/// reader's capability and the test's branch move together.
+///
+/// The refusal itself (`schedule_platform_refusal`) is the *install* side of
+/// the same fact and stays where it is; this is the *read* side, and the two
+/// are kept apart on purpose — a platform may refuse to install a scheduler
+/// while still being readable (a future build that installs schtasks tasks
+/// would answer no here and yes there), and conflating them is how the
+/// install guard and the reconciliation drift.
+pub fn scheduler_readable_on(os: &str) -> bool {
+    !matches!(os, "windows")
+}
+
 /// Which scheduled job the templates describe. `schedule` renders exactly one
 /// job per invocation; the two units never share a launchd label or systemd
 /// unit name.
@@ -1143,6 +1166,330 @@ pub fn unit_file_name(unit: Unit, format: Format, destination: Option<&str>) -> 
         }
         Format::Systemd => systemd_timer_name_for_destination(unit, destination),
     }
+}
+
+/// What one installed scheduler unit file declares about the job it runs
+/// (W1012 / SG-1 C1): the destinations its command names, and the environment
+/// variables its own file provides. This is the ground truth for two of the
+/// four facts the destination reconciliation reports — "is any timer pushing
+/// this destination?" needs the destinations the installed files embed, and
+/// "can a timer resolve its `env:NAME` credentials?" needs what the unit
+/// file itself declares, because a launchd/systemd job is *the* environment
+/// the scheduled run sees.
+///
+/// Presence is file presence only, the same half of the answer
+/// [`ScheduleInstall`] keeps for itself: whether the manager has the job
+/// armed is the other half, reported through the install state this
+/// module's existing probe owns. Two deliberate omissions:
+///
+/// * `destinations` empty on a run-once unit means the destination-less
+///   shape — the one timer pushing the default repository, which is a
+///   legitimate configuration a `start.md` machine keeps even after
+///   declaring destinations (and which `schedule.md` then tells it to
+///   migrate away from).
+/// * a file that cannot be read or does not look like this format's unit
+///   is an observation with a `parse_note`, never a silently skipped one:
+///   the reconciliation must be able to say "there is a file here I could
+///   not read", which is not the same claim as "there is nothing here".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitObservation {
+    /// The unit file's name (not its path), as the installer wrote it.
+    pub file: String,
+    /// The unit file's own modification time, unix seconds. The filesystem
+    /// answers this for free at the same time as the read, and it is the
+    /// one honest anchor for "how long has this job been installed" —
+    /// which is what separates an installed-weeks-ago-but-never-ran job
+    /// (a silent failure worth an alarm) from one installed minutes ago
+    /// (the first run is simply still up to a week away). `None` when the
+    /// stat could not be read: an unknown age, never age zero.
+    pub modified_unix: Option<u64>,
+    /// Destinations the embedded command names with `--destination`
+    /// (including `--destination=name`). Empty = the default-repository
+    /// shape, which names no destination.
+    pub destinations: Vec<String>,
+    /// Environment variable names the unit file itself declares — a
+    /// launchd `EnvironmentVariables` dict's keys, or systemd
+    /// `Environment=` lines' names.
+    pub env_names: Vec<String>,
+    /// Why this file could not be interpreted, when it could not be.
+    pub parse_note: Option<String>,
+}
+
+/// Every installed `run-once` unit file this machine's scheduler directory
+/// holds, in name order: the destination-less legacy one and one per
+/// named destination. Sorted by file name so the same machine yields the
+/// same list on every call.
+pub fn installed_run_once_units(format: Format, home: &Path) -> Vec<UnitObservation> {
+    installed_units(format, home, |name| {
+        // Both the legacy label and the per-destination labels share the
+        // `com.chat-stasher.run-once` / `chat-stasher-run-once` prefix; the
+        // inbox-pull labels do not, and their timers are not archive pushes.
+        match format {
+            Format::Launchd => name.starts_with(LAUNCHD_LABEL) && name.ends_with(".plist"),
+            Format::Systemd => {
+                name.starts_with(SYSTEMD_SERVICE.trim_end_matches(".service"))
+                    && name.ends_with(".service")
+            }
+        }
+    })
+}
+
+/// Every installed `reclaim-stage` unit file: exactly one job per format,
+/// which consults every declared destination at once.
+pub fn installed_reclaim_units(format: Format, home: &Path) -> Vec<UnitObservation> {
+    installed_units(format, home, |name| match format {
+        Format::Launchd => name == format!("{LAUNCHD_LABEL_RECLAIM_STAGE}.plist"),
+        Format::Systemd => name == SYSTEMD_SERVICE_RECLAIM_STAGE,
+    })
+}
+
+/// The files under the format's install directory whose names `relevant`
+/// accepts, each parsed as that format's unit file.
+fn installed_units(
+    format: Format,
+    home: &Path,
+    relevant: impl Fn(&str) -> bool,
+) -> Vec<UnitObservation> {
+    let dir = install_dir(format, home);
+    let read = match fs::read_dir(&dir) {
+        Ok(read) => read,
+        Err(e) => {
+            // No directory at all is the ordinary fresh-install state and
+            // gets no observation entry: the read_dir the reconciliation
+            // wants to make ("nothing is installed") is `dir_missing`
+            // below, which an empty list already says louder than a row
+            // with a note would. A directory that exists but cannot be
+            // read is the opposite, and gets one.
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return Vec::new();
+            }
+            return vec![UnitObservation {
+                file: dir.display().to_string(),
+                modified_unix: None,
+                destinations: Vec::new(),
+                env_names: Vec::new(),
+                parse_note: Some(format!("the install directory could not be read: {e}")),
+            }];
+        }
+    };
+    let mut rows = Vec::new();
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !relevant(&name) || !entry.path().is_file() {
+            continue;
+        }
+        let text = match fs::read_to_string(entry.path()) {
+            Ok(text) => text,
+            Err(e) => {
+                rows.push(UnitObservation {
+                    file: name,
+                    modified_unix: None,
+                    destinations: Vec::new(),
+                    env_names: Vec::new(),
+                    parse_note: Some(format!("the unit file could not be read: {e}")),
+                });
+                continue;
+            }
+        };
+        let parsed = match format {
+            Format::Launchd => parse_launchd_unit(&text),
+            Format::Systemd => parse_systemd_unit(&text),
+        };
+        let modified_unix = std::fs::metadata(entry.path())
+            .and_then(|meta| meta.modified())
+            .map_err(|e| e.to_string())
+            .and_then(|at| {
+                at.duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .map_err(|e| e.to_string())
+            })
+            .ok();
+        rows.push(UnitObservation {
+            file: name,
+            modified_unix,
+            ..parsed
+        });
+    }
+    rows.sort_by(|a, b| a.file.cmp(&b.file));
+    rows
+}
+
+/// The destinations and environment a launchd plist's command declares.
+///
+/// The plist embeds the whole command as one shell line inside
+/// `ProgramArguments` (`/bin/sh -c '… exec <binary> run-once --stage …'`,
+/// every argument single-quoted — see [`render_launchd_job`]), so the
+/// destination is read by shell-tokenizing the concatenated `<string>`
+/// values rather than trying to walk the XML's structure: the renderer's
+/// shape *is* the structure, and a hand-written plist that reaches the
+/// same command line is the same job.
+fn parse_launchd_unit(text: &str) -> UnitObservation {
+    let mut destinations = Vec::new();
+    let mut env_names = Vec::new();
+    let strings = collect_xml_strings(text);
+    // EnvironmentVariables: every <key>NAME</key> inside the dict that
+    // follows the EnvironmentVariables key. These are the only variables a
+    // launchd job has that a login shell also had, so they are precisely
+    // what an `env:NAME` credential reference can resolve against there.
+    if let Some((_, after_key)) = text.split_once("<key>EnvironmentVariables</key>") {
+        let dict = after_key
+            .split_once("</dict>")
+            .map(|(dict, _)| dict)
+            .unwrap_or(after_key);
+        env_names.extend(collect_of_keys(dict));
+    }
+    let tokens = shell_tokens(&strings.join("\n"));
+    destinations.extend(destination_of_flags(&tokens));
+    let parse_note = if strings.is_empty() {
+        Some(
+            "the plist contains no ProgramArguments string, so its command could not be read"
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    // A note on the case this cannot have: a run-once plist naming no
+    // destination is the legacy default-repository shape, a legitimate
+    // configuration, so "no destinations found" is an observation the
+    // reconciliation reads as exactly the fact it names — not a parse
+    // failure.
+    UnitObservation {
+        file: String::new(),
+        modified_unix: None,
+        destinations,
+        env_names,
+        parse_note,
+    }
+}
+
+/// The destinations and environment a systemd unit declares: the
+/// `ExecStart=` line's flags, and the names of every `Environment=` entry.
+fn parse_systemd_unit(text: &str) -> UnitObservation {
+    let mut destinations = Vec::new();
+    let mut env_names = Vec::new();
+    let mut saw_exec_start = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("ExecStart=") {
+            saw_exec_start = true;
+            destinations.extend(destination_of_flags(&shell_tokens(rest)));
+        }
+        if let Some(rest) = line.strip_prefix("Environment=") {
+            // `Environment="NAME=value" "OTHER=value"` — each entry names
+            // one variable; the name is everything before the first `=`.
+            for token in shell_tokens(rest) {
+                if let Some((name, _)) = token.split_once('=') {
+                    if !name.is_empty() {
+                        env_names.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let note = (!saw_exec_start).then(|| {
+        "the unit declares no ExecStart line, so its command could not be read".to_string()
+    });
+    UnitObservation {
+        file: String::new(),
+        modified_unix: None,
+        destinations,
+        env_names,
+        parse_note: note,
+    }
+}
+
+/// Every `<string>…</string>` body in a plist, with the basic XML escapes
+/// decoded. These hold the job's Label, its ProgramArguments and its
+/// paths — the command line is assembled from them by the caller.
+fn collect_xml_strings(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some((_, after_open)) = rest.split_once("<string>") {
+        let Some((body, after_close)) = after_open.split_once("</string>") else {
+            break;
+        };
+        out.push(xml_unescape(body));
+        rest = after_close;
+    }
+    out
+}
+
+/// Every `<key>NAME</key>` body in a dict's text.
+fn collect_of_keys(dict_text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = dict_text;
+    while let Some((_, after_open)) = rest.split_once("<key>") {
+        let Some((body, after_close)) = after_open.split_once("</key>") else {
+            break;
+        };
+        out.push(xml_unescape(body));
+        rest = after_close;
+    }
+    out
+}
+
+/// The five XML escapes the renderer may produce, decoded back.
+fn xml_unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Split one shell command line into its arguments the way `/bin sh` would:
+/// single- and double-quoted runs stay inside one token, unquoted runs
+/// break on whitespace, and the quote characters themselves are quoting
+/// rather than content. The renderer single-quotes every argument (see
+/// [`render_launchd_job`]); hand-written plists may use either quoting.
+fn shell_tokens(line: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for ch in line.chars() {
+        if let Some(open) = quote {
+            if ch == open {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            c if c.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// The destination names a tokenized command names, from `--destination X`
+/// and `--destination=X` alike — the two spellings clap accepts, and the
+/// one the renderer writes is the two-token form.
+fn destination_of_flags(tokens: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut expect_value = false;
+    for token in tokens {
+        if expect_value {
+            out.push(token.clone());
+            expect_value = false;
+            continue;
+        }
+        if let Some(name) = token.strip_prefix("--destination=") {
+            out.push(name.to_string());
+        } else if token == "--destination" {
+            expect_value = true;
+        }
+    }
+    out
 }
 
 /// Classify the state of the units in `targets`. An empty `targets` is
@@ -4214,4 +4561,205 @@ mod tests {
             "no answer is not the answer \"not loaded\": {note}"
         );
     }
+}
+
+// ------------------------------------------------- W1012 / SG-1 C1① + ②
+
+/// The observation half of the reconciliation: what the installed unit
+/// files themselves declare — which destinations the job pushes, and
+/// which environment variables it carries. Parsed from files the real
+/// renderer produced, not hand-written XML, so the parser is pinned to
+/// the bytes the product actually installs.
+#[test]
+fn installed_units_report_destinations_and_env_names() {
+    let home = tempfile::TempDir::new().unwrap();
+    let write = |name: &str, destination: Option<&str>| {
+        let files = render(
+            Unit::RunOnce,
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            home.path(),
+            3600,
+            &RunOnceArgs {
+                destination: destination.map(str::to_string),
+                ..Default::default()
+            },
+            &ReclaimStageArgs::default(),
+            home.path(),
+        );
+        let file = files.first().expect("one plist");
+        let dir = home.path().join("Library/LaunchAgents");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), &file.content).unwrap();
+    };
+    write("com.chat-stasher.run-once.plist", None);
+    write(
+        "com.chat-stasher.run-once.storagebox.plist",
+        Some("storagebox"),
+    );
+    // An inbox-pull unit is *not* an archive push: the prefix scan must
+    // pass it by.
+    let pull = render_pull(
+        Format::Launchd,
+        Path::new("/opt/chat-stasher"),
+        home.path(),
+        600,
+        "my-inbox",
+        None,
+        None,
+        home.path(),
+    );
+    let dir = home.path().join("Library/LaunchAgents");
+    for file in pull {
+        std::fs::write(dir.join(&file.name), &file.content).unwrap();
+    }
+
+    let observations = installed_run_once_units(Format::Launchd, home.path());
+    // The names it found, and the order it keeps.
+    let names: Vec<String> = observations.iter().map(|o| o.file.clone()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "com.chat-stasher.run-once.plist".to_string(),
+            "com.chat-stasher.run-once.storagebox.plist".to_string(),
+        ],
+        "the inbox-pull unit must not be read as an archive push"
+    );
+    let bare = &observations[0];
+    assert!(bare.destinations.is_empty(), "the legacy timer names none");
+    assert!(bare.parse_note.is_none(), "the renderer's own plist parses");
+    let box_unit = &observations[1];
+    assert_eq!(box_unit.destinations, vec!["storagebox".to_string()]);
+    assert!(
+        box_unit.env_names.is_empty(),
+        "the renderer writes no EnvironmentVariables, and that is an observation, not a failure"
+    );
+}
+
+/// The EnvironmentVariables half: a hand-maintained plist that carries
+/// variables must report their names — that is the one way an `env:`
+/// credential resolves inside a timer, so the reconciliation's
+/// credential fact reads exactly what this parse finds.
+#[test]
+fn a_launchd_unit_reports_the_environment_it_declares() {
+    let observed = parse_launchd_unit(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.chat-stasher.run-once.r2</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>exec '/opt/chat-stasher' 'run-once' '--stage' '/stage' '--destination' 'r2'</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CHAT_STASHER_R2_ACCESS_KEY_ID</key>
+    <string>redacted-by-fixture</string>
+    <key>CHAT_STASHER_R2_SECRET_ACCESS_KEY</key>
+    <string>redacted-by-fixture</string>
+  </dict>
+</dict>
+</plist>"#,
+    );
+    assert_eq!(observed.destinations, vec!["r2".to_string()]);
+    assert_eq!(
+        observed.env_names,
+        vec![
+            "CHAT_STASHER_R2_ACCESS_KEY_ID".to_string(),
+            "CHAT_STASHER_R2_SECRET_ACCESS_KEY".to_string(),
+        ]
+    );
+    assert!(observed.parse_note.is_none());
+}
+
+/// A `--destination=name` spelling a hand-written plist may use reads
+/// the same as the renderer's two-token form, and a systemd unit is
+/// read from its own dialect: `ExecStart=` flags and `Environment=`
+/// names.
+#[test]
+fn systemd_units_report_destinations_and_env_names() {
+    let observed = parse_systemd_unit(
+        "[Unit]\n\
+             Description=chat-stasher hourly archive\n\
+             [Service]\n\
+             ExecStart=/opt/chat-stasher run-once --stage /stage --destination=r2\n\
+             Environment=\"CHAT_STASHER_R2_ACCESS_KEY_ID=redacted-by-fixture\"\n\
+             Environment=\"OTHER=1\" \"THIRD=2\"\n\
+             [Install]\n",
+    );
+    assert_eq!(observed.destinations, vec!["r2".to_string()]);
+    assert_eq!(
+        observed.env_names,
+        vec![
+            "CHAT_STASHER_R2_ACCESS_KEY_ID".to_string(),
+            "OTHER".to_string(),
+            "THIRD".to_string(),
+        ]
+    );
+    assert!(observed.parse_note.is_none());
+
+    let no_exec = parse_systemd_unit("[Unit]\nDescription=nothing here\n");
+    let note = no_exec.parse_note.expect("no ExecStart is not silence");
+    assert!(
+        note.contains("no ExecStart line"),
+        "an unreadable command must say so: {note}"
+    );
+
+    let shell = shell_tokens("exec '/opt/chat-stasher' 'run-once' '--stage' '/stage with space'");
+    assert_eq!(
+        shell,
+        vec![
+            "exec".to_string(),
+            "/opt/chat-stasher".to_string(),
+            "run-once".to_string(),
+            "--stage".to_string(),
+            "/stage with space".to_string(),
+        ],
+        "quoted runs stay one token"
+    );
+    assert_eq!(
+        destination_of_flags(&[
+            "run-once".to_string(),
+            "--destination".to_string(),
+            "r2".to_string(),
+        ]),
+        vec!["r2".to_string()]
+    );
+    assert_eq!(
+        destination_of_flags(&["--destination=r2".to_string()]),
+        vec!["r2".to_string()]
+    );
+    assert!(destination_of_flags(&["run-once".to_string()]).is_empty());
+}
+
+/// An unreadable unit file is an observation that says so — never a
+/// silently skipped row, because the reconciliation distinguishes
+/// "nothing is installed" from "a file is here that could not be read",
+/// and this parse is where that distinction is made.
+#[test]
+fn an_unreadable_unit_file_says_so() {
+    let home = tempfile::TempDir::new().unwrap();
+    let dir = home.path().join("Library/LaunchAgents");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("com.chat-stasher.run-once.r2.plist"), "").unwrap();
+    let observations = installed_run_once_units(Format::Launchd, home.path());
+    assert_eq!(observations.len(), 1);
+    let note = observations[0]
+        .parse_note
+        .as_ref()
+        .expect("an empty plist is not a destination-less timer");
+    assert!(
+        note.contains("no ProgramArguments string"),
+        "the note must say which fact could not be read: {note}"
+    );
+    assert!(observations[0].destinations.is_empty());
+    // A file written by this very test carries its own modification
+    // time — the "how long has this job been installed" anchor.
+    assert!(
+        observations[0].modified_unix.is_some(),
+        "the observation reads the file's own mtime while it is there"
+    );
 }

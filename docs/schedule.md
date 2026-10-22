@@ -36,7 +36,7 @@ That is the whole step. `schedule install`:
 2. writes it where the scheduler looks: `~/Library/LaunchAgents/` on macOS, `~/.config/systemd/user/` on Linux;
 3. loads it: `launchctl bootstrap` on macOS, `systemctl --user daemon-reload` and `systemctl --user enable --now` on Linux.
 
-It ends with one line, for example `[schedule] installed agents: 1 unchanged: 0`.
+It ends with one line, for example `[schedule] installed agents: 1 unchanged: 0`. Anything it noticed about the declared set warns right after: a declared destination no installed timer pushes, or one whose `env:` credentials a timer cannot resolve — both say what happens next and what to run, because before the install warned there was no place those facts surfaced before the disk filled.
 
 Running it again is safe. A timer that is already installed with the same content is left alone and counted as `unchanged`. One whose content changed, for example because you moved the binary, is rewritten and reloaded.
 
@@ -162,7 +162,7 @@ chat-stasher reclaim-stage --stage ~/stash/chat-stasher/stage           # dry ru
 chat-stasher schedule install --unit reclaim-stage --stage ~/stash/chat-stasher/stage
 ```
 
-It runs weekly, on Sunday at 03:17 local time on macOS, and around then on Linux (with up to 15 minutes of random delay). It is one timer for all destinations, so it takes no `--destination`. If any destination cannot be reached or does not hold a session, nothing is removed that week, and the reason is in its log (`reclaim-stage.log`).
+It runs weekly, on Sunday at 03:17 local time on macOS, and around then on Linux (with up to 15 minutes of random delay). It is one timer for all destinations, so it takes no `--destination`. If any destination cannot be reached or does not hold a session, nothing is removed that week. The reason is in its log (`reclaim-stage.log`), and it is also what `chat-stasher status` and `doctor` report: a blocked clean-up names the destination it waits for and how much it holds back, and the menu bar app posts a system notification once it has been blocked twice in a row. `schedule install --unit reclaim-stage` warns on the spot when a declared destination is pushed by no installed hourly timer — a destination that never receives pushes keeps the clean-up blocked for the whole machine.
 
 Run the dry run by hand first, so you see what it would do.
 
