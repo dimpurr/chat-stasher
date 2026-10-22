@@ -107,8 +107,16 @@ pub struct PassMetrics {
     pub source_bytes_read: u64,
     /// Shard-body bytes read and hashed: the committed JSONL prefixes
     /// re-hashed during collection plus the shard bodies the activity
-    /// index read and hashed.
+    /// index read and hashed. A session the incremental index carried
+    /// forward is here by having contributed zero to this counter,
+    /// not by being counted — the carried count is
+    /// [`Self::activity_index_sessions_carried`].
     pub shard_bytes_read_hashed: u64,
+    /// Sessions the incremental activity-index build carried forward
+    /// without re-reading their bodies (SYNC-D). Zero is the honest
+    /// value for a build that derived everything — a pass that carried
+    /// nothing is a measurement, not a failure.
+    pub activity_index_sessions_carried: u64,
     /// SQLite sessions whose per-session rows were queried.
     pub sqlite_sessions_queried: u64,
     /// SQLite sessions exported (re-sealed) into the stage.
@@ -132,7 +140,8 @@ impl PassMetrics {
              stage_audit={} metadata_hash={} activity_index={} push_preflight={} \
              backup={} run_state_write={}; counts: records_scanned={} \
              files_statted={} source_bytes_read={} shard_bytes_read_hashed={} \
-             sqlite_sessions_queried={} sqlite_sessions_exported={} state_saves={}",
+             sqlite_sessions_queried={} sqlite_sessions_exported={} \
+             state_saves={} activity_index_sessions_carried={}",
             self.scan_ms,
             self.collect_ms,
             harness_ms,
@@ -149,6 +158,7 @@ impl PassMetrics {
             self.sqlite_sessions_queried,
             self.sqlite_sessions_exported,
             self.state_saves,
+            self.activity_index_sessions_carried,
         )
     }
 }

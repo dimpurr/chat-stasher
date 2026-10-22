@@ -126,6 +126,7 @@ pub(crate) fn write_shard_in_dir(
         }
         fs::rename(active, &path)
             .with_context(|| format!("seal rename {} -> {}", active.display(), path.display()))?;
+        record_shard_fact(dir, seq, raw);
         return Ok(ShardWrite::Allocated(seq));
     }
     let inbox = matches!(source, ShardSource::Inbox(_));
@@ -182,7 +183,24 @@ pub(crate) fn write_shard_in_dir(
     } else {
         renamed?;
     }
+    record_shard_fact(dir, seq, raw);
     Ok(ShardWrite::Allocated(seq))
+}
+
+/// Record the identity of the shard that just landed (SYNC-D): the digest the
+/// activity index compares between builds, written while the freshly sealed
+/// bytes are still in hand. Best-effort on purpose — the shard is already
+/// durable at this point, and a record that fails to land only costs the next
+/// index build a body re-read, so it must never fail the seal that produced
+/// a complete shard.
+fn record_shard_fact(dir: &Path, seq: u64, raw: &[u8]) {
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "A recording failure is deliberately reported nowhere: the best \
+                  effort is the whole contract, and the fallback (the next build \
+                  re-reads the body) is both correct and the historical behaviour."
+    )]
+    let _ = crate::shard_facts::record_in_dir(dir, &crate::shard_facts::fact_for(seq, raw));
 }
 
 /// Remove shard temp stubs left by an interrupted seal.

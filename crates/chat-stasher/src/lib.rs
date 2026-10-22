@@ -59,6 +59,7 @@ pub mod search;
 pub mod selector;
 pub mod send;
 pub mod send_key;
+pub mod shard_facts;
 mod shard_writer;
 pub mod sidecar;
 pub mod snapshot_cache;

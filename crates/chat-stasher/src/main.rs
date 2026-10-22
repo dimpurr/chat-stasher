@@ -19,6 +19,7 @@ use chat_stasher::verify::{CheckSummary, ExpectationBasis, ReconcileReport, Sess
 use clap::{Parser, Subcommand};
 use rustic_core::repofile::{MasterKey, Node, NodeType};
 use rustic_core::{Grouped, LsOptions, SnapshotGroupCriterion};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{IsTerminal, Write};
@@ -1381,11 +1382,22 @@ enum Command {
         /// on first use); use `--machine` explicitly to choose the partition.
         #[arg(long)]
         machine: Option<String>,
-        /// Explicitly rebuild the complete partition index. The command has
-        /// always rebuilt rather than incrementally patched; this spelling is
-        /// provided for repair workflows and makes that intent visible.
+        /// Explicitly rebuild the complete partition index. Repair workflows
+        /// and investigation want the predictable hammer — every session
+        /// re-derived from its bytes, whatever the previous index says — and
+        /// this spelling makes that intent visible. Required for destination
+        /// (`--destination`/`--repo`) rebuilds. A local `--stage` build
+        /// defaults to this and only this unless `--incremental` is passed.
         #[arg(long)]
         rebuild: bool,
+        /// Update the index incrementally instead of rebuilding it: sessions
+        /// whose bodies and inputs provably did not change since the last
+        /// build keep their measured row; everything else is re-derived as a
+        /// full rebuild would. Local `--stage` builds only; the result must
+        /// stay byte-identical to a full rebuild. `run-once` uses this path
+        /// for its pre-push index build.
+        #[arg(long, requires = "stage", conflicts_with = "rebuild")]
+        incremental: bool,
         /// Destination to rebuild from. Requires `--rebuild`; either this or
         /// `--repo` must be named. Appends the repaired snapshot when the named
         /// `--machine` is this machine's own partition and `--stage` is a
@@ -2510,6 +2522,7 @@ fn run() -> ExitCode {
             stage,
             machine,
             rebuild,
+            incremental,
             destination,
             repo,
             key_file,
@@ -2520,6 +2533,7 @@ fn run() -> ExitCode {
             stage.as_deref(),
             machine.as_deref(),
             rebuild,
+            incremental,
             destination,
             repo,
             key_file,
@@ -2996,13 +3010,17 @@ fn cmd_native_host(self_test: bool) -> ExitCode {
     nativehost::serve_stdin()
 }
 
-/// Outcome of a full activity-index rebuild for one machine partition.
+/// Outcome of an activity-index build for one machine partition.
 #[derive(Debug)]
 struct ActivityIndexOutcome {
     /// Number of sessions whose rows were written to the index.
     sessions_indexed: usize,
     /// Number of sessions indexed with an unknown harness.
     sessions_without_harness: usize,
+    /// Number of sessions an incremental build carried forward from the
+    /// previous index without re-reading their bodies (SYNC-D). Always zero
+    /// in a full rebuild.
+    sessions_carried: usize,
     /// Absolute path of the written index.
     out_path: PathBuf,
     /// Wall-clock time the rebuild took.
@@ -3066,7 +3084,384 @@ fn redact_local_activity_index_message(message: &str, stage: &Path) -> String {
     redact_activity_index_paths(message, &StoreConfig::default(), Some(stage))
 }
 
-/// Rebuild the activity index for one machine partition (ADR-017).
+/// Which sessions an activity-index build re-derives (SYNC-D).
+enum ActivityIndexBuild {
+    /// Full rebuild: every session's row is derived from its bytes, whatever
+    /// the previous index says. The `activity-index` command and every repair
+    /// workflow run this — the predictable hammer, always available.
+    FullRebuild,
+    /// Incremental: a session whose inputs provably did not change since the
+    /// last build keeps the row that build measured, and everything else is
+    /// derived exactly as a full rebuild would derive it.
+    IncrementalUpdate,
+}
+
+/// One shard's recorded identity, as the writer recorded it and a build
+/// validated against the bytes it read.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ActivityIndexShardState {
+    seq: u64,
+    bytes: u64,
+    sha256: String,
+}
+
+/// What an incremental build needs to know about one session it already
+/// covered: the recorded identity of every shard of its body, the
+/// `measured_body` the row it emitted carried, and a fingerprint of the
+/// provenance observations it saw.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ActivityIndexSessionState {
+    shards: Vec<ActivityIndexShardState>,
+    measured: activity::MeasuredBody,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observations: Option<String>,
+}
+
+/// The previous build's per-session facts, written beside the index after it
+/// is published. A dot-file: `metahash` skips dot-files, so this working
+/// record never influences the push decision, and it is not part of the
+/// archive — it describes only what the *local* stage's last build saw.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ActivityIndexState {
+    format: u32,
+    policy: String,
+    sessions: BTreeMap<String, ActivityIndexSessionState>,
+}
+
+/// Format of [`ActivityIndexState`]. A file that names a different format is
+/// a different contract's, and is discarded rather than parsed leniently.
+const ACTIVITY_INDEX_STATE_FORMAT: u32 = 1;
+
+/// Name of the incremental state file inside `meta/<machine>/`.
+const ACTIVITY_INDEX_STATE_FILE: &str = ".activity-index-state-v1.json";
+
+/// The per-machine inputs an index build needs, shared by both modes so the
+/// decisions an incremental build adds sit next to — not on top of — the code
+/// a full rebuild runs.
+#[derive(Debug)]
+struct ActivityIndexContext {
+    machine: String,
+    print_skips: bool,
+    policy: store::DuplicateShardPolicy,
+    previous: Option<BTreeMap<String, activity::ActivityRow>>,
+    provenance_by_session: BTreeMap<String, Vec<chat_stasher::provenance::ProvenanceObservation>>,
+    recorded_bodies: Option<BTreeMap<String, activity::MeasuredBody>>,
+    session_provenance: BTreeMap<String, activity::SessionProvenance>,
+    sessions_without_harness: usize,
+    shard_bytes_read_hashed: u64,
+}
+
+impl ActivityIndexContext {
+    /// The row's `session_provenance` stamp, written identically by every
+    /// path that emits a derived row: the collection-time sidecar's value when
+    /// there is one, else the value the previous row carried.
+    fn stamp_session_provenance(
+        &self,
+        row: &mut activity::ActivityRow,
+        previous_row: Option<&activity::ActivityRow>,
+    ) {
+        row.session_provenance = self
+            .session_provenance
+            .get(&row.session_id)
+            .cloned()
+            .or_else(|| previous_row.and_then(|previous| previous.session_provenance.clone()));
+    }
+
+    /// A fingerprint of what the provenance observations file says about one
+    /// session, or `None` when it says nothing. `merge_verified_*` only merges
+    /// observations that verify against the body's bytes, so a body that did
+    /// not change would merge the same way again — but a *newly appended*
+    /// observation can still verify against unchanged bytes, so the
+    /// incremental path must see the file move, not trust the digest to have
+    /// stayed irrelevant.
+    fn observations_fingerprint(&self, session_id: &str) -> Option<String> {
+        let observations = self.provenance_by_session.get(session_id)?;
+        if observations.is_empty() {
+            return None;
+        }
+        let mut body = String::new();
+        for observation in observations {
+            body.push_str(&serde_json::to_string(observation).unwrap_or_else(|error| {
+                panic!("serializing a provenance observation cannot fail: {error}")
+            }));
+            body.push('\n');
+        }
+        Some(hex_digest(&Sha256::digest(body.as_bytes())))
+    }
+
+    /// Resolve (and, on failure, count) the session's harness. Resolved for
+    /// carried rows too, so a session whose row is kept is still counted —
+    /// and announced — exactly as a derived one would be.
+    fn harness_for_session(&mut self, session_id: &str) -> String {
+        let inferred = sidecar::infer_harness(session_id);
+        if inferred.is_none() {
+            self.sessions_without_harness += 1;
+            if self.print_skips {
+                eprintln!(
+                    "activity-index: session `{}` has no inferable harness — indexed with unknown time",
+                    chat_stasher::id::short_session_id(session_id)
+                );
+            }
+        }
+        // reason: "unknown" is the recorded harness of a session whose id
+        // names none this build knows; the row stays honest about it and the
+        // count above keeps it visible to the build's report.
+        inferred.unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// The previous state entry a session may be carried forward with, or
+    /// `None` when anything it depends on moved — in which case the caller
+    /// derives the row exactly as a full rebuild would.
+    fn carryable_state_entry(
+        &self,
+        session_id: &str,
+        shards: &[(u64, PathBuf)],
+        facts: Option<&BTreeMap<u64, chat_stasher::shard_facts::ShardFact>>,
+        state: Option<&ActivityIndexState>,
+    ) -> Option<ActivityIndexSessionState> {
+        let state = state?;
+        let entry = state.sessions.get(session_id)?;
+        // A policy flip re-lines every session: which shards collapse into
+        // the row's lines is a build-wide decision, not a per-session one.
+        if state.policy != duplicate_policy_token(self.policy) {
+            return None;
+        }
+        let previous_row = self.previous.as_ref()?.get(session_id)?;
+        // The row and the state must be the same build's products: the state
+        // is written after the index, so a row that does not carry the
+        // `measured_body` the state records is not the row this state
+        // describes.
+        let measured = previous_row.measured_body.as_ref()?;
+        if measured != &entry.measured {
+            return None;
+        }
+        if entry.shards.len() != shards.len() || shards.is_empty() {
+            return None;
+        }
+        // Every shard must be covered by a writer-recorded digest that still
+        // reads today exactly as it read at the last build. Size is checked
+        // — it needs no hashing — but never *believed*: a same-size rewrite
+        // is precisely the case the digests below exist for.
+        let facts = facts?;
+        for ((seq, path), recorded) in shards.iter().zip(&entry.shards) {
+            let size = fs::metadata(path).ok()?.len();
+            let fact = facts.get(seq)?;
+            if fact.seq != *seq
+                || recorded.seq != *seq
+                || fact.sha256 != recorded.sha256
+                || fact.bytes != size
+                || recorded.bytes != size
+            {
+                return None;
+            }
+        }
+        // Observations move independently of bodies; a fingerprint change
+        // means a verified merge may now merge differently.
+        if self.observations_fingerprint(session_id) != entry.observations {
+            return None;
+        }
+        Some(entry.clone())
+    }
+
+    /// Derive one body-carrying session's row from its bytes — the code both
+    /// builds share, so an incremental session that cannot be proven
+    /// unchanged is measured by exactly the code a full rebuild measures it
+    /// with.
+    fn derived_row(
+        &mut self,
+        session_id: &str,
+        shards: &[(u64, PathBuf)],
+        facts: Option<&BTreeMap<u64, chat_stasher::shard_facts::ShardFact>>,
+    ) -> Result<(activity::ActivityRow, Option<ActivityIndexSessionState>), ActivityIndexError>
+    {
+        let harness = self.harness_for_session(session_id);
+
+        // The identity of the bytes this row measures, computed the same way
+        // `manifest::generate_manifest` computes it for the manifest: the shard
+        // count, and the sha256 of the shards concatenated in sequence order.
+        // The digest is over the raw shard bytes, not the decoded lines, so it
+        // is the same digest `reclaim-stage` proves when it deletes this body.
+        let mut lines: Vec<String> = Vec::new();
+        let mut hasher = Sha256::new();
+        let mut shard_bodies = Vec::with_capacity(shards.len());
+        for (_, shard) in shards {
+            let bytes = match fs::read(shard) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(ActivityIndexError::Read(format!(
+                        "cannot read shard {}: {e}",
+                        shard.display()
+                    )));
+                }
+            };
+            hasher.update(&bytes);
+            // W880: shard-body bytes read and hashed for the row's
+            // measured body.
+            self.shard_bytes_read_hashed += bytes.len() as u64;
+            shard_bodies.push(bytes);
+        }
+        let duplicate_indices: BTreeSet<_> = if self.policy.collapses() {
+            store::duplicate_shard_indices(&shard_bodies)
+                .into_iter()
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        for (index, bytes) in shard_bodies.iter().enumerate() {
+            if duplicate_indices.contains(&index) {
+                continue;
+            }
+            for line in String::from_utf8_lossy(bytes).lines() {
+                lines.push(line.to_string());
+            }
+        }
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let mut row = activity::build_row(session_id, &self.machine, &harness, &refs);
+        // Merged, not assigned: `build_row` has already read what the harness's
+        // own records say about this session (claude-code's `cwd` and owning
+        // organization/account), and the typed `dimensions` a capture envelope
+        // carries are *another* origin's observation of the same session rather
+        // than a replacement for it. Assigning here would discard the first
+        // reading every time the second was empty.
+        chat_stasher::provenance::merge(
+            &mut row.dimensions,
+            &chat_stasher::provenance::dimensions_from_jsonl(refs.iter().copied()),
+        );
+        if let Some(observations) = self.provenance_by_session.get(session_id) {
+            let sequence_bodies: Vec<(Option<u64>, Vec<u8>)> = shards
+                .iter()
+                .zip(&shard_bodies)
+                .map(|((sequence, _), body)| (Some(*sequence), body.clone()))
+                .collect();
+            chat_stasher::provenance::merge_verified_shard_sequence_observations(
+                &mut row.dimensions,
+                session_id,
+                observations,
+                &sequence_bodies,
+            );
+        }
+        let measured = activity::MeasuredBody {
+            shard_count: shards.len(),
+            concat_sha256: hex_digest(&hasher.finalize()),
+        };
+        row.measured_body = Some(measured.clone());
+        self.stamp_session_provenance(
+            &mut row,
+            self.previous.as_ref().and_then(|rows| rows.get(session_id)),
+        );
+
+        // The state entry this derivation can hand the next incremental build:
+        // the *recorded* identity of every shard, kept only when the record
+        // agrees with the bytes just read. A shard the writer never recorded
+        // is not carried as measured truth — the next build re-reads it, the
+        // ADR-034 disposable stance applied at shard grain.
+        let mut recorded: Vec<ActivityIndexShardState> = Vec::with_capacity(shards.len());
+        for ((seq, _shard_path), body) in shards.iter().zip(&shard_bodies) {
+            let Some(fact) = facts.as_ref().and_then(|facts| facts.get(seq)) else {
+                recorded.clear();
+                break;
+            };
+            let digest = hex_digest(&Sha256::digest(body));
+            if fact.seq == *seq && fact.bytes == body.len() as u64 && fact.sha256 == digest {
+                recorded.push(ActivityIndexShardState {
+                    seq: *seq,
+                    bytes: fact.bytes,
+                    sha256: digest,
+                });
+            } else {
+                // A record that disagrees with the bytes it claims to
+                // describe is worth nothing to the next build: drop the
+                // whole entry, never a partially trusted one.
+                recorded.clear();
+                break;
+            }
+        }
+        let state_entry = (!recorded.is_empty() && recorded.len() == shards.len()).then(|| {
+            ActivityIndexSessionState {
+                shards: recorded,
+                measured,
+                observations: self.observations_fingerprint(session_id),
+            }
+        });
+        Ok((row, state_entry))
+    }
+}
+
+/// One word for the join policy a build ran under, written into the state so
+/// a flip cannot be carried through silently.
+fn duplicate_policy_token(policy: store::DuplicateShardPolicy) -> &'static str {
+    if policy.collapses() {
+        "collapse"
+    } else {
+        "keep-all"
+    }
+}
+
+/// The previous build's state, if it is one this code understands.
+///
+/// Any reason not to trust the file — absent, unreadable, a format this
+/// version does not know — reads as `None`, and the caller derives every
+/// session. The state is a working record, never authority: the honest
+/// degradation is the full-rebuild cost, never a stale row.
+fn read_activity_index_state(meta_dir: &Path) -> Option<ActivityIndexState> {
+    let raw = match fs::read_to_string(meta_dir.join(ACTIVITY_INDEX_STATE_FILE)) {
+        Ok(raw) => raw,
+        Err(_) => return None,
+    };
+    let state: ActivityIndexState = serde_json::from_str(&raw).ok()?;
+    if state.format != ACTIVITY_INDEX_STATE_FORMAT {
+        return None;
+    }
+    Some(state)
+}
+
+/// Write the state beside the index it describes (temp file → sync → rename,
+/// the same publication contract the index itself holds). Called only after
+/// the index has been published, so a crash in between leaves the next build
+/// deriving sessions it could have carried — never carrying sessions it
+/// should have derived.
+fn write_activity_index_state(
+    meta_dir: &Path,
+    state: &ActivityIndexState,
+) -> Result<(), std::io::Error> {
+    let body = serde_json::to_string_pretty(state)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tmp = meta_dir.join(format!(".{ACTIVITY_INDEX_STATE_FILE}.tmp"));
+    {
+        let mut file = fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, body.as_bytes())?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, meta_dir.join(ACTIVITY_INDEX_STATE_FILE))?;
+    Ok(())
+}
+
+fn rebuild_activity_index(
+    stage: &Path,
+    machine: &str,
+    print_skips: bool,
+) -> Result<ActivityIndexOutcome, ActivityIndexError> {
+    build_activity_index(stage, machine, print_skips, ActivityIndexBuild::FullRebuild)
+}
+
+/// The incremental counterpart of [`rebuild_activity_index`] (SYNC-D): the
+/// same bytes on the same stage as a full rebuild — asserted by the acceptance
+/// gate, `tests/syncd_incremental_equivalence_test.rs` — reading strictly
+/// fewer shard bodies when some sessions provably did not change.
+fn update_activity_index_incrementally(
+    stage: &Path,
+    machine: &str,
+    print_skips: bool,
+) -> Result<ActivityIndexOutcome, ActivityIndexError> {
+    build_activity_index(
+        stage,
+        machine,
+        print_skips,
+        ActivityIndexBuild::IncrementalUpdate,
+    )
+}
+
+/// Build the activity index for one machine partition (ADR-017).
 ///
 /// Reads every sealed shard of every session under
 /// `<stage>/sessions/<machine>/`, concatenates each session's shards in global
@@ -3080,46 +3475,63 @@ fn redact_local_activity_index_message(message: &str, stage: &Path) -> String {
 /// output (T0 of the SYNC-D groundwork:
 /// `tests/syncd_index_determinism_test.rs`).
 ///
-/// Deliberately a **full rebuild**, never an incremental update: the index is
-/// derived from the stage, so after a full rebuild "the index says" and "the
-/// archive holds" can never diverge, while an incremental scheme would have to
-/// track exactly which shards changed since the last build — and any bug in
-/// that tracking produces a stale index that looks authoritative. The measured
-/// cost of a full rebuild is ~6.5 s on a 759-session stage (0.18% of the 3600 s
-/// run-once period), which is nothing next to the correctness it buys.
+/// Both modes are defined by their relation to a full rebuild
+/// ([`ActivityIndexBuild`]). A full rebuild re-derives every session, so
+/// after one, "the index says" and "the stage holds" cannot diverge. The
+/// incremental mode re-derives every session it cannot *prove* unchanged, by
+/// running the same per-session code a full rebuild runs, and keeps the
+/// previous row only for sessions whose every input reads identical: the
+/// digest a writer recorded at seal, the body's byte size, the duplicate
+/// policy, and the provenance observations for that session. The proof is the
+/// only thing that changed relative to the historical always-rebuild design
+/// (`measured_body` already bound each row to the bytes it measured); its
+/// contract is byte equality with a full rebuild, asserted by the gate test,
+/// so a missed change is a red test rather than a stale row that looks
+/// authoritative.
 ///
-/// 🆕 One exception, and it is the whole reason this function reads the index
-/// it is about to replace: **a session whose body this stage no longer holds
-/// keeps the row it already had — while that row is still bound to the body
-/// the manifest records.** ADR-020 Phase 4 reclaims a session's shard bodies
-/// once every declared destination has proved it holds every byte, and leaves
-/// the session directory (with only its `shard-seq` counter) behind. A rebuild
-/// that measured that empty directory would rewrite a known row as zero lines
-/// and an unknown time (field measurement: 2,832 of m3's 2,835 claude-code
-/// sessions). That is not a missing measurement — it is a measured row being
-/// replaced by the absence of a body, which is invariant 1's failure exactly.
-/// So the previous index is carried forward for those sessions, and a reclaimed
-/// session with no previous row is recorded as
-/// [`activity::TimeSource::Unknown`] naming the reclaim rather than as "no
-/// conversation content", which the empty directory would otherwise look like.
+/// A body a writer never recorded a digest for — every shard sealed before
+/// the records existed — is re-read on every build, by design: the
+/// alternative is trusting a size check, which cannot see a same-size
+/// rewrite. The cost such bodies keep is the cost they always had.
+///
+/// 🆕 One exception, unchanged from the original design and the reason both
+/// modes read the index they are about to replace: **a session whose body this
+/// stage no longer holds keeps the row it already had — while that row is
+/// still bound to the body the manifest records.** ADR-020 Phase 4 reclaims a
+/// session's shard bodies once every declared destination has proved it holds
+/// every byte, and leaves the session directory (with only its `shard-seq`
+/// counter) behind. A rebuild that measured that empty directory would
+/// rewrite a known row with zero lines and an unknown time, which is
+/// invariant 1's failure exactly. So the previous index is carried forward
+/// for those sessions, and a reclaimed session with no previous row is
+/// recorded as [`activity::TimeSource::Unknown`] naming the reclaim rather
+/// than as "no conversation content", which the empty directory would
+/// otherwise look like.
 ///
 /// "Bound" is what keeps the carry from becoming a lie one re-seal later: each
 /// row records the body it was measured from ([`activity::MeasuredBody`]) and
 /// is carried only when the manifest still records that same body for the
 /// session. A row whose identity no longer matches — or that records none, as
-/// every row written before the binding existed does — describes a body that is
-/// not the one this stage can account for, and is written as an explicit
-/// [`activity::TimeSource::Unknown`] naming which of the two it is. Carrying it
-/// instead would report the previous conversation's times for the new one, and
-/// every later rebuild would carry them again.
+/// every row written before the binding existed does — describes a body that
+/// is not the one this stage can account for, and is written as an explicit
+/// [`activity::TimeSource::Unknown`] naming which of the two it is. Carrying
+/// it instead would report the previous conversation's times for the new one,
+/// and every later rebuild of every kind would carry them again.
 ///
 /// `print_skips` controls the per-session "no inferable harness" stderr line:
 /// `activity-index` wants it (it is part of its existing output), `run-once`
 /// only wants the count.
-fn rebuild_activity_index(
+///
+/// Both modes publish the same way — the complete body reaches a sibling
+/// temporary file, is synced, and is renamed over the index — and then write
+/// the incremental state beside it. The state is a dot-file working record:
+/// `metahash` skips it, the push does not carry it, and the next build treats
+/// its absence as a full rebuild, never as a shorter answer.
+fn build_activity_index(
     stage: &Path,
     machine: &str,
     print_skips: bool,
+    mode: ActivityIndexBuild,
 ) -> Result<ActivityIndexOutcome, ActivityIndexError> {
     let started = std::time::Instant::now();
     // An activity index has no `--no-collapse` flag; its opt-out is the
@@ -3195,7 +3607,7 @@ fn rebuild_activity_index(
         )));
     }
     let out_path = meta_dir.join("activity-v1.jsonl");
-    // The rows the last rebuild measured, and which sessions the manifest says
+    // The rows the last build measured, and which sessions the manifest says
     // once had a body here. Both are read before the index is replaced: they
     // are the only records of a reclaimed session's times that this stage still
     // holds (see the doc comment above).
@@ -3219,15 +3631,32 @@ fn rebuild_activity_index(
         activity::load_session_provenance(stage, machine).map_err(|error| {
             ActivityIndexError::Read(format!("cannot read session provenance: {error}"))
         })?;
+    let mut ctx = ActivityIndexContext {
+        machine: machine.to_string(),
+        print_skips,
+        policy: index_shard_policy,
+        previous,
+        provenance_by_session,
+        recorded_bodies,
+        session_provenance,
+        sessions_without_harness: 0,
+        shard_bytes_read_hashed: 0,
+    };
+    // The last build's working record: the increment's only shortcut, and a
+    // record a full rebuild refreshes rather than resets wherever the stage
+    // really did not move.
+    let prior_state = read_activity_index_state(&meta_dir);
+    let mut state = ActivityIndexState {
+        format: ACTIVITY_INDEX_STATE_FORMAT,
+        policy: duplicate_policy_token(index_shard_policy).to_string(),
+        sessions: BTreeMap::new(),
+    };
     let mut index_temp = tempfile::Builder::new()
         .prefix(".activity-index-")
         .tempfile_in(&meta_dir)
         .map_err(|e| ActivityIndexError::Write(format!("cannot create activity index: {e}")))?;
     let mut rows_written = 0usize;
-    let mut sessions_without_harness = 0usize;
-    // W880: shard-body bytes read and hashed across every
-    // indexed session.
-    let mut shard_bytes_read_hashed = 0u64;
+    let mut sessions_carried = 0usize;
     for session_dir in session_dirs {
         let session_id = session_dir
             .file_name()
@@ -3247,69 +3676,61 @@ fn rebuild_activity_index(
             }
         };
         shards.sort_by_key(|(seq, _)| *seq);
-        let shard_count = shards.len();
-
-        // Resolved on demand, because a row carried forward from the previous
-        // index needs no harness at all — and must not be counted, or announced,
-        // as one whose harness this build could not read.
-        let mut harness_for_session = || {
-            let inferred = sidecar::infer_harness(&session_id);
-            if inferred.is_none() {
-                sessions_without_harness += 1;
-                if print_skips {
-                    eprintln!(
-                        "activity-index: session `{}` has no inferable harness — indexed with unknown time",
-                        chat_stasher::id::short_session_id(&session_id)
-                    );
-                }
-            }
-            inferred.unwrap_or_else(|| "unknown".to_string())
-        };
 
         // No body in this stage: either reclaimed, or a session that never had
         // one. Neither may be measured from the empty directory — the row the
-        // last rebuild wrote is the last measurement there was, and the manifest
-        // is what tells a reclaimed body apart from an empty session.
+        // last build wrote is the last measurement there was, and the manifest
+        // is what tells a reclaimed body apart from an empty session. Both
+        // builds run this branch identically; it reads no shard bytes.
         if shards.is_empty() {
-            // The row the last rebuild wrote for this session, if there is one,
-            // and the body the stage's manifest records for it.
-            let previous_row = previous.as_ref().and_then(|rows| rows.get(&session_id));
-            let measured = previous_row.and_then(|row| row.measured_body.as_ref());
-            let recorded = recorded_bodies
-                .as_ref()
-                .and_then(|bodies| bodies.get(&session_id));
+            // The row the last build wrote for this session, if there is one,
+            // and the body the stage's manifest records for it. Snapshotted
+            // owned copies, so nothing holds the context borrowed across the
+            // arm bodies below.
+            let (carried_row, measured, has_previous_row, recorded) = {
+                let previous_row = ctx.previous.as_ref().and_then(|rows| rows.get(&session_id));
+                let measured = previous_row.and_then(|row| row.measured_body.clone());
+                let has_previous_row = previous_row.is_some();
+                let recorded = ctx
+                    .recorded_bodies
+                    .as_ref()
+                    .and_then(|bodies| bodies.get(&session_id))
+                    .cloned();
+                let carried_row = match (&measured, &recorded) {
+                    (Some(measured), Some(recorded)) if measured == recorded => {
+                        previous_row.cloned()
+                    }
+                    _ => None,
+                };
+                (carried_row, measured, has_previous_row, recorded)
+            };
             // An unreadable manifest (`None`) also counts as reclaimed: the
             // conservative direction is "this body is not here", never "this
-            // session holds no conversation".
-            let reclaimed = recorded.is_some() || recorded_bodies.is_none();
+            // session holds no conversation". `recorded_bodies` being `None`
+            // is that unreadable case, distinct from an empty map.
+            let manifest_unreadable = ctx.recorded_bodies.is_none();
+            let reclaimed = recorded.is_some() || manifest_unreadable;
 
-            // Carried forward **only** while the row is still bound to the body
-            // the manifest records here. `reclaim-stage` writes that manifest
-            // row immediately before it deletes the body, so an identity that
-            // still matches is proof the row measured exactly the body that was
-            // reclaimed. An identity that does not — or a row that records none
-            // — is a row nothing in this stage vouches for, and carrying it
-            // would report times for a body that is not the one being indexed
-            // (SRCH-2 review, High 1: re-seal then reclaim).
-            let carried = match (measured, recorded) {
-                (Some(measured), Some(recorded)) if measured == recorded => previous_row.cloned(),
-                _ => None,
-            };
-            let mut row = match carried {
+            let mut row = match carried_row {
                 // Verbatim. Re-deriving it is impossible (the bytes are gone)
                 // and replacing it with zeros is the defect this rule fixes.
+                // The row is carried forward **only** while it is still bound
+                // to the body the manifest records here: `reclaim-stage`
+                // writes that manifest row immediately before it deletes the
+                // body, so an identity that still matches is proof the row
+                // measured exactly the body that was reclaimed.
                 Some(row) => row,
                 // A previous row that cannot be bound. It is not written
                 // forward, and its own span is not repeated either: which
                 // conversation it described is exactly what is now unknown.
                 // The two causes send an operator to two different repairs, so
                 // they are two different sentences.
-                None if previous_row.is_some() => {
+                None if has_previous_row => {
                     let why = match (measured, recorded) {
                         (Some(_), Some(_)) => RESEALED_BODY_WHY,
                         _ => UNBOUND_PREVIOUS_ROW_WHY,
                     };
-                    let harness = harness_for_session();
+                    let harness = ctx.harness_for_session(&session_id);
                     let mut row = activity::build_row(&session_id, machine, &harness, &[]);
                     row.time_source = activity::TimeSource::Unknown {
                         why: why.to_string(),
@@ -3317,7 +3738,7 @@ fn rebuild_activity_index(
                     row
                 }
                 None if reclaimed => {
-                    let harness = harness_for_session();
+                    let harness = ctx.harness_for_session(&session_id);
                     let mut row = activity::build_row(&session_id, machine, &harness, &[]);
                     row.time_source = activity::TimeSource::Unknown {
                         why: RECLAIMED_BODY_WHY.to_string(),
@@ -3328,104 +3749,85 @@ fn rebuild_activity_index(
                 // was ever sealed here, and `build_row`'s empty-input reading
                 // (no conversation content) is the honest one.
                 None => {
-                    let harness = harness_for_session();
+                    let harness = ctx.harness_for_session(&session_id);
                     activity::build_row(&session_id, machine, &harness, &[])
                 }
             };
-            row.session_provenance = session_provenance
+            row.session_provenance = ctx
+                .session_provenance
                 .get(&session_id)
                 .cloned()
-                .or(row.session_provenance);
+                .or(row.session_provenance.clone());
             index_temp
                 .write_all(activity::to_jsonl(&row).as_bytes())
                 .map_err(|e| {
                     ActivityIndexError::Write(format!("cannot append activity row: {e}"))
                 })?;
             rows_written += 1;
+            // A body-less session has no shard facts; its row is cheap to
+            // produce, so the next build re-runs this branch rather than
+            // recording anything about it.
             continue;
         }
 
-        let harness = harness_for_session();
+        // The recorded identity of this session's shards, as a writer wrote
+        // it next to the bodies it sealed.
+        let facts = chat_stasher::shard_facts::read_in_dir(&session_dir);
 
-        // The identity of the bytes this row measures, computed the same way
-        // `manifest::generate_manifest` computes it for the manifest: the shard
-        // count, and the sha256 of the shards concatenated in sequence order.
-        // The digest is over the raw shard bytes, not the decoded lines, so it
-        // is the same digest `reclaim-stage` proves when it deletes this body.
-        use sha2::{Digest, Sha256};
-        let mut lines: Vec<String> = Vec::new();
-        let mut hasher = Sha256::new();
-        let mut shard_bodies = Vec::with_capacity(shards.len());
-        for (_, shard) in &shards {
-            let bytes = match fs::read(&shard) {
-                Ok(b) => b,
-                Err(e) => {
-                    return Err(ActivityIndexError::Read(format!(
-                        "cannot read shard {}: {e}",
-                        shard.display()
-                    )));
-                }
-            };
-            hasher.update(&bytes);
-            // W880: shard-body bytes read and hashed for the row's
-            // measured body.
-            shard_bytes_read_hashed += bytes.len() as u64;
-            shard_bodies.push(bytes);
-        }
-        let duplicate_indices: BTreeSet<_> = if index_shard_policy.collapses() {
-            store::duplicate_shard_indices(&shard_bodies)
-                .into_iter()
-                .collect()
-        } else {
-            BTreeSet::new()
-        };
-        for (index, bytes) in shard_bodies.iter().enumerate() {
-            if duplicate_indices.contains(&index) {
-                continue;
-            }
-            for line in String::from_utf8_lossy(&bytes).lines() {
-                lines.push(line.to_string());
-            }
-        }
-        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-        let mut row = activity::build_row(&session_id, machine, &harness, &refs);
-        // Merged, not assigned: `build_row` has already read what the harness's
-        // own records say about this session (claude-code's `cwd` and owning
-        // organization/account), and the typed `dimensions` a capture envelope
-        // carries are *another* origin's observation of the same session rather
-        // than a replacement for it. Assigning here would discard the first
-        // reading every time the second was empty.
-        chat_stasher::provenance::merge(
-            &mut row.dimensions,
-            &chat_stasher::provenance::dimensions_from_jsonl(refs.iter().copied()),
-        );
-        if let Some(observations) = provenance_by_session.get(&session_id) {
-            let sequence_bodies: Vec<(Option<u64>, Vec<u8>)> = shards
-                .iter()
-                .zip(&shard_bodies)
-                .map(|((sequence, _), body)| (Some(*sequence), body.clone()))
-                .collect();
-            chat_stasher::provenance::merge_verified_shard_sequence_observations(
-                &mut row.dimensions,
+        // The incremental decision. Only a session whose every input is
+        // proven unchanged keeps its previous row; anything else — no state,
+        // a moved observation file, a policy flip, a record a legacy writer
+        // never wrote, a digest that no longer matches — is derived by the
+        // same code a full rebuild uses.
+        let carried = match &mode {
+            ActivityIndexBuild::IncrementalUpdate => ctx.carryable_state_entry(
                 &session_id,
-                observations,
-                &sequence_bodies,
-            );
-        }
-        row.measured_body = Some(activity::MeasuredBody {
-            shard_count,
-            concat_sha256: hex_digest(&hasher.finalize()),
-        });
-        row.session_provenance = session_provenance.get(&session_id).cloned().or_else(|| {
-            previous
-                .as_ref()
-                .and_then(|rows| rows.get(&session_id))
-                .and_then(|previous_row| previous_row.session_provenance.clone())
-        });
+                &shards,
+                facts.as_ref(),
+                prior_state.as_ref(),
+            ),
+            ActivityIndexBuild::FullRebuild => None,
+        };
+        let (row, state_entry) = match carried {
+            Some(entry) => {
+                let mut row = ctx
+                    .previous
+                    .as_ref()
+                    .and_then(|rows| rows.get(&session_id))
+                    .expect(
+                        "a carryable session always has a previous row, checked in the same \
+                         decision that granted the carry",
+                    )
+                    .clone();
+                // The one cheap input that can move without the body moving:
+                // recomputed here exactly as a derivation recomputes it, so a
+                // collection-time provenance record appended since the last
+                // build reaches the carried row just as it would a derived
+                // one.
+                row.session_provenance = ctx
+                    .session_provenance
+                    .get(&session_id)
+                    .cloned()
+                    .or_else(|| row.session_provenance.clone());
+                // The harness still has to be resolved: a session whose row
+                // is kept is still counted — and announced — exactly as a
+                // derived one would be.
+                ctx.harness_for_session(&session_id);
+                sessions_carried += 1;
+                (row, Some(entry))
+            }
+            None => {
+                let (row, entry) = ctx.derived_row(&session_id, &shards, facts.as_ref())?;
+                (row, entry)
+            }
+        };
         index_temp
             .write_all(activity::to_jsonl(&row).as_bytes())
             .map_err(|e| ActivityIndexError::Write(format!("cannot append activity row: {e}")))?;
         rows_written += 1;
+        if let Some(entry) = state_entry {
+            state.sessions.insert(session_id.clone(), entry);
+        }
     }
 
     // A complete read is published only after every session row is on disk.
@@ -3437,13 +3839,26 @@ fn rebuild_activity_index(
     index_temp.persist(&out_path).map_err(|e| {
         ActivityIndexError::Write(format!("cannot publish activity index: {}", e.error))
     })?;
+    // The working record is written after the index it describes, and a
+    // failure to write it costs only work: the next build re-derives what it
+    // could have carried. It must never fail — or be reported as failing —
+    // the build that already published a complete index.
+    if let Err(error) = write_activity_index_state(&meta_dir, &state) {
+        eprintln!(
+            "activity-index: warning: cannot write the incremental state (the next build will \
+             re-derive unchanged sessions): {error}"
+        );
+    }
 
     Ok(ActivityIndexOutcome {
         sessions_indexed: rows_written,
-        sessions_without_harness,
+        sessions_without_harness: ctx.sessions_without_harness,
+        sessions_carried,
         out_path,
         elapsed: started.elapsed(),
-        shard_bytes_read_hashed,
+        // reason: the counter accumulated inside the context is the measured
+        // bytes this build read; nothing here is inferred or defaulted.
+        shard_bytes_read_hashed: ctx.shard_bytes_read_hashed,
     })
 }
 
@@ -3603,6 +4018,7 @@ fn cmd_activity_index(
     stage: Option<&Path>,
     machine: Option<&str>,
     rebuild: bool,
+    incremental: bool,
     destination: Option<String>,
     repo: Option<String>,
     key_file: Option<String>,
@@ -3620,6 +4036,13 @@ fn cmd_activity_index(
     };
     let remote_mode = destination.is_some() || repo.is_some();
     if remote_mode {
+        if incremental {
+            eprintln!(
+                "activity-index: --incremental updates a local --stage; a destination \
+                 rebuild is always a full one"
+            );
+            return ExitCode::from(2);
+        }
         if !rebuild {
             eprintln!("activity-index: destination repair requires --rebuild");
             return ExitCode::from(2);
@@ -3767,12 +4190,32 @@ fn cmd_activity_index(
         eprintln!("activity-index: pass --stage for a local stage rebuild");
         return ExitCode::from(2);
     };
-    match rebuild_activity_index(stage, &machine, true) {
+    // `--incremental` is refused below for every destination shape, and
+    // clap's `conflicts_with = "rebuild"` + `requires = "stage"` already
+    // guarantee a local build cannot reach here with both or neither named.
+    let build = if incremental {
+        update_activity_index_incrementally(stage, &machine, true)
+    } else {
+        rebuild_activity_index(stage, &machine, true)
+    };
+    match build {
         Ok(outcome) => {
             println!("[activity-index] stage    : {}", stage.display());
             println!("[activity-index] machine  : {machine}");
             println!("[activity-index] sessions : {}", outcome.sessions_indexed);
+            println!("[activity-index] carried  : {}", outcome.sessions_carried);
+            println!(
+                "[activity-index] hashed  : {} B",
+                outcome.shard_bytes_read_hashed
+            );
             println!("[activity-index] index    : {}", outcome.out_path.display());
+            if outcome.sessions_without_harness > 0 {
+                println!(
+                    "[activity-index] no-harness: {} session(s) name no harness this build knows \
+                     — indexed with unknown time",
+                    outcome.sessions_without_harness
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(ActivityIndexError::Read(message)) => {
@@ -8384,20 +8827,25 @@ fn run_once_pass(
         return (ExitCode::SUCCESS, state);
     }
 
-    // Rebuild the activity index before pushing, so the snapshot that leaves
+    // Update the activity index before pushing, so the snapshot that leaves
     // this stage carries an index that reflects what was just collected —
     // otherwise the archived overview stays frozen at the last manual build.
-    // Always a full rebuild, never an incremental update: the index is derived
-    // from the stage, so after a full rebuild "the index says" and "the
-    // archive holds" can never diverge, while an incremental scheme would have
-    // to track exactly which shards changed since the last build — and any bug
-    // in that tracking produces a stale index that looks authoritative. The
-    // measured cost is ~6.5 s on a 759-session stage (0.18% of the 3600 s
-    // period), which is nothing next to the correctness it buys.
-    match rebuild_activity_index(stage, &machine_name, false) {
+    // Incrementally (SYNC-D), but on the exact contract that made the
+    // full rebuild safe: a session that cannot be *proven* unchanged —
+    // wrong-or-absent writer digest, moved observations, a policy flip, no
+    // previous row — is re-derived by the same code the full rebuild uses,
+    // and the acceptance gate
+    // (`tests/syncd_incremental_equivalence_test.rs`) asserts the result
+    // stays byte-identical to a full rebuild. Bodies sealed before writers
+    // recorded digests are re-derived every pass until they are re-sealed or
+    // restored. Phase timings for either path land in `run-state.json`, so
+    // which share of the pass the index costs is a measurement, not this
+    // comment.
+    match update_activity_index_incrementally(stage, &machine_name, false) {
         Ok(outcome) => {
             state.phases.activity_index_ms = outcome.elapsed.as_millis() as u64;
             state.phases.shard_bytes_read_hashed += outcome.shard_bytes_read_hashed;
+            state.phases.activity_index_sessions_carried = outcome.sessions_carried as u64;
             println!(
                 "[run-once] activity-index: sessions={} unknown_harness={} index={} elapsed={}ms",
                 outcome.sessions_indexed,
