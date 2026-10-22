@@ -82,6 +82,29 @@ pub enum Format {
     Systemd,
 }
 
+/// Whether this build can read this platform's scheduler at all.
+///
+/// The one fact three call sites used to each encode in its own way:
+/// `main.rs`'s `status`/`doctor` reconciliation passed
+/// `schedule_platform_refusal(std::env::consts::OS).is_none()`,
+/// `doctor.rs` passed `!cfg!(target_os = "windows")`, and the w1012 suite
+/// branched on `cfg!(target_os = "windows")` to decide which assertion set
+/// runs. The first two agreed only by inspection, and the third decides the
+/// suite's expectations, so a fourth platform — or a real Windows reader
+/// landing — would silently re-point the suite's expectations instead of
+/// redding them. One function, named after the question it answers, so the
+/// reader's capability and the test's branch move together.
+///
+/// The refusal itself (`schedule_platform_refusal`) is the *install* side of
+/// the same fact and stays where it is; this is the *read* side, and the two
+/// are kept apart on purpose — a platform may refuse to install a scheduler
+/// while still being readable (a future build that installs schtasks tasks
+/// would answer no here and yes there), and conflating them is how the
+/// install guard and the reconciliation drift.
+pub fn scheduler_readable_on(os: &str) -> bool {
+    !matches!(os, "windows")
+}
+
 /// Which scheduled job the templates describe. `schedule` renders exactly one
 /// job per invocation; the two units never share a launchd label or systemd
 /// unit name.

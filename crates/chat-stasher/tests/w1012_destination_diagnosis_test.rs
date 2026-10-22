@@ -195,14 +195,17 @@ fn scheduler_scope_of_this_machine() -> (&'static str, &'static str) {
 
 /// Whether this machine runs on the platform whose scheduler this build
 /// has no reader for (the reconciliation's `scheduler_readable: false`,
-/// where the CLI decides through `schedule_platform_refusal`). Tests that
+/// where the CLI decides through `schedule::scheduler_readable_on`). Tests that
 /// branch on this assert each platform's *correct* behavior — the
 /// planted files are the verdict's evidence where the scheduler is
 /// readable, and are not claimed at all where reading nothing must not
 /// become "nothing is installed". Both arms compile and run the same
-/// test: no platform's behavior is compiled out.
+/// test: no platform's behavior is compiled out. The branch reads the
+/// fact from the one place it lives rather than re-encoding it, so a
+/// fourth platform, or a real Windows reader landing, redds the suite
+/// instead of silently re-pointing its expectations.
 fn scheduler_is_unreadable_on_this_platform() -> bool {
-    cfg!(target_os = "windows")
+    !chat_stasher::schedule::scheduler_readable_on(std::env::consts::OS)
 }
 
 /// `status` reports the machine's four facts in prose: the destination no
@@ -432,12 +435,14 @@ fn status_json_carries_the_reconciliation_and_the_reclaim_record() {
         // A machine whose scheduler this build cannot read gets `null`
         // plus a `unit_installed_why`: the empty unit list is a fact about
         // the reader, and `false` there would be the measured negative
-        // H3 fixed for coverage. A readable platform still answers yes or
-        // no from what it read.
+        // H3 fixed for coverage. A readable platform answers from what
+        // it read — and this machine plants a reclaim unit, so the
+        // measured answer is `true`: an assertion of the fixture, not a
+        // tautology on the branch flag.
         if unreadable {
             serde_json::Value::Null
         } else {
-            serde_json::json!(!unreadable)
+            serde_json::json!(true)
         },
         "unit_installed is what this platform's reading supports, never a \
          silence read out of a machine this build could not look at: {}",

@@ -301,7 +301,9 @@ and prints the file, the position and the reason
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
-(`crates/chat-stasher/src/main.rs:13906-13914,13924-13947`).
+(`crates/chat-stasher/src/config.rs:170-179`, and the refusal that stops every
+command that reads the config rather than falling back to those defaults,
+`crates/chat-stasher/src/main.rs:14305-14356`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
@@ -604,7 +606,9 @@ can express them (`crates/chat-stasher/src/store.rs:2430-2437`).
 archive uses `rustic_key_file` (default `~/.local/share/chat-stasher/masterkey.json`);
 each declared destination has its own, defaulting to
 `~/.local/share/chat-stasher/masterkey-<destination>.json` and settable with that
-destination's `key_file` (`crates/chat-stasher/src/main.rs:8922-8927`). A second
+destination's `key_file` (`crates/chat-stasher/src/config.rs:269-289`, and the
+per-destination default that synthesises that path rather than reusing the local
+one, `crates/chat-stasher/src/main.rs:9335-9338`). A second
 machine reads a destination with **that destination's** key and does not use the
 local one at all — so a backup that copies only the local key cannot read the
 off-site copies. Measured on a real second machine: restoring only the local key
@@ -936,9 +940,9 @@ Linux; `schedule uninstall` stops and removes the matching job. Both operations
 are idempotent. Installation targets every configured destination by default;
 repeating `--destination` selects a subset. The embedded binary must be an
 installed path outside `target/` and the configured `CARGO_TARGET_DIR`
-(`crates/chat-stasher/src/schedule.rs:208-243`).
+(`crates/chat-stasher/src/schedule.rs:231-266`).
 The generated template wraps a `run-once` command
-(`crates/chat-stasher/src/schedule.rs:287-391`).
+(`crates/chat-stasher/src/schedule.rs:310-414`).
 
 The scheduler steps run only after the unit files are written (that is the
 only order a manager can accept), so a manager that refuses — WSL with
@@ -946,12 +950,12 @@ only order a manager can accept), so a manager that refuses — WSL with
 disk, and `status` then reported an installed timer that was armed nowhere —
 must be the install's problem, not the user's. A failed install rolls itself
 back: it stops the timers it had got enabled, removes the files it created and
-restores the ones it replaced (`crates/chat-stasher/src/schedule.rs:598-1019`),
+restores the ones it replaced (`crates/chat-stasher/src/schedule.rs:621-1042`),
 and `status` asks the manager rather than trusting the disk — `installed` needs
 every timer file *and* the manager confirming the job is loaded, `systemctl
 --user is-active` per timer on systemd and `launchctl print` per agent on macOS,
 and units the manager did not confirm are reported `unconfirmed`
-(`crates/chat-stasher/src/schedule.rs:1072-1566`). Both formats were measured
+(`crates/chat-stasher/src/schedule.rs:1095-1589`). Both formats were measured
 wrong in the same way: W282 on systemd and Windows, W287 on launchd, where a
 failed `bootstrap` left the plist behind and `status` called it installed. On
 Windows every `schedule` action refuses with exit 2 before writing anything,
@@ -986,7 +990,7 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:18559-18560`). This is the
+does not (`crates/chat-stasher/src/main.rs:18884-18885`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its timer and scan output has two parts. **The first line** is the timer health conclusion,
@@ -1007,7 +1011,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:315-363`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:18548-18616`):
+(`crates/chat-stasher/src/main.rs:18875-18961`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -1020,7 +1024,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:18535-18540`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:18396-18403`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -1030,8 +1034,9 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 or a requested destination; unavailable counts remain unknown) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:18060-18094`). **Note:** the human-readable report goes to
-**stderr**, so a pipeline like
+(`crates/chat-stasher/src/main.rs:14305-14316`, the shared refusal that stops
+every command that reads the config rather than falling back to defaults).
+**Note:** the human-readable report goes to **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,
 the JSON report is on stdout.
@@ -1067,7 +1072,7 @@ reports the machines whose archived activity index was written by an older
 (`crates/chat-stasher/src/doctor.rs:1774-1881`).
 It creates nothing, so a destination it reports as "not there yet" is still not
 created by running `doctor`. D10 also checks each destination's local FTS index
-without connecting to it (`crates/chat-stasher/src/doctor.rs:2734-2735,3302-3364`).
+without connecting to it (`crates/chat-stasher/src/doctor.rs:2734-2735,3305-3367`).
 The destination probes are the one check that touches the network; see section
 4.4 if it reports a host it cannot trust (`crates/chat-stasher/src/doctor.rs:1746-1756,1884-1905,2037-2090`).
 
@@ -1249,7 +1254,7 @@ confirmed in the code, not a temporary disclaimer.
 - **`schedule` render-only mode does not install the timer**; use the explicit
   `schedule install` action to load a launchd agent on macOS or enable the
   systemd user timer on Linux. `schedule uninstall` stops and removes the
-  matching job (`crates/chat-stasher/src/schedule.rs:598-1019`).
+  matching job (`crates/chat-stasher/src/schedule.rs:621-1042`).
 
 ---
 

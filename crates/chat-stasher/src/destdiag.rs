@@ -752,6 +752,39 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                 PushCoverage::UnreadablePlatform { .. } => {}
             }
         }
+        // ③'s unreadable arm. `ReclaimJobRecord::Unreadable` raises
+        // Yellow at the job level (this module's own doctrine: "a local
+        // anomaly the user can act on is worded as a `[dest]` alert"),
+        // and a corrupt `push-state.json` is the same shape — a file
+        // that exists and answers with nothing. Before this arm it was
+        // invisible in `status` entirely: the ③ fact kept its unknown
+        // shape in `doctor`'s table and `--json`, but no alert spoke, so
+        // the panel stayed green until the next `push` printed its own
+        // warning (`pushstate.rs:91-96`). A corrupt record is a local
+        // anomaly with a fix (the next successful push rebuilds it —
+        // `pushstate::record_success` does exactly that on the unreadable
+        // read, keeping the other destinations' rows), so it speaks,
+        // tagged like every other alert, and stays quiet where the
+        // question is unanswerable rather than merely unanswered.
+        if declared_row && matches!(facts.last_push, LastPush::Unknown { .. }) {
+            if let LastPush::Unknown { why } = &facts.last_push {
+                reconciliation.alerts.push(Alert {
+                    severity: Severity::Yellow,
+                    sentence: format!(
+                        "[dest] {}: the push-state record exists but is unreadable ({why}), so \
+                         when this destination was last pushed is unknown — not ok, and not never \
+                         pushed; the next successful push rebuilds the record from what it knows",
+                        facts.name,
+                    ),
+                    fix: Some(format!(
+                        "chat-stasher push --destination {name} --stage <stage>   # a \
+                             successful push rewrites the record, keeping the other \
+                             destinations' rows",
+                        name = facts.name
+                    )),
+                });
+            }
+        }
         match &facts.credentials {
             CredentialResolution::ShellIndependent
             | CredentialResolution::ResolvableInTimer { .. } => {}
@@ -2061,6 +2094,207 @@ mod tests {
         );
     }
 
+    /// M2 · ③'s unreadable arm, the regression half of the invariant fix:
+    /// a `push-state.json` that exists but cannot be read must stay its own
+    /// fact — `LastPush::Unknown` — and must speak as an alert, the way the
+    /// directly analogous `ReclaimJobRecord::Unreadable` already does. Before
+    /// this round the file's three read states collapsed to two at the alert
+    /// level (Missing and Unreadable both went quiet), so a corrupt record was
+    /// invisible in `status` until the next `push` printed its own warning.
+    /// The test writes the file in the product's own shape, then corrupts it,
+    /// and asserts the fact and the alert rather than trusting the commit.
+    #[test]
+    fn a_corrupt_push_state_record_is_worded_and_alerted() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        write_config(
+            home.path(),
+            "[destinations.storagebox]\nrepo = \"opendal:sftp\"\n",
+        );
+        plant_units(home.path(), Some("storagebox"));
+        // First: a healthy record, so the covered destination's ③ reads
+        // `At` and stays quiet — this half guards the fix against
+        // re-collapsing unreadable into absent.
+        crate::pushstate::record_success(state.path(), "storagebox", "m-unit", 42, 1_750_000_500)
+            .unwrap();
+        let old_xdg = pin_config_home(home.path());
+        let healthy = reconcile(&Inputs {
+            config: &config_with_two("storagebox", "r2"),
+            format: Format::Launchd,
+            home: home.path(),
+            state_dir: state.path(),
+            now_unix: 1_750_100_200,
+            scheduler_readable: true,
+        });
+        restore_config_home(&old_xdg);
+        let row = healthy
+            .destinations
+            .iter()
+            .find(|row| row.name == "storagebox")
+            .expect("storagebox row");
+        assert!(
+            matches!(row.last_push, LastPush::At { .. }),
+            "a readable record reads as At, not as absent: {:?}",
+            row.last_push
+        );
+        assert!(
+            healthy.all_alerts().iter().all(|a| !a
+                .sentence
+                .contains("the push-state record exists but is unreadable")),
+            "a healthy record raises no unreadable alert: {:?}",
+            healthy.all_alerts()
+        );
+
+        // Now corrupt the same file and reconcile again. The read state has
+        // moved to Unreadable, and the fact must follow it — not fall back
+        // to NoRecord, which would assert "no push is on record" out of a
+        // parse that never happened.
+        std::fs::write(
+            state.path().join(crate::pushstate::PUSH_STATE_FILE),
+            "not json",
+        )
+        .unwrap();
+        let old_xdg = pin_config_home(home.path());
+        let out = reconcile(&Inputs {
+            config: &config_with_two("storagebox", "r2"),
+            format: Format::Launchd,
+            home: home.path(),
+            state_dir: state.path(),
+            now_unix: 1_750_100_200,
+            scheduler_readable: true,
+        });
+        restore_config_home(&old_xdg);
+        let row = out
+            .destinations
+            .iter()
+            .find(|row| row.name == "storagebox")
+            .expect("storagebox row");
+        assert!(
+            matches!(row.last_push, LastPush::Unknown { .. }),
+            "a corrupt record stays Unknown — never silently folded into NoRecord: {:?}",
+            row.last_push
+        );
+        assert_eq!(
+            destination_facts_json(row)["last_push"]["kind"],
+            "unknown",
+            "the --json fact keeps its unknown shape, worded: {}",
+            destination_facts_json(row)["last_push"]
+        );
+        let all = out.all_alerts();
+        let alerts: Vec<&Alert> = all
+            .iter()
+            .filter(|a| {
+                a.sentence
+                    .contains("[dest] storagebox: the push-state record exists but is unreadable")
+            })
+            .collect();
+        assert_eq!(
+            alerts.len(),
+            1,
+            "exactly one alert names storagebox's corrupt record, and it is yellow: {:?}",
+            all
+        );
+        assert_eq!(alerts[0].severity, Severity::Yellow);
+        assert!(
+            alerts[0].sentence.contains("not ok, and not never pushed"),
+            "the alert says what it is not, never the all-clear: {}",
+            alerts[0].sentence
+        );
+        assert!(
+            alerts[0]
+                .fix
+                .as_deref()
+                .is_some_and(|fix| fix.contains("push --destination storagebox")),
+            "the fix is the push that rebuilds the record: {:?}",
+            alerts[0].fix
+        );
+        // The other half of the contract: an unreadable *platform* is still
+        // not this. The platform's own unknowns (①'s and ②'s
+        // `UnreadablePlatform`) are silent at the alert level even though
+        // their facts are also unknown — the difference is that a corrupt
+        // file is a local anomaly this machine can act on, while an
+        // unreadable scheduler is the same on every machine on that
+        // platform with nothing local to fix. The push-state file is
+        // platform-independent, so a record this build read and found bad
+        // is a finding on every platform, not a platform fact, and its
+        // alert fires here too. What must *not* happen is the platform's
+        // own unknown being laundered into a finding — that is the silence
+        // this module keeps for `ReclaimShare::UnknownRun` and an
+        // unobservable reclaim job, and it is the silence ① and ② hold to
+        // here.
+        let old_xdg = pin_config_home(home.path());
+        let unreadable_platform = reconcile(&Inputs {
+            config: &config_with_two("storagebox", "r2"),
+            format: Format::Launchd,
+            home: home.path(),
+            state_dir: state.path(),
+            now_unix: 1_750_100_200,
+            scheduler_readable: false,
+        });
+        restore_config_home(&old_xdg);
+        let platform_alerts = unreadable_platform.all_alerts();
+        assert!(
+            !platform_alerts
+                .iter()
+                .any(|a| a.sentence.contains("could not be established")
+                    && a.sentence.contains("no installed")),
+            "an unreadable platform does not raise a coverage finding: {:?}",
+            platform_alerts
+        );
+        assert!(
+            !platform_alerts
+                .iter()
+                .any(|a| a.sentence.contains("could not be established")
+                    && a.sentence.contains("shell-only")),
+            "an unreadable platform does not raise a credentials finding: {:?}",
+            platform_alerts
+        );
+        // The platform's facts keep their unknown shape in the table and
+        // `--json` rather than collapsing to a measured negative — the
+        // same premise the `doctor` test pins.
+        let platform_row = unreadable_platform
+            .destinations
+            .iter()
+            .find(|row| row.name == "storagebox")
+            .expect("storagebox row");
+        assert!(
+            matches!(
+                platform_row.push_coverage,
+                PushCoverage::UnreadablePlatform { .. }
+            ),
+            "① stays unknown where the platform could not be read: {:?}",
+            platform_row.push_coverage
+        );
+        assert_eq!(
+            destination_facts_json(platform_row)["push_coverage"]["kind"],
+            "unknown",
+            "①'s kind in json stays unknown on an unreadable platform"
+        );
+        // ② rides the same platform arm as ① on a destination that
+        // actually carries shell-only references — the M3 test pins that
+        // arm on the same row. Here storagebox has none, so its ② is
+        // shell-independent by measurement, which is the honest answer for
+        // a credential form that resolves without any shell or timer: it
+        // does not depend on reading the scheduler.
+        assert_eq!(
+            platform_row.credentials,
+            CredentialResolution::ShellIndependent,
+            "storagebox's ② is shell-independent, not unknown: {:?}",
+            platform_row.credentials
+        );
+        // And the corrupt file's own alert still fires here: it is a
+        // platform-independent read of a bad file, so it is a finding on
+        // every platform, not a silence bought by an unreadable scheduler.
+        assert!(
+            platform_alerts.iter().any(|a| a
+                .sentence
+                .contains("[dest] storagebox: the push-state record exists but is unreadable")),
+            "the corrupt record still speaks on an unreadable platform: {:?}",
+            platform_alerts
+        );
+    }
+
     /// H3 · A platform whose scheduler this build has no reader for (the
     /// product documents a `schtasks` task for Windows and refuses `schedule
     /// install` there) must not read an empty systemd directory as "no
@@ -2222,6 +2456,136 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("could not be re-read")),
             "the install warning names what it cannot check: {warnings:?}"
+        );
+    }
+
+    /// M3 · The Windows-silence contract's premise: the unknown that the
+    /// coverage and credentials findings are dropped *in favour of* is
+    /// actually worded in `doctor`'s table. Five comments state that premise
+    /// (`destdiag.rs:114`, `:149`, `:750`, `:2358`; test `:260`, `:295`,
+    /// `:405`), and nothing anywhere asserted it — `doctor_lines()` had no
+    /// unit test for either unknown arm, and the w1012 suite never invokes
+    /// `doctor`. A reader that stops wording the unknown would leave the
+    /// silence defensible in prose and empty in fact, which is the worse
+    /// direction: the comments would still say "it is worded in `doctor`'s
+    /// table" and the table would say nothing. This test drives both unknown
+    /// arms through the pure renderer and pins the wording, so the premise
+    /// is a measurement rather than a comment.
+    #[test]
+    fn doctor_lines_words_both_unknown_arms() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        // ①'s Unknown arm: a unit file that exists but cannot be read. The
+        // planted file is malformed on purpose — `installed_run_once_units`
+        // records the parse failure, and `push_coverage_of` answers Unknown
+        // rather than NoScheduledPush.
+        plant_units(home.path(), Some("storagebox"));
+        let unit_dir = home.path().join("Library/LaunchAgents");
+        let planted = unit_dir
+            .read_dir()
+            .unwrap()
+            .find(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("run-once")
+            })
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(&planted, "<plist not xml at all").unwrap();
+        // ②'s Unknown arm, on the *same* row: a config the product loads but
+        // this scan's strict re-read cannot parse. The re-read answers at
+        // all or it does not, so a file that fails it leaves *every* row's
+        // credentials unknown — including storagebox's, which is what this
+        // test pins. The failure shape is the nested inline table the other
+        // test uses (`options = { nested = { deep = "table" } }`), which
+        // `Config` tolerates and this scan's `BTreeMap<String, String>` does
+        // not. One config, one row carrying both unknowns, so the two arms
+        // are tested on the same destination rather than on two different
+        // machines.
+        write_config(
+            home.path(),
+            "[destinations.storagebox]\nrepo = \"opendal:sftp\"\n\
+             options = { nested = { deep = \"table\" } }\n",
+        );
+        let old_xdg = pin_config_home(home.path());
+        let out = reconcile(&Inputs {
+            config: &config_with_two("storagebox", "r2"),
+            format: Format::Launchd,
+            home: home.path(),
+            state_dir: state.path(),
+            now_unix: 1_750_100_200,
+            scheduler_readable: true,
+        });
+        restore_config_home(&old_xdg);
+        let table = doctor_lines(&out);
+
+        let storagebox = table
+            .iter()
+            .find(|line| line.trim() == "storagebox")
+            .expect("storagebox header");
+        let idx = table.iter().position(|line| line == storagebox).unwrap();
+        // ①'s unknown is worded in the row right under the header, never
+        // collapsed to "no installed launchd agent names this destination".
+        assert!(
+            table[idx + 1].contains("timer push     : unknown"),
+            "①'s unreadable unit is worded as unknown in doctor's table, \
+             not read as no timer: {}",
+            table[idx + 1]
+        );
+        assert!(
+            !table[idx + 1].contains("no installed"),
+            "the unknown arm must not launder into a measured negative: {}",
+            table[idx + 1]
+        );
+        // ②'s unknown is worded in the same row's credentials line.
+        assert!(
+            table[idx + 2].contains("timer creds    : unknown"),
+            "②'s unreadable re-read is worded as unknown in doctor's table: {}",
+            table[idx + 2]
+        );
+        // Both unknowns reach the `--json` layer in the same tagged shape,
+        // which is what the menu bar app reads — the premise holds there
+        // too, not only in the human table.
+        let json = destinations_json(&out);
+        // The rows come out sorted (`r2` first), so the assertion must
+        // name the row it means rather than trusting its index.
+        let storagebox_json = json["destinations"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["name"] == "storagebox"))
+            .expect("storagebox row in --json");
+        assert_eq!(
+            storagebox_json["push_coverage"]["kind"], "unknown",
+            "①'s kind in json: {}",
+            storagebox_json["push_coverage"]
+        );
+        assert_eq!(
+            storagebox_json["credentials"]["kind"], "unknown",
+            "②'s kind in json: {}",
+            storagebox_json["credentials"]
+        );
+        // And the alert level: a local anomaly with a fix still speaks, so
+        // the wording is not only in the quiet table. Both anomalies raise
+        // exactly one alert each, and the alerts are worded against what
+        // was read rather than claiming the all-clear.
+        let alerts = out.all_alerts();
+        assert!(
+            alerts
+                .iter()
+                .any(|a| a.sentence.contains("could not be read")),
+            "①'s anomaly still raises its alert: {:?}",
+            alerts
+        );
+        assert!(
+            alerts
+                .iter()
+                .any(|a| a.sentence.contains("could not be re-read")),
+            "②'s anomaly still raises its alert: {:?}",
+            alerts
         );
     }
 }

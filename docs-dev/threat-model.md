@@ -861,9 +861,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:9164-9168`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:9680-9685`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:9137-9144`).
+  (`crates/chat-stasher/src/main.rs:9552-9568`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having

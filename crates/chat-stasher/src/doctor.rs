@@ -2777,9 +2777,10 @@ pub fn run() -> DoctorReport {
         // through `schedule_platform_refusal`: Windows schedules through a
         // Task Scheduler this build has no reader for, so the
         // reconciliation must not read any directory's silence there as
-        // "no timer pushes". `cfg!` keeps both arms compiled and tested
-        // on every platform.
-        scheduler_readable: !cfg!(target_os = "windows"),
+        // "no timer pushes". `schedule::scheduler_readable_on` is the one
+        // place this fact lives, so the reader's capability and the test's
+        // branch cannot drift apart the way three hand-rolled copies did.
+        scheduler_readable: crate::schedule::scheduler_readable_on(std::env::consts::OS),
     });
 
     DoctorReport {
