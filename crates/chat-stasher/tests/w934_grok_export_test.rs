@@ -1,42 +1,38 @@
-//! W934 — the Grok official-export parser, behind the `import` seam.
+//! W934 — the Grok parser's own rules, behind the `import` seam.
 //!
-//! `chat-stasher import grok <export> --inbox <dir> --stage <dir>`
-//! parses a Grok `prod-grok-backend.json` payload (W909 §2: one JSON
-//! object whose `conversations` key holds `{"conversation",
-//! "responses"}` wrappers) and does exactly what the Claude leg of the
-//! same seam does: archives the whole file byte-exact in the
-//! `import-raw` stage namespace and emits one ordinary `inbox@3`
-//! `web-capture` bundle per conversation into a **local** inbox folder.
-//! It never seals, never pushes and never reads a config or a
-//! destination, so these tests can point it at a `tempfile` sandbox
-//! and mean it.
+//! W934 shipped in two halves. The parser half lives on: a Grok
+//! `prod-grok-backend.json` payload (W909 §2: one JSON object whose
+//! `conversations` key holds `{"conversation", "responses"}` wrappers)
+//! is parsed by `import::parse_grok_export`, and this file pins the
+//! parser's properties directly on the record it returns. The
+//! conversation half is held by this build's development import gate
+//! (27-ORACLE §0.1): the Grok row is blocked, so the CLI run archives
+//! the export byte-exact as its own object and refuses to write a
+//! bundle — that gated half is pinned end to end, through the real
+//! binary, by `w934_grok_raw_test.rs`, and is not repeated here.
 //!
-//! The parser rules these tests keep honest, all measured in W909 §2:
+//! What this file holds:
 //!
-//!   * **The raw `responses` list is the complete node set.** A
-//!     response deeper than the conversation's `leaf_response_id`
-//!     still belongs to the record — the list, not the leaf pointer,
-//!     is the measurement axis (27-ORACLE §4.4).
-//!   * **Times are carried, never rebuilt.** A response whose
-//!     `create_time` is a string where the export normally carries a
-//!     MongoDB `$date` dict of epoch milliseconds is carried verbatim:
-//!     the parser neither converts it nor rejects it, and the
-//!     conversation's own `create_time`/`modify_time` survive as the
-//!     platform wrote them.
-//!   * **Every absence lands as unobserved.** A response without
-//!     `file_attachments` and a conversation without
-//!     `leaf_response_id` keep those keys absent in the record — never
-//!     an empty list, never a zero, never an invented value.
-//!   * **The exit code says which kind of "no" this was** (invariant
-//!     2): `3` for "never finished reading", `2` for "read it, and it
-//!     is not importable". A torn file, a wrong-platform shape and a
-//!     manifest are three different refusals.
+//!   * **The parser-direct properties.** The raw `responses` list is
+//!     the complete node set — never walked from the
+//!     `leaf_response_id` pointer (27-ORACLE §4.4). Times are carried
+//!     verbatim, never rebuilt: a response whose `create_time` is a
+//!     string where the export normally carries a MongoDB `$date`
+//!     dict of epoch milliseconds stays a string. Every absence lands
+//!     as unobserved — never an empty list, never a zero, never an
+//!     invented value. The id ladder refuses each named case.
+//!   * **Two refusal-ladder cases a gated CLI run still walks** once
+//!     `--machine` names the partition: a file that was read to the
+//!     end and is not valid JSON is `2`, never `3` (invariant 2), and
+//!     each wrong shape is refused with the reason stated — in both
+//!     cases before anything is archived, so a refused input reaches
+//!     no namespace.
 //!
 //! Every fixture here is synthetic — a tiny fake
 //! `prod-grok-backend.json` built in this file, with text nobody wrote
 //! by hand. No real takeout, archive, destination or inbox is touched.
 
-use chat_stasher::{import, inbox, store};
+use chat_stasher::{import, raw_export};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -44,17 +40,19 @@ use std::process::Command;
 #[path = "../src/test_support.rs"]
 mod test_support;
 
-const DID_NOT_FINISH: i32 = 3;
 const WRONG_INPUT: i32 = 2;
-const CLEAN: i32 = 0;
 
 const ID_A: &str = "aaaaaaaa-0000-4000-8000-000000000001";
 const ID_B: &str = "bbbbbbbb-0000-4000-8000-000000000002";
 const ID_C: &str = "cccccccc-0000-4000-8000-000000000003";
-/// A one-time download link, planted so its absence is a fact we
-/// checked rather than a property we hoped for. Not a real
-/// credential format, not reachable.
-const PLANTED_URL: &str = "https://example.invalid/export/one-time-use/SECRETTOKEN1234567890";
+
+/// The machine label the gated CLI leg files its index row under. The
+/// development import gate requires `--machine` for a grok import, and
+/// giving it is what lets these ladder cases reach the parse — the step
+/// they pin — instead of stopping at the usage refusal the raw test
+/// file already pins. The same fixture-only shape that file uses, for
+/// the same reason: it names a partition that exists only in a sandbox.
+const MACHINE: &str = "fixture-machine";
 
 /// Run the real binary with every ambient path redirected into `sandbox`.
 fn run(sandbox: &Path, args: &[&str]) -> std::process::Output {
@@ -185,17 +183,13 @@ impl Rig {
     fn inbox(&self) -> PathBuf {
         self.sandbox.path().join("inbox")
     }
-    /// Writes the synthetic export and returns its path.
-    fn export(&self) -> PathBuf {
-        let path = self.root().join("prod-grok-backend.json");
-        fs::write(&path, synthetic_grok_export()).expect("write synthetic export");
-        path
-    }
     fn root(&self) -> &Path {
         self.sandbox.path()
     }
 }
 
+/// Drive the gated grok leg with the machine label the gate requires, so
+/// the refusal-ladder cases below reach the parse they are about.
 fn import_cmd(rig: &Rig, platform: &str, export: &Path) -> std::process::Output {
     run(
         rig.root(),
@@ -207,6 +201,8 @@ fn import_cmd(rig: &Rig, platform: &str, export: &Path) -> std::process::Output 
             &rig.inbox().to_string_lossy(),
             "--stage",
             &rig.stage().to_string_lossy(),
+            "--machine",
+            MACHINE,
         ],
     )
 }
@@ -235,114 +231,6 @@ fn text(output: &std::process::Output) -> String {
     let mut s = String::from_utf8_lossy(&output.stdout).into_owned();
     s.push_str(&String::from_utf8_lossy(&output.stderr));
     s
-}
-
-/// The happy path, and the structural promises that go with it.
-#[test]
-fn grok_import_emits_valid_bundles_and_keeps_the_export_out_of_session_counts() {
-    let rig = Rig::new();
-    let export = rig.export();
-    let source_bytes = fs::read(&export).unwrap();
-
-    let output = import_cmd(&rig, "grok", &export);
-    assert_eq!(
-        output.status.code(),
-        Some(CLEAN),
-        "a good Grok export imports cleanly: {}",
-        text(&output)
-    );
-
-    let names = bundled_names(&rig.inbox());
-    assert_eq!(
-        names,
-        vec![
-            import::bundle_file_name("grok", ID_A),
-            import::bundle_file_name("grok", ID_B),
-            import::bundle_file_name("grok", ID_C),
-        ],
-        "one bundle per conversation, and no half-written .part behind"
-    );
-    for name in &names {
-        let bytes = fs::read(rig.inbox().join(name)).unwrap();
-        inbox::check_bundle(&bytes)
-            .unwrap_or_else(|e| panic!("{name} is not an inbox@3 bundle: {e}"));
-    }
-
-    // The byte-exact copy, under its own namespace, named by its own
-    // digest, in the grok partition.
-    let dir = rig.stage().join(import::IMPORT_RAW_DIR).join("grok");
-    let stored = dir.join(hex_sha256(&source_bytes));
-    assert_eq!(fs::read(&stored).unwrap(), source_bytes, "byte-exact");
-
-    // The exclusion this slice is judged on: a stage holding that export
-    // still counts zero sessions, because nothing here wrote under
-    // `stage/sessions`.
-    assert_eq!(
-        store::sealed_shard_count(&rig.stage()).unwrap(),
-        0,
-        "an archived export must not move a session count"
-    );
-    assert!(
-        !rig.stage().join("sessions").exists(),
-        "import never touches the sessions tree"
-    );
-    assert!(
-        store::stage_file_sha256s(&rig.stage()).unwrap().is_empty(),
-        "the ingest audit scan must not see a raw export"
-    );
-
-    // Read-only on the source (ADR-011): same bytes, same place.
-    assert_eq!(fs::read(&export).unwrap(), source_bytes);
-    assert!(export.exists());
-
-    // And it did not seal anything: the inbox files are still there,
-    // unconsumed.
-    assert!(
-        !rig.inbox().join("consumed").exists(),
-        "import must not act like ingest"
-    );
-}
-
-/// The bundle for a Grok conversation carries the whole wrapper as its
-/// body: the conversation's own times, the complete response list —
-/// including the response deeper than the named leaf — and the
-/// attachment references, all as the platform wrote them.
-#[test]
-fn the_grok_bundle_body_is_the_whole_wrapper_field_for_field() {
-    let rig = Rig::new();
-    let export = rig.export();
-    let output = import_cmd(&rig, "grok", &export);
-    assert_eq!(output.status.code(), Some(CLEAN), "{}", text(&output));
-
-    let bytes = fs::read(rig.inbox().join(import::bundle_file_name("grok", ID_A))).unwrap();
-    let bundle: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(bundle["platform"], "grok");
-    assert_eq!(bundle["sessionId"], ID_A);
-    assert_eq!(bundle["fidelity"]["representation"], "export");
-
-    let body: serde_json::Value =
-        serde_json::from_str(bundle["raw"]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(body["conversation"]["id"], ID_A);
-    // The conversation's own times, carried — never derived from the
-    // responses, never reformatted.
-    assert_eq!(
-        body["conversation"]["create_time"],
-        "2026-09-01T00:00:00.000000Z"
-    );
-    assert_eq!(
-        body["conversation"]["modify_time"],
-        "2026-09-02T00:00:00.000Z"
-    );
-    // The raw list is the complete node set: three responses, the third
-    // deeper than the leaf the conversation names.
-    let responses = body["responses"].as_array().unwrap();
-    assert_eq!(responses.len(), 3);
-    assert_eq!(responses[2]["response"]["_id"], format!("{ID_A}-r2"));
-    // The attachment reference survives as a reference.
-    assert_eq!(
-        responses[1]["response"]["file_attachments"][0],
-        "synthetic-asset-uuid-0"
-    );
 }
 
 /// The record the parser returns keeps every absence as an absence: the
@@ -430,34 +318,6 @@ fn grok_parser_refuses_rows_without_a_readable_id() {
     }
 }
 
-/// A file that stops mid-JSON was never read to the end. That is `3`,
-/// and the difference between `3` and `2` is the whole content of
-/// invariant 2.
-#[test]
-fn grok_import_calls_a_torn_export_a_read_that_never_finished() {
-    let rig = Rig::new();
-    let full = synthetic_grok_export();
-    let path = rig.root().join("prod-grok-backend.json");
-    fs::write(&path, &full[..full.len() - 40]).expect("write truncated export");
-
-    let output = import_cmd(&rig, "grok", &path);
-    assert_eq!(
-        output.status.code(),
-        Some(DID_NOT_FINISH),
-        "unreadable-to-the-end is 3: {}",
-        text(&output)
-    );
-    assert!(
-        bundled_names(&rig.inbox()).is_empty(),
-        "a run that never read the file must not emit a partial conversation set"
-    );
-    assert!(
-        !rig.stage().join(import::IMPORT_RAW_DIR).exists(),
-        "bytes that never parsed are not an export, so the byte-exact namespace holds \
-         exactly the files this producer imported — and nothing it refused"
-    );
-}
-
 /// A file that was read to the end and is not valid JSON is a
 /// completed read of invalid input: `2`, not `3`. The exit code
 /// must not claim a read was incomplete when it finished.
@@ -481,8 +341,13 @@ fn grok_import_calls_a_complete_but_malformed_export_wrong_input() {
         "a refused input writes nothing"
     );
     assert!(
+        !rig.stage().join(raw_export::EXPORT_FILES_DIR).exists(),
+        "bytes that never parsed are not an export: the object namespace holds \
+         exactly the files this producer accepted"
+    );
+    assert!(
         !rig.stage().join(import::IMPORT_RAW_DIR).exists(),
-        "a refused input archives nothing"
+        "a refused input archives nothing in either namespace"
     );
 }
 
@@ -520,81 +385,11 @@ fn grok_import_refuses_the_wrong_file_shape_as_wrong_input() {
         "a refused input writes nothing"
     );
     assert!(
-        !rig.stage().join(import::IMPORT_RAW_DIR).exists(),
+        !rig.stage().join(raw_export::EXPORT_FILES_DIR).exists(),
         "a refused input archives nothing"
     );
-}
-
-/// A Claude manifest offered to the Grok parser is refused by name, and
-/// the refusal must not become a channel for echoing a one-time-use
-/// download credential.
-#[test]
-fn grok_import_refuses_a_manifest_by_name_and_never_echoes_its_url() {
-    let rig = Rig::new();
-    let manifest = serde_json::json!({
-        "version": "1.0",
-        "total_files": 6,
-        "data_files": [
-            { "category": "conversations", "part": 0,
-              "filename": "conversations-000.zip", "export_url": PLANTED_URL }
-        ]
-    })
-    .to_string();
-    let path = rig.root().join("manifest-1.json");
-    fs::write(&path, &manifest).expect("write synthetic manifest");
-
-    let output = import_cmd(&rig, "grok", &path);
-    let shown = text(&output);
-    assert_eq!(
-        output.status.code(),
-        Some(WRONG_INPUT),
-        "a manifest was read completely and is the wrong input, so 2 and not 3: {shown}"
-    );
-    assert!(shown.contains("manifest"), "{shown}");
-    assert!(
-        !shown.contains(PLANTED_URL) && !shown.contains("SECRETTOKEN1234567890"),
-        "the refusal echoed a one-time-use export_url"
-    );
-    assert!(
-        bundled_names(&rig.inbox()).is_empty(),
-        "a refused input writes nothing"
-    );
     assert!(
         !rig.stage().join(import::IMPORT_RAW_DIR).exists(),
-        "a manifest must not reach the byte-exact namespace: its `export_url` values \
-         are one-time-use credentials, and archiving a refused file would keep them"
+        "a refused input archives nothing in either namespace"
     );
-}
-
-/// Re-importing the same Grok export is a no-op for the raw namespace:
-/// the byte-exact file is stored once, and the same bundles are
-/// rewritten byte-identically.
-#[test]
-fn a_second_grok_import_of_the_same_export_stores_nothing_new() {
-    let rig = Rig::new();
-    let export = rig.export();
-
-    let first = import_cmd(&rig, "grok", &export);
-    assert_eq!(first.status.code(), Some(CLEAN), "{}", text(&first));
-    let second = import_cmd(&rig, "grok", &export);
-    assert_eq!(second.status.code(), Some(CLEAN), "{}", text(&second));
-
-    let shown = text(&second);
-    assert!(
-        shown.contains("already archived") || shown.contains("0 new"),
-        "the report should say the raw export was already there: {shown}"
-    );
-    assert_eq!(
-        bundled_names(&rig.inbox()).len(),
-        3,
-        "one bundle per conversation, not two"
-    );
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }

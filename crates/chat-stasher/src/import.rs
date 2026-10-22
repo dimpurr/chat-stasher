@@ -3,13 +3,21 @@
 //! An **official export** (a takeout) is the platform's own statement of what an
 //! account holds. This module turns one export file into two things:
 //!
-//! 1. the whole file, archived **byte-exact** in its own stage namespace, and
+//! 1. the whole file, archived **byte-exact**, and
 //! 2. one ordinary [`inbox@3`](crate::inbox) `web-capture` bundle per
 //!    conversation, written into the **LOCAL** inbox folder, which a later
 //!    `ingest --inbox` carries into the archive — this module never seals
 //!    anything itself.
 //!
-//! It is *groundwork*, and three of its limits are decisions, not omissions:
+//! *Which* of the two a platform gets is decided once, in [`ObservationPlan`]:
+//! the development import gate of 27-ORACLE §0.1 holds some platforms at
+//! **raw only** — their export archives as its own `export-files/` object
+//! (ADR-055 D4, the half the gate permits) and run refuses to write a single
+//! conversation bundle (the half the gate blocks, enforced by this producer
+//! rather than by a process nothing checks). The ungated platforms keep the
+//! skeleton behaviour below unchanged.
+//!
+//! It is ground-work, and three of its limits are decisions, not omissions:
 //!
 //! * **The archive probe is not wired.** Phase 1 says a conversation whose
 //!   normalised body already equals the archive's latest emits an observation
@@ -203,6 +211,78 @@ fn parser_for(platform: TakeoutPlatform) -> Option<fn(&[u8]) -> Result<ParsedExp
         TakeoutPlatform::Claude => Some(parse_claude_conversations),
         TakeoutPlatform::Grok => Some(parse_grok_export),
         TakeoutPlatform::DeepSeek | TakeoutPlatform::ChatGpt | TakeoutPlatform::Gemini => None,
+    }
+}
+
+/// What an import run does with a platform's conversations in this build —
+/// the development import gate of 27-ORACLE §0.1, as its gate-state table
+/// stands for the platforms this build offers.
+///
+/// The gate protects a measurement, not a feature: the takeout's first job
+/// is to *validate* the extension against it, and importing the takeout's
+/// conversations into the archive being measured would fill the extension's
+/// gaps from the very corpus that is supposed to expose them — making
+/// "can the extension alone back everything up?" unanswerable. So for a
+/// platform whose validation has not passed, the run refuses the
+/// conversation half and keeps the file half: archiving the export
+/// byte-exact as its own object cannot move a single coverage figure of
+/// the platforms under measurement (every counter in the crate is scoped
+/// to `sessions/`, which the `export-files/` namespace is not under), and
+/// a future run that lifts the refusal is a diff someone has to justify
+/// against the table's row — not ambient behaviour.
+///
+/// This is the *development* half of ADR-055's product rule: for users,
+/// import is never gated (any platform, any account, any time, closed
+/// accounts included). Both halves are this module's contract today: the
+/// gated leg ships the raw-export object half, and the refusal sentence it
+/// returns is the one the CLI prints when it refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationPlan {
+    /// The platform's observation half is this build's open groundwork:
+    /// parse, archive under [`IMPORT_RAW_DIR`], write one bundle per
+    /// conversation into the inbox.
+    Import,
+    /// Raw only (TKO-4): the platform's row in 27-ORACLE §0.1's gate table
+    /// is blocked, so the run archives the export as its own
+    /// [`raw_export`](crate::raw_export) object — the permitted half — and
+    /// refuses every bundle, reporting [`ImportReport::observation_refusal`]
+    /// so the command can say so instead of reading as a zero-conversation
+    /// success. The platform's *parser* stays pure and testable on
+    /// isolated copies; refusing here holds the observation half only.
+    RawOnly {
+        /// The refusal, worded for the CLI: `Some` side of the report field
+        /// the command prints.
+        refusal: &'static str,
+    },
+}
+
+impl ObservationPlan {
+    /// The refusal the CLI prints, or `None` for a platform whose
+    /// observation half is open work.
+    pub fn refusal(self) -> Option<&'static str> {
+        match self {
+            Self::Import => None,
+            Self::RawOnly { refusal } => Some(refusal),
+        }
+    }
+}
+
+impl TakeoutPlatform {
+    /// This platform's observation half under the 27-ORACLE §0.1 gate, for
+    /// this build. The single place the state lives: [`run_with_machine`]
+    /// and the CLI both consult it, so a platform cannot be named by
+    /// `--platform` and ungated at the same time.
+    pub fn observation_plan(self) -> ObservationPlan {
+        match self {
+            Self::Grok => ObservationPlan::RawOnly {
+                refusal: "grok's conversation import is refused in this build: the platform's \
+                          validation against its official exports has not passed, so `import` \
+                          archives the export byte-exact as its own object and writes no \
+                          conversation bundles; conversation import returns when that \
+                          validation passes",
+            },
+            Self::Claude | Self::DeepSeek | Self::ChatGpt | Self::Gemini => ObservationPlan::Import,
+        }
     }
 }
 
@@ -727,18 +807,47 @@ pub struct ImportReport {
     pub rejections: Vec<String>,
     /// What kind of archive probe answered — the probe's own words.
     pub archive_probe: String,
+    /// [`Some`] only for a run 27-ORACLE §0.1's gate held at raw-export
+    /// archiving: the sentence the command prints when it refuses the
+    /// conversation half. The export was archived; no bundle and no
+    /// observation record exists.
+    pub observation_refusal: Option<&'static str>,
 }
 
-/// Run one import pass: archive the file, then emit per conversation.
-///
-/// The inbox and the raw namespace are written; `sessions/` never is, and
-/// nothing here seals or pushes. `ingest --inbox` is a separate, explicit step.
+/// Run one import pass without a machine label — the takeout-mode entry the
+/// skeleton's platforms use, where no export object is written and no
+/// machine partition is read. A platform the development import gate holds
+/// at raw-export archiving answers this call with a usage error naming
+/// `--machine`;[`run_with_machine`] is the entry that takes the label.
 pub fn run(
     platform: TakeoutPlatform,
     export: &Path,
     inbox: &Path,
     stage: &Path,
     archive: &dyn ArchivedLatest,
+) -> Result<ImportReport, ImportError> {
+    run_with_machine(platform, export, inbox, stage, archive, None)
+}
+
+/// Run one import pass: archive the file, then emit per conversation — or,
+/// for a platform the 27-ORACLE §0.1 gate holds at raw-export archiving,
+/// archive the file as its own object and refuse the conversation half.
+///
+/// The inbox and the raw namespace are written; `sessions/` never is, and
+/// nothing here seals or pushes. `ingest --inbox` is a separate, explicit step.
+///
+/// `machine` is the label a gated platform's export object needs: its index
+/// row files under `<stage>/meta/<machine>/`, which is also what lets the
+/// run's own machine bind the object into its push. The skeleton's platforms
+/// read no machine identity at all, and a label handed to one of them is a
+/// usage error, never silently accepted.
+pub fn run_with_machine(
+    platform: TakeoutPlatform,
+    export: &Path,
+    inbox: &Path,
+    stage: &Path,
+    archive: &dyn ArchivedLatest,
+    machine: Option<&str>,
 ) -> Result<ImportReport, ImportError> {
     let slug = platform.slug();
     let parse = parser_for(platform).ok_or_else(|| {
@@ -752,6 +861,53 @@ pub fn run(
         return Err(ImportError::WrongInput(format!(
             "stage {} is not a directory; import never creates a stage",
             stage.display()
+        )));
+    }
+
+    // These two checks stand before any read, for the same reason every
+    // other usage refusal in this module does: a 65 MB read that is about
+    // to be refused is a waste of the operator's time, and an argument
+    // error must never be reported as though something about the *file*
+    // had gone wrong (invariant 2).
+    if let Some(refusal) = platform.observation_plan().refusal() {
+        let Some(machine) = machine else {
+            return Err(ImportError::WrongInput(format!(
+                "`--machine <name>` is required for a {slug} import in this build: the \
+                 development import gate holds the platform at raw-export archiving, and the \
+                 export object that run writes files its index row under that machine's stage \
+                 partition. Nothing was read."
+            )));
+        };
+        let bytes = fs::read(export)
+            .map_err(|e| ImportError::ReadIncomplete(format!("read {}: {e}", export.display())))?;
+        // Parse before archiving, exactly like the skeleton path: the
+        // object namespace holds the platform's own bytes of the exports
+        // this producer accepted, and a file it refuses — a manifest whose
+        // `export_url` values are one-time-use credentials, a Claude-shaped
+        // flat array — has no business being sealed byte-exact on the
+        // strength of having been named on a command line.
+        let parsed = parse(&bytes)?;
+        let raw = seal_raw_export(stage, machine, slug, export)?;
+        return Ok(ImportReport {
+            platform: slug,
+            raw,
+            conversations_seen: parsed.conversations.len() + parsed.rejections.len(),
+            bundles_written: 0,
+            observations_written: 0,
+            rejections: parsed.rejections,
+            // The refusal itself is the report's probe answer: no body was
+            // planned, so no comparison could have suppressed one, and a
+            // "0 observations" line that also claimed the probe ran would be
+            // a fact nobody checked stated as though it were.
+            archive_probe: NOT_CONSULTED_PROBE.to_string(),
+            observation_refusal: Some(refusal),
+        });
+    }
+    if machine.is_some() {
+        return Err(ImportError::WrongInput(format!(
+            "`--machine` is not read by a {slug} import in this build: this platform's run \
+             archives the export under `{IMPORT_RAW_DIR}/`, not as an export object, so there \
+             is no index row to file under a machine partition. Nothing was read."
         )));
     }
 
@@ -821,7 +977,70 @@ pub fn run(
         observations_written,
         rejections: parsed.rejections,
         archive_probe: archive.describe(),
+        observation_refusal: None,
     })
+}
+
+/// The probe answer a gate-refused run reports: nothing was planned, so
+/// nothing was compared. A refusal that left an "unwired probe" line
+/// standing would read as though the run had tried and failed to look
+/// things up, which is a different fact from never having been allowed to.
+const NOT_CONSULTED_PROBE: &str =
+    "not consulted — the platform's import gate refused every conversation bundle in this build";
+
+/// Archive the gated leg's export as its own object (ADR-055 D4, W902's
+/// machinery) and reduce the outcome to the report's raw-archive shape.
+///
+/// The single archiving path for the object half: [`raw_export`] owns the
+/// namespace, the content address, the delivered name, the index row and
+/// the two-pass copy, and this producer adds only the mapping of its
+/// failures onto this module's exit-code kinds — a label the archive cannot
+/// keep is a usage error (`2`), and anything past it happened after the
+/// export was already read whole, so it is a completed failure (`1`), never
+/// a claimed partial read.
+fn seal_raw_export(
+    stage: &Path,
+    machine: &str,
+    platform: &str,
+    source: &Path,
+) -> Result<RawArchive, ImportError> {
+    let outcome =
+        crate::raw_export::seal_export_file(stage, machine, platform, source).map_err(|error| {
+            for link in error.chain() {
+                if let Some(label) = link.downcast_ref::<crate::raw_export::ExportLabelError>() {
+                    return ImportError::WrongInput(label.0.clone());
+                }
+            }
+            ImportError::WriteFailed(error.to_string())
+        })?;
+    match outcome {
+        crate::raw_export::SealOutcome::Installed {
+            content_sha256,
+            bytes,
+            path,
+            ..
+        } => Ok(RawArchive {
+            path,
+            sha256: content_sha256,
+            bytes,
+            newly_stored: true,
+        }),
+        crate::raw_export::SealOutcome::AlreadyArchived {
+            content_sha256,
+            bytes,
+            held_name,
+        } => Ok(RawArchive {
+            path: crate::raw_export::export_object_file(
+                stage,
+                platform,
+                &content_sha256,
+                &held_name,
+            ),
+            sha256: content_sha256,
+            bytes,
+            newly_stored: false,
+        }),
+    }
 }
 
 /// The inbox must exist before a bundle lands in it; unlike the stage, an inbox
@@ -1211,6 +1430,194 @@ mod tests {
         assert!(long.ends_with(".json"), "{long}");
     }
 
+    // ------------------------------------------- the development import gate
+
+    /// One place holds the per-platform state, and this pins it to the rows
+    /// it was written from (27-ORACLE §0.1's gate table): grok raw-only with
+    /// a refusal that can be printed, the rest open.
+    #[test]
+    fn the_observation_plan_matches_the_gate_table_this_build_was_cut_from() {
+        for platform in [
+            TakeoutPlatform::Claude,
+            TakeoutPlatform::DeepSeek,
+            TakeoutPlatform::ChatGpt,
+            TakeoutPlatform::Gemini,
+        ] {
+            assert_eq!(
+                platform.observation_plan().refusal(),
+                None,
+                "{platform:?}: the skeleton's open-work half, unchanged by this gate"
+            );
+        }
+        let Some(refusal) = TakeoutPlatform::Grok.observation_plan().refusal() else {
+            panic!("grok must be held at raw-export archiving by the gate");
+        };
+        assert!(refusal.contains("refused"), "{refusal}");
+        assert!(refusal.contains("grok"), "{refusal}");
+    }
+
+    /// A synthetic Grok payload — the wrapper dict of W909 §2.1 with one
+    /// conversation, small enough to be read at a glance.
+    fn synthetic_grok_bytes(ids: &[&str]) -> Vec<u8> {
+        let conversations: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "conversation": {
+                        "id": id,
+                        "create_time": "2026-09-01T00:00:00.000000Z",
+                        "modify_time": "2026-09-02T00:00:00.000Z",
+                    },
+                    "responses": [
+                        { "response": {
+                            "_id": format!("{id}-r0"),
+                            "conversation_id": id,
+                            "parent_response_id": null,
+                            "sender": "human",
+                            "create_time": { "$date": { "$numberLong": "1756684800000" } },
+                        }, "share_link": null },
+                    ],
+                })
+            })
+            .collect();
+        serde_json::to_vec(&serde_json::json!({ "conversations": conversations })).unwrap()
+    }
+
+    /// The gated half end to end on the library seam: the export sealed as
+    /// its own object at D4's key, one index row under the machine's stage
+    /// partition, no bundle ever planned — and the refusal in the report,
+    /// so zero bundles can never read as a zero-conversation success.
+    #[test]
+    fn a_gated_run_archives_the_object_and_refuses_the_conversation_half() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let inbox = dir.path().join("inbox");
+        fs::create_dir_all(&stage).unwrap();
+        let export = dir.path().join("prod-grok-backend.json");
+        let bytes = synthetic_grok_bytes(&[ID_A]);
+        fs::write(&export, &bytes).unwrap();
+
+        let report = run_with_machine(
+            TakeoutPlatform::Grok,
+            &export,
+            &inbox,
+            &stage,
+            &ArchiveNotWired,
+            Some("lab-machine"),
+        )
+        .unwrap();
+
+        let Some(refusal) = report.observation_refusal else {
+            panic!("the gate refusal must be reported, not implied: {report:?}");
+        };
+        assert!(refusal.contains("refused"), "{refusal}");
+        assert_eq!(report.conversations_seen, 1, "the parser still read it");
+        assert_eq!(report.bundles_written, 0);
+        assert_eq!(report.observations_written, 0);
+        assert!(report.raw.newly_stored);
+        assert_eq!(report.raw.bytes, bytes.len() as u64);
+        assert_eq!(
+            report.raw.path,
+            crate::raw_export::export_object_file(
+                &stage,
+                "grok",
+                &report.raw.sha256,
+                "prod-grok-backend.json"
+            ),
+            "the object sits at D4's key, under the delivered name"
+        );
+        assert_eq!(fs::read(&report.raw.path).unwrap(), bytes, "byte-exact");
+        match crate::raw_export::read_export_index(&stage, "lab-machine").unwrap() {
+            crate::raw_export::ExportIndexState::Loaded(rows) => {
+                assert_eq!(rows.len(), 1, "{rows:?}");
+                assert_eq!(rows[0].content_sha256, report.raw.sha256);
+            }
+            other => panic!("the object's index row must exist: {other:?}"),
+        }
+        // The refused half wrote nothing: no bundle, no inbox, no skeleton
+        // namespace copy, no session.
+        assert!(!inbox.exists(), "a gated run creates no inbox");
+        assert!(!stage.join(IMPORT_RAW_DIR).exists());
+        assert_eq!(crate::store::sealed_shard_count(&stage).unwrap(), 0);
+    }
+
+    /// The refusal holds across a repeat: the same bytes are already an
+    /// object, the run stores nothing, and the report still says the
+    /// conversation half is refused — a second takeout is not a second
+    /// chance to write observations.
+    #[test]
+    fn a_repeat_of_a_gated_export_stores_nothing_and_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let inbox = dir.path().join("inbox");
+        fs::create_dir_all(&stage).unwrap();
+        let bytes = synthetic_grok_bytes(&[ID_A]);
+        let export = dir.path().join("prod-grok-backend.json");
+        fs::write(&export, &bytes).unwrap();
+        run_with_machine(
+            TakeoutPlatform::Grok,
+            &export,
+            &inbox,
+            &stage,
+            &ArchiveNotWired,
+            Some("lab-machine"),
+        )
+        .unwrap();
+        let second = run_with_machine(
+            TakeoutPlatform::Grok,
+            &export,
+            &inbox,
+            &stage,
+            &ArchiveNotWired,
+            Some("lab-machine"),
+        )
+        .unwrap();
+        assert!(!second.raw.newly_stored, "one object per content digest");
+        assert!(second.observation_refusal.is_some());
+        match crate::raw_export::read_export_index(&stage, "lab-machine").unwrap() {
+            crate::raw_export::ExportIndexState::Loaded(rows) => {
+                assert_eq!(rows.len(), 1, "one index row for one object: {rows:?}");
+            }
+            other => panic!("the index row must still be there: {other:?}"),
+        }
+    }
+
+    /// A gate-refused run still reports what the parser could not carry:
+    /// the conversation was counted, named as rejected, and not archived as
+    /// though it had been fine — the honesty in the report is what makes a
+    /// 0-bundle run distinguishable from a zero-conversation one.
+    #[test]
+    fn a_gated_run_still_reports_the_parser_rejections() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let inbox = dir.path().join("inbox");
+        fs::create_dir_all(&stage).unwrap();
+        let export = dir.path().join("prod-grok-backend.json");
+        let bytes = synthetic_grok_bytes(&[ID_A, "../escape"]);
+        fs::write(&export, &bytes).unwrap();
+        let report = run_with_machine(
+            TakeoutPlatform::Grok,
+            &export,
+            &inbox,
+            &stage,
+            &ArchiveNotWired,
+            Some("lab-machine"),
+        )
+        .unwrap();
+        assert_eq!(
+            report.conversations_seen, 2,
+            "seen and refused, both counted"
+        );
+        assert_eq!(report.rejections.len(), 1, "{}", report.rejections[0]);
+        assert!(
+            report.rejections[0].contains("unsafe"),
+            "{}",
+            report.rejections[0]
+        );
+        // The export itself is an accepted package, so it stays archived.
+        assert!(report.raw.newly_stored);
+    }
+
     // ------------------------------------------------- the raw namespace
 
     #[test]
@@ -1307,6 +1714,43 @@ mod tests {
                 "{platform:?}: the refusal must name the platform"
             );
         }
+    }
+
+    /// 27-ORACLE §0.1's Grok row, enforced by the producer: a gated platform's
+    /// run archives its export as its own object, and that object's index row
+    /// files under a machine's stage partition — so the run refuses without
+    /// the label, before it reads anything at all. The deliberately absent
+    /// export file is the proof of ordering: a run that read first would
+    /// answer `ReadIncomplete` here, and a usage error that cannot say
+    /// `--machine` is a refusal that names nothing.
+    #[test]
+    fn a_gated_platform_is_refused_without_a_machine_label_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        let err = run(
+            TakeoutPlatform::Grok,
+            &dir.path().join("nowhere.json"),
+            &dir.path().join("inbox"),
+            &stage,
+            &ArchiveNotWired,
+        )
+        .unwrap_err();
+        let ImportError::WrongInput(message) = err else {
+            panic!("a missing --machine is a usage error, not a read failure: {err:?}");
+        };
+        assert!(
+            message.contains("--machine"),
+            "the refusal must name the missing argument: {message}"
+        );
+        assert!(
+            message.contains("grok"),
+            "the refusal must name the platform: {message}"
+        );
+        assert!(
+            !stage.join(IMPORT_RAW_DIR).exists(),
+            "a usage error writes nothing"
+        );
     }
 
     // ------------------------------------------------------- the run

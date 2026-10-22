@@ -917,14 +917,24 @@ enum Command {
     /// Two modes share this command.
     ///
     /// **Takeout mode** (with a `<platform>` and `<export>`): archive the file
-    /// byte-exact, and write one inbox bundle per conversation into a local
-    /// inbox. Reads `<export>` whole, stores it under
+    /// byte-exact, and — where the platform's conversation import is open in
+    /// this build — write one inbox bundle per conversation into a local
+    /// inbox. Claude's run reads `<export>` whole, stores it under
     /// `<stage>/import-raw/<platform>/<sha256>` — a sibling of `sessions/`,
     /// so it is in no session count — and writes one `chat-stasher/inbox@3`
-    /// `web-capture` bundle per conversation into `--inbox`. A later
-    /// `ingest --inbox` is what seals them; this mode never seals, never
-    /// pushes, never reads the config, a destination or a machine identity,
-    /// and never modifies or moves the export file.
+    /// `web-capture` bundle per conversation into `--inbox`, for a later
+    /// `ingest --inbox` to seal. This mode never seals, never pushes, never
+    /// reads the config or a destination, and never modifies or moves the
+    /// export file.
+    ///
+    /// Grok's run is held by this build's development import gate at
+    /// **raw-export archiving only**: the export is parsed and sealed
+    /// byte-exact as its own object under
+    /// `<stage>/export-files/<platform>/<sha256>/<name>`, its index row
+    /// files under `meta/<machine>/`, and **no conversation bundle is
+    /// written** — the refused half is what the run says in its output.
+    /// `--machine` names the partition that index row belongs to and is
+    /// required for such a platform.
     ///
     /// Claude's `conversations.json` and Grok's `prod-grok-backend.json`
     /// have parsers in this build; naming any other platform is a
@@ -946,11 +956,13 @@ enum Command {
     /// counts and writes nothing anywhere.
     ///
     /// Exit codes (both modes): `0` = everything was read to the end and
-    /// imported (takeout mode: everything importable was written) ·
-    /// `3` = an input was never read to the end, so nothing about what it
-    /// holds is proven · `2` = it was read and is not something this build
-    /// imports · `1` = it was read, and a conversation, session or write
-    /// failed.
+    /// imported (takeout mode: everything this build lets the run write was
+    /// written) · `3` = an input was never read to the end, so nothing about
+    /// what it holds is proven · `2` = it was read and is not something this
+    /// build imports, or an argument was missing or unusable · `1` = it was
+    /// read, and a conversation, session, write, or the platform's import
+    /// gate refused the rest — what was written is real but the run is
+    /// incomplete.
     Import {
         /// Which platform's export this is.
         #[arg(value_enum, required_unless_present = "harness")]
@@ -979,10 +991,17 @@ enum Command {
         /// Report the per-session counts without writing anything.
         #[arg(long, requires = "harness")]
         dry_run: bool,
-        /// Machine partition for `sessions/<machine>/…` (backup-restore mode).
-        /// Default: config `machine`, else this machine's identity (generated
-        /// on first use).
-        #[arg(long, requires = "harness")]
+        /// The machine partition the run writes machine-keyed metadata for.
+        ///
+        /// Takeout mode: required for a platform whose run is held at
+        /// raw-export archiving (grok) — the export object's index row
+        /// files under `meta/<machine>/` — and not read by any other
+        /// platform's run.
+        ///
+        /// Backup-restore mode: the machine partition for
+        /// `sessions/<machine>/…`. Default: config `machine`, else this
+        /// machine's identity (generated on first use).
+        #[arg(long)]
         machine: Option<String>,
         /// Maximum sealed shards per bucket (default: 20).
         #[arg(long, requires = "harness", default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
@@ -2278,6 +2297,7 @@ fn run() -> ExitCode {
                 &export.expect("clap requires an export unless --harness was given"),
                 &inbox.expect("clap requires an inbox unless --harness was given"),
                 &stage,
+                machine.as_deref(),
             ),
         },
         Command::Backfill {
@@ -6526,11 +6546,49 @@ fn cmd_import(
     export: &Path,
     inbox: &Path,
     stage: &Path,
+    machine: Option<&str>,
 ) -> ExitCode {
     use chat_stasher::import::ArchiveNotWired;
     use chat_stasher::import::ImportError;
 
-    let report = match chat_stasher::import::run(platform, export, inbox, stage, &ArchiveNotWired) {
+    // The machine label's own checks, stated here once more for a caller
+    // that hand-builds the arguments — the run refuses the same pair on the
+    // same terms, exactly the way cmd_import_backup re-states `--from`.
+    // Both are usage errors, and both stand before any read so an argument
+    // problem is never reported as a file problem.
+    let gated = platform.observation_plan().refusal().is_some();
+    match (gated, machine) {
+        (true, None) => {
+            eprintln!(
+                "import: FAILED exit_code=2 — `--machine <name>` is required for a {} import in \
+                 this build: the platform is held at raw-export archiving by the development \
+                 import gate, and the export object that run writes files its index row under \
+                 that machine's stage partition. Nothing was read, nothing was sealed.",
+                platform.slug()
+            );
+            return ExitCode::from(2);
+        }
+        (false, Some(_)) => {
+            eprintln!(
+                "import: FAILED exit_code=2 — `--machine` is not read by a {} import in this \
+                 build: this platform's run archives the export under `import-raw/`, not as an \
+                 export object, so there is no index row to file. Nothing was read, nothing was \
+                 sealed.",
+                platform.slug()
+            );
+            return ExitCode::from(2);
+        }
+        _ => {}
+    }
+
+    let report = match chat_stasher::import::run_with_machine(
+        platform,
+        export,
+        inbox,
+        stage,
+        &ArchiveNotWired,
+        machine,
+    ) {
         Ok(report) => report,
         Err(error) => {
             let (code, kind) = match &error {
@@ -6548,6 +6606,41 @@ fn cmd_import(
 
     println!("[import] platform         : {}", report.platform);
     println!("[import] export           : {}", export.display());
+    if let Some(reason) = report.observation_refusal {
+        println!(
+            "[import] raw archive      : {} ({} bytes, {})",
+            report.raw.path.display(),
+            report.raw.bytes,
+            if report.raw.newly_stored {
+                "newly archived"
+            } else {
+                "already archived byte-for-byte; nothing new stored"
+            }
+        );
+        println!("[import] raw sha256       : {}", report.raw.sha256);
+        println!(
+            "[import] inbox            : {} (no bundle was written — see the gate line below)",
+            inbox.display()
+        );
+        println!(
+            "[import] conversations    : {} (read; none imported)",
+            report.conversations_seen
+        );
+        println!("[import] bundles written  : 0 (refused by the platform's import gate)");
+        println!("[import] observations     : 0");
+        println!("[import] archive probe    : {}", report.archive_probe);
+        println!("[import] gate             : {reason}");
+        println!("[import] rejected         : {}", report.rejections.len());
+        for rejection in &report.rejections {
+            println!("  - {rejection}");
+        }
+        eprintln!(
+            "import: FAILED exit_code=1 — {reason} The export above was archived exactly once, \
+             byte-exact, as its own object — the half the gate permits; the inbox was not \
+             touched, and no observation of these conversations exists."
+        );
+        return ExitCode::from(1);
+    }
     println!(
         "[import] raw archive      : {} ({} bytes, {})",
         report.raw.path.display(),
