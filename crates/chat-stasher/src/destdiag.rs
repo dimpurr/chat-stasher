@@ -1450,6 +1450,26 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
         });
     }
 
+    // The unreadable record needs no scheduler's say-so: the file exists
+    // and answers with nothing, which is a measured negative the way ③'s
+    // unreadable push-state arm is, so it speaks on every platform — on a
+    // machine whose scheduler this build cannot read, the blocked-streak
+    // arm above already reads this same file, and a v1 record left by an
+    // older build must alarm there too rather than pass as a healthy
+    // silence (ADR-060 D7, the W1012g policy applied forward). Being
+    // pulled out of the E2 install gate below is the point: that gate
+    // anchors its alarms on the measured fact that the job is installed,
+    // which is exactly what an unreadable scheduler cannot supply.
+    if let ReclaimJobRecord::Unreadable(why) = &reclaim.record {
+        reconciliation.job_alerts.push(Alert {
+            severity: Severity::Yellow,
+            sentence: format!(
+                "[reclaim] the reclaim record exists but is unreadable ({why}), so what the \
+                 weekly job last did is unknown — not ok, and not never-run"
+            ),
+            fix: None,
+        });
+    }
     // The silent-failure shape the log cannot cover (SG-0 E2): the job is
     // installed and its record has gone quiet. "Never recorded a run" is
     // only an alarm once the timer file has been installed longer than
@@ -1506,14 +1526,6 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                     ),
                 });
             }
-            ReclaimJobRecord::Unreadable(why) => reconciliation.job_alerts.push(Alert {
-                severity: Severity::Yellow,
-                sentence: format!(
-                    "[reclaim] the reclaim record exists but is unreadable ({why}), so what the \
-                     weekly job last did is unknown — not ok, and not never-run"
-                ),
-                fix: None,
-            }),
             _ => {}
         }
     }
