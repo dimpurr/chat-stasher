@@ -156,6 +156,30 @@ This machine's **body cache** may retain bodies fetched by eligible single-sessi
 - A `[cache]` section with an unreadable value turns the cache **off** instead of guessing, and `doctor` says why.
 - `chat-stasher cache` shows what it holds, and `chat-stasher cache clear` empties it.
 
+## `[pull.letta]`
+
+Declares the Letta API-pull producer for the scheduled pass: with this
+section present, every `run-once` pass pulls the producer **before** its
+collect step, so the hourly job archives Letta without a separate command.
+`chat-stasher pull letta` (see [pull.md](pull.md)) is unchanged and reads
+the same pipeline. The section rejects unknown keys: a provider this build
+does not know must not look declared while silently never being pulled.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `account_id` | (required) | The stable provider account ID you chose, independent of the API key. Never logged. |
+| `inbox` | (required) | The local inbox directory the producer's `inbox@3` bundles are published into. Keep it stable across runs. |
+| `api_key` | (unset → the environment) | The credential the pull authenticates with: a literal, or a `file:PATH`, `env-file:PATH:NAME` or `keychain:ACCOUNT` reference — the same forms destination options accept, fail-closed the same way. A timer sees no login shell, so this is the form the hourly pass can actually reach; without it the pull reads `LETTA_API_KEY` from the environment, which `schedule install`, `status`, `doctor` and the menu bar flag as unreachable by the timer. Never logged. |
+| `state` | `~/.local/share/chat-stasher/state/api-pull/letta` | Durable private producer state. Preserve it across restores: its identity salt keeps the account's derived tenant stable across key rotation. |
+| `pace_ms` | `1000` | Serial request pacing. The unattended pass accepts **1000–60000** (at least one request per second — an unattended job never hammers the provider); the interactive `pull letta` command accepts 0–60000. |
+| `budget_seconds` | `600` | Whole-pass wall-clock budget, shared by the walk and the archive-proof phase. The unattended pass accepts **1–2700** (45 minutes, below the hourly period, so one pass can never contend with its own successor); the interactive command accepts 1–3600. |
+| `page_size` | `100` | Rows requested per page. Accepts **100–200** only — the provider rejects larger agent-history pages. |
+
+A declaration that cannot be honoured (a missing key, a value outside the
+band) stops the pass's pull with the config key named, and the whole pass
+ends with exit 3 ("did not finish reading") while the local archive cycle
+still runs: a partly-read producer is never reported as an empty one.
+
 ## Files chat-stasher keeps outside the config
 
 | What | Where | Safe to delete? |

@@ -15,6 +15,45 @@ under its own heading below.
 
 #### Added
 
+- **Letta pull inside the scheduled pass.** Declaring `[pull.letta]` in the
+  config (account id, inbox; credential, pacing, budget and 100–200-row
+  page size optional) makes every `run-once` pass pull the producer before
+  its collect step, through the same paced, `Retry-After`-honouring pipeline
+  as `chat-stasher pull letta`, with the pass's own machine and stage and
+  its archive proof checked against the repository this pass pushes to.
+  The credential is timer-reachable by construction: `pull.letta.api_key`
+  accepts the shared `file:` / `env-file:` / `keychain:` reference forms
+  (fail-closed, like destination options), and when the declaration is
+  missing — leaving only a shell's `LETTA_API_KEY`, which a timer never
+  sees — `schedule install` warns on the spot and `status`, `doctor` and
+  the menu bar carry the same sentence. A producer that cannot finish
+  reading keeps the pass at exit 3 ("did not finish reading") while the
+  local collect-and-push cycle still runs; the run-state record keeps that
+  fact beside `failed_step` (a pass whose collect also failed keeps both),
+  and `status` renders the two as **two lines** — the archive cycle's
+  health first, the producer's own sentence second, with a fix, or with
+  `pulled N of ~M` progress while a large account backfills. Publication
+  follows the content: a re-read conversation whose content cursors match
+  republishes zero bytes and the unchanged hour is a genuine NOOP. The
+  re-verification is a paced, resumable sweep rather than a metadata
+  shortcut — no conversation is skipped on its listing row's word — so a
+  steady round re-reads a bounded slice (a quarter of the round's
+  requests, derived from the declared budget and pacing and shared across
+  the account's agents — never from the clock that remains mid-round, so
+  a load-slowed round keeps the same slice: about 150 conversations per
+  hour for a single agent at the ~1/s pacing — resuming where the previous
+  round stopped) and every conversation is content-verified within a
+  bounded number of rounds; an account too big for one round persists its
+  position and completes across rounds, each reporting progress — and a
+  round whose conversations are all published but whose agent-level
+  material (window, listing, metadata, capture order) is unwritten still
+  reports progress rather than a premature "caught up", because caught up
+  is a round's claim, not an emptied conversation position's — with the
+  declared path's pacing floored at one request per second and its budget
+  capped at 45 minutes — below the hourly period — a deadline the archive
+  proof shares, opening each destination once per round to ask about every
+  receipt in one batch and retiring a receipt only when every declared
+  destination holds it. See [API pull](docs/pull.md).
 - **User-initiated hide, unhide, and a purge preview (ADR-046 draft, Phase 1).**
   `hide` and `unhide` append durable one-record control events to this
   machine's `meta/<machine>/deletion-control-v1.jsonl` stage file; the next
@@ -34,8 +73,9 @@ under its own heading below.
 - **Letta API pull.** `pull letta` captures conversation exports and agent-window
   extras through the local inbox @3 sink, including hidden agents discovered
   from local IDs. Edits and source absence append observations; per-agent
-  cursors wait for destination archive proof. See [API pull](docs/pull.md).
-  Scheduling and local transcript capture remain separate work.
+  cursors wait for destination archive proof. Pages are sized by the new
+  `--page-size` (default 100, accepted band 100–200). See
+  [API pull](docs/pull.md). Local transcript capture remains separate work.
 - **Portable remote inbox posting keys.** `send-key <inbox> --for <platform>
   --credential-file <file>` prints a versioned secret after saving its public
   puller policy. Expiry defaults to 24 hours; `--expires 90d` requests a longer

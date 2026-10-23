@@ -209,6 +209,56 @@ pub struct Config {
     /// 107 MB session cost 22.6 s (W117) — and is one quota shared by every
     /// destination on this machine, never an allowance per destination.
     pub cache: Option<CacheSectionConfig>,
+
+    /// The `[pull]` section: API-pull producers the scheduled pass pulls
+    /// before its collect step (LETTA-P3). Absent means no producer is
+    /// declared and the pass's behaviour is unchanged.
+    pub pull: Option<PullSectionConfig>,
+}
+
+/// The `[pull]` section. Only the `letta` producer exists today, and the
+/// section rejects any other key: a declared producer this build does not
+/// know would otherwise look declared while it is silently never pulled.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PullSectionConfig {
+    /// The `[pull.letta]` Letta API-pull producer declaration.
+    pub letta: Option<LettaPullConfig>,
+}
+
+/// The `[pull.letta]` producer declaration for the scheduled pass.
+///
+/// Every key is optional in the *schema* sense; the pass resolves the
+/// declaration through `letta::pass_pull`, which requires the account and the
+/// inbox and validates the pacing band — an invalid declaration stops the
+/// pass's pull with the key named rather than substituting defaults nobody
+/// wrote.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LettaPullConfig {
+    /// Stable provider account ID, independent of the API key. Never logged.
+    pub account_id: Option<String>,
+    /// Local inbox directory the producer's @3 bundles are published into.
+    /// Declaring the producer means naming this inbox; the pass has no
+    /// default for it.
+    pub inbox: Option<String>,
+    /// Durable private producer state; preserve its identity salt across
+    /// restores. Default: the state directory's `api-pull/letta`.
+    pub state: Option<String>,
+    /// The provider credential. Accepts the shared credential-reference
+    /// forms — `file:PATH`, `env-file:PATH:NAME`, `keychain:ACCOUNT` — or a
+    /// literal; a reference that cannot be resolved refuses the config,
+    /// naming this key. This is the form a timer can actually reach: a
+    /// launchd or systemd job sees no login shell, so an exported
+    /// `LETTA_API_KEY` is invisible to exactly the process the declared
+    /// producer runs in. Never logged.
+    pub api_key: Option<String>,
+    /// Serial request pacing in milliseconds. Default: ~1 request/second.
+    pub pace_ms: Option<u64>,
+    /// Whole-pass wall-clock budget in seconds. Default: 600.
+    pub budget_seconds: Option<u64>,
+    /// Rows requested per page. Default: 100; accepted band 100–200.
+    pub page_size: Option<u64>,
 }
 
 /// The `[cache]` section (ADR-034).
@@ -898,6 +948,13 @@ impl Config {
                 dest.options.remove(&key);
             }
         }
+
+        if let Some(pull) = &mut self.pull {
+            if let Some(letta) = &mut pull.letta {
+                expand_opt_field("pull.letta.inbox", &mut letta.inbox, problems);
+                expand_opt_field("pull.letta.state", &mut letta.state, problems);
+            }
+        }
     }
 }
 
@@ -1143,6 +1200,22 @@ fn resolve_option_credential_refs(cfg: &mut Config) -> Result<(), String> {
                     return Err(format!(
                         "destinations.{destination}.options.{key}: {reason}"
                     ));
+                }
+            }
+        }
+    }
+    // The declared pull producer's credential goes through the same
+    // resolver, fail-closed for the same reason: a timer-unreachable
+    // reference would make every scheduled pass exit 3 at the credential
+    // check, which is exactly the invisible failure this refusal exists to
+    // turn into the one sentence the user can act on.
+    if let Some(letta) = cfg.pull.as_mut().and_then(|pull| pull.letta.as_mut()) {
+        if let Some(value) = &letta.api_key {
+            match crate::credentials::resolve(value) {
+                crate::credentials::Resolved::NotReference => {}
+                crate::credentials::Resolved::Value(secret) => letta.api_key = Some(secret),
+                crate::credentials::Resolved::Missing(reason) => {
+                    return Err(format!("pull.letta.api_key: {reason}"));
                 }
             }
         }
@@ -1866,6 +1939,32 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # no_cache = false
 # [destinations.storagebox.options]
 # endpoint = "ssh://example:23"
+
+# ---------------------------------------------------------------- pull
+# API-pull producers the scheduled pass reads before it collects. Declaring
+# one is how the hourly job archives a cloud service whose authoritative
+# record is only reachable through its API, without a separate command.
+#
+# [pull.letta] lets the scheduled Letta pass read the API key from the
+# environment (`LETTA_API_KEY`; see docs/pull.md). Requests are serial and
+# paced (~1 per second by default, tune with pace_ms), pages stay in the
+# 100–200 row band the provider serves, and 429/503 answers honor Retry-After.
+# Local archiving still runs when the pull cannot finish reading; the pass
+# then exits 3 ("did not finish reading") and keeps the unread remainder
+# pending in the producer's state, never reported as "no messages".
+#
+# The account id is a stable label you choose for the account, independent of
+# the API key; the inbox is where the producer's @3 bundles are published.
+# Keep both stable across runs: the producer's durable state derives its
+# identity from the account id, and receipts in the inbox stay pending until
+# every destination proves it holds them.
+#
+# [pull.letta]
+# account_id = "my-letta-account"
+# inbox = "~/stash/chat-stasher/letta-inbox"
+# pace_ms = 1000
+# budget_seconds = 600
+# page_size = 100
 "#;
 
 #[cfg(test)]
@@ -1993,6 +2092,78 @@ mod tests {
         assert!(!cfg.destinations["d1"].options.contains_key("access_key_id"));
     }
 
+    /// W964: the declared pull producer's credential goes through the same
+    /// shared resolver, fail-closed with the key named — the timer-reachable
+    /// form the `[pull.letta]` section is built around.
+    #[test]
+    fn pull_letta_api_key_resolves_and_refuses_named() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let secret_file = dir.path().join("letta-key");
+        std::fs::write(&secret_file, "synthetic-letta-secret\n").unwrap();
+
+        let declared = format!(
+            "[pull.letta]\naccount_id = \"synthetic-account\"\ninbox = \
+             \"/tmp/w964-synthetic-inbox\"\napi_key = \"file:{}\"\n",
+            secret_file.display()
+        );
+        let cfg = Config::from_text(&declared).expect("a resolvable producer key must load");
+        assert_eq!(
+            cfg.pull
+                .as_ref()
+                .unwrap()
+                .letta
+                .as_ref()
+                .unwrap()
+                .api_key
+                .as_deref(),
+            Some("synthetic-letta-secret"),
+            "the reference must resolve to the file's secret, newline trimmed"
+        );
+        assert!(
+            cfg.pull
+                .as_ref()
+                .unwrap()
+                .letta
+                .as_ref()
+                .unwrap()
+                .api_key
+                .as_deref()
+                .is_some_and(|key| key != "synthetic-letta-secret\n"),
+            "the resolved credential is the trimmed secret, never labeled by form"
+        );
+
+        let missing = format!(
+            "[pull.letta]\naccount_id = \"synthetic-account\"\ninbox = \
+             \"/tmp/w964-synthetic-inbox\"\napi_key = \"file:/no/such/producer-key\"\n"
+        );
+        let err = Config::from_text(&missing)
+            .expect_err("an unreadable producer credential reference must refuse the config");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("pull.letta.api_key"),
+            "the refusal must name the producer key: {text}"
+        );
+        assert!(
+            err.downcast_ref::<CredentialRefused>().is_some(),
+            "the producer credential refusal keeps the typed classification"
+        );
+
+        let literal = "[pull.letta]\naccount_id = \"synthetic-account\"\ninbox = \
+             \"/tmp/w964-synthetic-inbox\"\napi_key = \"synthetic-literal\"\n";
+        let cfg = Config::from_text(literal).expect("a literal credential must pass through");
+        assert_eq!(
+            cfg.pull
+                .as_ref()
+                .unwrap()
+                .letta
+                .as_ref()
+                .unwrap()
+                .api_key
+                .as_deref(),
+            Some("synthetic-literal"),
+            "a literal is a valid declaration, left as written"
+        );
+    }
     #[test]
     fn backend_option_environment_references_resolve_and_missing_values_are_omitted() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());

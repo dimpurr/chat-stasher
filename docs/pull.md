@@ -77,13 +77,111 @@ absence. The local state is a rebuildable cache: deleting its pass records cause
 replay, but replacing its identity salt changes scope and must be treated as a
 deliberate migration.
 
-Requests are serial, paced by `--pace-ms` (default 1000), with 100-row pages,
+Requests are serial, paced by `--pace-ms` (default 1000, about one request
+per second), with pages sized by `--page-size` (default 100; the accepted
+band is 100–200 rows, the provider rejects larger agent-history pages),
 finite timeouts, retry and page limits, and `--budget-seconds` (default 600).
-429/503 honors delta-seconds or HTTP-date `Retry-After`; invalid headers use
-bounded exponential backoff with jitter. Redirects are refused. Diagnostics show
-counts only; no API key or response body is printed. Concurrent passes using the
-same state directory serialize through a durable-state file lock; contention
-returns an incomplete result rather than racing a receipt journal update.
+Pagination always stops on the existing page budget rather than looping
+forever. 429/503 honors delta-seconds or HTTP-date `Retry-After`; invalid
+headers use bounded exponential backoff with jitter. Redirects are refused.
+Diagnostics show counts only; no API key or response body is printed.
+Concurrent passes using the same state directory serialize through a
+durable-state file lock. Contention on the standalone command returns an
+incomplete result rather than racing a receipt journal update; the
+scheduled pass records a **deferral** instead (see below) and lets the
+pass that won the lock report the producer that hour.
 
-Paced backfill inside `run-once` and local transcript collection remain separate
-work. `run-once` does not invoke this producer.
+## The scheduled pass
+
+Declaring the producer in the config pulls it inside the hourly job, before
+the pass's collect step — no separate command to remember:
+
+```toml
+[pull.letta]
+account_id = "my-letta-account"
+inbox = "~/stash/chat-stasher/letta-inbox"
+api_key = "keychain:my-letta-key"
+```
+
+See [config.md](config.md) for every key. The pass pulls with the same one
+pipeline as the command above: the same pacing, page-size band, `Retry-After`
+handling and receipt journal, and an archive-proof rule with the same
+purpose — except that the pass proves its receipts against the repository
+**this pass pushes to** (its `--destination`/`--repo`/`--key-file` shape),
+because that is where they are about to land.
+
+`api_key` is the timer-reachable form: a literal in the config file, or a
+`file:` / `env-file:` / `keychain:` reference — the same forms destination
+options accept. Without it the pull reads `LETTA_API_KEY` from the
+environment, which works for a terminal and **not** for a timer: a launchd
+or systemd job sees no login shell, so every scheduled pass would exit 3 at
+the credential check while the local archive cycle stays intact.
+`schedule install`, `status`, `doctor` and the menu bar all name exactly
+that trap with the same sentence when they see it. `chat-stasher pull
+letta` (run by hand, with your environment) is unchanged.
+
+What the pass does when the producer cannot finish reading is the point of
+the integration. The local cycle (collect, push) still runs, so a later pass
+can settle the producer's pending receipts — halting the whole pass instead
+would deadlock the producer, whose proof needs an earlier push. But the pass
+does not stop there being something left to read: it ends with exit 3
+("did not finish reading") and records the failed `pull-letta` step, so
+`status` reports the failure — never a clean exit 0 that would read "no
+messages". The unread remainder stays pending in the producer state exactly
+as the standalone command leaves it. The record keeps the producer's
+failure **beside** the local steps, not inside them: a pass whose collect
+also failed keeps both facts, and `status` renders them as two lines — the
+archive cycle's own health, and the producer's sentence. One corner worth
+naming: with more than one destination, each destination's timer runs the
+same declared producer, and they all share one producer state. Concurrent
+passes serialize through that state's lock: the pass that wins it pulls the
+producer and reports the producer's own result that hour; every other pass
+**defers** — recorded as its own fact (`pull_letta_deferred` in the
+run-state, surfaced in `status --json`), rendered by `status` as the
+producer's line "Letta pull deferred …" beside the green archive line,
+never as "did not finish reading" and never as an exit-3 failure, because
+the winning pass owns that hour's pull and every pass's push moves the
+shared stage. `schedule install` explains that line at the moment it first
+creates the combination.
+
+## What a round reads, publishes and costs
+
+Every round re-verifies content — edit and disappearance detection compares
+the fetched bytes, never a listing-row shortcut — and publication follows
+the content:
+
+- A conversation whose re-read content matches its last published round
+  republishes **nothing**: no inbox bytes, `run-once` sees no new shards,
+  and the unchanged hour is a genuine `NOOP` pass. The re-verification is a
+  paced, resumable sweep, not a whole account per round: it starts where
+  the previous round stopped and re-reads a bounded slice — a quarter of
+  the round's requests, derived from the declared budget and pacing and
+  shared across the account's agents, never from the clock that remains
+  mid-round, so a load-slowed round keeps the same slice (about 150
+  conversations per hour for a single agent at the ~1/s pacing) — so every
+  conversation is content-verified within a bounded number of rounds —
+  whatever its listing row claims about it.
+- A conversation that moved — new or edited messages, archived flag,
+  content that changed while its row stayed still — republishes exactly
+  its own bundles (its messages and conversation metadata) plus a new
+  observation record when the change is an edit or a disappearance, on the
+  sweep turn that re-reads it.
+- A **large account completes across rounds**: the first pull persists its
+  position, and a round whose budget runs out leaves the unwalked
+  conversations pending — reported as progress (`pulled N of ~M`) in the
+  pass line and in `status`, never as "no messages" — while the next round
+  continues from the position instead of restarting. A round that
+  publishes every conversation but cannot reach the agent-level material
+  (window, listing, metadata, capture order) keeps the account at "did
+  not finish reading" the same way: caught up is what a round that
+  journals everything it owes may claim, never what an emptied
+  conversation position implies. The sweep hand-off is the same
+  mechanism: a steady round that cannot finish its slice resumes from
+  the persisted position. The declared path's
+  budget is capped at 45 minutes precisely so a round can never reach its
+  own hourly period. The proof phase shares the round's deadline, so no
+  phase of a pass borrows unbounded time from the next one.
+- The round's archive proof opens each destination repository **once per
+  round**, and asks about every pending receipt in one batch — an account
+  with hundreds of publications costs the proof the same one repository
+  open per destination, not one per bundle.
