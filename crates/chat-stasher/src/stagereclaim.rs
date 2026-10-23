@@ -471,6 +471,12 @@ pub fn reclaim_session_body(
         } else if store::is_extra_file(&entry.file_name().to_string_lossy()) {
             fs::remove_file(entry.path())
                 .with_context(|| format!("remove reclaimed sidecar {}", entry.path().display()))?;
+        } else if entry.file_name().to_string_lossy() == crate::shard_facts::FILE_NAME {
+            // The per-shard digest record describes the body being deleted;
+            // with the body gone it is neither metadata nor retained summary
+            // (that is the manifest's job), so it leaves with the shards.
+            fs::remove_file(entry.path())
+                .with_context(|| format!("remove reclaimed sidecar {}", entry.path().display()))?;
         }
     }
     Ok(entries.len())
@@ -520,6 +526,12 @@ mod tests {
         assert!(
             session_dir(stage, machine, session).is_dir(),
             "session dir must stay (it holds the counter)"
+        );
+        assert!(
+            !session_dir(stage, machine, session)
+                .join(crate::shard_facts::FILE_NAME)
+                .is_file(),
+            "the shard-facts digest records must leave with the body they describe"
         );
         drop(dir);
     }
