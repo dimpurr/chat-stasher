@@ -259,24 +259,41 @@ fn status_names_the_destination_the_timers_do_not_push() {
     if scheduler_is_unreadable_on_this_platform() {
         // Reading nothing must not become "nothing is installed": the
         // planted unit files are exactly the evidence this platform's
-        // verdict must not claim. The human `status` panel is silent there
-        // — the unknown is worded in the `--json` reclaim row's null +
-        // `unit_installed_why` (see the JSON test below) and in `doctor`'s
-        // table, not raised as a coverage or credentials finding, because
-        // it is the same on every machine here and nothing the user can
-        // act on. So the assertion here is silence, not a sentence.
-        assert!(
-            !text.contains("[dest]"),
-            "the panel is silent where the scheduler was not read: {text}"
-        );
+        // verdict must not claim. The two findings a scheduler read
+        // supports stay silent there — the coverage claim and the
+        // shell-only credentials sentence, each asserted by its own
+        // wording — because the unreadable scheduler is the same on every
+        // machine here and nothing the user can act on; the unknown is
+        // worded in the `--json` reclaim row's null + `unit_installed_why`
+        // (see the JSON test below) and in `doctor`'s table, not raised as
+        // a finding. ADR-060 (SG-2) added a record-based `[dest]` finding
+        // of its own — the degraded-health alarm, read from the
+        // push-state file the same way the reclaim record is — so the
+        // silence is asserted per finding, not as a blanket "no `[dest]`
+        // line", and the degraded alarm itself is asserted to speak like
+        // every other record-based finding.
         assert!(
             !text.contains("no installed"),
             "no coverage claim is made against a scheduler that was not read: {text}"
         );
-        // Record-based findings (the blocked reclaim and its streak) still
-        // surface — H3 keeps those, because the state file is
-        // platform-independent. Only the coverage and credentials findings
-        // an unreadable scheduler cannot support stay quiet.
+        assert!(
+            !text.contains(SHELL_ONLY_R2_SENTENCE),
+            "the shell-only credentials finding needs a timer file to name, so \
+             it stays quiet where the scheduler was not read: {text}"
+        );
+        // Record-based findings (the blocked reclaim with its streak, and
+        // ADR-060's degraded-health alarms) still surface — H3 keeps
+        // those, because the state files are platform-independent. Only
+        // the coverage and credentials findings an unreadable scheduler
+        // cannot support stay quiet. Both of this machine's destinations
+        // are push-record-silent, so both are degraded and both alarms
+        // speak here too.
+        assert!(
+            text.contains("[dest] r2: degraded —")
+                && text.contains("[dest] storagebox: degraded —"),
+            "the degraded-health alarm speaks on every platform, the \
+             unreadable-scheduler one included, because it reads the record: {text}"
+        );
     } else {
         let (scope_noun, scope_dir) = scheduler_scope_of_this_machine();
         let uncovered =
@@ -404,17 +421,37 @@ fn status_json_carries_the_reconciliation_and_the_reclaim_record() {
     // The push-coverage finding this platform surfaces: the scope-named
     // claim where the scheduler is readable, the worded unknown where it is
     // not — both yellow, both matching this build's contract. A machine
-    // whose scheduler this build cannot read (Windows CI) is silent at the
-    // alert level: the unknown is worded in the reclaim row's null and in
-    // `doctor`'s table, not raised as a finding, because it is the same on
-    // every machine there and nothing the user can act on.
+    // whose scheduler this build cannot read (Windows CI) stays silent at
+    // the alert level about the two findings a scheduler read supports —
+    // the coverage claim and the shell-only credentials sentence — because
+    // the platform fact is worded in the reclaim row's null and in
+    // `doctor`'s table, never raised as a per-machine finding. ADR-060's
+    // degraded-health alarms are record-based, so they speak at the alert
+    // level on every platform, and this machine's rows make both fire: r2
+    // has no push on record, storagebox's recorded push is far past its
+    // degrade-after.
     let unreadable = scheduler_is_unreadable_on_this_platform();
     if unreadable {
         assert!(
-            alerts.is_empty(),
+            alerts.iter().all(|alert| {
+                !alert["sentence"].as_str().is_some_and(|sentence| {
+                    sentence.contains("declared, but no installed")
+                        || sentence.contains("credentials are shell-only")
+                })
+            }),
             "an unreadable scheduler raises no coverage or credentials \
              finding at the alert level: {alerts:?}"
         );
+        for name in ["r2", "storagebox"] {
+            assert!(
+                alerts.iter().any(|alert| alert["severity"] == "yellow"
+                    && alert["sentence"].as_str().is_some_and(|sentence| {
+                        sentence.contains(&format!("[dest] {name}: degraded —"))
+                    })),
+                "the record-based degraded alarm speaks at the alert level \
+                 even where the scheduler was not read: {alerts:?}"
+            );
+        }
     } else {
         let (scope_noun, scope_dir) = scheduler_scope_of_this_machine();
         assert!(
