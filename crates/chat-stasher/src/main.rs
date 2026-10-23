@@ -189,6 +189,26 @@ enum ScheduleAction {
     Uninstall,
 }
 
+/// A harness for the `mirror` group (ADR-062 / LM-2): one action today, run
+/// as its own round under the same budget discipline a pass applies.
+#[derive(Subcommand, Clone, Copy)]
+enum MirrorAction {
+    /// Run one mirror sync round: list the destination, download what the
+    /// mirror lacks, hash every file against its own name, stop where the
+    /// round's budget or the free-disk floor says.
+    Sync {
+        /// This round's budget, in seconds. A round stops cleanly here and
+        /// the next round resumes; it is not a failure when it stops.
+        /// Default 600 — a manual round carries its own budget the way an
+        /// hourly round carries the hour's leftover (ADR-062 C2).
+        #[arg(long)]
+        budget_secs: Option<u64>,
+        /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
+        #[arg(long)]
+        keep_ssh_masters: bool,
+    },
+}
+
 /// A harness for `import --harness` (cache copy) or `backfill` (app-driven).
 ///
 /// One variant today: Grok Bot, whose measured local cache (ADR-051 fidelity
@@ -1194,6 +1214,43 @@ enum Command {
         /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
         #[arg(long)]
         keep_ssh_masters: bool,
+    },
+    /// Mirror the declared destination onto this machine (ADR-062 / LM-2).
+    ///
+    /// A mirror is a byte-exact, file-by-file copy of one declared remote
+    /// destination's whole repository, on local disk under the data
+    /// directory, ciphertext only: `config`, `keys/`, `index/`, `snapshots/`
+    /// and `data/` — everything except `locks/`, which this build never
+    /// holds. Copying a repo also copies its encrypted master key, which is
+    /// the same key the destination already uses, not a new one, and the
+    /// copy never decrypts anything: every file except `config` is verified
+    /// by hashing the bytes against the file's own name.
+    ///
+    /// One run is one round (W964's discipline): it lists the remote,
+    /// downloads what the mirror lacks, and stops where the round's budget
+    /// `--budget-secs` (default 600) says, leaving the next round to
+    /// resume from the same listing-diff — progress is recorded every
+    /// round, and a stopped round is reported, never counted as a failure.
+    /// The hourly pass runs the same copy after its push, inside that
+    /// round's leftover budget.
+    ///
+    /// Before a first fill starts it estimates whether the remaining
+    /// download plus the free-disk floor (`[mirror] min_free_gib`, default
+    /// max(10 GiB, 5% of the volume's capacity)) fits the free space, and
+    /// refuses with both numbers when it does not. Mid-round, free space
+    /// falling below the floor pauses the copy instead of writing toward a
+    /// full disk.
+    ///
+    /// Exit codes: 0 = the mirror holds everything the remote listed;
+    /// 3 = the round stopped or refused and made no progress it did not
+    /// verify (budget spent, disk floor, remote unreadable, space
+    /// pre-estimate refused — the next round resumes); 1 = a finished
+    /// read that failed (the source proved corrupt); 2 = usage error
+    /// (no `[mirror]` section, switch off, or `mirror_of` names no
+    /// declared destination).
+    Mirror {
+        #[command(subcommand)]
+        action: MirrorAction,
     },
     /// Report the packs one destination's backend holds that **no index file
     /// names** — what a push killed between its packs and its index strands —
@@ -2514,6 +2571,12 @@ fn run() -> ExitCode {
             &options,
             keep_ssh_masters,
         ),
+        Command::Mirror { action } => match action {
+            MirrorAction::Sync {
+                budget_secs,
+                keep_ssh_masters,
+            } => cmd_mirror_sync(budget_secs, keep_ssh_masters),
+        },
         Command::PruneOrphans {
             destination,
             dry_run,
@@ -8820,6 +8883,11 @@ fn run_once_pass_with(
 ) -> (ExitCode, chat_stasher::runstate::RunState) {
     use chat_stasher::runstate::{RunOutcome, RunState};
 
+    // W964's budget anchor (applied to the mirror step by ADR-062 C2): the
+    // pass is one round and the wall clock starts here, at the first line,
+    // so every step — including the post-push mirror — spends out of the
+    // same interval, never past it.
+    let pass_started = std::time::Instant::now();
     let machine_name = match resolve_machine("run-once", config, machine.as_deref()) {
         Ok(machine) => machine,
         Err(code) => {
@@ -9108,6 +9176,7 @@ fn run_once_pass_with(
                 }
             }
         }
+        mirror_step_after_push(config, pass_started, &mut state.phases);
         // A partially-read or halted declared producer keeps this pass from
         // reporting health even though the local cycle archived cleanly:
         // the run-state record carries the failed step, `status` reports the
@@ -9205,6 +9274,14 @@ fn run_once_pass_with(
             return (ExitCode::FAILURE, state);
         }
     }
+    // ADR-062 D2: the hourly copy runs after this pass's push completed —
+    // never during it, never before it — inside the round's leftover budget.
+    // Its pauses and refusals belong to the mirror, not to the pass: the
+    // W964 reading C2 fixes is that an unfinished fill is progress, not the
+    // failure of a collect-and-push round. It runs before the producer's
+    // exit-3 return below for the same reason: the mirror copies the remote
+    // and is independent of whether this pass finished reading the producer.
+    mirror_step_after_push(config, pass_started, &mut state.phases);
     // Same discipline as the no-push exit above: the snapshot was created,
     // which the record says, but a pass whose declared producer did not
     // finish reading is a failed pass with "did not finish reading" exit 3 —
@@ -9221,6 +9298,179 @@ fn run_once_pass_with(
     state.failed_step = None;
     state.snapshot_created = true;
     (ExitCode::SUCCESS, state)
+}
+
+/// The pass's mirror step (ADR-062 D2 / LM-2): the copy that runs after the
+/// push, inside this round's leftover budget.
+///
+/// Silent when no mirror is configured or the switch is off — the same
+/// byte-silence rule the key alerts keep, so an unchanged machine sees no
+/// new line. It can *pause* (budget, disk floor, remote readability) or
+/// refuse (free-space pre-estimate), print why, and it never moves the
+/// pass's own outcome: a stopped fill round is the mirror's progress
+/// statement, not a failed collect-and-push (W964's principle, applied to
+/// the mirror by ruling C2). A hard engine error — the one class that says
+/// the source is corrupt, not slow — is a loud warning for the same reason:
+/// the archive push already succeeded and the stage is protected, which is
+/// this pass's primary duty; the mirror retries next round.
+fn mirror_step_after_push(
+    config: &Config,
+    pass_started: std::time::Instant,
+    phases: &mut chat_stasher::runstate::PassMetrics,
+) {
+    let Some(settings) = chat_stasher::mirror::MirrorSettings::for_config(config) else {
+        return;
+    };
+    if !settings.enabled {
+        return;
+    }
+    if !config.destinations.contains_key(&settings.mirror_of) {
+        eprintln!(
+            "[run-once] mirror-sync warning: `[mirror] mirror_of = \"{}\"` names no declared \
+             destination; the copy step is skipped this pass",
+            settings.mirror_of
+        );
+        return;
+    }
+    let step_started = std::time::Instant::now();
+    phases.mirror_sync_ms = 0;
+    let remote = match resolve_store_config_checked(
+        config,
+        Some(&settings.mirror_of),
+        None,
+        None,
+        None,
+        &[],
+    ) {
+        Ok(cfg) => cfg,
+        Err(problem) => {
+            eprintln!(
+                "[run-once] mirror-sync warning: the mirror destination could not be \
+                 resolved ({problem}); the copy step is skipped this pass"
+            );
+            return;
+        }
+    };
+    let mk = match store::load_key_file_state(&remote) {
+        store::KeyFileState::Loaded(mk) => mk,
+        store::KeyFileState::Missing => {
+            eprintln!(
+                "[run-once] mirror-sync warning: the masterkey for `{}` is not on this \
+                 machine ({}), so the mirror cannot be verified; the copy step is skipped \
+                 this pass",
+                settings.mirror_of,
+                remote.key_file.display()
+            );
+            return;
+        }
+        store::KeyFileState::Unusable(_) => {
+            eprintln!(
+                "[run-once] mirror-sync warning: the masterkey for `{}` cannot be read \
+                 ({}), so the mirror cannot be verified; the copy step is skipped this pass",
+                settings.mirror_of,
+                remote.key_file.display()
+            );
+            return;
+        }
+    };
+    let interval = chat_stasher::schedule::interval_secs(config)
+        // reason: interval_secs refuses a zero interval, so this arm is
+        // the unreachable guard band — 3600 is the same hourly default
+        // the scheduler installs and the pass itself runs under.
+        .unwrap_or(chat_stasher::config::DEFAULT_BACKUP_INTERVAL_SECS);
+    let deadline = pass_started + std::time::Duration::from_secs(interval);
+    if std::time::Instant::now() >= deadline {
+        println!(
+            "[run-once] mirror-sync: skipped — the pass spent its round budget; the next \
+             pass's mirror round resumes"
+        );
+        return;
+    }
+    let data_root = chat_stasher::config::default_data_root();
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let mirror_root = chat_stasher::mirror::mirror_dir(&data_root, &settings.mirror_of);
+    let round_ends = chat_stasher::mirror::DeadlineAndDisk::new(
+        Some(deadline),
+        settings.min_free_bytes(&mirror_root),
+        mirror_root,
+    );
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // reason: same clock-before-1970 branch `runstate::now_unix`
+        // documents — the record would date itself 1970-01-01, which reads
+        // as ancient rather than fresh in every staleness surface.
+        .unwrap_or(0);
+    let request = chat_stasher::mirror::SyncRequest {
+        settings: &settings,
+        remote: &remote,
+        data_root: &data_root,
+        state_dir: &state_dir,
+        master_key: &mk,
+        now_unix,
+        round_ends: &round_ends,
+    };
+    let percent_done = |present: u64, total: u64| {
+        if total == 0 {
+            100
+        } else {
+            present.saturating_mul(100) / total
+        }
+    };
+    match chat_stasher::mirror::sync_once(&request) {
+        Ok((report, outcome)) => match outcome {
+            chat_stasher::mirror::SyncOutcome::Completed => println!(
+                "[run-once] mirror-sync: complete — {} of {} snapshots covered, {} \
+                     file(s) / {} downloaded",
+                report.covered_snapshots,
+                report.snapshots_remote,
+                report.downloaded_files,
+                fmt_bytes(report.downloaded_bytes)
+            ),
+            chat_stasher::mirror::SyncOutcome::Stopped(end) => match end {
+                chat_stasher::mirror::RoundEnd::BudgetSpent => println!(
+                    "[run-once] mirror-sync: paused — this pass's round budget is \
+                             spent, {}% mirrored; the next pass resumes",
+                    percent_done(
+                        report.present_bytes + report.downloaded_bytes,
+                        report.remote_total_bytes
+                    )
+                ),
+                chat_stasher::mirror::RoundEnd::DiskBelowThreshold {
+                    free_bytes,
+                    min_free_bytes,
+                } => println!(
+                    "[run-once] mirror-sync: paused — free disk fell below the \
+                             mirror's floor ({} free, floor {}); it resumes when space frees",
+                    fmt_bytes(free_bytes),
+                    fmt_bytes(min_free_bytes)
+                ),
+                chat_stasher::mirror::RoundEnd::RemoteRead { why } => println!(
+                    "[run-once] mirror-sync: paused — the destination could not be \
+                             read: {}",
+                    why
+                ),
+            },
+            chat_stasher::mirror::SyncOutcome::RefusedSpace {
+                needed_bytes,
+                free_bytes,
+                ..
+            } => eprintln!(
+                "[run-once] mirror-sync warning: refused — the mirror's remaining fill \
+                     needs {} and only {} is free, so this round copied nothing; `status` shows \
+                     the refusal",
+                fmt_bytes(needed_bytes),
+                fmt_bytes(free_bytes)
+            ),
+        },
+        Err(e) => {
+            eprintln!(
+                "[run-once] mirror-sync warning: the mirror step failed this round and the \
+                 pass's result stands; the next round retries: {e:#}"
+            );
+        }
+    }
+    phases.mirror_sync_ms = step_started.elapsed().as_millis() as u64;
 }
 
 /// The refusal message `schedule` prints on an OS this build has no supported
@@ -12747,6 +12997,225 @@ fn cmd_reclaim_stage(
     );
     println!("[reclaim-stage] RESULT       : OK");
     ExitCode::SUCCESS
+}
+
+/// `mirror sync` — one copy round against the declared mirror destination
+/// (ADR-062 / LM-2). The engine ([`chat_stasher::mirror::sync_once`]) holds
+/// the semantics; this command pins the CLI contract around it: usage
+/// errors for a mirror that is not configured on, and the trichotomy the
+/// command's doc states (0 complete / 3 stopped or refused / 1 corrupt
+/// source). A remote read error is not classified as corruption here — it
+/// stops the round the same way a budget does, because a read failure says
+/// "unknown, retry", never "checked and failed" ([`chat_stasher::remote_err`]
+/// owns the ADR-023 family).
+fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode {
+    let config = match config_or_refuse("mirror sync") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let Some(settings) = chat_stasher::mirror::MirrorSettings::for_config(&config) else {
+        eprintln!(
+            "mirror: no [mirror] section in the config — this machine mirrors nothing; \
+             see `chat-stasher` config docs (ADR-062)"
+        );
+        return ExitCode::from(2);
+    };
+    if !settings.enabled {
+        eprintln!(
+            "mirror: [mirror] enabled is false; set `enabled = true` to sync {}",
+            settings.mirror_of
+        );
+        return ExitCode::from(2);
+    }
+    if !config.destinations.contains_key(&settings.mirror_of) {
+        let declared = config
+            .destinations
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "mirror: `[mirror] mirror_of = \"{}\"` names no declared destination{}",
+            settings.mirror_of,
+            if declared.is_empty() {
+                String::new()
+            } else {
+                format!("; declared: {declared}")
+            }
+        );
+        return ExitCode::from(2);
+    }
+    let remote = match resolve_store_config_checked(
+        &config,
+        Some(&settings.mirror_of),
+        None,
+        None,
+        None,
+        &[],
+    ) {
+        Ok(cfg) => cfg,
+        Err(problem) => {
+            eprintln!("mirror: {problem}");
+            return ExitCode::from(2);
+        }
+    };
+    let mk = match store::load_key_file_state(&remote) {
+        store::KeyFileState::Loaded(mk) => mk,
+        store::KeyFileState::Missing => {
+            eprintln!(
+                "mirror: the masterkey file for `{}` is not on this machine ({}); \
+                 a mirror copies ciphertext but cannot verify what it copied without \
+                 the destination's key — restore it first",
+                settings.mirror_of,
+                remote.key_file.display()
+            );
+            return ExitCode::FAILURE;
+        }
+        store::KeyFileState::Unusable(_) => {
+            eprintln!(
+                "mirror: the masterkey file for `{}` cannot be read ({}); fix the \
+                 access or I/O problem and re-run",
+                settings.mirror_of,
+                remote.key_file.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let data_root = chat_stasher::config::default_data_root();
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let mirror_root = chat_stasher::mirror::mirror_dir(&data_root, &settings.mirror_of);
+    let deadline_secs = budget_secs
+        // reason: a manual round owns a budget the way an hourly round owns
+        // the hour's leftover; 600 s is a whole round by the same W964
+        // reading that gives the letta pull its 600 s.
+        .unwrap_or(600);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(deadline_secs);
+    let round_ends = chat_stasher::mirror::DeadlineAndDisk::new(
+        Some(deadline),
+        settings.min_free_bytes(&mirror_root),
+        mirror_root.clone(),
+    );
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // reason: same clock-before-1970 branch `runstate::now_unix`
+        // documents — reached only on a machine whose clock predates the
+        // epoch, and the record would claim a 1970 finish, which the
+        // staleness check reports as ancient rather than fresh.
+        .unwrap_or(0);
+    let request = chat_stasher::mirror::SyncRequest {
+        settings: &settings,
+        remote: &remote,
+        data_root: &data_root,
+        state_dir: &state_dir,
+        master_key: &mk,
+        now_unix,
+        round_ends: &round_ends,
+    };
+    println!(
+        "[mirror] syncing      : `{}` into {} (budget: {}s)",
+        settings.mirror_of,
+        mirror_root.display(),
+        deadline_secs
+    );
+    let outcome = chat_stasher::mirror::sync_once(&request);
+    reap_remote(&remote, keep_ssh_masters);
+    let (report, outcome) = match outcome {
+        Ok(pair) => pair,
+        Err(e) => {
+            // ADR-023: a remote-classified error says "unknown, retry next
+            // round", never "checked and failed" — so this branch reports
+            // with exit 3 and lets the next round resume, while anything
+            // else is a finished read the mirror genuinely failed on.
+            chat_stasher::remote_err::eprint_remote_error("mirror", &e, &remote);
+            if chat_stasher::remote_err::classify_error_str(&format!("{e:#}")).is_some() {
+                eprintln!(
+                    "mirror: exit_code=3 — this round did not finish; the next round resumes"
+                );
+                return ExitCode::from(3);
+            }
+            eprintln!("mirror: exit_code=1 — {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "[mirror] remote       : {} files / {} ({} snapshots)",
+        report.remote_files,
+        fmt_bytes(report.remote_total_bytes),
+        report.snapshots_remote
+    );
+    match outcome {
+        chat_stasher::mirror::SyncOutcome::Completed => {
+            println!(
+                "[mirror] result       : complete — {} of {} snapshots' closures covered, {} file(s) / {} downloaded this round",
+                report.covered_snapshots,
+                report.snapshots_remote,
+                report.downloaded_files,
+                fmt_bytes(report.downloaded_bytes)
+            );
+            ExitCode::SUCCESS
+        }
+        chat_stasher::mirror::SyncOutcome::RefusedSpace {
+            needed_bytes,
+            missing_bytes,
+            headroom_bytes,
+            free_bytes,
+        } => {
+            eprintln!(
+                "mirror: not starting — not enough free space for what the sync would \
+                 write: needs {} (the missing {} plus the {} free-disk floor), only {} free, \
+                 short by {}; free space (larger disk, or a floor you are willing to \
+                 lower in [mirror] min_free_gib) and re-run",
+                fmt_bytes(needed_bytes),
+                fmt_bytes(missing_bytes),
+                fmt_bytes(headroom_bytes),
+                fmt_bytes(free_bytes),
+                fmt_bytes(needed_bytes.saturating_sub(free_bytes))
+            );
+            eprintln!(
+                "mirror: exit_code=3 — this round moved nothing; the refusal is recorded \
+                 so `status` shows why the first fill is not progressing"
+            );
+            ExitCode::from(3)
+        }
+        chat_stasher::mirror::SyncOutcome::Stopped(end) => {
+            match &end {
+                chat_stasher::mirror::RoundEnd::BudgetSpent => {
+                    let have = report.present_bytes + report.downloaded_bytes;
+                    let percent = if report.remote_total_bytes == 0 {
+                        100
+                    } else {
+                        have.saturating_mul(100) / report.remote_total_bytes
+                    };
+                    println!(
+                        "[mirror] result       : paused — this round's budget is spent; \
+                         {} of {} ({percent}%) verified in the mirror, the next round resumes",
+                        fmt_bytes(have),
+                        fmt_bytes(report.remote_total_bytes)
+                    );
+                }
+                chat_stasher::mirror::RoundEnd::DiskBelowThreshold {
+                    free_bytes,
+                    min_free_bytes,
+                } => println!(
+                    "[mirror] result       : paused — free space fell below the mirror's \
+                     floor ({} free, floor {}); this round stopped rather than write toward a \
+                     full disk, and the next round resumes once space frees",
+                    fmt_bytes(*free_bytes),
+                    fmt_bytes(*min_free_bytes)
+                ),
+                chat_stasher::mirror::RoundEnd::RemoteRead { why } => println!(
+                    "[mirror] result       : paused — the destination could not be read \
+                     mid-round: {why}; the next round retries"
+                ),
+            }
+            eprintln!(
+                "mirror: exit_code=3 — the round stopped early, which is a pause, not a \
+                 failure; progress is recorded and the next round resumes"
+            );
+            ExitCode::from(3)
+        }
+    }
 }
 
 /// Persist one reclaim attempt's durable record (W1012 / SG-1 C1④ + C2).
@@ -19622,6 +20091,17 @@ fn cmd_status(
             eprintln!("    fix: {fix}");
         }
     }
+    // ADR-062 (LM-2) / C2: the mirror's advisory lines — first-fill progress
+    // phrased as progress, never as red. Same family as the key alerts:
+    // silent when no mirror is configured or the fill is complete, never
+    // moving the exit code, and readable after every round because each
+    // round leaves a progress record behind.
+    for line in chat_stasher::mirror::mirror_status_lines(
+        &config,
+        &chat_stasher::collect::default_state_dir(),
+    ) {
+        eprintln!("{line}");
+    }
     if let Some(error) = &writer_version_error {
         eprintln!("[status] writer versions unavailable: {error}");
     }
@@ -19902,6 +20382,15 @@ fn local_layer_json(config: &Config, info: &RunStateInfo) -> serde_json::Value {
         // needs to show the alarm the surfaces print, and an unknown
         // stays an unknown here too, never a zero.
         object.insert("stage_cap".to_string(), reconciled["stage_cap"].clone());
+        // ADR-062 (LM-2): the mirror rides the same local layer for the same
+        // reason the reconciliation does — every fact is machinery on this
+        // machine, and an unconfigured or complete mirror must be an
+        // explicit `not_applicable` shape, not a zero that reads as
+        // measured.
+        object.insert(
+            "mirror".to_string(),
+            chat_stasher::mirror::status_json(config, &chat_stasher::collect::default_state_dir()),
+        );
     }
     value
 }

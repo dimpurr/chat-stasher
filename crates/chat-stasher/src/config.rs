@@ -223,6 +223,21 @@ pub struct Config {
     /// before its collect step (LETTA-P3). Absent means no producer is
     /// declared and the pass's behaviour is unchanged.
     pub pull: Option<PullSectionConfig>,
+
+    /// The `[mirror]` section: this machine's local mirror (ADR-062 / LM-2).
+    ///
+    /// One declared destination, copied file by file, byte for byte, into
+    /// `<data root>/mirror/<mirror_of>` — the whole archive of every machine
+    /// that pushes to that destination, ciphertext only, written with the
+    /// destination's existing key (copying `keys/` copies the same encrypted
+    /// master key; it creates no new key and no new plaintext anywhere).
+    ///
+    /// Off by default, and off when absent: nothing changes on a machine
+    /// that never configures one. The hourly pass copies after its push,
+    /// inside the round's leftover budget; a stopped round resumes the next
+    /// pass (the first fill of a large repository spans several rounds), and
+    /// `chat-stasher mirror sync` runs the same copy on demand.
+    pub mirror: Option<MirrorSectionConfig>,
 }
 
 /// The `[reclaim]` section (ADR-060 D5).
@@ -2036,6 +2051,30 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # pace_ms = 1000
 # budget_seconds = 600
 # page_size = 100
+
+# ---------------------------------------------------------------- mirror
+# This machine's local mirror (ADR-062): one declared destination, copied
+# file by file, byte for byte, into the data directory's mirror/<name>.
+# What it holds is ciphertext written with the destination's own existing
+# key — copying the repo also copies its `keys/` directory, which is the
+# same encrypted master key, not a new key and not new plaintext; syncing
+# is "download what the mirror lacks and hash it against its own name",
+# so the copy never decrypts anything either.
+#
+# Default off. With it on, the hourly pass copies after its push inside
+# the round's leftover budget, and `chat-stasher mirror sync` runs the
+# same copy on demand. A first fill of a large repository spans several
+# rounds and `status` shows its progress; an interrupted round resumes on
+# the next one, none of which is a failure. Turning it back off stops the
+# copying and never deletes anything.
+#
+# [mirror]
+# enabled = true
+# mirror_of = "storagebox"
+# Free-disk floor for the mirror's volume, in GiB. Default:
+# max(10, 5% of the volume's capacity). Below it the copy pauses rather
+# than writing toward a full disk.
+# min_free_gib = 10
 "#;
 
 #[cfg(test)]
@@ -3872,4 +3911,102 @@ mod line_ending_tests {
             result.as_bytes()
         );
     }
+}
+
+// ——————————————————————————————————————————————————————————————————————————
+// [mirror] (ADR-062 / LM-2). Appended at the file's end so introducing it
+// moved no cited line, for the same reason `store.rs` appends its impl
+// blocks instead of inserting them.
+// ——————————————————————————————————————————————————————————————————————————
+
+/// The `[mirror]` section (ADR-062): one declared destination, copied file
+/// by file onto this machine.
+///
+/// Every key is optional and the whole section is optional; the resolved
+/// defaults live with the consumer ([`crate::mirror::MirrorSettings`]), so
+/// an absent value stays "use this machine's default", never a silent
+/// number.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MirrorSectionConfig {
+    /// The on/off switch for the post-push copy step and `mirror sync`.
+    ///
+    /// Default false — the mirror is a whole-archive copier and nothing
+    /// about a default install opts into one (ADR-062 D1).
+    pub enabled: Option<bool>,
+    /// The declared name of the destination to copy. Uses the exact key
+    /// from the `[destinations]` table; declaring no `[mirror]` section,
+    /// or one without `enabled = true`, leaves the mirror off.
+    pub mirror_of: Option<String>,
+    /// Free-disk floor for the mirror's volume, in GiB (ADR-062 ruling 6).
+    ///
+    /// Default: max(10, 5% of the volume's capacity). Below the floor the
+    /// copy pauses instead of writing on — never writing the disk full is
+    /// a rule, not a best effort.
+    pub min_free_gib: Option<f64>,
+}
+
+// -----------------------------------------------------------------------
+// [mirror] (ADR-062 / LM-2).
+// -----------------------------------------------------------------------
+
+/// The `[mirror]` section parses alongside everything else, and one
+/// config can carry destinations and a mirror naming one of them — the
+/// shape every fleet machine will hold (ADR-062 D1).
+#[test]
+fn mirror_section_parses_alongside_destinations() {
+    let cfg: Config = toml::from_str(
+        r#"
+[destinations.storagebox]
+repo = "~/stash/repo"
+key_file = "~/stash/key.json"
+
+[mirror]
+enabled = true
+mirror_of = "storagebox"
+min_free_gib = 12.5
+"#,
+    )
+    .unwrap();
+    let mirror = cfg.mirror.as_ref().expect("the [mirror] section parses");
+    assert_eq!(mirror.enabled, Some(true));
+    assert_eq!(mirror.mirror_of.as_deref(), Some("storagebox"));
+    assert_eq!(mirror.min_free_gib, Some(12.5));
+    assert!(
+        cfg.destinations.contains_key("storagebox"),
+        "the mirrored destination stays a normal destination row"
+    );
+}
+
+/// Every key is optional exactly like the rest of the file: absent means
+/// "this machine does not mirror / use the default floor", never a
+/// silent number (the resolved defaults live in `mirror.rs`, at use
+/// site, per the file's own convention).
+#[test]
+fn mirror_section_defaults_when_absent() {
+    let cfg: Config = toml::from_str("").unwrap();
+    assert!(cfg.mirror.is_none());
+
+    let cfg: Config = toml::from_str("[mirror]\nenabled = true\n").unwrap();
+    let mirror = cfg.mirror.as_ref().unwrap();
+    assert_eq!(mirror.enabled, Some(true));
+    assert_eq!(mirror.mirror_of, None);
+    assert_eq!(mirror.min_free_gib, None);
+}
+
+/// The commented template stays parseable-empty with the mirror block
+/// in it, and the block documents the default the code resolves.
+#[test]
+fn template_documents_the_mirror_and_stays_empty() {
+    let cfg: Config =
+        toml::from_str(DEFAULT_CONFIG_TEMPLATE).expect("the template must still parse");
+    assert!(cfg.mirror.is_none());
+    assert!(
+        DEFAULT_CONFIG_TEMPLATE.contains("# [mirror]"),
+        "the template's mirror block is present as comments"
+    );
+    assert!(
+        DEFAULT_CONFIG_TEMPLATE.contains("mirror_of = \"storagebox\""),
+        "the template names the mirror_of key"
+    );
 }

@@ -147,6 +147,13 @@ pub struct PassMetrics {
     /// bytes of new and changed records (Δ in D6's hourly rule).
     #[serde(default)]
     pub sqlite_growth_bytes: u64,
+    /// ADR-062 (LM-2): the post-push mirror copy round, when a mirror is
+    /// configured and enabled. Zero is the honest value for a pass that did
+    /// not reach the step or runs with the mirror off; a round that stopped
+    /// early (budget, disk floor, remote readability) still measures its
+    /// wall time, because a stopped mirror round is a fact, not a failure.
+    #[serde(default)]
+    pub mirror_sync_ms: u64,
     /// Collector state saves plus this run-state write.
     pub state_saves: u64,
 }
@@ -193,6 +200,16 @@ impl PassMetrics {
             self.sqlite_increment_bytes,
             self.sqlite_growth_bytes,
         )
+    }
+
+    /// One line of mirror-only `key=value` pairs, appended to the run-once
+    /// summary line by a pass that reached the mirror step. ADR-062 (LM-2):
+    /// the post-push copy runs inside the round's leftover budget, so its
+    /// cost belongs in the same measurable place as every other phase —
+    /// and a pass with no mirror configured prints nothing, not zeros
+    /// standing in for "did not run".
+    pub fn mirror_summary_line(&self) -> String {
+        format!("[run-once] phases ms: mirror_sync={}", self.mirror_sync_ms)
     }
 }
 

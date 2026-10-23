@@ -33,6 +33,8 @@ pub mod keydecl;
 pub mod manifest;
 pub mod message_audit;
 pub mod metahash;
+pub mod mirror;
+pub mod mirrorstate;
 pub mod models;
 pub mod nativehost;
 pub mod normalize;

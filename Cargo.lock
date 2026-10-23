@@ -711,6 +711,7 @@ dependencies = [
  "toml 0.8.23",
  "toml_edit",
  "tungstenite",
+ "winapi",
  "zstd",
 ]
 

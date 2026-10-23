@@ -201,3 +201,20 @@ version = "3.5"
 version = "0.28"
 default-features = false
 features = ["handshake"]
+
+# ADR-062 / LM-2: the mirror's free-space checks (the C3 pre-estimate and the
+# per-file threshold pause) need `statvfs(2)` on Unix; std has no disk-space
+# API. `libc` is already in this workspace's lock file (a normal dependency of
+# several crates, and a dev edge right above), so this adds no new package to
+# the build graph — only the direct normal edge, held to `cfg(unix)` because
+# the Windows call below serves that platform with `winapi`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The same free-space question on Windows is `GetDiskFreeSpaceExW`; std has no
+# disk-space API there either. `winapi` is already in this workspace's lock
+# file as several crates' dependency, so enabling its features adds only a
+# direct edge (`fileapi` brings the call, `winnt` the ULARGE_INTEGER type it
+# fills) and no new package to the build graph. Held to `cfg(windows)`.
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["fileapi", "winnt"] }
