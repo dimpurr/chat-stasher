@@ -3445,6 +3445,50 @@ fn opencode_record_map_path(state_dir: &Path, session_id: &str) -> PathBuf {
         .join(format!("{}.json", sha256_hex(session_id.as_bytes())))
 }
 
+/// Rename a freshly written temp file onto its final name, waiting out the
+/// transient denial Windows reports while another handle is open on either
+/// name — a real-time scanner reading the temp file this caller just closed,
+/// or the target path an uncooperative reader still holds. `std::fs::rename`
+/// is `MoveFileEx` there, and a hold of that shape answers with
+/// `ERROR_ACCESS_DENIED` (os error 5) or `ERROR_SHARING_VIOLATION`
+/// (os error 32) for the microseconds the scan takes instead of waiting it
+/// out; the denial is exactly what the one windows-latest failure in CI run
+/// 39911056846 met — the run's only red test lost its first
+/// `save_opencode_record_map` to "Access is denied" seconds after the same
+/// temp-then-rename write pattern had passed in more than a thousand other
+/// tests. A bounded wait turns that hold into the rename it was always going
+/// to be; a rename still denied after a quarter of a second is a real
+/// failure and is returned, because the wait is for a scan, not for a
+/// permission this process lacks.
+///
+/// The retry arms only where the two codes are Windows' (`cfg!(windows)`),
+/// so a Unix rename keeps its single attempt, but the loop itself is not
+/// behind a `cfg`: it compiles and type-checks on every platform, so an
+/// error in it breaks the build here rather than one OS's CI — the
+/// `body_cache::touch_entry` convention for a Windows-only remedy. It also
+/// deliberately has no test of its own: the hold it waits out needs a
+/// scanner timing this suite cannot schedule, so the windows-latest job is
+/// where the code runs (the same `touch_entry` precedent); on every other
+/// platform the function is an unambiguous single rename.
+fn commit_by_rename(temp: &Path, path: &Path) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match fs::rename(temp, path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let a_scanner_holds_the_name =
+                    cfg!(windows) && matches!(e.raw_os_error(), Some(5) | Some(32));
+                if !a_scanner_holds_the_name || attempt == 3 {
+                    return Err(e);
+                }
+                let waits = [25, 100, 250];
+                std::thread::sleep(std::time::Duration::from_millis(waits[attempt]));
+                attempt += 1;
+            }
+        }
+    }
+}
+
 /// Persist one session's increment map (tmp + rename, parent fsync like the
 /// state file itself).
 fn save_opencode_record_map(
@@ -3468,7 +3512,7 @@ fn save_opencode_record_map(
         writer.write_all(&bytes)?;
         writer.flush()?;
     }
-    fs::rename(&temp, path)?;
+    commit_by_rename(&temp, path)?;
     // Windows has no portable directory fsync; retain its state-file
     // durability convention. Unix proves the rename durable before the
     // map is trusted by a later pass.
