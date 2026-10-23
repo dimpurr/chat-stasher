@@ -291,13 +291,13 @@ chat-stasher init
 `init` writes a commented default config only when the config does **not**
 already exist; it is non-destructive (`crates/chat-stasher/src/main.rs:219-220`).
 The config file lives at `~/.config/chat-stasher/config.toml`, or under
-`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:22-24,1478-1499`).
+`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:22-24,1551-1572`).
 
 🔴 **A config file that exists has to be valid, and the tool will not pretend
 otherwise.** If it does not parse, if a value has the wrong type, or if a path in
 it cannot be resolved, every command that reads it stops with **exit code `3`**
 and prints the file, the position and the reason
-(`crates/chat-stasher/src/config.rs:382-398,959-966`). It does **not** warn
+(`crates/chat-stasher/src/config.rs:432-448,1016-1023`). It does **not** warn
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
@@ -312,7 +312,7 @@ When the error is an unexpandable `rustic_cache_dir`, it also names that cache
 path check as unavailable and says to fix the value and run doctor again
 (`crates/chat-stasher/src/doctor.rs:2264-2317`). And an **absent** config file is a
 different state altogether, not an error: that is the normal first run, and it
-does use the defaults (`crates/chat-stasher/src/config.rs:382-391`). If you want
+does use the defaults (`crates/chat-stasher/src/config.rs:432-441`). If you want
 the defaults back, move the file aside rather than leaving a broken one in place.
 
 ---
@@ -565,7 +565,7 @@ Two properties of that directory, both from
   before they allocate a shard sequence number**, so two browsers, two profiles,
   or a host racing a manual `ingest` cannot pick the same number. The wait is
   bounded at 10 seconds, and a timeout comes back as a `stage-unavailable` the
-  extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1282-1310`).
+  extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1287-1315`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a
   directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:2094-2161`);
@@ -606,7 +606,7 @@ can express them (`crates/chat-stasher/src/store.rs:2491-2498`).
 archive uses `rustic_key_file` (default `~/.local/share/chat-stasher/masterkey.json`);
 each declared destination has its own, defaulting to
 `~/.local/share/chat-stasher/masterkey-<destination>.json` and settable with that
-destination's `key_file` (`crates/chat-stasher/src/config.rs:269-289`, and the
+destination's `key_file` (`crates/chat-stasher/src/config.rs:319-339`, and the
 per-destination default that synthesises that path rather than reusing the local
 one, `crates/chat-stasher/src/main.rs:9882-9885`). A second
 machine reads a destination with **that destination's** key and does not use the
@@ -820,11 +820,11 @@ owner-only-readable (`chmod 600`). That is the shape most S3 clients document,
 and nothing about it is wrong — it is a secret on a disk.
 
 A value spelled `env:NAME` is instead resolved at config load, out of the
-process environment (`crates/chat-stasher/src/config.rs:1097`). The four ways
+process environment (`crates/chat-stasher/src/config.rs:1154`). The four ways
 that can fail — the name is not a legal variable name, the variable is set but
 empty, it is set to a value that is not valid Unicode, it is not set at all —
 are four different messages, and none of them quotes the value
-(`crates/chat-stasher/src/config.rs:1016-1033`; the warning is printed at `:937`).
+(`crates/chat-stasher/src/config.rs:1073-1090`; the warning is printed at `:994`).
 A reference that cannot be resolved **removes that option** rather than
 substituting an empty string, so the failure is a credential error, not a
 silently-empty one.
@@ -965,7 +965,7 @@ the logon caveat that keeps a per-user task from looking scheduled while it
 sleeps (`crates/chat-stasher/src/main.rs:8487-8542`).
 
 `run-once` is one complete collect-and-push pass; it exits when done, and
-repeated invocation is safe (`crates/chat-stasher/src/main.rs:294-331`).
+repeated invocation is safe (`crates/chat-stasher/src/main.rs:296-337`).
 Every pass prints one summary line last in its output —
 `[run-once] phases ms: …` — carrying the wall time of each phase
 (scan, collect per harness, stage audit, metadata hash, activity
@@ -1020,7 +1020,7 @@ few lines and does not flood the screen
 - Finally, a fixed last line: `details (one line per session): chat-stasher status --sessions`
 
 To see the per-session detail, add `--sessions`; that will be hundreds of lines
-(`crates/chat-stasher/src/main.rs:468-470`).
+(`crates/chat-stasher/src/main.rs:476-478`).
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
@@ -1280,7 +1280,7 @@ touch it again.**
 - Install the timer
 
 **Then it runs automatically:** the timer runs `run-once` at each scheduled
-point — collect, push, exit (`crates/chat-stasher/src/main.rs:294-331`). It does
+point — collect, push, exit (`crates/chat-stasher/src/main.rs:296-337`). It does
 not need you to confirm anything.
 
 **What you should occasionally do** (not required, but recommended):

@@ -46,7 +46,7 @@ Understanding the roles below requires knowing the path the content takes.
    (`crates/chat-stasher/src/main.rs:934-1042`).
 4. `push` writes the stage into a rustic repository — encrypted — at a
    destination you configure, local or remote
-   (`crates/chat-stasher/src/main.rs:414-451`).
+   (`crates/chat-stasher/src/main.rs:415-452`).
 
 Steps 1–3 are plaintext on your own machine. Step 4 is the only encrypted
 boundary. Two steps can involve a network: step 4, and an **API pull** —
@@ -133,7 +133,7 @@ Concretely, five separate plaintext exposures:
 
 3. **The stage directory.** Sealed shards are ordinary files on disk before
    `push` encrypts them into the repository
-   (`crates/chat-stasher/src/main.rs:414-418`).
+   (`crates/chat-stasher/src/main.rs:415-419`).
 
 4. **The download-history entry for an export file.** If you press the popup's
    export button, the browser records an ordinary download whose file name is
