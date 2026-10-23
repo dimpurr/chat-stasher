@@ -121,6 +121,27 @@ pub struct PassMetrics {
     pub sqlite_sessions_queried: u64,
     /// SQLite sessions exported (re-sealed) into the stage.
     pub sqlite_sessions_exported: u64,
+    /// ADR-061: snapshot-source sessions sealed as one whole-file
+    /// observation line (the pre-increment shape, and the one-pass degrade
+    /// of an unknown increment map).
+    #[serde(default)]
+    pub sqlite_full_exports: u64,
+    /// ADR-061: changed snapshot-source sessions sealed as record-level
+    /// increment shards.
+    #[serde(default)]
+    pub sqlite_increment_passes: u64,
+    /// ADR-061: record lines sealed by those passes (records, explicit
+    /// tombstones, session observations).
+    #[serde(default)]
+    pub sqlite_increment_records: u64,
+    /// ADR-061: bytes of those record lines (Σw in D6's hourly rule,
+    /// `written ≤ max(1.2 × growth, 64 KiB)`).
+    #[serde(default)]
+    pub sqlite_increment_bytes: u64,
+    /// ADR-061: the measured true growth of the same passes — payload
+    /// bytes of new and changed records (Δ in D6's hourly rule).
+    #[serde(default)]
+    pub sqlite_growth_bytes: u64,
     /// Collector state saves plus this run-state write.
     pub state_saves: u64,
 }
@@ -141,7 +162,8 @@ impl PassMetrics {
              backup={} run_state_write={}; counts: records_scanned={} \
              files_statted={} source_bytes_read={} shard_bytes_read_hashed={} \
              sqlite_sessions_queried={} sqlite_sessions_exported={} \
-             state_saves={} activity_index_sessions_carried={}",
+             state_saves={} activity_index_sessions_carried={}; \
+             sg3: full_exports={} incr_passes={} incr_records={} incr_bytes={} growth_bytes={}",
             self.scan_ms,
             self.collect_ms,
             harness_ms,
@@ -159,6 +181,11 @@ impl PassMetrics {
             self.sqlite_sessions_exported,
             self.state_saves,
             self.activity_index_sessions_carried,
+            self.sqlite_full_exports,
+            self.sqlite_increment_passes,
+            self.sqlite_increment_records,
+            self.sqlite_increment_bytes,
+            self.sqlite_growth_bytes,
         )
     }
 }

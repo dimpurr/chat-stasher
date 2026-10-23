@@ -175,7 +175,7 @@ stays in the count. See [Codex](sources/codex.md).
 | Local | OpenAI Codex CLI | 2026-09-25 | normal | - |
 | Local | Gemini CLI | 2026-09-25 | normal | the tool's own 30-day cleanup can delete chats in the source before a first archive runs; archive often |
 | Local | Google Antigravity | 2026-10-03 | normal | - |
-| Local | opencode | 2026-09-25 | normal | a one-line change still re-exports the whole session as a new full snapshot (git a908a00) |
+| Local | opencode | 2026-09-25 | normal | incremental per-record writes ship 2026-10-23; the one-day real-session write-amplification gate is still pending |
 | Agent platform | OpenClaw | - | normal | Cold transcript matching rules are documented in docs-dev/openclaw-scanner.md. |
 | Agent platform | Hermes Agent | 2026-10-06 | normal | - |
 | Local | Cursor | 2026-09-25 | normal | - |

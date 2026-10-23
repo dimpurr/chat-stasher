@@ -36,6 +36,7 @@ pub mod metahash;
 pub mod models;
 pub mod nativehost;
 pub mod normalize;
+pub mod opencode_records;
 pub mod orphans;
 pub mod overview;
 pub mod packcheck;

@@ -366,6 +366,34 @@ under its own heading below.
 
 #### Changed
 
+- **Snapshot sources write per record, and their readback assembles the source's
+  final state (ADR-061, SG-3; opencode first).** A changed opencode session no
+  longer re-stores the whole session as a new full-snapshot line on every pass:
+  the first observation still writes one whole-session line
+  (`chat-stasher.opencode.session.v1`), and every later pass writes record lines
+  under `chat-stasher.opencode.session.v2` — the message row without its parts
+  inlined, each part under its own id, a session-row record when the session row
+  itself changed, and an explicit tombstone when the source deleted something
+  (revert or compaction). Unchanged records are never re-serialized, so an hour
+  that grows a session a few percent stages a few percent of it. The collector
+  keeps the per-session record map beside its state file while the state entry
+  carries a bounded digest cache (one digest per record, one overall digest
+  past 5000 records); a map that cannot be proven degrades to exactly one full
+  export — the pre-change behaviour — never to a silent skip. Reading an
+  opencode session now assembles the newest version of every record across all
+  stored lines (whole-file and increments mixed, no conversion of existing
+  shards), so the default view equals a fresh export of the source's final
+  state byte for byte; a legacy multi-copy session reads as its newest copy
+  instead of a concatenation of every copy, and a body that cannot be assembled
+  is a loud exit-3 read failure, never a short session. Deletions are never
+  erased: `read --include-deleted` and `export --include-deleted` emit the
+  deleted messages and parts at their original positions, each carrying
+  `"deleted": true`. The raw shard identity `verify` L3, reclaim and dest-init
+  copy stays exactly what it was — the assembled body is the reader-facing
+  projection, not the proof. The extension/grok per-record follow-ons, the
+  stage-side compression add-on and the one-day live-session
+  write-amplification gate are separate tickets.
+
 - **Fixed clock-time hourly schedule on macOS.** When `backup_interval_secs` is
   the default 3600 (hourly), `schedule` on macOS renders launchd's
   `StartCalendarInterval` (one run per hour at a fixed minute) instead of
