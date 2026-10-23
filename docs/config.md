@@ -167,11 +167,12 @@ does not know must not look declared while silently never being pulled.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `account_id` | (required) | The stable provider account ID you chose, independent of the API key (`LETTA_API_KEY`, from the timer's environment). Never logged. |
+| `account_id` | (required) | The stable provider account ID you chose, independent of the API key. Never logged. |
 | `inbox` | (required) | The local inbox directory the producer's `inbox@3` bundles are published into. Keep it stable across runs. |
+| `api_key` | (unset → the environment) | The credential the pull authenticates with: a literal, or a `file:PATH`, `env-file:PATH:NAME` or `keychain:ACCOUNT` reference — the same forms destination options accept, fail-closed the same way. A timer sees no login shell, so this is the form the hourly pass can actually reach; without it the pull reads `LETTA_API_KEY` from the environment, which `schedule install`, `status`, `doctor` and the menu bar flag as unreachable by the timer. Never logged. |
 | `state` | `~/.local/share/chat-stasher/state/api-pull/letta` | Durable private producer state. Preserve it across restores: its identity salt keeps the account's derived tenant stable across key rotation. |
-| `pace_ms` | `1000` | Serial request pacing, about one request per second. Accepts 0–60000. |
-| `budget_seconds` | `600` | Whole-pass wall-clock budget. Accepts 1–3600. |
+| `pace_ms` | `1000` | Serial request pacing. The unattended pass accepts **1000–60000** (at least one request per second — an unattended job never hammers the provider); the interactive `pull letta` command accepts 0–60000. |
+| `budget_seconds` | `600` | Whole-pass wall-clock budget, shared by the walk and the archive-proof phase. The unattended pass accepts **1–2700** (45 minutes, below the hourly period, so one pass can never contend with its own successor); the interactive command accepts 1–3600. |
 | `page_size` | `100` | Rows requested per page. Accepts **100–200** only — the provider rejects larger agent-history pages. |
 
 A declaration that cannot be honoured (a missing key, a value outside the

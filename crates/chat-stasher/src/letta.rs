@@ -25,10 +25,21 @@ use std::{
 pub const DEFAULT_PACE_MS: u64 = 1000;
 /// Largest accepted serial pacing interval, in milliseconds.
 pub const MAX_PACE_MS: u64 = 60_000;
+/// Smallest serial pacing the **declared path** (`[pull.letta]` under a
+/// timer) accepts. An unattended pass has nobody watching it slow down, so a
+/// declaration below one request per second would hammer exactly the
+/// provider the pacing promise is meant to protect; the interactive command
+/// keeps its wider band because a person is present and can stop it.
+pub const MIN_PASS_PACE_MS: u64 = 1000;
 /// Default whole-pass wall-clock budget, in seconds.
 pub const DEFAULT_BUDGET_SECONDS: u64 = 600;
-/// Largest accepted whole-pass budget: one hour.
+/// Largest accepted whole-pass budget: one hour (the interactive command).
 pub const MAX_BUDGET_SECONDS: u64 = 3_600;
+/// Largest whole-pass budget the **declared path** accepts: 45 minutes,
+/// below the hourly period a timer runs on. A pass that may overrun its
+/// own period contends on the state lock with the next pass, which is the
+/// "exit 3 by construction" failure shape the cap refuses.
+pub const PASS_MAX_BUDGET_SECONDS: u64 = 2_700;
 /// Rows requested per page. The provider rejects larger agent-history pages,
 /// so the accepted band is 100–200 rows and the default sits inside it.
 pub const DEFAULT_PAGE_SIZE: u64 = 100;
@@ -78,12 +89,21 @@ pub struct PassPull {
     pub inbox: PathBuf,
     /// Durable private producer state.
     pub state: PathBuf,
-    /// Serial request pacing in milliseconds (default ~1 request/second).
+    /// Serial request pacing in milliseconds (default ~1 request/second;
+    /// the declared path accepts `MIN_PASS_PACE_MS..=MAX_PACE_MS`).
     pub pace_ms: u64,
-    /// Whole-pass wall-clock budget in seconds.
+    /// Whole-pass wall-clock budget in seconds
+    /// (`1..=PASS_MAX_BUDGET_SECONDS` on the declared path).
     pub budget_seconds: u64,
     /// Rows requested per page (`MIN_PAGE_SIZE..=MAX_PAGE_SIZE`).
     pub page_size: u64,
+    /// The `pull.letta.api_key` declaration as the config loader resolved
+    /// it: a literal, or the secret a `file:` / `env-file:` / `keychain:`
+    /// reference produced. `None` means nothing was declared and the pass
+    /// falls back to `LETTA_API_KEY` in the process environment — the form
+    /// a timer cannot see, which is exactly why declaring the key is
+    /// better. Never logged.
+    pub api_key: Option<String>,
 }
 
 /// Resolve the declared `[pull.letta]` producer for a scheduled pass.
@@ -116,16 +136,22 @@ pub fn pass_pull(config: &crate::config::Config) -> Result<Option<PassPull>> {
             "pull.letta.inbox is missing: the declared producer publishes inbox@3 bundles into \
              that directory, so declaring it means naming the inbox",
         )?;
+    // The declared path runs unattended, so its band is deliberately tighter
+    // than the interactive command's: pacing below one request per second
+    // hammers the provider nobody is watching, and a budget that can reach
+    // the timer's own period contends on the state lock with the next pass.
     let pace_ms = pull.pace_ms.unwrap_or(DEFAULT_PACE_MS);
     ensure!(
-        pace_ms <= MAX_PACE_MS,
-        "pull.letta.pace_ms = {pace_ms} is outside the accepted 0–{MAX_PACE_MS} millisecond band"
+        (MIN_PASS_PACE_MS..=MAX_PACE_MS).contains(&pace_ms),
+        "pull.letta.pace_ms = {pace_ms} is outside the accepted \
+         {MIN_PASS_PACE_MS}–{MAX_PACE_MS} millisecond band an unattended pass obeys"
     );
     let budget_seconds = pull.budget_seconds.unwrap_or(DEFAULT_BUDGET_SECONDS);
     ensure!(
-        (1..=MAX_BUDGET_SECONDS).contains(&budget_seconds),
+        (1..=PASS_MAX_BUDGET_SECONDS).contains(&budget_seconds),
         "pull.letta.budget_seconds = {budget_seconds} is outside the accepted \
-         1–{MAX_BUDGET_SECONDS} second band"
+         1–{PASS_MAX_BUDGET_SECONDS} second band an unattended pass obeys; a pass that could \
+         reach its own period would contend with the next one"
     );
     let page_size = pull.page_size.unwrap_or(DEFAULT_PAGE_SIZE);
     ensure!(
@@ -144,6 +170,9 @@ pub fn pass_pull(config: &crate::config::Config) -> Result<Option<PassPull>> {
                 .join("api-pull")
                 .join("letta")
         });
+    // The config loader resolved the credential reference before this, so the
+    // secret is already in hand here — a timer-unreachable reference never
+    // gets this far, it refused the config load with the key named.
     Ok(Some(PassPull {
         account,
         inbox: PathBuf::from(inbox),
@@ -151,6 +180,12 @@ pub fn pass_pull(config: &crate::config::Config) -> Result<Option<PassPull>> {
         pace_ms,
         budget_seconds,
         page_size,
+        api_key: pull
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
     }))
 }
 
@@ -165,11 +200,31 @@ pub struct Api {
     page_size: u64,
 }
 impl Api {
-    pub fn environment(pace: Duration, budget: Duration, page_size: u64) -> Result<Self> {
-        let key = std::env::var("LETTA_API_KEY")
-            .map_err(|_| anyhow::anyhow!("Letta credential unavailable"))?;
+    /// The credential a caller already resolved (the `[pull.letta].api_key`
+    /// declaration), or the `LETTA_API_KEY` environment variable when the
+    /// caller has none. Both failures are the same one sentence, because
+    /// both mean the pull cannot authenticate — the difference between "no
+    /// declaration" and "a declaration that resolved to nothing" is not a
+    /// fact the user can act on differently.
+    pub fn environment(
+        resolved: Option<String>,
+        pace: Duration,
+        budget: Duration,
+        page_size: u64,
+    ) -> Result<Self> {
+        let key = match resolved {
+            Some(key) if !key.trim().is_empty() => key,
+            _ => std::env::var("LETTA_API_KEY")
+                .map_err(|_| anyhow::anyhow!("Letta credential unavailable"))?,
+        };
         ensure!(!key.trim().is_empty(), "Letta credential unavailable");
         Self::new("https://api.letta.com", Some(key), pace, budget, page_size)
+    }
+    /// The whole-pass deadline every phase of a run shares: requests wait
+    /// against it, and the proof phase is bounded by it too, so no phase of
+    /// a pass can silently run past the budget the pass was given.
+    pub fn deadline(&self) -> Instant {
+        self.deadline
     }
     fn new(
         base: &str,
@@ -365,13 +420,57 @@ fn scoped_identity(salt: &str, domain: &[u8], value: &str) -> Result<String> {
         .map(|b| format!("{b:02x}"))
         .collect())
 }
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 struct Snapshot {
     sessions: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
     bundles: Vec<String>,
     #[serde(default)]
     required: BTreeSet<String>,
+    /// Per-session content cursors of the last published round: session →
+    /// bundle class → cursor. A cursor is a digest of the content the
+    /// bundles of that class carry — the raw the `file` block hashes — and
+    /// never of the bundle wrapper, whose `capturedAt` changes every pass,
+    /// so an unchanged conversation produces the same cursor forever.
+    /// Where every cursor of a session matches its published predecessor,
+    /// the round republishes nothing.
+    #[serde(default)]
+    cursors: BTreeMap<String, BTreeMap<String, String>>,
+    /// The listing-row digest of each conversation the last round walked:
+    /// a conversation whose row is byte-identical has not reported any
+    /// change at the source, so the steady round skips its message fetch
+    /// altogether — the cost of a caught-up round is the listings plus the
+    /// conversations that moved, not the size of the account. A row change
+    /// re-fetches the content and re-differs it against the cursors above.
+    #[serde(default)]
+    rows: BTreeMap<String, String>,
+    /// This session's contribution to the capture-order record, from the
+    /// last walk that fetched it. A steady round assembles the record from
+    /// these pieces, so a round that skipped every fetch republishes a
+    /// byte-identical capture order instead of an emptied one.
+    #[serde(default)]
+    orders: BTreeMap<String, String>,
+    /// Conversations of this agent whose first publication is still owed:
+    /// the backfill position. `None` means the account is caught up and
+    /// every round walks the whole inventory against the cursors above;
+    /// `Some(pending)` means the round starts where the previous one
+    /// stopped (a conversation already present stays in the set until its
+    /// bundles are both published and durably journaled), which is how a
+    /// large account completes across several rounds instead of restarting
+    /// from zero and staying unfinished forever.
+    #[serde(default)]
+    backlog: Option<BTreeSet<String>>,
 }
+
+/// Backfill progress, while the account is still catching up across rounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Backfill {
+    /// Conversations fully published and journaled so far.
+    pub pulled: usize,
+    /// Conversations the listing says exist. An estimate for progress
+    /// display, never a claim that nothing new appeared while backfilling.
+    pub estimated_total: usize,
+}
+
 #[derive(Default)]
 pub struct Report {
     pub agents: usize,
@@ -379,6 +478,11 @@ pub struct Report {
     pub bundles: usize,
     pub committed: usize,
     pub incomplete: usize,
+    /// Some while conversations of the declared account are still owed
+    /// their first publication: the pass did not finish reading, and the
+    /// next round continues from the persisted position. None means the
+    /// account is caught up.
+    pub backfill: Option<Backfill>,
 }
 fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     atomic_write(path, |temp| {
@@ -425,8 +529,12 @@ fn bundle(
     Ok(bytes)
 }
 
-/// Always replay complete inventories to detect edits at earlier sequences.
-/// Window exhaustion cannot establish absence for agent-only messages.
+/// Replay the complete inventory every round — edit and disappearance
+/// detection is a content comparison, never a metadata shortcut — but let
+/// publication follow the content: an unchanged conversation republishes
+/// nothing, and a conversation the round cannot reach stays in the
+/// backfill position and is continued by the next round. Window
+/// exhaustion cannot establish absence for agent-only messages.
 pub fn run(
     api: &mut Api,
     account: &str,
@@ -503,6 +611,12 @@ pub fn run(
         // Identity binding, like the salt, survives a crash before publication.
         db.execute_batch("COMMIT; BEGIN IMMEDIATE;")?;
     }
+    // The deadline every phase of this round shares: each request waits
+    // against it inside [`Api`], the walk checks it before reaching for a
+    // new conversation, and the proof phase is bounded by the same moment —
+    // no phase of a round can silently outgrow the budget it was given,
+    // which is what keeps a scheduled pass inside its period.
+    let deadline = api.deadline();
     let agents = api.pages("/v1/agents/", &[], false)?;
     let conversations = api.pages(
         "/v1/conversations/",
@@ -523,6 +637,22 @@ pub fn run(
             .into(),
         );
     }
+    // Backfill bookkeeping: the conversation inventory, grouped by agent, is
+    // both the walk order and the progress estimate the rounds that
+    // complete a large account across several passes report.
+    let mut per_agent_conversations: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for conversation in &conversations {
+        let agent = safe(
+            conversation["agent_id"]
+                .as_str()
+                .context("conversation agent missing")?,
+        )?;
+        per_agent_conversations
+            .entry(agent.to_owned())
+            .or_default()
+            .insert(id(conversation)?.to_owned());
+    }
+    let total_conversations: usize = per_agent_conversations.values().map(BTreeSet::len).sum();
     let mut report = Report::default();
     match fs::read_dir(local_agents) {
         Ok(entries) => {
@@ -542,20 +672,24 @@ pub fn run(
         Err(_) => anyhow::bail!("local agent discovery unavailable"),
     }
     report.agents = known.len();
-    for agent in known {
+    for agent in known.iter().cloned() {
         let scope = format!("{tenant}/{agent}");
         let mut pass_proven = false;
         let result = (|| -> Result<()> {
             let metadata = api.get(&format!("/v1/agents/{agent}"), &[])?;
             ensure!(id(&metadata)? == agent, "agent metadata identity mismatch");
-            let previous: Option<String> = db
+            let row = db
                 .query_row("SELECT pending FROM agents WHERE scope=?1", [&scope], |r| {
-                    r.get(0)
+                    r.get::<_, String>(0)
                 })
                 .optional()?;
-            let mut previous: Snapshot = match previous {
-                Some(serialized) => serde_json::from_str(&serialized)?,
-                None => Snapshot::default(),
+            // `existed` distinguishes a scope with no journal row — which
+            // owes every conversation it has — from a legacy row written
+            // before backfill tracking, which is caught up by definition:
+            // its journal carries a full inventory's receipts already.
+            let (existed, mut previous) = match row {
+                Some(serialized) => (true, serde_json::from_str::<Snapshot>(&serialized)?),
+                None => (false, Snapshot::default()),
             };
             // A prior journal describes an independently completed source
             // pass. Settle it after push, before emitting fresh capture times;
@@ -563,7 +697,7 @@ pub fn run(
             if !previous.required.is_empty() {
                 crate::test_identity_guard::refuse_fixture_write(&[machine], stage)?;
                 fs::create_dir_all(stage)?;
-                if prove_receipts(&previous.required, inbox, stage, machine, proof)? {
+                if prove_receipts(&previous.required, inbox, stage, machine, proof, deadline)? {
                     previous.bundles = previous.required.iter().cloned().collect();
                     previous.required.clear();
                     db.execute(
@@ -580,9 +714,40 @@ pub fn run(
                     return Ok(());
                 }
             }
-            let mut snapshot = Snapshot::default();
-            let mut exports = Vec::new();
-            let mut capture_order = String::new();
+            // The round's working snapshot. The published-content cursors,
+            // the listing-row cursors, the capture-order pieces and the
+            // backfill position carry over from the settled journal; the
+            // session memory and the ledgers are rebuilt by this round's
+            // walk (a backfill round derives only what it walks, a
+            // caught-up round walks the rows that moved), so a session that
+            // left the source is observed as absent and a round that stops
+            // part-way journals exactly what it reached. The backfill
+            // position inside the snapshot is the live working set: every
+            // publication removes its conversation from it before the
+            // journal commits, so the persisted position is always the one
+            // the next round continues from.
+            let mut snapshot = Snapshot {
+                cursors: previous.cursors.clone(),
+                rows: previous.rows.clone(),
+                orders: previous.orders.clone(),
+                backlog: previous.backlog.clone(),
+                ..Snapshot::default()
+            };
+            // The backfill position: a scope with no row owes every
+            // conversation it has; a scope mid-backfill continues the set
+            // it persisted; every other scope is caught up.
+            if !existed {
+                snapshot.backlog = Some(
+                    per_agent_conversations
+                        .get(&agent)
+                        .cloned()
+                        // reason: an agent with no row in the conversation
+                        // listing has no conversations to owe — an empty
+                        // pending set is the position to continue from,
+                        // not a fallback standing in for an unknown one.
+                        .unwrap_or_default(),
+                );
+            }
             let mut conversation_ids = BTreeSet::new();
             let mut overlap = BTreeSet::new();
             for conversation in conversations.iter().filter(|c| c["agent_id"] == agent) {
@@ -594,9 +759,45 @@ pub fn run(
                 if !conversation_ids.insert(session.to_owned()) {
                     continue;
                 }
+                if let Some(pending) = &snapshot.backlog {
+                    if !pending.contains(session) {
+                        // Published by an earlier round of the backfill: the
+                        // session memory and cursors describe it, the walk
+                        // continues from the position it persisted, and the
+                        // budget that conversation once cost belongs to the
+                        // conversations still owed.
+                        if let Some(old) = previous.sessions.get(session) {
+                            snapshot.sessions.insert(session.to_owned(), old.clone());
+                        }
+                        continue;
+                    }
+                }
+                // The row cursor: the listing this round already fetched
+                // names this conversation byte-for-byte as the last walked
+                // round did. A conversation whose row is unchanged has
+                // reported no change at the source, so the steady round
+                // does not spend a request on its messages — the cursors
+                // and the capture-order piece it recorded stand. A row
+                // that changed re-fetches and re-diffs the content below.
+                let row_cursor = hash(crate::import::canonical_json(conversation).as_bytes());
+                if previous.required.is_empty() && previous.rows.get(session) == Some(&row_cursor) {
+                    snapshot.rows.insert(session.to_owned(), row_cursor.clone());
+                    if let Some(old) = previous.sessions.get(session) {
+                        snapshot.sessions.insert(session.to_owned(), old.clone());
+                    }
+                    continue;
+                }
+                // The budget gate before reaching for a new conversation. A
+                // round that cannot reach a conversation leaves it pending —
+                // never reported as read — and the next round continues from
+                // here instead of restarting from zero.
+                ensure!(Instant::now() < deadline, "Letta pass budget exhausted");
                 let rows =
                     api.pages(&format!("/v1/conversations/{session}/messages"), &[], false)?;
-                capture_order.push_str(&observation_order(session, "conversation", &rows)?);
+                snapshot.orders.insert(
+                    session.to_owned(),
+                    observation_order(session, "conversation", &rows)?,
+                );
                 let (raw, variants) = messages(&rows)?;
                 overlap.extend(variants.keys().cloned());
                 snapshot.sessions.insert(session.into(), variants);
@@ -605,98 +806,147 @@ pub fn run(
                     Some(false) => vec!["active"],
                     None => vec![],
                 };
-                exports.push(bundle(
-                    &tenant,
-                    &agent,
-                    session,
-                    "messages",
-                    &raw,
-                    status.clone(),
-                    false,
-                )?);
                 let complete_metadata: String = conversations
                     .iter()
                     .filter(|row| row["id"] == session)
                     .map(|row| crate::import::canonical_json(row) + "\n")
                     .collect();
-                exports.push(bundle(
-                    &tenant,
+                let recorded = snapshot.cursors.entry(session.to_owned()).or_default();
+                recorded.insert("messages".to_owned(), hash(raw.as_bytes()));
+                recorded.insert(
+                    "conversation-metadata".to_owned(),
+                    hash(complete_metadata.as_bytes()),
+                );
+                snapshot.rows.insert(session.to_owned(), row_cursor.clone());
+                // Two content cursors for the two conversation classes: the
+                // raw the `file` block hashes and the metadata rows —
+                // everything except the bundle wrapper, whose `capturedAt`
+                // moves every pass. Where both match the published
+                // predecessors and the prior round settled its receipts, the
+                // conversation publishes nothing this round; one that moved
+                // republishes exactly its own pair.
+                let unchanged = previous.cursors.get(session).is_some_and(|prior| {
+                    prior.get("messages").is_some_and(|value| {
+                        value == &hash(raw.as_bytes())
+                            && prior.get("conversation-metadata").is_some_and(|metadata| {
+                                metadata == &hash(complete_metadata.as_bytes())
+                            })
+                    })
+                });
+                if unchanged {
+                    continue;
+                }
+                publish(
+                    inbox,
+                    &mut report,
+                    &mut snapshot,
                     &agent,
+                    &tenant,
+                    session,
+                    "messages",
+                    &raw,
+                    status.clone(),
+                    false,
+                )?;
+                publish(
+                    inbox,
+                    &mut report,
+                    &mut snapshot,
+                    &agent,
+                    &tenant,
                     session,
                     "conversation-metadata",
                     &complete_metadata,
                     status,
                     false,
-                )?);
+                )?;
+                if let Some(pending) = &mut snapshot.backlog {
+                    pending.remove(session);
+                }
+                // Durable before the walk reaches for the next conversation,
+                // so a round that stops here keeps every published
+                // conversation plus the position the next one continues
+                // from.
+                db.execute(
+                    "INSERT INTO agents VALUES (?1,NULL,?2) ON CONFLICT(scope) DO UPDATE SET pending=excluded.pending",
+                    rusqlite::params![scope, serde_json::to_string(&snapshot)?],
+                )?;
+                db.execute_batch("COMMIT; BEGIN IMMEDIATE;")?;
             }
+            // A conversation that left the source during a backfill can no
+            // longer be first-published; the listing this round decides what
+            // is still there, so the position drops what is gone instead of
+            // owing it forever. Its bytes were never archived, so the
+            // observation surface stays honest: there is nothing recorded to
+            // compare against, and none is invented.
+            if let Some(pending) = &mut snapshot.backlog {
+                let inventory = per_agent_conversations.get(&agent);
+                pending.retain(|id| inventory.is_some_and(|set| set.contains(id)));
+            }
+            if snapshot
+                .backlog
+                .as_ref()
+                .is_some_and(|pending| !pending.is_empty())
+            {
+                // The budget stopped this agent mid-backfill: its remaining
+                // conversations stay pending, its agent-level material is
+                // unwritten, and the round that finishes the walk publishes
+                // the rest.
+                db.execute(
+                    "INSERT INTO agents VALUES (?1,NULL,?2) ON CONFLICT(scope) DO UPDATE SET pending=excluded.pending",
+                    rusqlite::params![scope, serde_json::to_string(&snapshot)?],
+                )?;
+                db.execute_batch("COMMIT; BEGIN IMMEDIATE;")?;
+                report.incomplete += 1;
+                return Ok(());
+            }
+            // The position clears with the walk: this scope is caught up,
+            // and it is the snapshot (not a local variable) that persists.
+            snapshot.backlog = None;
+            let default = format!("agent-default-{agent}");
             let rows = api.pages(&format!("/v1/agents/{agent}/messages"), &[], true)?;
-            capture_order.push_str(&observation_order(
-                &format!("agent-default-{agent}"),
-                "agent-window",
-                &rows,
-            )?);
+            snapshot.orders.insert(
+                default.clone(),
+                observation_order(&default, "agent-window", &rows)?,
+            );
             // Same-id different renderings on the agent route belong to their
             // observed conversation too; preserve them instead of discarding.
             let extras: Vec<Value> = rows
                 .iter()
-                .filter(|r| id(r).is_ok_and(|id| !overlap.contains(id)))
+                .filter(|r| id(r).is_ok_and(|identified| !overlap.contains(identified)))
                 .cloned()
                 .collect();
-            let default = format!("agent-default-{agent}");
-            let (raw, variants) = messages(&extras)?;
+            let (default_raw, variants) = messages(&extras)?;
             snapshot.sessions.insert(default.clone(), variants);
-            exports.push(bundle(
-                &tenant,
-                &agent,
-                &default,
-                "messages",
-                &raw,
-                vec![],
-                true,
-            )?);
             let listing: String = agents
                 .iter()
                 .filter(|row| row["id"] == agent)
                 .map(|row| crate::import::canonical_json(row) + "\n")
                 .collect();
-            exports.push(bundle(
-                &tenant,
-                &agent,
-                &default,
-                "agent-listing",
-                &listing,
-                vec![],
-                true,
-            )?);
-            exports.push(bundle(
-                &tenant,
-                &agent,
-                &default,
-                "agent-metadata",
-                &(crate::import::canonical_json(&metadata) + "\n"),
-                vec![],
-                true,
-            )?);
+            let metadata_raw = crate::import::canonical_json(&metadata) + "\n";
             // Retain the complete window, including overlapping renderings.
-            let (window, _) = messages(&rows)?;
-            exports.push(bundle(
-                &tenant,
-                &agent,
-                &default,
-                "agent-window",
-                &window,
-                vec![],
-                true,
-            )?);
-            exports.push(bundle(
-                &tenant,
-                &agent,
-                &default,
-                "capture-order",
-                &capture_order,
-                vec![],
-                true,
-            )?);
+            let (window_raw, _) = messages(&rows)?;
+            // The capture order assembles from the per-session pieces the
+            // walks recorded — conversations in listing order, then the
+            // agent window. The pieces carry across rounds in the journal,
+            // so a round that skipped every fetch (nothing moved at the
+            // source) re-emits a byte-identical record whose cursor
+            // matches, and a round that clears a multi-round backfill
+            // re-emits the complete record from the pieces the earlier
+            // rounds left beside their publications.
+            let mut capture_order = String::new();
+            for conversation in conversations.iter().filter(|c| c["agent_id"] == agent) {
+                let session = id(conversation)?;
+                if !conversation_ids.contains(session) {
+                    continue;
+                }
+                if let Some(order) = snapshot.orders.get(session) {
+                    capture_order.push_str(order);
+                }
+            }
+            if let Some(order) = snapshot.orders.get(&default) {
+                capture_order.push_str(order);
+            }
             let now = chrono::Utc::now().to_rfc3339();
             let mut observations = String::new();
             for (session, old) in &previous.sessions {
@@ -719,16 +969,91 @@ pub fn run(
                     }
                 }
             }
+            // Agent-level classes, each under its own content cursor: the
+            // default-session extras, the listing and metadata rows, the
+            // complete window, and the capture order. A steady round where
+            // nothing moved republishes none of them.
+            let agent_level: [(&str, &str, String); 5] = [
+                (
+                    "messages",
+                    default_raw.as_str(),
+                    hash(default_raw.as_bytes()),
+                ),
+                ("agent-listing", listing.as_str(), hash(listing.as_bytes())),
+                (
+                    "agent-metadata",
+                    metadata_raw.as_str(),
+                    hash(metadata_raw.as_bytes()),
+                ),
+                (
+                    "agent-window",
+                    window_raw.as_str(),
+                    hash(window_raw.as_bytes()),
+                ),
+                (
+                    "capture-order",
+                    capture_order.as_str(),
+                    hash(capture_order.as_bytes()),
+                ),
+            ];
+            // A round that clears a multi-round backfill assembles its
+            // agent-level classes from live window rows plus the carried
+            // pieces, so what it publishes is complete for the exact same
+            // reason a full round's is.
+            for (class, raw, cursor) in agent_level {
+                let unchanged = previous.required.is_empty()
+                    && previous
+                        .cursors
+                        .get(&default)
+                        .and_then(|prior| prior.get(class))
+                        == Some(&cursor);
+                snapshot
+                    .cursors
+                    .entry(default.clone())
+                    .or_default()
+                    .insert(class.to_owned(), cursor);
+                if !unchanged {
+                    publish(
+                        inbox,
+                        &mut report,
+                        &mut snapshot,
+                        &agent,
+                        &tenant,
+                        &default,
+                        class,
+                        raw,
+                        vec![],
+                        true,
+                    )?;
+                }
+            }
             if !observations.is_empty() {
-                exports.push(bundle(
-                    &tenant,
-                    &agent,
-                    &default,
-                    "observations",
-                    &observations,
-                    vec![],
-                    true,
-                )?);
+                let cursor = observation_cursor(&observations);
+                let unchanged = previous.required.is_empty()
+                    && previous
+                        .cursors
+                        .get(&default)
+                        .and_then(|prior| prior.get("observations"))
+                        == Some(&cursor);
+                snapshot
+                    .cursors
+                    .entry(default.clone())
+                    .or_default()
+                    .insert("observations".to_owned(), cursor);
+                if !unchanged {
+                    publish(
+                        inbox,
+                        &mut report,
+                        &mut snapshot,
+                        &agent,
+                        &tenant,
+                        &default,
+                        "observations",
+                        &observations,
+                        vec![],
+                        true,
+                    )?;
+                }
             }
             // Keep the cumulative variant set: a temporarily missing rendering
             // must not become a false edit when the server serves it again.
@@ -745,18 +1070,10 @@ pub fn run(
             fs::create_dir_all(stage)?;
             // Journal durable publication before sealing/proof. The pass lock
             // remains held while SQLite commits, including crash recovery.
-            for bytes in &exports {
-                let digest = hash(bytes);
-                atomic(&inbox.join(format!("letta-{digest}.json")), bytes)?;
-                snapshot.required.insert(digest.clone());
-                if !snapshot.bundles.contains(&digest) {
-                    snapshot.bundles.push(digest);
-                }
-                report.bundles += 1;
-            }
             db.execute("INSERT INTO agents VALUES (?1,NULL,?2) ON CONFLICT(scope) DO UPDATE SET pending=excluded.pending", rusqlite::params![scope, serde_json::to_string(&snapshot)?])?;
             db.execute_batch("COMMIT; BEGIN IMMEDIATE;")?;
-            let proven = prove_receipts(&snapshot.required, inbox, stage, machine, proof)?;
+            let proven =
+                prove_receipts(&snapshot.required, inbox, stage, machine, proof, deadline)?;
             if proven {
                 snapshot.required.clear();
                 db.execute(
@@ -779,6 +1096,33 @@ pub fn run(
             report.incomplete += 1;
         }
     }
+    // Backfill progress: what the listing says exists minus what the scopes'
+    // journals still owe. A scope this round never reached has no row, so
+    // its conversations count as owed — `status` words the difference as
+    // pulled-so-far of an estimated total, never a completion claim.
+    let mut remaining = 0usize;
+    for agent_id in &known {
+        let scope = format!("{tenant}/{agent_id}");
+        let row = db
+            .query_row("SELECT pending FROM agents WHERE scope=?1", [&scope], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?;
+        remaining += match row {
+            None => per_agent_conversations
+                .get(agent_id)
+                .map_or(0, |set| set.len()),
+            Some(serialized) => serde_json::from_str::<Snapshot>(&serialized)?
+                .backlog
+                .map_or(0, |pending| pending.len()),
+        };
+    }
+    if remaining > 0 {
+        report.backfill = Some(Backfill {
+            pulled: total_conversations.saturating_sub(remaining),
+            estimated_total: total_conversations,
+        });
+    }
     db.execute_batch("COMMIT")?;
     Ok(report)
 }
@@ -788,8 +1132,19 @@ fn prove_receipts(
     stage: &Path,
     machine: &str,
     proof: &dyn ArchiveProof,
+    deadline: Instant,
 ) -> Result<bool> {
-    let mut proven = true;
+    if required.is_empty() {
+        return Ok(true);
+    }
+    // The proof phase is bounded by the same deadline the requests obey: a
+    // round whose budget the walk left alone can still prove what it
+    // sealed, but no phase of a round can borrow unbounded time from the
+    // next pass — a scheduled pass that overruns its period contends on
+    // the state lock with its own successor, which is the frozen-forever
+    // failure shape the deadline exists to refuse.
+    ensure!(Instant::now() < deadline, "Letta proof budget exhausted");
+    let mut outcomes = Vec::with_capacity(required.len());
     for digest in required {
         let name = format!("letta-{digest}.json");
         let bytes = fs::read(inbox.join(&name))
@@ -798,9 +1153,67 @@ fn prove_receipts(
         ensure!(hash(&bytes) == *digest, "pending bundle digest mismatch");
         let outcome = crate::inbox::seal_payload(&name, &bytes, stage, machine, 1000, None, None)
             .map_err(|_| anyhow::anyhow!("Letta seal unavailable"))?;
-        proven &= proof.holds(machine, &outcome)?;
+        outcomes.push(outcome);
     }
-    Ok(proven)
+    // One proof query for the whole set: each destination is asked about
+    // every receipt in one batch, so a repository is opened once per
+    // destination per round, never once per bundle.
+    ensure!(Instant::now() < deadline, "Letta proof budget exhausted");
+    Ok(proof
+        .holds_many(machine, &outcomes)?
+        .iter()
+        .all(|held| *held))
+}
+
+/// Publish one bundle: an inbox@3 file named by its digest, plus the
+/// journal entry (`required`, `bundles`) this round's archive proof settles
+/// against. `capturedAt` lives in the bundle wrapper and never enters a
+/// cursor, so two publications of identical content are identical only
+/// in what the cursors compare — which is the point of the cursors.
+#[allow(clippy::too_many_arguments)]
+fn publish(
+    inbox: &Path,
+    report: &mut Report,
+    snapshot: &mut Snapshot,
+    agent: &str,
+    tenant: &str,
+    session: &str,
+    class: &str,
+    raw: &str,
+    status: Vec<&str>,
+    window: bool,
+) -> Result<()> {
+    let bytes = bundle(tenant, agent, session, class, raw, status, window)?;
+    let digest = hash(&bytes);
+    atomic(&inbox.join(format!("letta-{digest}.json")), &bytes)?;
+    snapshot.required.insert(digest.clone());
+    if !snapshot.bundles.contains(&digest) {
+        snapshot.bundles.push(digest);
+    }
+    report.bundles += 1;
+    Ok(())
+}
+
+/// The observations cursor: the content of the observation lines with the
+/// moment-of-observation field removed, so a repeated observation — a
+/// conversation still absent at source — is not republished every round
+/// only because its timestamp moved. Nothing else in an observation line
+/// is time-dependent.
+fn observation_cursor(observations: &str) -> String {
+    let mut canonical = String::new();
+    for line in observations.lines() {
+        match serde_json::from_str::<Value>(line) {
+            Ok(mut value) => {
+                if let Some(map) = value.as_object_mut() {
+                    map.remove("observed_at");
+                }
+                canonical.push_str(&value.to_string());
+                canonical.push('\n');
+            }
+            Err(_) => continue,
+        }
+    }
+    hash(canonical.as_bytes())
 }
 
 use rusqlite::OptionalExtension;
@@ -917,16 +1330,28 @@ mod tests {
                 .unwrap();
             serde_json::from_str::<Value>(&serialized).unwrap()
         };
-        for _ in 0..3 {
+        // Three proven rounds of an unchanged source: the first publishes
+        // the agent's bundles, the later two publish nothing — a round the
+        // cursors match is a no-op, which is the property that keeps a
+        // caught-up account's steady state at zero re-sends.
+        let first = pull(true);
+        assert_eq!(first.committed, 1);
+        assert!(first.bundles > 0, "the first round publishes the agent");
+        let snapshot = pending();
+        assert_eq!(snapshot["bundles"].as_array().unwrap().len(), first.bundles);
+        for _ in 0..2 {
             let report = pull(true);
             assert_eq!(report.committed, 1);
-            let snapshot = pending();
             assert_eq!(
-                snapshot["bundles"].as_array().unwrap().len(),
-                report.bundles
+                report.bundles, 0,
+                "an unchanged proven source republishes nothing"
             );
         }
+        // A source that changed under an unprovable proof leaves fresh
+        // receipts pending — the one state that must record incomplete.
+        server.mode.store(1, Ordering::SeqCst);
         assert_eq!(pull(false).incomplete, 1);
+        server.mode.store(0, Ordering::SeqCst);
         let before = pending();
         for _ in 0..3 {
             let report = pull(false);
@@ -937,7 +1362,11 @@ mod tests {
             );
             assert_eq!(pending(), before);
         }
+        // The settling round proves the pending receipts and then proves
+        // the source is unchanged by its cursors: complete, with the
+        // journal exactly as small as the changed content.
         assert_eq!(pull(true).committed, 1);
+        assert_eq!(pull(true).incomplete, 0);
     }
 
     #[test]
@@ -1068,6 +1497,17 @@ mod tests {
                     }
                     let mode = m.load(Ordering::SeqCst);
                     let after = path.contains("after=");
+                    // The conversation listing row changes with the modes that
+                    // change the conversation — that is how a provider's row
+                    // says "this conversation moved", and the steady round's
+                    // row cursor reads exactly this.
+                    let row_updated_at = if mode == 1 {
+                        "2026-02-02T00:00:00Z"
+                    } else if mode == 2 {
+                        "2026-03-03T00:00:00Z"
+                    } else {
+                        "2026-01-01T00:00:00Z"
+                    };
                     let mut status = "200 OK";
                     let mut headers = "";
                     let body = if path.starts_with("/v1/environments") {
@@ -1094,15 +1534,11 @@ mod tests {
                         status = "503 Service Unavailable";
                         headers = "Retry-After: 0\r\n";
                         json!({})
-                    } else if mode == 12
+                    } else if (mode == 12
                         && path.starts_with("/v1/agents/?")
-                        && g.swap(1, Ordering::SeqCst) == 0
-                    {
-                        status = "429 Too Many Requests";
-                        headers = "Retry-After: 1\r\n";
-                        json!({})
-                    } else if path.starts_with("/v1/agents/agent-visible/messages")
-                        && r.fetch_add(1, Ordering::SeqCst) == 0
+                        && g.swap(1, Ordering::SeqCst) == 0)
+                        || (path.starts_with("/v1/agents/agent-visible/messages")
+                            && r.fetch_add(1, Ordering::SeqCst) == 0)
                     {
                         status = "429 Too Many Requests";
                         headers = "Retry-After: 1\r\n";
@@ -1110,15 +1546,45 @@ mod tests {
                     } else if path.starts_with("/v1/agents/?") {
                         if after {
                             json!([])
+                        } else if mode == 13 {
+                            json!([{"id":"agent-big"}])
                         } else {
                             json!([{"id":"agent-visible"}])
                         }
                     } else if path.starts_with("/v1/conversations/?") {
                         assert!(path.contains("archive_status=all"));
+                        if mode == 13 {
+                            // The oversized-account fixture: one agent, many
+                            // conversations, all changing nothing between
+                            // rounds, so the backfill spans rounds on budget
+                            // and the steady rounds cost only the listings.
+                            if after {
+                                json!([])
+                            } else {
+                                let conversations: Vec<Value> = (1..=40)
+                                    .map(|n| {
+                                        json!({"id":format!("conv-{n:02}"),
+                                               "agent_id":"agent-big",
+                                               "archived":false,
+                                               "updated_at":"2026-01-01T00:00:00Z"})
+                                    })
+                                    .collect();
+                                json!(conversations)
+                            }
+                        } else if after {
+                            json!([])
+                        } else {
+                            json!([{"id":"conv-one","agent_id":"agent-visible","archived":true,"is_subagent":true,"unknown":null,"updated_at":row_updated_at}])
+                        }
+                    } else if mode == 13 && path.starts_with("/v1/conversations/conv-") {
+                        // One message page plus its terminator per
+                        // conversation: two paced requests each (plus the
+                        // durable publication commits), the cost the backfill
+                        // rounds are budgeted against.
                         if after {
                             json!([])
                         } else {
-                            json!([{"id":"conv-one","agent_id":"agent-visible","archived":true,"is_subagent":true,"unknown":null}])
+                            json!([{"id":"message-a","seq_id":1,"content":"synthetic"}])
                         }
                     } else if path.starts_with("/v1/conversations/conv-one/messages") {
                         if (after && path.contains("message-b")) || mode == 2 {
@@ -1135,7 +1601,7 @@ mod tests {
                             json!([{"id":"message-window","seq_id":3,"tool_returns":[{"unknown":null}]}])
                         }
                     } else if path.starts_with("/v1/agents/agent-") {
-                        json!({"id":if path.contains("agent-hidden") {"agent-hidden"} else {"agent-visible"},"hidden":path.contains("agent-hidden"),"unknown":null})
+                        json!({"id":if mode == 13 {"agent-big"} else if path.contains("agent-hidden") {"agent-hidden"} else {"agent-visible"},"hidden":path.contains("agent-hidden"),"unknown":null})
                     } else {
                         panic!("unexpected mock route");
                     };
@@ -1445,9 +1911,21 @@ mod tests {
                 .map(|entry| hash(&fs::read(entry.unwrap().path()).unwrap()))
                 .collect(),
         );
+        // A settle round whose proof holds exactly the prior receipts. The
+        // property this pins is the ordering: those receipts are proven
+        // *before* the round reaches for fresh captures, which succeed and
+        // land as this round's own pending rows. An unchanged source would
+        // re-derive the same cursors and publish nothing (the no-op a
+        // caught-up account's steady state is), so the round is given a
+        // source change to make the fresh captures real.
+        server.mode.store(1, Ordering::SeqCst);
         let fresh = pull(&held);
+        server.mode.store(0, Ordering::SeqCst);
         assert_eq!(fresh.committed, 2);
-        assert_eq!(fresh.incomplete, 2);
+        // Only the agent whose content moved leaves fresh pending receipts;
+        // the unchanged agent settles and then no-ops (nothing republished,
+        // nothing to prove).
+        assert_eq!(fresh.incomplete, 1);
         let db = rusqlite::Connection::open(root.join("state/letta.sqlite3")).unwrap();
         assert_eq!(
             db.query_row("SELECT COUNT(*) FROM agents WHERE cursor IS NULL AND json_array_length(json_extract(pending, '$.required')) > 0", [], |row| row
@@ -1455,7 +1933,7 @@ mod tests {
                 0
             ))
             .unwrap(),
-            2
+            1
         );
     }
 
@@ -1507,6 +1985,165 @@ mod tests {
         assert_eq!(cursor, None);
     }
 
+    /// The decision's steady-state promise: two rounds against an unchanged
+    /// source, and the second publishes nothing — zero new inbox bytes, zero
+    /// re-sends — while the round still completes (exit-shape incomplete 0),
+    /// because the listing rows match, the content cursors match and the
+    /// capture order reassembles to identical bytes from its carried pieces.
+    #[test]
+    fn second_unchanged_round_republishes_nothing() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let root = sandbox.root();
+        let local = root.join("agents");
+        fs::create_dir_all(local.join("agent-hidden")).unwrap();
+        let server = Server::start();
+        let pull = || {
+            run(
+                &mut server.api(),
+                "synthetic-account",
+                &local,
+                &root.join("inbox"),
+                &root.join("state"),
+                &root.join("stage"),
+                "synthetic-machine",
+                &Proof(true),
+            )
+            .unwrap()
+        };
+        let first = pull();
+        assert!(first.bundles > 0, "the first round must publish");
+        assert_eq!(first.incomplete, 0);
+        let inbox_files = || fs::read_dir(root.join("inbox")).unwrap().count();
+        let requests_before = server.requests.load(Ordering::SeqCst);
+        let before = inbox_files();
+        let second = pull();
+        assert_eq!(
+            second.bundles, 0,
+            "an unchanged source republishes nothing: no bytes, no re-sends"
+        );
+        assert_eq!(second.incomplete, 0, "the no-op round still completes");
+        assert_eq!(second.committed, 2);
+        assert_eq!(
+            inbox_files(),
+            before,
+            "the unchanged round writes no publication bytes"
+        );
+        let steady_requests = server.requests.load(Ordering::SeqCst) - requests_before;
+        assert!(
+            steady_requests <= 12,
+            "the steady round reads listings and windows, not every conversation again: \
+             {steady_requests} requests"
+        );
+        // And it stays a no-op on the third round too — the second round
+        // re-derived nothing that could grow.
+        assert_eq!(pull().bundles, 0);
+        assert_eq!(inbox_files(), before);
+    }
+
+    /// The decision's large-account promise: an account too big for one
+    /// round's budget completes across several rounds, each continuing from
+    /// the persisted position, reporting progress (`pulled` of the estimated
+    /// total) while still honestly "did not finish reading" — and once
+    /// caught up, a steady round costs the listings and windows only.
+    #[test]
+    fn oversized_account_backfills_across_rounds_with_progress() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let root = sandbox.root();
+        let server = Server::start();
+        server.mode.store(13, Ordering::SeqCst);
+        // The fixture: one agent, forty conversations, two paced requests
+        // each plus the durable per-conversation commits — a whole first
+        // pull costs many multiples of one round's 900 ms budget at this
+        // 25 ms pace, so the account provably spans several rounds.
+        let pull = || {
+            run(
+                &mut Api::new(
+                    &server.base,
+                    None,
+                    Duration::from_millis(25),
+                    Duration::from_millis(900),
+                    DEFAULT_PAGE_SIZE,
+                )
+                .unwrap(),
+                "synthetic-account",
+                &root.join("agents"),
+                &root.join("inbox"),
+                &root.join("state"),
+                &root.join("stage"),
+                "synthetic-machine",
+                &Proof(true),
+            )
+            .unwrap()
+        };
+        let mut rounds = 0usize;
+        let mut pulled_so_far = 0usize;
+        loop {
+            rounds += 1;
+            assert!(
+                rounds <= 12,
+                "the backfill must complete within a few rounds, still running after {rounds}"
+            );
+            let report = pull();
+            match &report.backfill {
+                Some(backfill) => {
+                    // Monotone, not strictly increasing per round: a round
+                    // that spends its whole budget part-way through one
+                    // conversation is a legal zero-progress round under
+                    // timing jitter; what the position guarantees is that
+                    // it never goes backwards and that the total walk is
+                    // bounded by the budget, not restarted.
+                    assert!(
+                        backfill.pulled >= pulled_so_far,
+                        "a backfill round must never lose progress: \
+                         {pulled_so_far} -> {}",
+                        backfill.pulled
+                    );
+                    assert_eq!(backfill.estimated_total, 40);
+                    assert_eq!(
+                        report.incomplete, 1,
+                        "a mid-backfill round did not finish reading"
+                    );
+                    pulled_so_far = backfill.pulled;
+                }
+                None => break,
+            }
+        }
+        assert!(
+            rounds >= 3,
+            "the fixture is budgeted to span rounds, completed in {rounds}"
+        );
+        // Every conversation archived exactly once: two publication bundles
+        // each, plus the agent-level set published by the clearing round.
+        let published = fs::read_dir(root.join("inbox")).unwrap().count();
+        assert_eq!(
+            published,
+            40 * 2 + 5,
+            "each conversation archived exactly once"
+        );
+        // The steady round is a no-op and costs the listings and windows,
+        // not a full re-walk: it must fit even a fraction of one round's
+        // budget.
+        let requests_before = server.requests.load(Ordering::SeqCst);
+        let steady = pull();
+        assert_eq!(
+            steady.bundles, 0,
+            "the caught-up account republishes nothing"
+        );
+        assert_eq!(steady.incomplete, 0);
+        assert_eq!(steady.backfill, None);
+        assert_eq!(
+            fs::read_dir(root.join("inbox")).unwrap().count(),
+            published,
+            "the steady round republishes nothing"
+        );
+        let steady_requests = server.requests.load(Ordering::SeqCst) - requests_before;
+        assert!(
+            steady_requests <= 12,
+            "the steady round reads listings and windows, not every conversation: \
+             {steady_requests} requests"
+        );
+    }
+
     #[test]
     fn sequences_identifiers_and_retry_dates_are_checked() {
         assert!(messages(&[json!({"id":"message-a"})]).is_err());
@@ -1544,6 +2181,7 @@ mod tests {
                         account_id: account.map(str::to_owned),
                         inbox: inbox.map(str::to_owned),
                         state: None,
+                        api_key: None,
                         pace_ms: None,
                         budget_seconds: None,
                         page_size: page,
@@ -1552,21 +2190,15 @@ mod tests {
                 ..Default::default()
             };
         // Absent section and empty `[pull]` table are both "not declared".
-        assert_eq!(
-            pass_pull(&crate::config::Config::default())
-                .unwrap()
-                .is_none(),
-            true
-        );
-        assert_eq!(
-            pass_pull(&crate::config::Config {
-                pull: Some(crate::config::PullSectionConfig::default()),
-                ..Default::default()
-            })
+        assert!(pass_pull(&crate::config::Config::default())
             .unwrap()
-            .is_none(),
-            true
-        );
+            .is_none());
+        assert!(pass_pull(&crate::config::Config {
+            pull: Some(crate::config::PullSectionConfig::default()),
+            ..Default::default()
+        })
+        .unwrap()
+        .is_none());
         // A valid resolution applies the documented defaults exactly once;
         // the producer state defaults beside the pass's own state.
         let resolved = pass_pull(&declared(
@@ -1627,6 +2259,26 @@ mod tests {
             .unwrap()
             .pace_ms = Some(MAX_PACE_MS + 1);
         assert!(error(overpaced).contains("pull.letta.pace_ms"));
+        // The declared path runs unattended on a timer, so its band is
+        // narrower than the interactive command's: pacing below one request
+        // per second would hammer exactly the provider nobody is watching,
+        // and a budget that can reach the timer's own period would contend
+        // on the state lock with the next pass.
+        for underpaced in [0u64, MIN_PASS_PACE_MS - 1] {
+            let mut floored = declared(Some("synthetic-account"), Some("/inbox"), Some(100));
+            floored
+                .pull
+                .as_mut()
+                .unwrap()
+                .letta
+                .as_mut()
+                .unwrap()
+                .pace_ms = Some(underpaced);
+            assert!(
+                error(floored).contains("pull.letta.pace_ms"),
+                "an unattended pass may not pace below {MIN_PASS_PACE_MS} ms"
+            );
+        }
         let mut unbudgeted = declared(Some("synthetic-account"), Some("/inbox"), Some(100));
         unbudgeted
             .pull
@@ -1637,6 +2289,41 @@ mod tests {
             .unwrap()
             .budget_seconds = Some(0);
         assert!(error(unbudgeted).contains("pull.letta.budget_seconds"));
+        for periodic in [PASS_MAX_BUDGET_SECONDS + 1, MAX_BUDGET_SECONDS] {
+            let mut overlong = declared(Some("synthetic-account"), Some("/inbox"), Some(100));
+            overlong
+                .pull
+                .as_mut()
+                .unwrap()
+                .letta
+                .as_mut()
+                .unwrap()
+                .budget_seconds = Some(periodic);
+            assert!(
+                error(overlong).contains("pull.letta.budget_seconds"),
+                "an unattended pass may not budget up to or past the hourly period"
+            );
+        }
+        // The floor and the cap are the declared path's own: the resolvers
+        // accept them.
+        let mut lawful = declared(Some("synthetic-account"), Some("/inbox"), Some(100));
+        lawful
+            .pull
+            .as_mut()
+            .unwrap()
+            .letta
+            .as_mut()
+            .unwrap()
+            .pace_ms = Some(MIN_PASS_PACE_MS);
+        lawful
+            .pull
+            .as_mut()
+            .unwrap()
+            .letta
+            .as_mut()
+            .unwrap()
+            .budget_seconds = Some(PASS_MAX_BUDGET_SECONDS);
+        assert!(pass_pull(&lawful).unwrap().is_some());
         // An explicit state is honoured verbatim.
         let mut restated = declared(Some("synthetic-account"), Some("/inbox"), Some(100));
         restated
@@ -1650,6 +2337,61 @@ mod tests {
         assert_eq!(
             pass_pull(&restated).unwrap().unwrap().state,
             PathBuf::from("/elsewhere/letta")
+        );
+    }
+
+    /// The pass's credential comes from the config's resolved
+    /// `pull.letta.api_key` declaration when there is one, and from the
+    /// environment only when there is not — the forms a timer can reach and
+    /// the form it cannot, both reaching the same one pipeline.
+    #[test]
+    fn pass_pull_carries_the_resolved_credential_declaration() {
+        let declared = |api_key: Option<&str>| crate::config::Config {
+            pull: Some(crate::config::PullSectionConfig {
+                letta: Some(crate::config::LettaPullConfig {
+                    account_id: Some("synthetic-account".to_string()),
+                    inbox: Some("/inbox".to_string()),
+                    state: None,
+                    api_key: api_key.map(str::to_owned),
+                    pace_ms: None,
+                    budget_seconds: None,
+                    page_size: Some(100),
+                }),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            pass_pull(&declared(None)).unwrap().unwrap().api_key,
+            None,
+            "no declaration means the environment fallback, carried as None"
+        );
+        assert_eq!(
+            pass_pull(&declared(Some("  "))).unwrap().unwrap().api_key,
+            None,
+            "a blank declaration resolves to nothing, never to a blank credential"
+        );
+        // The config loader resolves references before the pass sees them,
+        // so what arrives here is already the secret — never logged, only
+        // passed to the API client.
+        assert_eq!(
+            pass_pull(&declared(Some("synthetic-resolved-secret")))
+                .unwrap()
+                .unwrap()
+                .api_key
+                .as_deref(),
+            Some("synthetic-resolved-secret")
+        );
+        // And the client accepts a resolved credential without touching the
+        // environment at all.
+        assert!(
+            Api::environment(
+                Some("synthetic-resolved-secret".to_owned()),
+                Duration::from_secs(1),
+                Duration::from_secs(10),
+                DEFAULT_PAGE_SIZE,
+            )
+            .is_ok(),
+            "a resolved declaration is a usable credential without the environment"
         );
     }
 

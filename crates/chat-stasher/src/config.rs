@@ -245,6 +245,14 @@ pub struct LettaPullConfig {
     /// Durable private producer state; preserve its identity salt across
     /// restores. Default: the state directory's `api-pull/letta`.
     pub state: Option<String>,
+    /// The provider credential. Accepts the shared credential-reference
+    /// forms — `file:PATH`, `env-file:PATH:NAME`, `keychain:ACCOUNT` — or a
+    /// literal; a reference that cannot be resolved refuses the config,
+    /// naming this key. This is the form a timer can actually reach: a
+    /// launchd or systemd job sees no login shell, so an exported
+    /// `LETTA_API_KEY` is invisible to exactly the process the declared
+    /// producer runs in. Never logged.
+    pub api_key: Option<String>,
     /// Serial request pacing in milliseconds. Default: ~1 request/second.
     pub pace_ms: Option<u64>,
     /// Whole-pass wall-clock budget in seconds. Default: 600.
@@ -1196,6 +1204,22 @@ fn resolve_option_credential_refs(cfg: &mut Config) -> Result<(), String> {
             }
         }
     }
+    // The declared pull producer's credential goes through the same
+    // resolver, fail-closed for the same reason: a timer-unreachable
+    // reference would make every scheduled pass exit 3 at the credential
+    // check, which is exactly the invisible failure this refusal exists to
+    // turn into the one sentence the user can act on.
+    if let Some(letta) = cfg.pull.as_mut().and_then(|pull| pull.letta.as_mut()) {
+        if let Some(value) = &letta.api_key {
+            match crate::credentials::resolve(value) {
+                crate::credentials::Resolved::NotReference => {}
+                crate::credentials::Resolved::Value(secret) => letta.api_key = Some(secret),
+                crate::credentials::Resolved::Missing(reason) => {
+                    return Err(format!("pull.letta.api_key: {reason}"));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2001,6 +2025,78 @@ mod tests {
     /// environment, and one that cannot be resolved refuses the config naming
     /// the option — while `env:NAME` keeps its documented lenient behaviour.
     #[test]
+    /// W964: the declared pull producer's credential goes through the same
+    /// shared resolver, fail-closed with the key named — the timer-reachable
+    /// form the `[pull.letta]` section is built around.
+    fn pull_letta_api_key_resolves_and_refuses_named() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let secret_file = dir.path().join("letta-key");
+        std::fs::write(&secret_file, "synthetic-letta-secret\n").unwrap();
+
+        let declared = format!(
+            "[pull.letta]\naccount_id = \"synthetic-account\"\ninbox = \
+             \"/tmp/w964-synthetic-inbox\"\napi_key = \"file:{}\"\n",
+            secret_file.display()
+        );
+        let cfg = Config::from_text(&declared).expect("a resolvable producer key must load");
+        assert_eq!(
+            cfg.pull
+                .as_ref()
+                .unwrap()
+                .letta
+                .as_ref()
+                .unwrap()
+                .api_key
+                .as_deref(),
+            Some("synthetic-letta-secret"),
+            "the reference must resolve to the file's secret, newline trimmed"
+        );
+        assert!(
+            cfg.pull
+                .as_ref()
+                .unwrap()
+                .letta
+                .as_ref()
+                .unwrap()
+                .api_key
+                .as_deref()
+                .is_some_and(|key| key != "synthetic-letta-secret\n"),
+            "the resolved credential is the trimmed secret, never labeled by form"
+        );
+
+        let missing = format!(
+            "[pull.letta]\naccount_id = \"synthetic-account\"\ninbox = \
+             \"/tmp/w964-synthetic-inbox\"\napi_key = \"file:/no/such/producer-key\"\n"
+        );
+        let err = Config::from_text(&missing)
+            .expect_err("an unreadable producer credential reference must refuse the config");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("pull.letta.api_key"),
+            "the refusal must name the producer key: {text}"
+        );
+        assert!(
+            err.downcast_ref::<CredentialRefused>().is_some(),
+            "the producer credential refusal keeps the typed classification"
+        );
+
+        let literal = "[pull.letta]\naccount_id = \"synthetic-account\"\ninbox = \
+             \"/tmp/w964-synthetic-inbox\"\napi_key = \"synthetic-literal\"\n";
+        let cfg = Config::from_text(literal).expect("a literal credential must pass through");
+        assert_eq!(
+            cfg.pull
+                .as_ref()
+                .unwrap()
+                .letta
+                .as_ref()
+                .unwrap()
+                .api_key
+                .as_deref(),
+            Some("synthetic-literal"),
+            "a literal is a valid declaration, left as written"
+        );
+    }
+
     fn credential_references_resolve_and_a_missing_one_refuses_the_config() {
         let dir = tempfile::TempDir::new().unwrap();
         let secret_file = dir.path().join("secret");

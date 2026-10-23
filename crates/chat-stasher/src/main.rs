@@ -234,7 +234,9 @@ enum Command {
     /// Encrypt and post an explicit file using an environment posting key.
     /// Creates no archive key or machine identity. Currently opens fs:// inboxes.
     Send(SendArgs),
-    /// Pull a declared fs:// inbox into sealed stage; run-once never pulls.
+    /// Pull a declared fs:// inbox into sealed stage; `run-once` never pulls
+    /// a remote inbox (a declared `[pull.letta]` producer is the pass's own
+    /// separate pull step, not this command).
     /// Archive proof is not wired yet: sealed objects remain queued, exit 3.
     /// Retain <name>.rates.sqlite3 beside the inbox declaration across pulls;
     /// deleting or moving it can reset local hourly accounting. Waiting is the
@@ -340,7 +342,9 @@ enum Command {
     /// there.
     Schedule {
         /// Schedule only inbox-pull for this initialized inbox, independently
-        /// of the archive cycle. run-once never pulls remote inboxes.
+        /// of the archive cycle. run-once never pulls remote inboxes (a
+        /// declared `[pull.letta]` producer is pulled by its own step inside
+        /// the pass, not by inbox-pull).
         #[arg(long, global = true)]
         pull: Option<String>,
         /// Optional action. Without it, only render the templates.
@@ -8753,12 +8757,12 @@ fn run_once_pass(
 
 /// The declared Letta producer step of a scheduled pass: the same one-pipeline
 /// pull `chat-stasher pull letta` runs, with the `[pull.letta]` declaration
-/// resolved for the pass and the pass's own machine and stage. This is the
-/// production seam target; the tests inject a recording one so the wiring is
-/// provable without a credential or any network.
+/// resolved for the pass and the pass's own machine, stage and destination.
+/// This is the production seam target; the tests inject a recording one so
+/// the wiring is provable without a credential or any network.
 fn run_once_letta_pull(
     pull: &chat_stasher::letta::PassPull,
-    config: &Config,
+    pull_destinations: &[StoreConfig],
     machine: &str,
     stage: &Path,
 ) -> anyhow::Result<chat_stasher::letta::Report> {
@@ -8775,7 +8779,8 @@ fn run_once_letta_pull(
         pull.pace_ms,
         pull.budget_seconds,
         pull.page_size,
-        config,
+        pull.api_key.as_deref(),
+        pull_destinations,
         &home.join(".letta/agents"),
     )
 }
@@ -8795,7 +8800,7 @@ fn run_once_pass_with(
     keep_ssh_masters: bool,
     letta_pull: &dyn Fn(
         &chat_stasher::letta::PassPull,
-        &Config,
+        &[StoreConfig],
         &str,
         &Path,
     ) -> anyhow::Result<chat_stasher::letta::Report>,
@@ -8831,6 +8836,15 @@ fn run_once_pass_with(
     );
     let view = destination_view(&collect_cfg, &machine_name);
 
+    // The declared producer's archive proof checks the repository THIS pass
+    // pushes to — the same resolved destination `collect` accrues debt
+    // against and `push` settles against — not whatever the config would
+    // default the standalone command to. Without this, a pass named
+    // `--destination x` would prove its receipts against a different
+    // repository than the one it archived to, which is the one mismatch
+    // the proof phase exists to rule out.
+    let pull_destinations = vec![collect_cfg.clone()];
+
     // LETTA-P3: pull the declared `[pull.letta]` producer before the collect
     // step, so what it seals into the stage is archived by this same pass and
     // no separate command is needed. The step deliberately does not stop the
@@ -8851,7 +8865,7 @@ fn run_once_pass_with(
         Ok(None) => {}
         Ok(Some(pull)) => {
             let started = std::time::Instant::now();
-            let outcome = letta_pull(&pull, config, &machine_name, stage);
+            let outcome = letta_pull(&pull, &pull_destinations, &machine_name, stage);
             state.phases.letta_pull_ms = started.elapsed().as_millis() as u64;
             match outcome {
                 Ok(report) => {
@@ -8864,6 +8878,19 @@ fn run_once_pass_with(
                         report.committed,
                         report.incomplete
                     );
+                    if let Some(backfill) = &report.backfill {
+                        println!(
+                            "[run-once] pull letta backfill: pulled={}; estimated_total={}",
+                            backfill.pulled, backfill.estimated_total
+                        );
+                        state.pull_letta_backfill =
+                            Some(chat_stasher::runstate::PullLettaBackfill {
+                                pulled: backfill.pulled,
+                                estimated_total: backfill.estimated_total,
+                            });
+                    } else {
+                        state.pull_letta_backfill = None;
+                    }
                     if report.incomplete > 0 {
                         eprintln!(
                             "[run-once] pull letta incomplete: {} agent pass(es) did not finish \
@@ -8884,6 +8911,12 @@ fn run_once_pass_with(
             }
         }
     }
+    // The producer's fact is recorded the moment it is known, so the local
+    // steps below cannot erase it: a pass whose collect fails while the
+    // producer also went unread keeps both in the durable record, and
+    // `status` renders them as two lines (W964 #5: both are recorded,
+    // neither wins the `failed_step` slot alone).
+    state.pull_letta_unread = pull_letta_unread;
 
     let report = match chat_stasher::collect::collect(
         config,
@@ -19155,6 +19188,17 @@ fn cmd_status(
     };
     let info = run_state_info(&config);
     eprintln!("[run-once] {}", info.verdict.line);
+    // The second line of the two-line split: the archive cycle's health is
+    // the verdict above; when the last pass left the declared Letta producer
+    // unread, the producer's own sentence and its fix print here instead of
+    // being folded into a single unhealthy verdict. When there is none to
+    // say, status prints nothing extra.
+    if let Some(letta) = &info.verdict.letta {
+        eprintln!("[pull-letta] {}", letta.sentence);
+        if let Some(fix) = &letta.fix {
+            eprintln!("[pull-letta]     fix: {fix}");
+        }
+    }
 
     let scan = scanner::scan(&config);
     // Deliberately 3, not 1, when the scan fails. Nothing was scanned, so
@@ -19410,6 +19454,7 @@ fn run_state_info(config: &Config) -> RunStateInfo {
                     "backup_interval_secs is invalid: {error}. It is impossible to tell whether the timer is running as configured."
                 ),
                 healthy: false,
+                letta: None,
             },
             read,
             now_unix: now,
@@ -20656,10 +20701,8 @@ fn cmd_inbox_pull_observed(
         }
         destinations
     };
-    let archive = chat_stasher::remote_inbox_archive::DestinationArchive {
-        stage: &args.stage,
-        destinations: &destinations,
-    };
+    let archive =
+        chat_stasher::remote_inbox_archive::DestinationArchive::new(&args.stage, &destinations);
     let result = (|| -> anyhow::Result<remote_inbox::PullReport> {
         let runtime = tokio::runtime::Runtime::new()?;
         let entered = runtime.enter();
@@ -20728,6 +20771,10 @@ fn cmd_api_pull(args: chat_stasher::letta::PullArgs) -> ExitCode {
         &config,
         home,
         |args, config, machine, local_agents| {
+            // The interactive command has no destination overrides, so its
+            // proof covers every declared destination (or the
+            // single-destination repository while none is declared) and
+            // its credential is the environment's, exactly as before.
             letta_producer_pull(
                 &args.account_id,
                 &args.inbox,
@@ -20737,7 +20784,8 @@ fn cmd_api_pull(args: chat_stasher::letta::PullArgs) -> ExitCode {
                 args.pace_ms,
                 args.budget_seconds,
                 args.page_size,
-                config,
+                None,
+                &letta_producer_destinations(config)?,
                 local_agents,
             )
         },
@@ -20745,11 +20793,12 @@ fn cmd_api_pull(args: chat_stasher::letta::PullArgs) -> ExitCode {
 }
 
 /// The one Letta pull pipeline, shared by the `pull letta` command and the
-/// scheduled pass's declared producer: every declared destination must prove
-/// it holds the sealed bytes (or the single-destination mode repository when
-/// none is declared), the credential comes from the environment only, and
-/// the pass itself keeps its own pacing, `Retry-After` and receipt-journal
-/// discipline. No caller-specific second pipeline exists on purpose.
+/// scheduled pass's declared producer: every destination it is given must
+/// prove it holds the sealed bytes, the credential comes from the resolved
+/// `[pull.letta].api_key` declaration when the pass supplies one and from
+/// the environment otherwise, and the pass itself keeps its own pacing,
+/// `Retry-After` and receipt-journal discipline. No caller-specific second
+/// pipeline exists on purpose.
 #[allow(clippy::too_many_arguments)]
 fn letta_producer_pull(
     account_id: &str,
@@ -20760,16 +20809,14 @@ fn letta_producer_pull(
     pace_ms: u64,
     budget_seconds: u64,
     page_size: u64,
-    config: &Config,
+    api_key: Option<&str>,
+    destinations: &[StoreConfig],
     local_agents: &Path,
 ) -> anyhow::Result<chat_stasher::letta::Report> {
     use chat_stasher::remote_inbox_archive::DestinationArchive;
-    let destinations = letta_producer_destinations(config)?;
-    let proof = DestinationArchive {
-        stage,
-        destinations: &destinations,
-    };
+    let proof = DestinationArchive::new(stage, destinations);
     let mut api = chat_stasher::letta::Api::environment(
+        api_key.map(str::to_owned),
         std::time::Duration::from_millis(pace_ms),
         std::time::Duration::from_secs(budget_seconds),
         page_size,
@@ -21530,8 +21577,15 @@ mod run_once_letta_tests {
 
     /// Serialises these tests against one another: each redirects the
     /// process environment into its own sandbox, and cargo runs tests in
-    /// parallel threads of one process. No other module in this binary
-    /// mutates any of these variables.
+    /// parallel threads of one process. `Redirected::install` is the one
+    /// mutator of *these* variables — XDG_CONFIG_HOME, XDG_DATA_HOME,
+    /// XDG_STATE_HOME, XDG_CACHE_HOME, CHAT_STASHER_RUSTIC_CACHE_DIR,
+    /// CHAT_STASHER_REGISTRY and LETTA_API_KEY — and it restores them on
+    /// drop; it deliberately does not touch HOME or USERPROFILE (which
+    /// `home_redaction_covers_the_windows_home_spelling` mutates under its
+    /// own lock), so this lock protects exactly the variables above, and
+    /// the claim is scoped to them, not to the process environment as a
+    /// whole.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// One synthetic claude-code line with an RFC 3339 timestamp, the same
@@ -21658,6 +21712,7 @@ mod run_once_letta_tests {
                     account_id: Some("synthetic-account".to_string()),
                     inbox: Some(sandbox.root().join("inbox").display().to_string()),
                     state: Some(sandbox.root().join("letta-state").display().to_string()),
+                    api_key: None,
                     pace_ms: None,
                     budget_seconds: None,
                     page_size,
@@ -21673,7 +21728,7 @@ mod run_once_letta_tests {
         config: &Config,
         hook: &dyn Fn(
             &chat_stasher::letta::PassPull,
-            &Config,
+            &[StoreConfig],
             &str,
             &Path,
         ) -> anyhow::Result<Report>,
@@ -21721,7 +21776,7 @@ mod run_once_letta_tests {
         let stage = sandbox.root().join("stage");
         let inbox = sandbox.root().join("inbox");
         let hook = |pull: &chat_stasher::letta::PassPull,
-                    _config: &Config,
+                    _pull_destinations: &[StoreConfig],
                     machine: &str,
                     hook_stage: &Path|
          -> anyhow::Result<Report> {
@@ -21773,6 +21828,60 @@ mod run_once_letta_tests {
         );
     }
 
+    /// The pull's archive proof checks the repository THIS pass pushes to —
+    /// the destination the pass's own overrides resolved — and not whatever
+    /// the config would default the standalone command to. Without that,
+    /// a pass named `--destination x` would prove its receipts against a
+    /// repository it never archived to, and its unproven-receipts branch
+    /// would freeze the producer against a repo it cannot read.
+    #[test]
+    fn the_pull_proof_uses_the_passs_own_resolved_destination() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sandbox = test_support::Sandbox::new();
+        let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
+        let repo = sandbox.root().join("repo");
+        let key_file = sandbox.root().join("keys").join("masterkey.json");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        let hook = move |_pull: &chat_stasher::letta::PassPull,
+                         pull_destinations: &[StoreConfig],
+                         _machine: &str,
+                         _stage: &Path|
+              -> anyhow::Result<Report> {
+            *recorder
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = pull_destinations.to_vec();
+            Ok(Report::default())
+        };
+        let stage = sandbox.root().join("stage");
+        run_once_pass_with(
+            &declared_config(&sandbox, None),
+            &stage,
+            Some("synthetic-machine".to_string()),
+            store::DEFAULT_SHARD_BUCKET_CAP,
+            None,
+            Some(repo.display().to_string()),
+            Some(key_file.display().to_string()),
+            None,
+            &[],
+            false,
+            false,
+            &hook,
+        );
+        let recorded = seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            recorded.len(),
+            1,
+            "the pass hands the pull one resolved destination, not the whole declared set"
+        );
+        assert_eq!(
+            recorded[0].key_file, key_file,
+            "the pull proof settles against the pass's own key file override"
+        );
+    }
+
     /// A return-shape tour of the producer step: an unread remainder (an
     /// incomplete report) and an outright refusal (an error) both keep the
     /// pass's local archive work — the snapshot is still created, which the
@@ -21788,7 +21897,7 @@ mod run_once_letta_tests {
             let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
             let session = "claude-code.synthetic-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
             let hook = move |_pull: &chat_stasher::letta::PassPull,
-                             _config: &Config,
+                             _pull_destinations: &[StoreConfig],
                              machine: &str,
                              hook_stage: &Path|
                   -> anyhow::Result<Report> {
@@ -21832,7 +21941,7 @@ mod run_once_letta_tests {
         let sandbox = test_support::Sandbox::new();
         let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
         let hook = |_pull: &chat_stasher::letta::PassPull,
-                    _config: &Config,
+                    _pull_destinations: &[StoreConfig],
                     _machine: &str,
                     _stage: &Path|
          -> anyhow::Result<Report> {
@@ -21866,7 +21975,7 @@ mod run_once_letta_tests {
             let sandbox = test_support::Sandbox::new();
             let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
             let hook = |_pull: &chat_stasher::letta::PassPull,
-                        _config: &Config,
+                        _pull_destinations: &[StoreConfig],
                         _machine: &str,
                         _stage: &Path|
              -> anyhow::Result<Report> {

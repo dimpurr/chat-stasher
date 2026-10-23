@@ -248,10 +248,63 @@ pub enum ReclaimJobRecord {
 /// the three surfaces display them unchanged, which is the shared-
 /// wording half of C1; the fact enums beside them are what `--json`
 /// consumers and `doctor`'s table read.
+///
+/// ②, extended to the pull producers (W964): whether the declared
+/// `[pull.letta]` producer's credential resolves in the scheduled pass
+/// that pulls it — the same question the per-destination credentials fact
+/// asks, asked about the producer the timer's run-once pass pulls before
+/// its collect step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullProducerCredentials {
+    /// `pull.letta.api_key` is declared — a literal, or one of the three
+    /// persistent references — which resolves in a timer process exactly
+    /// the way a destination's declared credential does.
+    Declared,
+    /// No `api_key` is declared, so the producer falls back to
+    /// `LETTA_API_KEY` in the process environment: a variable a login
+    /// shell exports and a launchd or systemd job does not see — and the
+    /// scheduled pass is exactly that job.
+    EnvironmentOnly,
+}
+
+/// The one-sentence finding for a declared producer whose credential only
+/// a login shell could reach. `schedule install` prints it at install time
+/// and the reconciliation's alerts carry the same words to `status`,
+/// `doctor` and the menu bar app, because the same misconfiguration must
+/// not read differently on different surfaces.
+pub fn pull_producer_credential_alert() -> Alert {
+    Alert {
+        severity: Severity::Yellow,
+        sentence: "[pull] the declared [pull.letta] producer reads LETTA_API_KEY from the \
+environment because pull.letta.api_key is not set — a login shell exports that variable, \
+a scheduled job never sees it, so every pass would exit 3 (\"did not finish reading\") at \
+the credential check while the local archive cycle stays intact; declare pull.letta.api_key \
+instead — a file:, env-file: or keychain: reference, the same forms destinations accept — \
+and the next pass pulls it again"
+            .to_string(),
+        // Prose-only fix: there is no command that writes a credential, so
+        // the sentence itself says what to do (the Alert contract).
+        fix: None,
+    }
+}
+
+/// The declared pull producer's credential fact, W964's extension of
+/// ② to the producers the scheduled pass pulls. `None` when no
+/// `[pull.letta]` is declared.
+///
+/// The whole reconciliation: rows plus the alerts both prose surfaces and
+/// the menu bar display. `alerts` and `job_alerts` are already worded —
+/// the three surfaces display them unchanged, which is the shared-
+/// wording half of C1; the fact enums beside them are what `--json`
+/// consumers and `doctor`'s table read.
 #[derive(Debug, Clone)]
 pub struct Reconciliation {
     pub destinations: Vec<DestinationFacts>,
     pub reclaim: ReclaimJobFacts,
+    /// The declared pull producer's credential fact, W964's extension of
+    /// ② to the producers the scheduled pass pulls. `None` when no
+    /// `[pull.letta]` is declared.
+    pub pull_producer: Option<PullProducerCredentials>,
     /// The scheduler format the unit-file facts were read in — the scope
     /// the coverage claims are worded against, so a sentence that says
     /// "nothing pushes it" names which files were read ("launchd agent
@@ -457,9 +510,28 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
         inputs.scheduler_readable,
     );
 
+    // ② for the declared pull producer: the loaded config has the api_key
+    // resolved or absent, which is exactly the distinction the fact draws —
+    // a reference that could not resolve refused the load, naming the key,
+    // so every surface downstream of a loaded config already says that one
+    // loudly.
+    let pull_producer = inputs
+        .config
+        .pull
+        .as_ref()
+        .and_then(|pull| pull.letta.as_ref())
+        .map(|letta| {
+            if letta.api_key.is_some() {
+                PullProducerCredentials::Declared
+            } else {
+                PullProducerCredentials::EnvironmentOnly
+            }
+        });
+
     let reconciliation = Reconciliation {
         destinations,
         reclaim,
+        pull_producer,
         format: inputs.format,
         alerts: Vec::new(),
         job_alerts: Vec::new(),
@@ -699,7 +771,16 @@ fn reclaim_job_facts(
 fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
     let destinations = reconciliation.destinations.clone();
     let reclaim = reconciliation.reclaim.clone();
+    let pull_producer = reconciliation.pull_producer.clone();
     let format = reconciliation.format;
+
+    // ② for the pull producer, after the per-destination alerts: the
+    // declared producer whose credential only a login shell could reach is
+    // the same yellow-shape gap a shell-only destination credential is —
+    // a silent trap until the first pass fails at the credential check.
+    if pull_producer == Some(PullProducerCredentials::EnvironmentOnly) {
+        reconciliation.alerts.push(pull_producer_credential_alert());
+    }
 
     for facts in &destinations {
         // The implicit "default" row is not a declared destination: a
@@ -1071,11 +1152,32 @@ pub fn install_warnings(
 ) -> Vec<String> {
     let mut declared: Vec<&str> = config.destinations.keys().map(String::as_str).collect();
     declared.sort_unstable();
+    // W964: the declared pull producer rides the run-once timer this
+    // install just put down, so its credential trap is named here, at the
+    // moment a user is watching — with the same sentence the
+    // reconciliation carries to status, doctor and the menu bar. A missing
+    // credential declaration is not a refusal: the local archive cycle
+    // still works, and the warning plus the per-pass exit 3 are the two
+    // places the trap is said out loud.
+    let mut producer_line = Vec::new();
+    if matches!(
+        config
+            .pull
+            .as_ref()
+            .and_then(|pull| pull.letta.as_ref())
+            .map(|letta| letta.api_key.is_some()),
+        Some(false)
+    ) {
+        let alert = pull_producer_credential_alert();
+        producer_line.push(format!("schedule install: WARNING ⚠ {}", alert.sentence));
+    }
     // Single-destination machines have no declared set to reconcile — the
     // one timer they just installed pushes the default repository, and
-    // nothing could be "declared but uncovered".
+    // nothing could be "declared but uncovered". The producer warning
+    // above is independent of the destination set, so it is returned even
+    // here.
     if declared.is_empty() {
-        return Vec::new();
+        return producer_line;
     }
     let run_once_units = schedule::installed_run_once_units(format, home);
     let covered: std::collections::BTreeSet<&str> = run_once_units
@@ -1090,7 +1192,11 @@ pub fn install_warnings(
 
     match unit {
         schedule::Unit::RunOnce => {
-            let mut lines = Vec::new();
+            // The producer warning leads: the timer this install just put
+            // down is the pass that pulls the producer, so its credential
+            // question is answered here at install time with the same
+            // sentence every later surface repeats.
+            let mut lines = producer_line;
             if !missing.is_empty() {
                 lines.push(format!(
                     "schedule install: WARNING ⚠ no installed timer pushes declared \
@@ -1212,6 +1318,18 @@ pub fn destinations_json(r: &Reconciliation) -> serde_json::Value {
     serde_json::json!({
         "destinations": r.destinations.iter().map(destination_facts_json).collect::<Vec<_>>(),
         "alerts": r.all_alerts().iter().map(alert_json).collect::<Vec<_>>(),
+        // ② for the declared pull producer: `null` when none is declared,
+        // so "no producer" stays distinct from "a producer whose
+        // credential a timer cannot reach".
+        "pull_producer": match &r.pull_producer {
+            None => serde_json::Value::Null,
+            Some(PullProducerCredentials::Declared) => serde_json::json!({
+                "kind": "declared",
+            }),
+            Some(PullProducerCredentials::EnvironmentOnly) => serde_json::json!({
+                "kind": "environment_only",
+            }),
+        },
         "reclaim": reclaim_json(r),
     })
 }
@@ -1410,6 +1528,23 @@ fn no_record_why(name: &str) -> String {
 /// C1's point). Pure, so the wording is assertable without a machine.
 pub fn doctor_lines(r: &Reconciliation) -> Vec<String> {
     let mut lines = Vec::new();
+    // ② for the declared pull producer, whether or not any destination is
+    // declared: the producer's credential question is independent of the
+    // destination set.
+    match &r.pull_producer {
+        Some(PullProducerCredentials::Declared) => lines.push(
+            "  [pull.letta] credential: declared (a literal, or a file:/env-file:/keychain: \
+             reference) — a scheduled pass can resolve it"
+                .to_string(),
+        ),
+        Some(PullProducerCredentials::EnvironmentOnly) => lines.push(
+            "  [pull.letta] credential: environment only (LETTA_API_KEY) — a scheduled pass \
+             does not see it; declare pull.letta.api_key (a file:/env-file:/keychain: \
+             reference, the same forms destinations accept)"
+                .to_string(),
+        ),
+        None => {}
+    }
     if r.destinations.is_empty() {
         lines.push(
             "  no destination is declared; the archive goes to the local repository".to_string(),
@@ -2586,6 +2721,117 @@ mod tests {
                 .any(|a| a.sentence.contains("could not be re-read")),
             "②'s anomaly still raises its alert: {:?}",
             alerts
+        );
+    }
+    /// W964, ② for the pull producer: a declared `[pull.letta]` without an
+    /// `api_key` is the same yellow trap a shell-only destination
+    /// credential is — one sentence, the same one the install warning
+    /// prints — while a declared credential or no declaration at all
+    /// stays quiet.
+    #[test]
+    fn a_declared_producer_without_an_api_key_gets_the_credential_alert() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let declared = |api_key: Option<&str>| crate::config::Config {
+            pull: Some(crate::config::PullSectionConfig {
+                letta: Some(crate::config::LettaPullConfig {
+                    account_id: Some("synthetic-account".to_string()),
+                    inbox: Some("/inbox".to_string()),
+                    api_key: api_key.map(str::to_owned),
+                    ..crate::config::LettaPullConfig::default()
+                }),
+            }),
+            ..Default::default()
+        };
+        fn inputs<'a>(
+            config: &'a crate::config::Config,
+            home: &'a Path,
+            state: &'a Path,
+        ) -> Inputs<'a> {
+            Inputs {
+                config,
+                format: Format::Launchd,
+                home,
+                state_dir: state,
+                now_unix: 1_750_000_000,
+                scheduler_readable: false,
+            }
+        }
+        let environment_only = reconcile(&inputs(&declared(None), home.path(), state.path()));
+        assert_eq!(
+            environment_only.pull_producer,
+            Some(PullProducerCredentials::EnvironmentOnly)
+        );
+        assert!(
+            environment_only
+                .all_alerts()
+                .iter()
+                .any(|alert| alert.sentence.contains("pull.letta.api_key is not set")),
+            "the shell-only producer credential speaks: {:?}",
+            environment_only.all_alerts()
+        );
+        assert!(
+            environment_only
+                .all_alerts()
+                .iter()
+                .any(|alert| alert.sentence.contains("file:")),
+            "the alert names the timer-reachable forms"
+        );
+        // The install warning carries the same sentence, and it fires with
+        // no destinations declared at all.
+        let warnings = install_warnings(
+            &declared(None),
+            schedule::Unit::RunOnce,
+            Format::Launchd,
+            home.path(),
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|line| line.contains("pull.letta.api_key is not set")),
+            "the install-time warning says the same thing: {warnings:?}"
+        );
+        // A declared credential is quiet everywhere.
+        let declared_key = reconcile(&inputs(
+            &declared(Some("synthetic-resolved-secret")),
+            home.path(),
+            state.path(),
+        ));
+        assert_eq!(
+            declared_key.pull_producer,
+            Some(PullProducerCredentials::Declared)
+        );
+        assert!(
+            !declared_key
+                .all_alerts()
+                .iter()
+                .any(|alert| alert.sentence.contains("pull.letta")),
+            "a declared credential is not a finding"
+        );
+        assert!(
+            install_warnings(
+                &declared(Some("synthetic-resolved-secret")),
+                schedule::Unit::RunOnce,
+                Format::Launchd,
+                home.path(),
+            )
+            .is_empty(),
+            "install says nothing when the producer's credential is declared"
+        );
+        // No producer declared: no fact, no alert, no warning.
+        let undeclared = reconcile(&inputs(
+            &crate::config::Config::default(),
+            home.path(),
+            state.path(),
+        ));
+        assert_eq!(undeclared.pull_producer, None);
+        assert!(
+            !undeclared
+                .all_alerts()
+                .iter()
+                .any(|alert| alert.sentence.contains("pull.letta")),
+            "an undeclared producer is nobody's finding"
         );
     }
 }

@@ -154,3 +154,120 @@ fn record_never_contains_the_hostname() {
         "run-state must store a digest, not the hostname"
     );
 }
+
+/// A pass that archived cleanly but left the declared Letta producer unread
+/// is two lines, not one unhealthy verdict: the archive cycle's health stays
+/// worded as healthy, the producer's own failure prints as the second line
+/// with its fix, and the overall verdict is still not healthy — the exit
+/// code must not let the run read as success.
+#[test]
+fn producer_only_failure_is_two_lines_not_one_unhealthy_verdict() {
+    let mut state = ok_state(NOW - 600);
+    state.outcome = RunOutcome::Error;
+    state.failed_step = Some("pull-letta".to_string());
+    state.snapshot_created = true;
+    state.pull_letta_unread = true;
+    let verdict = runstate::summarize(&RunStateRead::Present(state), NOW, 4 * HOUR);
+    assert!(!verdict.healthy, "the exit code stays non-zero");
+    assert!(
+        verdict.line.starts_with("Archive cycle healthy:"),
+        "the first line reports the archive cycle, got: {}",
+        verdict.line
+    );
+    let letta = verdict
+        .letta
+        .as_ref()
+        .expect("the producer's failure has its own line");
+    assert!(
+        letta.sentence.contains("did not finish reading"),
+        "the producer line keeps the exit-3 vocabulary: {}",
+        letta.sentence
+    );
+    let fix = letta
+        .fix
+        .as_ref()
+        .expect("a pull failure without progress carries a fix");
+    assert!(
+        fix.contains("pull.letta.api_key") && fix.contains("file:") && fix.contains("keychain:"),
+        "the fix names the timer-reachable credential forms: {fix}"
+    );
+}
+
+/// While the producer is still catching a large account up across rounds,
+/// the second line is progress, not a failure sentence — and the pass still
+/// records "did not finish reading" honestly, because it did not.
+#[test]
+fn backfill_progress_has_its_own_line_and_never_claims_completion() {
+    let mut state = ok_state(NOW - 600);
+    state.outcome = RunOutcome::Error;
+    state.failed_step = Some("pull-letta".to_string());
+    state.pull_letta_unread = true;
+    state.pull_letta_backfill = Some(chat_stasher::runstate::PullLettaBackfill {
+        pulled: 8,
+        estimated_total: 25,
+    });
+    let verdict = runstate::summarize(&RunStateRead::Present(state), NOW, 4 * HOUR);
+    assert!(!verdict.healthy);
+    let letta = verdict.letta.as_ref().expect("the progress line exists");
+    assert!(
+        letta.sentence.contains("backfilling") && letta.sentence.contains("8 of ~25"),
+        "the line reports pulled-of-estimated progress: {}",
+        letta.sentence
+    );
+    assert!(
+        letta.sentence.contains("did not finish reading"),
+        "progress does not turn an unfinished pass into a finished one"
+    );
+    assert!(
+        letta.fix.is_none(),
+        "progress needs no fix text; the estimate is the answer"
+    );
+}
+
+/// The two facts stay two facts even when the local cycle failed too: a
+/// collect failure keeps its step-named line, and the producer's line stays
+/// beside it rather than being erased by the earlier failure (the durable
+/// record keeps both, so the answer does too).
+#[test]
+fn a_local_failure_does_not_erase_the_producer_fact() {
+    let mut state = ok_state(NOW - 600);
+    state.outcome = RunOutcome::Error;
+    state.failed_step = Some("collect".to_string());
+    state.pull_letta_unread = true;
+    let verdict = runstate::summarize(&RunStateRead::Present(state), NOW, 4 * HOUR);
+    assert!(!verdict.healthy);
+    assert!(
+        verdict.line.contains("Last run failed") && verdict.line.contains("collect"),
+        "the local failure keeps its step-named line: {}",
+        verdict.line
+    );
+    assert!(
+        verdict.letta.is_some(),
+        "the producer's own line survives the local failure"
+    );
+}
+
+/// Older records (written before the producer fields existed) still parse,
+/// with the new fields at their defaults rather than refusing the read.
+#[test]
+fn a_record_without_the_producer_fields_still_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    std::fs::write(
+        runstate::run_state_path(&state_dir),
+        r#"{ "version": 1, "finished_at_unix": 100, "duration_ms": 5,
+             "outcome": "completed", "failed_step": null, "shards_written": 0,
+             "stage_shards": 0, "snapshot_created": false,
+             "collect_errors": 0, "archive_gaps": 0,
+             "machine_digest": "aaaaaaaaaaaa" }"#,
+    )
+    .unwrap();
+    match runstate::load(&state_dir) {
+        RunStateRead::Present(state) => {
+            assert!(!state.pull_letta_unread);
+            assert!(state.pull_letta_backfill.is_none());
+        }
+        other => panic!("a pre-producer record must load, got {other:?}"),
+    }
+}

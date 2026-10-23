@@ -916,9 +916,14 @@ pub fn seal_payload(
         }));
     }
 
-    // Only send-produced harness files use content deduplication. Legacy/web
-    // deliveries retain their exact-byte contract. The validated slice digest,
-    // role, parent and range bind content; metadata and encoding may change.
+    // Only send-produced harness files use content deduplication, never the
+    // `collect` producers: an api-export bundle is an original publication,
+    // and the round-trip contract its fixtures pin is that it stores whole —
+    // a collect producer that must not re-send unchanged content is held to
+    // that at its own cursor layer (the no-op round), not by dropping the
+    // raw from a sealed record. Send resends keep their validated slice
+    // digest, role, parent and range binding; legacy/web deliveries retain
+    // their exact-byte contract.
     let content_ref = matching_send_content(&session_dir, &parsed).map_err(SealError::Other)?;
     let raw =
         if content_ref.is_some() {

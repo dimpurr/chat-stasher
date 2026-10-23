@@ -16,18 +16,32 @@ under its own heading below.
 #### Added
 
 - **Letta pull inside the scheduled pass.** Declaring `[pull.letta]` in the
-  config (account id, inbox; pacing, budget and 100–200-row page size
-  optional) makes every `run-once` pass pull the producer before its collect
-  step, through the same paced, `Retry-After`-honouring pipeline as
-  `chat-stasher pull letta`, with the pass's own machine and stage and
-  `LETTA_API_KEY` from the environment. A producer that cannot finish
-  reading — rate-limited, refusing, partly proven, or contending with
-  another pass of the same machine — keeps the pass at exit 3 ("did not
-  finish reading") while the local collect-and-push cycle still runs and its
-  unread remainder stays pending in the producer state; the failure is
-  recorded as the pass's `pull-letta` step. The pull's wall time is the new
-  `letta_pull=` phase in the run-once summary line. See
-  [API pull](docs/pull.md).
+  config (account id, inbox; credential, pacing, budget and 100–200-row
+  page size optional) makes every `run-once` pass pull the producer before
+  its collect step, through the same paced, `Retry-After`-honouring pipeline
+  as `chat-stasher pull letta`, with the pass's own machine and stage and
+  its archive proof checked against the repository this pass pushes to.
+  The credential is timer-reachable by construction: `pull.letta.api_key`
+  accepts the shared `file:` / `env-file:` / `keychain:` reference forms
+  (fail-closed, like destination options), and when the declaration is
+  missing — leaving only a shell's `LETTA_API_KEY`, which a timer never
+  sees — `schedule install` warns on the spot and `status`, `doctor` and
+  the menu bar carry the same sentence. A producer that cannot finish
+  reading keeps the pass at exit 3 ("did not finish reading") while the
+  local collect-and-push cycle still runs; the run-state record keeps that
+  fact beside `failed_step` (a pass whose collect also failed keeps both),
+  and `status` renders the two as **two lines** — the archive cycle's
+  health first, the producer's own sentence second, with a fix, or with
+  `pulled N of ~M` progress while a large account backfills. Publication
+  follows the content: an unchanged conversation's listing row and content
+  cursors match, so a steady round republishes zero bytes and the unchanged
+  hour is a genuine NOOP, at ~5 requests plus the conversations that moved
+  however large the account; an account too big for one round persists its
+  position and completes across rounds, each reporting progress, with the
+  declared path's pacing floored at one request per second and its budget
+  capped at 45 minutes — below the hourly period — a deadline the archive
+  proof shares, opening each destination once per round to ask about every
+  receipt in one batch. See [API pull](docs/pull.md).
 - **User-initiated hide, unhide, and a purge preview (ADR-046 draft, Phase 1).**
   `hide` and `unhide` append durable one-record control events to this
   machine's `meta/<machine>/deletion-control-v1.jsonl` stage file; the next

@@ -169,9 +169,13 @@ the sentence.
    (`crates/chat-stasher/src/main.rs:403-440`;
    `crates/chat-stasher/src/store.rs:327-428`).
 
-Steps 1–3 happen entirely on your machine, in plaintext. Step 4 is the only
-step that can involve a network, and the only destination it can reach is the
-one you put in your own config. The Native Messaging hop in step 3 is a local
+Steps 1–3 happen entirely on your machine, in plaintext. Two steps can
+involve a network: **step 4**, whose only destination is the one you put in
+your own config; and an **API pull** — `chat-stasher pull letta`, or the
+`[pull.letta]` producer a scheduled `run-once` pass reads before its collect
+step — which talks, over HTTPS, to the API you name the account on
+(`crates/chat-stasher/src/letta.rs:214-224`; see [API
+pull](../docs/pull.md)). The Native Messaging hop in step 3 is a local
 process-to-process call: it is not a network connection, and the host it reaches
 is one you registered yourself.
 
@@ -365,7 +369,7 @@ the extension still delivers normally and coordination falls back to the
 existing platform scope (`apps/extension/lib/outbox.ts:110-120`,
 `apps/extension/lib/native-host.ts:1099-1143`,
 `crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2881-3096`,
-`crates/chat-stasher/src/inbox.rs:530-540`, `:959-961`).
+`crates/chat-stasher/src/inbox.rs:530-540`, `:964-966`).
 
 The bundle also names the **install** that captured it: three fields — a random
 UUID minted once per extension install, the browser family read from this
@@ -378,13 +382,13 @@ this extension lives in — one user, several machines, several browsers, severa
 profiles per browser: the sealed shard record keeps them beside a `machine`
 name the host itself assigns, so your archive can say which install produced a
 conversation (`crates/chat-stasher/src/inbox.rs:448-453`,
-`:529-537`, `:962-965`). 🔴 A copied browser profile brings its copied
+`:529-537`, `:967-970`). 🔴 A copied browser profile brings its copied
 `install_id` along, and the stage can tell: a delivery whose identity names a
 different browser, or a different label the user actually named, while the same
 `install_id` was already sealed under another is refused — the capture stays in
 your outbox, listed there as rejected with the refusal's own instruction, and
 is never merged with the first install's record
-(`crates/chat-stasher/src/inbox.rs:875-885`, `:1008-1069`;
+(`crates/chat-stasher/src/inbox.rs:875-885`, `:1013-1074`;
 `crates/chat-stasher/src/nativehost.rs:3111-3115`;
 `apps/extension/lib/outbox.ts:503-548`). The label is a name you typed, and it
 is plaintext wherever the bundle is — the outbox record, the export file, the
