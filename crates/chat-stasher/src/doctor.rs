@@ -2781,6 +2781,14 @@ pub fn run() -> DoctorReport {
         // place this fact lives, so the reader's capability and the test's
         // branch cannot drift apart the way three hand-rolled copies did.
         scheduler_readable: crate::schedule::scheduler_readable_on(std::env::consts::OS),
+        // The one stage the config itself names — expanded at load, the
+        // same source the D11 duplicate scan reads, so the affected
+        // ADR-060 D5 cap fact and the duplicate scan walk one tree.
+        stage: config
+            .native_host
+            .as_ref()
+            .and_then(|native_host| native_host.stage.as_deref())
+            .map(std::path::Path::new),
     });
 
     DoctorReport {
@@ -4019,6 +4027,10 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
                     "destinations": value["destinations"],
                     "alerts": value["alerts"],
                     "reclaim": value["reclaim"],
+                    // ADR-060 D5: the stage-cap fact rides beside the
+                    // facts — measured / unknown, never a zero-shaped
+                    // silence, the same shape `status --json` prints.
+                    "stage_cap": value["stage_cap"],
                 })
             }
             None => serde_json::json!({"checked": false}),

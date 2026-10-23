@@ -174,7 +174,11 @@ pub enum LastPush {
 }
 
 /// ④ What the latest recorded reclaim attempt says about this
-/// destination.
+/// destination, with ADR-060 D7's third visible arm: a destination the run
+/// classified degraded was not asked to prove anything — the record keeps
+/// that as its own state, distinct from both "answered and fine"
+/// ([`NotBlocking`]) and "answered and blocked" ([`Blocking`]), because a
+/// state the user must see may not fold into one of the other two.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReclaimShare {
     /// Nothing blocked the reclaim on this destination's account: either
@@ -192,17 +196,240 @@ pub enum ReclaimShare {
         sessions: usize,
         bytes: u64,
     },
+    /// The destination was degraded that run (ADR-060 D2: lagging, or no
+    /// push on record), so the proof never asked it anything. `why` is the
+    /// health state's own word (`lagging` / `never-pushed`); it is not a
+    /// block — protection for that destination is the alarm and the union
+    /// backfill, never stage retention.
+    DegradedNotConsulted { health: String },
     /// The latest attempt ended before consulting destinations.
     UnknownRun { outcome: String },
 }
 
-/// One declared destination and its four facts.
+/// ADR-060 D2's four reportable destination-health states — every
+/// destination is judged against its *own* effective degrade-after
+/// (per-destination override, else the global `[reclaim]` value, else the
+/// default), and the answer is derived from the durable push record every
+/// time it is read, never stored: health heals automatically with the next
+/// successful push.
+///
+/// This is the one function-owning type both the reclaim and the three
+/// surfaces consult (`classify_destination_health` below): `reclaim-stage`,
+/// `status`, `doctor` and the menu bar can never disagree about health,
+/// the shared-wording half of C1 applied to health.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DestinationHealth {
+    /// Last successful push within the destination's effective
+    /// degrade-after: it participates in the proof (must-prove).
+    Healthy,
+    /// Last successful push older than the effective degrade-after: it is
+    /// assumed to be missing the recent increment era, is not consulted,
+    /// and alarms every run.
+    Lagging,
+    /// No push record on this machine. Worded as absence in prose ("no
+    /// push on record", never "never pushed"); the `--json` slug *is*
+    /// `never-pushed` (review ruling, 2026-10-22). A machine that pushed before
+    /// this CLI kept records leaves the same absence.
+    NeverPushed,
+    /// The record exists but is unreadable (malformed, or a version this
+    /// build does not know). Fail-safe: must-prove — an unreadable record
+    /// may never become deletion permission (the unknown-never-empty
+    /// invariant), so it can only block, never be skipped.
+    Unknown { why: String },
+}
+
+impl DestinationHealth {
+    /// The `--json` / durable-record vocabulary, D2's four states verbatim
+    /// (`healthy` / `lagging` / `never-pushed` / `unknown`).
+    pub fn slug(&self) -> &'static str {
+        match self {
+            DestinationHealth::Healthy => "healthy",
+            DestinationHealth::Lagging => "lagging",
+            DestinationHealth::NeverPushed => "never-pushed",
+            DestinationHealth::Unknown { .. } => "unknown",
+        }
+    }
+
+    /// Whether the destination is past its effective degrade-after in the
+    /// two time-derived senses D2 names degraded: not consulted by the
+    /// proof, listed and alarmed on every run. `unknown` is *not* degraded
+    /// — it is must-prove.
+    pub fn is_degraded(&self) -> bool {
+        matches!(
+            self,
+            DestinationHealth::Lagging | DestinationHealth::NeverPushed
+        )
+    }
+
+    /// D7's proof-role word: `must-prove` for the set the reclaim consults
+    /// (healthy, plus unknown on the fail-safe side), and
+    /// `degraded-not-consulted` for the two degraded states.
+    pub fn proof_role_word(&self) -> &'static str {
+        if self.is_degraded() {
+            "degraded-not-consulted"
+        } else {
+            "must-prove"
+        }
+    }
+}
+
+/// The default degrade-after (ADR-060 D2/D5): 7 days, the weekly reclaim
+/// cadence — long enough that a network blip cannot out-age a healthy
+/// destination (degradation is time-based, never reachability-based),
+/// short enough that a misconfigured machine's stage does not quietly grow
+/// forever. Configurable: `[reclaim] degrade_after_days`, plus
+/// `[destinations.<name>] degrade_after_days` per destination.
+pub const DEFAULT_DEGRADE_AFTER_DAYS: u64 = 7;
+
+/// The default stage cap (ADR-060 D5): 10 GiB. An over-cap stage is a
+/// **red alarm through the SG-1 channel and nothing else** — the cap never
+/// stops collection and never triggers a reclaim of its own.
+/// Configurable: `[reclaim] stage_cap_bytes` with `cache.max_bytes`'s dual
+/// spelling (`"10GB"` = 10⁹, `"10GiB"` = 2³⁰).
+pub const DEFAULT_STAGE_CAP_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+/// The destination's effective degrade-after (ADR-060 D2 + review ruling A1): the
+/// per-destination override when the destination declares one, else the
+/// global `[reclaim] degrade_after_days`, else the default. The override
+/// never removes protection — it only lets "how behind is behind" follow
+/// the destination's declared rhythm; past that rhythm the destination
+/// degrades and alarms exactly like the global rule.
+pub fn effective_degrade_after_days(global: Option<u64>, per_destination: Option<u64>) -> u64 {
+    per_destination
+        .or(global)
+        // reason: absence of both keys is the documented ADR-060 default
+        // (7 days = the weekly cadence), a configured default rather than
+        // an unknown turned into a number — the same honesty as
+        // body_cache's DEFAULT_MAX_BYTES for an absent [cache] quota.
+        .unwrap_or(DEFAULT_DEGRADE_AFTER_DAYS)
+}
+
+/// ADR-060 D2's classification, one function parameterised by `now` (the
+/// destdiag testability rule: never a clock read inside the computation).
+/// Both `reclaim-stage` and the three surfaces call this same function.
+///
+/// Degrades at *strictly older* than the threshold: a push exactly on the
+/// boundary is within its window, and health heals with the next successful
+/// push because the state is derived, never latched.
+pub fn classify_destination_health(
+    last_push: &LastPush,
+    degrade_after_days: u64,
+    now_unix: u64,
+) -> DestinationHealth {
+    match last_push {
+        LastPush::At {
+            finished_at_unix, ..
+        } => {
+            let age_secs = now_unix.saturating_sub(*finished_at_unix);
+            let threshold_secs = degrade_after_days.saturating_mul(86_400);
+            if age_secs <= threshold_secs {
+                DestinationHealth::Healthy
+            } else {
+                DestinationHealth::Lagging
+            }
+        }
+        LastPush::NoRecord => DestinationHealth::NeverPushed,
+        LastPush::Unknown { why } => DestinationHealth::Unknown { why: why.clone() },
+    }
+}
+
+/// Fact ③ for one destination, read out of the durable push record — the
+/// same three-state mapping `reconcile` uses, lifted out so `reclaim-stage`
+/// derives its classification from the *same* read the surfaces do (a
+/// reclaim that judged health from any other input could disagree with
+/// `status` about the same destination on the same minute).
+pub fn last_push_of(read: &crate::pushstate::PushStateRead, name: &str) -> LastPush {
+    match read {
+        crate::pushstate::PushStateRead::Present(state) => match state.pushes.get(name) {
+            Some(record) => LastPush::At {
+                finished_at_unix: record.finished_at_unix,
+                snapshots_in_repo: record.snapshots_in_repo,
+            },
+            None => LastPush::NoRecord,
+        },
+        crate::pushstate::PushStateRead::Unreadable(why) => LastPush::Unknown { why: why.clone() },
+        crate::pushstate::PushStateRead::Missing => LastPush::NoRecord,
+    }
+}
+
+/// What the stage-cap arm of the reconciliation measured (ADR-060 D5): the
+/// stage's shard-body bytes against the configured cap. The alarm-only rule
+/// lives here as the type's shape — over the cap is a fact someone sees,
+/// never an action anything takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageCapFact {
+    /// No stage is configured on this machine (`[native_host] stage` is the
+    /// only stage the config names), so the question has nothing to
+    /// measure. Quiet everywhere: absence of the configured input is not
+    /// an unknown about a stage that exists.
+    NoStage,
+    /// A stage is configured but its sessions tree could not be walked.
+    /// Quiet in the alerts (the bytes are unknown, not "zero bytes — under
+    /// cap": an unknown may never be recorded as empty), visible with its
+    /// reason in `doctor`'s table and `--json`.
+    Unmeasurable { why: String },
+    /// The measured shard-body bytes and the effective cap
+    /// (configured, else the 10 GiB default).
+    Measured { bytes: u64, cap: u64 },
+}
+
+impl StageCapFact {
+    /// The (bytes, cap) pair when the stage is over the cap — the pair the
+    /// red alarm names, `None` for every other state.
+    pub fn exceeded(&self) -> Option<(u64, u64)> {
+        match self {
+            StageCapFact::Measured { bytes, cap } if bytes > cap => Some((*bytes, *cap)),
+            _ => None,
+        }
+    }
+}
+
+/// The stage's shard-body bytes — ADR-060 D5's size basis, decided 10-22:
+/// the `sessions/` tree only, a stat-only walk (`metadata()`, no file is
+/// opened), `meta/` excluded (measured ~10 MB — noise, 46 §2). Machine
+/// logs and the extension status tree are not the session body this cap
+/// describes and stay out of the number.
+///
+/// A stage with no `sessions/` directory holds zero body bytes — a real
+/// zero, not an unknown; a walk that fails mid-tree is an error the caller
+/// keeps as [`StageCapFact::Unmeasurable`], never a zero.
+pub fn stage_shard_body_bytes(stage: &Path) -> std::io::Result<u64> {
+    let root = stage.join(crate::store::SESSIONS_DIR);
+    let mut stack = vec![root];
+    let mut total: u64 = 0;
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else {
+                // `DirEntry::metadata` stats without following a symlink,
+                // so a link planted inside the tree counts as itself and
+                // never wanders off the stage.
+                total = total.saturating_add(entry.metadata()?.len());
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// One declared destination and its four facts, plus the derived health the
+/// reclaim and every surface share (ADR-060 D2).
 #[derive(Debug, Clone)]
 pub struct DestinationFacts {
     pub name: String,
     pub push_coverage: PushCoverage,
     pub credentials: CredentialResolution,
     pub last_push: LastPush,
+    /// ADR-060 D2's derived state, classified from `last_push` and the
+    /// effective degrade-after at read time.
+    pub health: DestinationHealth,
+    /// The effective degrade-after the health was judged against, in days
+    /// (per-destination override, else global `[reclaim]`, else the default)
+    /// — carried beside the state so every surface names the threshold the
+    /// same way the reclaim judged it.
+    pub degrade_after_days: u64,
     pub reclaim_share: ReclaimShare,
 }
 
@@ -291,6 +518,11 @@ and the next pass pulls it again"
 pub struct Reconciliation {
     pub destinations: Vec<DestinationFacts>,
     pub reclaim: ReclaimJobFacts,
+    /// The stage-cap arm (ADR-060 D5): the measured shard-body bytes of the
+    /// configured stage against the effective cap — alarm-only, so the
+    /// fact is data for the alerts and the surfaces, never an input to any
+    /// run's outcome.
+    pub stage_cap: StageCapFact,
     /// The declared pull producer's credential fact, W964's extension of
     /// ② to the producers the scheduled pass pulls. `None` when no
     /// `[pull.letta]` is declared.
@@ -340,6 +572,12 @@ pub struct Inputs<'a> {
     /// leaves the record-based facts (③'s absence, the reclaim records) to
     /// speak, because those it can read.
     pub scheduler_readable: bool,
+    /// The stage the `[native_host] stage` key names, already expanded by
+    /// the config loader — the only stage the config itself knows, and the
+    /// one the D5 cap alarm measures. `None` when nothing is configured,
+    /// which is the fact's own state ([`StageCapFact::NoStage`]), never an
+    /// unknown about a stage that exists.
+    pub stage: Option<&'a Path>,
 }
 
 /// The one function (C1): read the local, read-only facts and turn them into
@@ -447,35 +685,65 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
         // facts: a readable file with no row for this destination is an
         // absence, and a file that failed to parse is an unknown — never the
         // same absence, which would assert "no push is on record" out of a
-        // read that never happened.
-        let last_push = match &push_records {
-            crate::pushstate::PushStateRead::Present(state) => match state.pushes.get(name) {
-                Some(record) => LastPush::At {
-                    finished_at_unix: record.finished_at_unix,
-                    snapshots_in_repo: record.snapshots_in_repo,
-                },
-                None => LastPush::NoRecord,
-            },
-            crate::pushstate::PushStateRead::Unreadable(why) => {
-                LastPush::Unknown { why: why.clone() }
-            }
-            crate::pushstate::PushStateRead::Missing => LastPush::NoRecord,
-        };
-        // ④ from the latest recorded reclaim attempt.
+        // read that never happened. `last_push_of` is the one mapping both
+        // this function and `reclaim-stage` use, so the fact and the
+        // ADR-060 health derived from it can never disagree between the
+        // surfaces and the reclaim.
+        let last_push = last_push_of(&push_records, name);
+        // ADR-060 D2's derived health, judged against this destination's own
+        // effective degrade-after — the per-destination override (ruling A1)
+        // when it declares one, else the global `[reclaim]`, else the default.
+        let global_degrade_after_days = inputs
+            .config
+            .reclaim
+            .as_ref()
+            .and_then(|reclaim| reclaim.degrade_after_days);
+        let per_destination_degrade_after_days = inputs
+            .config
+            .destinations
+            .get(name)
+            .and_then(|destination| destination.degrade_after_days);
+        let degrade_after_days = effective_degrade_after_days(
+            global_degrade_after_days,
+            per_destination_degrade_after_days,
+        );
+        let health = classify_destination_health(&last_push, degrade_after_days, inputs.now_unix);
+        // ④ from the latest recorded reclaim attempt, with ADR-060 D7's
+        // distinct arm for the destination the run classified degraded: it
+        // was not asked anything, which is neither "did not block" (a
+        // state the user must see, folded into the shred it exists to
+        // forbid) nor a block.
         let reclaim_share = match &reclaim_read {
             crate::reclaimstate::ReclaimStateRead::Present(attempt) => match attempt.outcome {
-                crate::reclaimstate::ReclaimOutcome::Ok => ReclaimShare::NotBlocking,
-                crate::reclaimstate::ReclaimOutcome::Blocked => attempt
-                    .blocked
-                    .iter()
-                    .find(|block| &block.destination == name)
-                    .map(|block| ReclaimShare::Blocking {
-                        kind: block.kind.to_string(),
-                        error_kind: block.error_kind.clone(),
-                        sessions: block.sessions,
-                        bytes: block.bytes,
-                    })
-                    .unwrap_or(ReclaimShare::NotBlocking),
+                crate::reclaimstate::ReclaimOutcome::Ok
+                | crate::reclaimstate::ReclaimOutcome::Blocked => {
+                    if let Some(block) = attempt
+                        .blocked
+                        .iter()
+                        .find(|block| &block.destination == name)
+                    {
+                        ReclaimShare::Blocking {
+                            kind: block.kind.to_string(),
+                            error_kind: block.error_kind.clone(),
+                            sessions: block.sessions,
+                            bytes: block.bytes,
+                        }
+                    } else if let Some(row) = attempt
+                        .destination_health
+                        .as_ref()
+                        .and_then(|rows| rows.iter().find(|row| &row.destination == name))
+                    {
+                        if row.role == "degraded-not-consulted" {
+                            ReclaimShare::DegradedNotConsulted {
+                                health: row.health.clone(),
+                            }
+                        } else {
+                            ReclaimShare::NotBlocking
+                        }
+                    } else {
+                        ReclaimShare::NotBlocking
+                    }
+                }
                 crate::reclaimstate::ReclaimOutcome::Refused => ReclaimShare::UnknownRun {
                     outcome: "refused".to_string(),
                 },
@@ -489,6 +757,8 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
             push_coverage,
             credentials,
             last_push,
+            health,
+            degrade_after_days,
             reclaim_share,
         });
     }
@@ -518,9 +788,38 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
             }
         });
 
+    // ADR-060 D5's stage-cap fact: the configured stage's shard-body bytes
+    // (sessions tree, stat-only, `meta/` excluded) against the effective cap
+    // — configured `[reclaim] stage_cap_bytes`, else the 10 GiB default. An
+    // unconfigured stage has its own state, never a guessed path; a stage
+    // that could not be walked is an unknown the alerts stay quiet about
+    // and the table names, never zero.
+    let stage_cap = match inputs.stage {
+        None => StageCapFact::NoStage,
+        Some(stage) => match stage_shard_body_bytes(stage) {
+            Ok(bytes) => StageCapFact::Measured {
+                bytes,
+                cap: inputs
+                    .config
+                    .reclaim
+                    .as_ref()
+                    .and_then(|reclaim| reclaim.stage_cap_bytes)
+                    .map(crate::body_cache::CacheSize::bytes)
+                    // reason: absence of the key is ADR-060 D5's documented
+                    // default (10 GiB) — a configured default like the body
+                    // cache's quota, not an unknown turned into a number.
+                    .unwrap_or(DEFAULT_STAGE_CAP_BYTES),
+            },
+            Err(e) => StageCapFact::Unmeasurable {
+                why: format!("the configured stage's sessions tree could not be walked: {e}"),
+            },
+        },
+    };
+
     let reconciliation = Reconciliation {
         destinations,
         reclaim,
+        stage_cap,
         pull_producer,
         format: inputs.format,
         alerts: Vec::new(),
@@ -761,6 +1060,7 @@ fn reclaim_job_facts(
 fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
     let destinations = reconciliation.destinations.clone();
     let reclaim = reconciliation.reclaim.clone();
+    let stage_cap = reconciliation.stage_cap.clone();
     let pull_producer = reconciliation.pull_producer.clone();
     let format = reconciliation.format;
 
@@ -796,10 +1096,11 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                     severity: Severity::Yellow,
                     sentence: format!(
                         "[dest] {name}: declared, but no installed {scope_noun} ({scope_dir}) \
-                         pushes it — a push reaches it only when a command names it by hand; the \
-                         weekly stage clean-up consults every declared destination, so the \
-                         stage keeps growing until `{name}` holds a copy or the declaration is \
-                         removed",
+                         pushes it — a push reaches it only when a command names it by hand; \
+                         until one succeeds it stays degraded (the weekly stage clean-up does \
+                         not consult it and alarms every run, and if it is the only declared \
+                         destination nothing is ever reclaimed); either install its timer or \
+                         remove the declaration from the config",
                         name = facts.name
                     ),
                     fix: Some(format!(
@@ -856,6 +1157,68 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                 });
             }
         }
+        // ADR-060 D2's degraded alarms — one per destination the derived
+        // health names degraded, on every run, and (review ruling A2,
+        // 2026-10-22) the advice always names both roads: repair the push, or
+        // remove the destination from the config if it is no longer
+        // needed. Never one road only — a one-road alarm is how a
+        // legitimately hand-pushed destination (its user on global 7 days)
+        // teaches everyone to ignore the dot. Degrading never touches the
+        // push itself: a degraded destination keeps receiving pushes
+        // exactly as before, and health heals automatically with the next
+        // successful push because the state is derived, never latched.
+        if declared_row {
+            match &facts.health {
+                DestinationHealth::Lagging => {
+                    reconciliation.alerts.push(Alert {
+                        severity: Severity::Yellow,
+                        sentence: format!(
+                            "[dest] {name}: degraded — its last successful push is older than \
+                             its degrade-after of {days} day(s), so it is assumed to be missing \
+                             the recent increment era; the weekly stage clean-up does not \
+                             consult it (protection for its copy is this alarm and the union \
+                             backfill, never stage retention), and if no healthy destination \
+                             remains nothing is reclaimed at all. Two roads: repair the push \
+                             (health heals automatically with the next successful push), or \
+                             remove `[destinations.{name}]` from the config if this \
+                             destination is no longer needed",
+                            name = facts.name,
+                            days = facts.degrade_after_days,
+                        ),
+                        fix: Some(format!(
+                            "chat-stasher push --destination {name} --stage <stage>   # repair \
+                                 the push; if no timer covers it yet: chat-stasher schedule \
+                                 install --destination {name} --stage <stage>",
+                            name = facts.name
+                        )),
+                    });
+                }
+                DestinationHealth::NeverPushed => {
+                    reconciliation.alerts.push(Alert {
+                        severity: Severity::Yellow,
+                        sentence: format!(
+                            "[dest] {name}: degraded — {no_record}. It has not received this \
+                             machine's increments on this record, the weekly stage clean-up does \
+                             not consult it, and if no healthy destination remains nothing is \
+                             reclaimed at all. Two roads: give it its first successful push \
+                             (health heals automatically from there), or remove \
+                             `[destinations.{name}]` from the config if this destination is no \
+                             longer needed",
+                            name = facts.name,
+                            no_record = no_record_why(&facts.name),
+                        ),
+                        fix: Some(format!(
+                            "chat-stasher push --destination {name} --stage <stage>   # the \
+                                 first successful push ends the degraded state; also install \
+                                 its hourly timer: chat-stasher schedule install --destination \
+                                 {name} --stage <stage>",
+                            name = facts.name
+                        )),
+                    });
+                }
+                DestinationHealth::Healthy | DestinationHealth::Unknown { .. } => {}
+            }
+        }
         match &facts.credentials {
             CredentialResolution::ShellIndependent
             | CredentialResolution::ResolvableInTimer { .. } => {}
@@ -892,35 +1255,11 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
             CredentialResolution::UnreadablePlatform { .. } => {}
             _ => {}
         }
-        // ③ the covered-but-never-successfully-pushed destination (§4.7's
-        // fixture shape): the machinery looks right — a timer covers it,
-        // the credentials resolve — yet no push has been recorded to have
-        // succeeded. Before this arm, ③ surfaced only in `--json` facts
-        // and `doctor`'s table, never as an alert, so `status` stayed
-        // green until a weekly reclaim happened to block on the gap. An
-        // uncovered destination does not get this alert: its coverage
-        // finding already speaks, and the push that follows the fix is
-        // the same sentence's happy ending.
-        if declared_row
-            && matches!(facts.push_coverage, PushCoverage::Covered { .. })
-            && matches!(facts.last_push, LastPush::NoRecord)
-        {
-            reconciliation.alerts.push(Alert {
-                severity: Severity::Yellow,
-                sentence: format!(
-                    "[dest] {}: {} — the timer covers it, and until a push succeeds no copy \
-                     beyond this machine is known to exist; the first successful push ends the \
-                     finding",
-                    facts.name,
-                    no_record_why(&facts.name),
-                ),
-                fix: Some(format!(
-                    "chat-stasher push --destination {} --stage <stage>   # a push by hand now \
-                     records the first success",
-                    facts.name
-                )),
-            });
-        }
+        // ③'s covered-but-never-recorded arm (the pre-ADR-060 shape) is
+        // subsumed by the degraded-health alarm above: a destination with
+        // no push on record is `never-pushed` — degraded, alarmed on every
+        // run, with the two-road advice — whether or not a timer covers
+        // it, which is the ADR's own unification of the finding.
         match &facts.reclaim_share {
             ReclaimShare::NotBlocking => {}
             ReclaimShare::Blocking {
@@ -951,7 +1290,8 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                     severity: Severity::Yellow,
                     sentence: format!(
                         "[reclaim] blocked by `{}`: {} — {sessions} session(s) / {} held back in \
-                         the stage; nothing is reclaimed until every declared destination answers",
+                         the stage; nothing is reclaimed until the healthy set answers (this \
+                         destination is healthy, so its word is the one that holds the bytes)",
                         facts.name,
                         why,
                         fmt_bytes(*bytes),
@@ -963,6 +1303,16 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                     ),
                 });
             }
+            // ADR-060 D7's separate arm: the run classified this destination
+            // degraded and did not consult it — a state the user must see,
+            // never folded into `NotBlocking`. It stays quiet at the alert
+            // level by design: the degradation the *current* health alarm
+            // above speaks of is the same finding in the present tense,
+            // with the same two-road advice, and a second sentence for the
+            // same destination on the same panel is how alarms stop being
+            // read. The arm is visible where facts live: `doctor`'s table
+            // and `--json`.
+            ReclaimShare::DegradedNotConsulted { .. } => {}
             ReclaimShare::UnknownRun { .. } => {}
         }
     }
@@ -982,32 +1332,76 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
             } else {
                 Severity::Yellow
             };
-            // A `Refused` attempt ended before the destinations were
-            // consulted, so nothing about the stage was measured — the
-            // record keeps `candidates` absent for exactly that reason,
-            // and the alert must not launder the refusal's empty
-            // `blocked` list into `0 session(s) / 0 B held back for ;`: a
-            // fabricated measurement with a dangling list. Counts print
-            // only for the outcome that measured them, and the refusal
-            // reason lives in this one line rather than in a second,
-            // milder alert that would contradict its own severity.
-            let held_back = if attempt.blocked.is_empty() {
-                "what it holds back is unknown — the attempt ended before the destinations \
-                 were consulted"
-                    .to_string()
-            } else {
-                let held: usize = attempt.blocked.iter().map(|b| b.sessions).sum();
-                let bytes: u64 = attempt.blocked.iter().map(|b| b.bytes).sum();
-                let destinations_held: Vec<&str> = attempt
-                    .blocked
-                    .iter()
-                    .map(|b| b.destination.as_str())
-                    .collect();
-                format!(
-                    "{held} session(s) / {} held back for {}",
-                    fmt_bytes(bytes),
-                    destinations_held.join(", ")
-                )
+            // The two empty-`blocked` shapes a non-Ok attempt can have,
+            // which the record must keep apart (an unknown-never-empty
+            // rule of its own):
+            //
+            // * `Refused` — the attempt ended before the destinations were
+            //   consulted, so nothing about the stage was measured either:
+            //   the record keeps `candidates` absent for exactly that
+            //   reason, and the alert must not launder the refusal's empty
+            //   `blocked` list into `0 session(s) / 0 B held back for ;`:
+            //   a fabricated measurement with a dangling list.
+            //
+            // * `Blocked` with an empty `blocked` list — ADR-060's
+            //   empty-proof-set refusal: the run consulted, found every
+            //   declared destination degraded, and deleted nothing on the
+            //   ≥1 guard. The health snapshot the v2 record carries is what
+            //   makes the shape checkable; the wording names the guard
+            //   rather than a count nobody measured session-by-session.
+            //
+            // Counts print only for the outcome that measured them, and
+            // the refusal reason lives in this one line rather than in a
+            // second, milder alert that would contradict its own severity.
+            let held_back = match (attempt.outcome, attempt.blocked.is_empty()) {
+                (crate::reclaimstate::ReclaimOutcome::Refused, _) => {
+                    "what it holds back is unknown — the attempt ended before the destinations \
+                     were consulted"
+                        .to_string()
+                }
+                (_, false) => {
+                    let held: usize = attempt.blocked.iter().map(|b| b.sessions).sum();
+                    let bytes: u64 = attempt.blocked.iter().map(|b| b.bytes).sum();
+                    let destinations_held: Vec<&str> = attempt
+                        .blocked
+                        .iter()
+                        .map(|b| b.destination.as_str())
+                        .collect();
+                    format!(
+                        "{held} session(s) / {} held back for {}",
+                        fmt_bytes(bytes),
+                        destinations_held.join(", ")
+                    )
+                }
+                (_, true) => {
+                    // A `Blocked` attempt whose per-destination list is
+                    // empty: the run proved nothing because nothing could
+                    // be proven against — not a refusal, a refusal-shape of
+                    // its own. The counts the run did measure are already
+                    // in the sentence the way every blocked run's are: the
+                    // whole candidate set was held back.
+                    let degraded: Vec<&str> = attempt
+                        .destination_health
+                        .iter()
+                        .flatten()
+                        .filter(|row| row.role == "degraded-not-consulted")
+                        .map(|row| row.destination.as_str())
+                        .collect();
+                    format!(
+                        "no healthy destination to prove against — every declared destination \
+                         is degraded ({}), so nothing was deleted; restoration path: fix \
+                         pushes, health heals automatically",
+                        if degraded.is_empty() {
+                            // A blocked attempt recorded neither a block nor
+                            // a health snapshot: what it held back is a
+                            // blank in the record, worded as one rather
+                            // than as a list invented from absence.
+                            "destination states not recorded by that run".to_string()
+                        } else {
+                            degraded.join(", ")
+                        }
+                    )
+                }
             };
             let noun = if streak == 1 {
                 "blocked once in a row".to_string()
@@ -1029,6 +1423,53 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
         }
     }
 
+    // ADR-060 D5's stage cap: red through the SG-1 alert channel when the
+    // stage's shard body is over the effective cap, and *only* that — the
+    // cap adds no stop, no forced reclaim, no other consequence; the
+    // weekly job's own alarms (above) are what say what is stuck. Wording
+    // carries the measured bytes, the cap, and the fix commands, the one
+    // shape the three surfaces share.
+    if let Some((bytes, cap)) = stage_cap.exceeded() {
+        reconciliation.job_alerts.push(Alert {
+            severity: Severity::Red,
+            sentence: format!(
+                "[reclaim] the stage holds {} of shard body — over the configured cap of {} \
+                 (sessions tree only; meta is excluded). This is an alarm, not a block: \
+                 collection and the weekly clean-up run exactly as before, and the bytes stay \
+                 until a proven reclaim removes them. If the stage is not shrinking, run the \
+                 dry reclaim and read which destinations it names — repair their pushes, or \
+                 remove a destination from the config if it is no longer needed",
+                fmt_bytes(bytes),
+                fmt_bytes(cap),
+            ),
+            fix: Some(
+                "chat-stasher reclaim-stage --stage <stage>   # dry run: names what it would \
+                 reclaim and what holds it back"
+                    .to_string(),
+            ),
+        });
+    }
+
+    // The unreadable record needs no scheduler's say-so: the file exists
+    // and answers with nothing, which is a measured negative the way ③'s
+    // unreadable push-state arm is, so it speaks on every platform — on a
+    // machine whose scheduler this build cannot read, the blocked-streak
+    // arm above already reads this same file, and a v1 record left by an
+    // older build must alarm there too rather than pass as a healthy
+    // silence (ADR-060 D7, the W1012g policy applied forward). Being
+    // pulled out of the E2 install gate below is the point: that gate
+    // anchors its alarms on the measured fact that the job is installed,
+    // which is exactly what an unreadable scheduler cannot supply.
+    if let ReclaimJobRecord::Unreadable(why) = &reclaim.record {
+        reconciliation.job_alerts.push(Alert {
+            severity: Severity::Yellow,
+            sentence: format!(
+                "[reclaim] the reclaim record exists but is unreadable ({why}), so what the \
+                 weekly job last did is unknown — not ok, and not never-run"
+            ),
+            fix: None,
+        });
+    }
     // The silent-failure shape the log cannot cover (SG-0 E2): the job is
     // installed and its record has gone quiet. "Never recorded a run" is
     // only an alarm once the timer file has been installed longer than
@@ -1085,14 +1526,6 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                     ),
                 });
             }
-            ReclaimJobRecord::Unreadable(why) => reconciliation.job_alerts.push(Alert {
-                severity: Severity::Yellow,
-                sentence: format!(
-                    "[reclaim] the reclaim record exists but is unreadable ({why}), so what the \
-                     weekly job last did is unknown — not ok, and not never-run"
-                ),
-                fix: None,
-            }),
             _ => {}
         }
     }
@@ -1101,8 +1534,11 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
 }
 
 /// Coarse, honest duration wording — the same bands `runstate::human_age`
-/// keeps, restated here so this module owns all of its sentences.
-fn human_age(secs: u64) -> String {
+/// keeps, restated here so this module owns all of its sentences. Public
+/// because `reclaim-stage` prints the same banding for the health lines it
+/// lists beside this module's alerts (one wording, D2's shared-wording
+/// rule).
+pub fn human_age(secs: u64) -> String {
     if secs < 5400 {
         format!("{} minutes", (secs + 59) / 60)
     } else if secs < 172_800 {
@@ -1225,9 +1661,10 @@ pub fn install_warnings(
                 ));
                 lines.push(
                     "schedule install:   A push reaches them only when a command names them by \
-                     hand, and the weekly stage clean-up consults every declared destination and \
-                     holds every staged byte until they answer — so one of these keeps the \
-                     stage from ever shrinking."
+                     hand, and the weekly stage clean-up classifies every declared destination: \
+                     without a recent successful push they are degraded — not consulted for proof, \
+                     alarmed on every run, and the stage keeps every byte the healthy set has not \
+                     proven. If no healthy destination remains, nothing is reclaimed at all."
                         .to_string(),
                 );
                 lines.push(
@@ -1246,15 +1683,16 @@ pub fn install_warnings(
             }
             vec![
                 format!(
-                    "schedule install: WARNING ⚠ the weekly clean-up proves EVERY declared \
+                    "schedule install: WARNING ⚠ the weekly clean-up proves every HEALTHY declared \
                      destination before it deletes anything, and no installed hourly timer \
                      pushes: {}",
                     missing.join(", ")
                 ),
-                "schedule install:   It will consult every declared destination each week, and \
-                 an unreachable or never-pushed one blocks the whole reclamation: nothing is \
-                 deleted and the stage keeps growing. `chat-stasher status` reports the \
-                 blockage and its reason."
+                "schedule install:   A destination without a recent successful push is degraded: \
+                  the clean-up does not consult it, alarms on every run, and if none of the \
+                  declared destinations is healthy nothing is deleted and the stage keeps \
+                  growing. `chat-stasher status` reports the health and the alarm; health heals \
+                  automatically with the next successful push."
                     .to_string(),
                 "schedule install:   Install their hourly timers too (`chat-stasher schedule \
                  install --destination <name> --stage <stage>`) or remove the declaration from \
@@ -1351,7 +1789,28 @@ pub fn destinations_json(r: &Reconciliation) -> serde_json::Value {
             }),
         },
         "reclaim": reclaim_json(r),
+        // ADR-060 D5's stage-cap fact: the measured shard-body bytes against
+        // the effective cap — data for the menu bar, never an input to any
+        // run's outcome (the cap is alarm-only). Unknown stays unknown,
+        // never a zero-shaped silence.
+        "stage_cap": stage_cap_json(r),
     })
+}
+
+/// The `--json` shape of the stage-cap fact (ADR-060 D5).
+fn stage_cap_json(r: &Reconciliation) -> serde_json::Value {
+    match &r.stage_cap {
+        StageCapFact::NoStage => serde_json::json!({ "kind": "no_stage" }),
+        StageCapFact::Unmeasurable { why } => {
+            serde_json::json!({ "kind": "unknown", "why": why })
+        }
+        StageCapFact::Measured { bytes, cap } => serde_json::json!({
+            "kind": "measured",
+            "bytes": bytes,
+            "cap": cap,
+            "exceeded": bytes > cap,
+        }),
+    }
 }
 
 fn destination_facts_json(facts: &DestinationFacts) -> serde_json::Value {
@@ -1413,6 +1872,22 @@ fn destination_facts_json(facts: &DestinationFacts) -> serde_json::Value {
                 "why": why,
             }),
         },
+        // ADR-060 D2: the health vocabulary is the four states verbatim —
+        // `healthy` / `lagging` / `never-pushed` / `unknown` — and the
+        // prose rule keeps its distance: the slug `never-pushed` is a
+        // machine word, and the human sentence for the same state says
+        // "no push on record", never the suggestive "never pushed".
+        "health": match &facts.health {
+            DestinationHealth::Unknown { why } => serde_json::json!({
+                "kind": "unknown",
+                "why": why,
+                "degrade_after_days": facts.degrade_after_days,
+            }),
+            health => serde_json::json!({
+                "kind": health.slug(),
+                "degrade_after_days": facts.degrade_after_days,
+            }),
+        },
         "reclaim_share": match &facts.reclaim_share {
             ReclaimShare::NotBlocking => serde_json::json!({ "kind": "not_blocking" }),
             ReclaimShare::Blocking { kind, error_kind, sessions, bytes } => serde_json::json!({
@@ -1421,6 +1896,13 @@ fn destination_facts_json(facts: &DestinationFacts) -> serde_json::Value {
                 "error_kind": error_kind,
                 "sessions": sessions,
                 "bytes": bytes,
+            }),
+            // D7's third visible arm, machine-readable, in the ADR's own
+            // words: the state the run actually recorded for a
+            // degraded destination.
+            ReclaimShare::DegradedNotConsulted { health } => serde_json::json!({
+                "kind": "degraded-not-consulted",
+                "health": health,
             }),
             ReclaimShare::UnknownRun { outcome } => serde_json::json!({
                 "kind": "unknown_run",
@@ -1472,6 +1954,17 @@ fn reclaim_json(r: &Reconciliation) -> serde_json::Value {
                     "error_kind": b.error_kind,
                     "sessions": b.sessions,
                     "bytes": b.bytes,
+                })).collect::<Vec<_>>(),
+                // ADR-060 D7: the run's per-destination health snapshot —
+                // what the run actually saw, so a degraded destination is
+                // read as that state (`never-pushed` and friends are the
+                // D2 slugs recorded verbatim) and never as a zero-shaped
+                // "nothing happened". Absent when the run recorded no
+                // classification.
+                "destination_health": attempt.destination_health.iter().flatten().map(|row| serde_json::json!({
+                    "destination": row.destination,
+                    "health": row.health,
+                    "role": row.role,
                 })).collect::<Vec<_>>(),
             });
             // The same honesty the record itself keeps (its `candidates`
@@ -1625,6 +2118,35 @@ pub fn doctor_lines(r: &Reconciliation) -> Vec<String> {
                 LastPush::Unknown { why } => format!("unknown — {why}"),
             }
         ));
+        // ADR-060 D2's derived health, the same one function `reclaim-stage`
+        // consults: the state word, the effective degrade-after it was
+        // judged against, and — for the two degraded states — the fact that
+        // the empty-proof-set refusal is what hangs on them when nothing
+        // healthy remains.
+        lines.push(format!(
+            "    health         : {} (degrade after {} day(s)){}",
+            match &facts.health {
+                DestinationHealth::Healthy => "healthy".to_string(),
+                DestinationHealth::Lagging => {
+                    "degraded — last successful push older than its degrade-after".to_string()
+                }
+                // Prose keeps the absence rule: the state word in `--json`
+                // is `never-pushed`; the human table says "no push on
+                // record" and never "never pushed".
+                DestinationHealth::NeverPushed => {
+                    "degraded — no push on record".to_string()
+                }
+                DestinationHealth::Unknown { why } => format!("unknown — {why}"),
+            },
+            facts.degrade_after_days,
+            if facts.health.is_degraded() {
+                "; not consulted by the reclaim proof, alarmed every run"
+            } else if matches!(facts.health, DestinationHealth::Unknown { .. }) {
+                "; must-prove (an unreadable record may never become deletion permission)"
+            } else {
+                ""
+            },
+        ));
         // ④
         lines.push(format!(
             "    reclaim share  : {}",
@@ -1639,11 +2161,35 @@ pub fn doctor_lines(r: &Reconciliation) -> Vec<String> {
                     "blocking ({kind}) — {sessions} session(s) / {} held back",
                     fmt_bytes(*bytes)
                 ),
+                ReclaimShare::DegradedNotConsulted { health } => format!(
+                    "degraded-not-consulted by the last recorded attempt (health then: {health})"
+                ),
                 ReclaimShare::UnknownRun { .. } => {
                     "the last recorded attempt ended before destinations were consulted".to_string()
                 }
             }
         ));
+    }
+    // ADR-060 D5's stage-cap fact, in the table even when it is quiet in the
+    // alerts: the measured basis is named so the number can be checked
+    // against what it excludes (meta, machine logs).
+    match &r.stage_cap {
+        StageCapFact::NoStage => {}
+        StageCapFact::Unmeasurable { why } => {
+            lines.push(format!("  stage cap        : unknown — {why}"));
+        }
+        StageCapFact::Measured { bytes, cap } => {
+            lines.push(format!(
+                "  stage cap        : {} of shard body, cap {} — {}",
+                fmt_bytes(*bytes),
+                fmt_bytes(*cap),
+                if bytes > cap {
+                    "over (alarm only, never a stop)"
+                } else {
+                    "within"
+                }
+            ));
+        }
     }
     if let ReclaimJobRecord::Present { attempt, age_secs } = &r.reclaim.record {
         lines.push(format!(
@@ -1764,6 +2310,7 @@ mod tests {
                 sessions: 9_869,
                 bytes: 12_900_000_000,
             }],
+            destination_health: None,
             consecutive_blocked: 0,
             candidates: Some(9_869),
             candidate_bytes: Some(12_900_000_000),
@@ -1826,6 +2373,7 @@ mod tests {
             state_dir: state.path(),
             now_unix: 1_750_100_200,
             scheduler_readable: true,
+            stage: None,
         });
         restore_config_home(&old_xdg);
 
@@ -1920,6 +2468,7 @@ mod tests {
             state_dir: state.path(),
             now_unix: 1_750_000_000,
             scheduler_readable: true,
+            stage: None,
         });
         let [row] = out.destinations.as_slice() else {
             panic!("one row for the default repository: {:?}", out.destinations)
@@ -1949,6 +2498,7 @@ mod tests {
             state_dir: state.path(),
             now_unix: 1_750_000_000,
             scheduler_readable: true,
+            stage: None,
         });
         let streak = out
             .all_alerts()
@@ -2016,8 +2566,8 @@ mod tests {
             "the uncovered destination is named: {joined}"
         );
         assert!(
-            joined.contains("stage from ever shrinking"),
-            "the consequence is stated: {joined}"
+            joined.contains("the stage keeps every byte the healthy set has not proven"),
+            "the consequence is stated in the health semantics: {joined}"
         );
         assert!(
             joined.contains(
@@ -2042,8 +2592,9 @@ mod tests {
         );
         let reclaim_joined = reclaim_warnings.join("\n");
         assert!(
-            reclaim_joined.contains("the weekly clean-up proves EVERY declared destination"),
-            "the reclaim install warns about what it consults: {reclaim_joined}"
+            reclaim_joined
+                .contains("the weekly clean-up proves every HEALTHY declared destination"),
+            "the reclaim install warns about what it consults (the healthy set): {reclaim_joined}"
         );
         assert!(
             reclaim_joined.contains("pushes: storagebox"),
@@ -2095,6 +2646,7 @@ mod tests {
             state_dir: state.path(),
             now_unix: 1_750_000_000,
             scheduler_readable: true,
+            stage: None,
         });
         let stale_alert = out
             .all_alerts()
@@ -2124,6 +2676,7 @@ mod tests {
             apply: true,
             outcome: crate::reclaimstate::ReclaimOutcome::Refused,
             blocked: Vec::new(),
+            destination_health: None,
             consecutive_blocked: 0,
             candidates: None,
             candidate_bytes: None,
@@ -2139,6 +2692,7 @@ mod tests {
             state_dir,
             now_unix: 1_750_100_200,
             scheduler_readable: true,
+            stage: None,
         });
         let streak_alerts: Vec<&Alert> = out
             .job_alerts
@@ -2181,14 +2735,16 @@ mod tests {
         );
     }
 
-    /// M1 · Fact ③, the coverage-shaped gap §4.7's fixture is built on: the
-    /// timer covers the destination and yet no push has ever been recorded
-    /// against it. Before this, ③ surfaced only in `--json` facts and
-    /// `doctor`'s table — never as an alert — so `status` and the panel
-    /// stayed green on exactly the machine the reconciliation exists for.
-    /// An uncovered destination does not get the alert: its coverage
-    /// finding already speaks, and the §5.3 rule is a finding per fact,
-    /// not a doubling per destination.
+    /// M1, superseded shape kept deliberately · Fact ③ as ADR-060 D2 owns
+    /// it: a destination with no push on record is **never-pushed** —
+    /// degraded, alarmed on every run — whether or not a timer covers it,
+    /// because the state is about the record, not the coverage. The alarm
+    /// keeps the pre-ADR-060 round's absence wording (it names the version
+    /// that started keeping the record, never "never pushed") and gains
+    /// A2's two roads: repair the push *or* remove the destination from
+    /// the config. The covered destination raises exactly one such alarm;
+    /// the uncovered one keeps its coverage finding *and* raises its own
+    /// degraded alarm — two first-order facts (① and ③), not a doubling.
     #[test]
     fn a_covered_destination_with_no_recorded_push_alerts_fact_three() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -2210,18 +2766,19 @@ mod tests {
             state_dir: state.path(),
             now_unix: 1_750_100_200,
             scheduler_readable: true,
+            stage: None,
         });
         restore_config_home(&old_xdg);
 
         let all = out.all_alerts();
         let no_push_alerts: Vec<&Alert> = all
             .iter()
-            .filter(|a| a.sentence.contains("[dest] storagebox: no push"))
+            .filter(|a| a.sentence.contains("[dest] storagebox: degraded"))
             .collect();
         assert_eq!(
             no_push_alerts.len(),
             1,
-            "one alert for the covered-but-never-pushed destination: {:?}",
+            "one degraded alarm for the covered-but-never-pushed destination: {:?}",
             all
         );
         let alert = no_push_alerts[0];
@@ -2234,10 +2791,55 @@ mod tests {
             alert.sentence
         );
         assert!(
+            alert.sentence.contains("Two roads"),
+            "A2: the alarm names both roads, never one: {}",
+            alert.sentence
+        );
+        assert!(
+            alert
+                .sentence
+                .contains("remove `[destinations.storagebox]` from the config"),
+            "road two is the removal: {}",
+            alert.sentence
+        );
+        // The uncovered destination keeps its coverage finding and raises
+        // its own degraded alarm for the same absence — degradation is a
+        // separate fact from coverage, and the degraded alarm no longer
+        // waits for a timer to exist (D2: "alarming every run").
+        assert!(
             all.iter()
-                .all(|a| !a.sentence.contains("[dest] r2: no push")),
-            "the uncovered destination's story is its coverage finding, not a doubling: {:?}",
+                .any(|a| a.sentence.contains("[dest] r2: declared, but no installed")),
+            "the coverage finding still speaks for the uncovered destination: {:?}",
             all
+        );
+        assert!(
+            all.iter()
+                .any(|a| a.sentence.contains("[dest] r2: degraded")),
+            "the uncovered destination's degraded state speaks too: {:?}",
+            all
+        );
+        // The machine facts themselves: both rows classify never-pushed
+        // with no push record, whatever the coverage says.
+        let r2 = out
+            .destinations
+            .iter()
+            .find(|facts| facts.name == "r2")
+            .expect("the uncovered row exists");
+        assert_eq!(r2.health, DestinationHealth::NeverPushed);
+        assert!(
+            r2.health.is_degraded(),
+            "never-pushed is a degraded state (not consulted by the proof)"
+        );
+        assert_eq!(r2.health.proof_role_word(), "degraded-not-consulted");
+        let storagebox = out
+            .destinations
+            .iter()
+            .find(|facts| facts.name == "storagebox")
+            .expect("the covered row exists");
+        assert_eq!(storagebox.health, DestinationHealth::NeverPushed);
+        assert_eq!(
+            storagebox.health.proof_role_word(),
+            "degraded-not-consulted"
         );
         assert!(
             alert
@@ -2281,6 +2883,7 @@ mod tests {
             state_dir: state.path(),
             now_unix: 1_750_100_200,
             scheduler_readable: true,
+            stage: None,
         });
         restore_config_home(&old_xdg);
         let row = healthy
@@ -2318,6 +2921,7 @@ mod tests {
             state_dir: state.path(),
             now_unix: 1_750_100_200,
             scheduler_readable: true,
+            stage: None,
         });
         restore_config_home(&old_xdg);
         let row = out
@@ -2386,6 +2990,7 @@ mod tests {
             state_dir: state.path(),
             now_unix: 1_750_100_200,
             scheduler_readable: false,
+            stage: None,
         });
         restore_config_home(&old_xdg);
         let platform_alerts = unreadable_platform.all_alerts();
@@ -2481,6 +3086,7 @@ mod tests {
             state_dir: state.path(),
             now_unix: 1_750_100_200,
             scheduler_readable: false,
+            stage: None,
         });
         restore_config_home(&old_xdg);
 
@@ -2538,6 +3144,7 @@ mod tests {
             state_dir: state.path(),
             now_unix: 1_750_000_100,
             scheduler_readable: false,
+            stage: None,
         });
         restore_config_home(&old_xdg);
         assert!(
@@ -2577,6 +3184,7 @@ mod tests {
             state_dir: state.path(),
             now_unix: 1_750_000_000,
             scheduler_readable: true,
+            stage: None,
         });
         for name in ["storagebox", "r2"] {
             let row = out
@@ -2675,6 +3283,7 @@ mod tests {
             state_dir: state.path(),
             now_unix: 1_750_100_200,
             scheduler_readable: true,
+            stage: None,
         });
         restore_config_home(&old_xdg);
         let table = doctor_lines(&out);
@@ -2776,6 +3385,7 @@ mod tests {
                 state_dir: state,
                 now_unix: 1_750_000_000,
                 scheduler_readable: false,
+                stage: None,
             }
         }
         let environment_only = reconcile(&inputs(&declared(None), home.path(), state.path()));
@@ -2923,5 +3533,377 @@ mod tests {
             single_warnings.is_empty(),
             "an uncontended producer timer warns about nothing: {single_warnings:?}"
         );
+    }
+
+    // ------------------------------------------- ADR-060 D2/D5/A1 (SG-2) unit pins
+
+    /// The classifier's four states from the three record states (D2),
+    /// with the boundary decided 10-22: a push *exactly* on the threshold
+    /// is within it, and degrading means strictly older. Parameterised by
+    /// `now`, so the whole table is assertable without waiting.
+    #[test]
+    fn the_four_health_states_classify_from_the_record() {
+        let at = |secs_ago: u64| LastPush::At {
+            finished_at_unix: 1_750_000_000 - secs_ago,
+            snapshots_in_repo: 1,
+        };
+        let now = 1_750_000_000;
+        let seven_days = 7 * 86_400;
+        assert_eq!(
+            classify_destination_health(&at(0), 7, now),
+            DestinationHealth::Healthy,
+            "a push this instant is healthy"
+        );
+        assert_eq!(
+            classify_destination_health(&at(seven_days), 7, now),
+            DestinationHealth::Healthy,
+            "a push exactly on the threshold is within it — strictly older degrades"
+        );
+        assert_eq!(
+            classify_destination_health(&at(seven_days + 1), 7, now),
+            DestinationHealth::Lagging,
+            "one second past the threshold degrades"
+        );
+        assert_eq!(
+            classify_destination_health(&LastPush::NoRecord, 7, now),
+            DestinationHealth::NeverPushed
+        );
+        assert_eq!(
+            classify_destination_health(&LastPush::NoRecord, 35, now),
+            DestinationHealth::NeverPushed,
+            "an absence stays never-pushed whatever the threshold — the override never \
+             manufactures a record"
+        );
+        assert_eq!(
+            classify_destination_health(
+                &LastPush::Unknown {
+                    why: "malformed json".to_string(),
+                },
+                7,
+                now
+            ),
+            DestinationHealth::Unknown {
+                why: "malformed json".to_string()
+            },
+            "an unreadable record is its own state — never lagging, never healthy"
+        );
+    }
+
+    /// A1's fixture (the review's mandatory edit): a destination declaring
+    /// `degrade_after_days = 35` whose last successful push is 20 days old
+    /// classifies **healthy** — inside the must-prove set, no degraded
+    /// alarm — while its sibling on the global window classifies lagging on
+    /// the same 20 days. The override follows the declared rhythm only; it
+    /// never removes protection, and past its own threshold it degrades
+    /// exactly like the global rule.
+    #[test]
+    fn a_thirty_five_day_override_keeps_a_twenty_day_push_healthy() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        write_config(
+            home.path(),
+            "[destinations.monthly-disk]\nrepo = \"opendal:sftp\"\ndegrade_after_days = 35\n\n\
+             [destinations.hourly-box]\nrepo = \"opendal:s3\"\n\n[reclaim]\ndegrade_after_days = 7\n",
+        );
+        plant_units(home.path(), None);
+        // Both destinations were last pushed 20 days ago; the machine's
+        // `cmd_push` would have written these rows.
+        let twenty_days_ago = 1_750_000_000 - 20 * 86_400;
+        crate::pushstate::record_success(&state.path(), "monthly-disk", "m", 3, twenty_days_ago)
+            .unwrap();
+        crate::pushstate::record_success(&state.path(), "hourly-box", "m", 3, twenty_days_ago)
+            .unwrap();
+        // A config parsed from the same text the machine would write, so
+        // the override reading is the loader's, not the test's assertion.
+        let raw =
+            std::fs::read_to_string(home.path().join(".config/chat-stasher/config.toml")).unwrap();
+        let config: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(
+            config.destinations["monthly-disk"].degrade_after_days,
+            Some(35),
+            "the override key parses on its own destination"
+        );
+
+        let old_xdg = pin_config_home(home.path());
+        let out = reconcile(&Inputs {
+            config: &config,
+            format: Format::Launchd,
+            home: home.path(),
+            state_dir: state.path(),
+            now_unix: 1_750_000_000,
+            scheduler_readable: false,
+            stage: None,
+        });
+        restore_config_home(&old_xdg);
+
+        let monthly = out
+            .destinations
+            .iter()
+            .find(|facts| facts.name == "monthly-disk")
+            .expect("the override destination has a row");
+        assert_eq!(monthly.health, DestinationHealth::Healthy);
+        assert_eq!(monthly.health.proof_role_word(), "must-prove");
+        assert_eq!(
+            monthly.degrade_after_days, 35,
+            "the row carries the effective window it was judged against"
+        );
+        let hourly = out
+            .destinations
+            .iter()
+            .find(|facts| facts.name == "hourly-box")
+            .expect("the global-window destination has a row");
+        assert_eq!(hourly.health, DestinationHealth::Lagging);
+        assert_eq!(hourly.degrade_after_days, 7);
+        // And the two roads: the lagging sibling's alarm names both, the
+        // override destination stays silent — a destination on its
+        // declared rhythm is not a finding.
+        let sentences = out
+            .all_alerts()
+            .iter()
+            .map(|a| a.sentence.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            !sentences
+                .iter()
+                .any(|s| s.contains("[dest] monthly-disk: degraded")),
+            "no degraded alarm for a destination inside its own rhythm: {sentences:?}"
+        );
+        let lagging_alarm = sentences
+            .iter()
+            .find(|s| s.contains("[dest] hourly-box: degraded"))
+            .expect("the global-window sibling alarms on the same 20 days");
+        assert!(
+            lagging_alarm.contains("Two roads")
+                && lagging_alarm.contains("remove `[destinations.hourly-box]` from the config"),
+            "A2: the lagging alarm names both roads: {lagging_alarm}"
+        );
+        drop(home);
+        drop(state);
+    }
+
+    /// D2's unknown state is never read as healthy anywhere the surfaces
+    /// look: the `--json` health kind stays `unknown` with its `why`, and
+    /// the alert that speaks for it is the W1012g one (already covered by
+    /// `a_corrupt_push_state_record_is_worded_and_alerted`).
+    #[test]
+    fn an_unreadable_record_stays_unknown_in_the_json_and_always_must_proves() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        write_config(home.path(), "[destinations.r2]\nrepo = \"opendal:s3\"\n");
+        let state_dir = state.path();
+        std::fs::create_dir_all(state_dir).unwrap();
+        // A record a future build wrote: an unknown version is unreadable,
+        // never a healthy record.
+        std::fs::write(
+            crate::pushstate::push_state_path(state_dir),
+            r#"{ "version": 99, "pushes": {} }"#,
+        )
+        .unwrap();
+        let config = Config {
+            destinations: [(
+                "r2".to_string(),
+                crate::config::DestinationConfig {
+                    repo: Some("opendal:s3".to_string()),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let old_xdg = pin_config_home(home.path());
+        let out = reconcile(&Inputs {
+            config: &config,
+            format: Format::Launchd,
+            home: home.path(),
+            state_dir,
+            now_unix: 1_750_000_000,
+            scheduler_readable: false,
+            stage: None,
+        });
+        restore_config_home(&old_xdg);
+        let r2 = &out.destinations[0];
+        assert_eq!(
+            r2.health,
+            DestinationHealth::Unknown {
+                why: "unknown version 99".to_string()
+            }
+        );
+        assert!(
+            !r2.health.is_degraded(),
+            "unknown is not degraded — it is must-prove (fail-safe)"
+        );
+        assert_eq!(r2.health.proof_role_word(), "must-prove");
+        // The `--json` vocabulary is D2's four states verbatim; the
+        // unknown arm carries its why.
+        let json = destinations_json(&out);
+        let health = &json["destinations"][0]["health"];
+        assert_eq!(health["kind"], "unknown");
+        assert!(health["why"]
+            .as_str()
+            .unwrap()
+            .contains("unknown version 99"));
+    }
+
+    /// D5's size basis: the cap walk counts the sessions tree's file bytes,
+    /// stat-only — `meta/` never enters the number, and a stage that holds
+    /// no sessions tree at all is a real zero, not an unknown.
+    #[test]
+    fn the_cap_walk_counts_session_body_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let sessions = stage.join("sessions/m-unit/s-one");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let body_bytes: u64 = 3 * 1024;
+        std::fs::write(
+            sessions.join("000001.jsonl"),
+            vec![b'x'; body_bytes as usize],
+        )
+        .unwrap();
+        // A bucketed shard in a nested bucket counts too.
+        let bucket = sessions.join("0002");
+        std::fs::create_dir_all(&bucket).unwrap();
+        std::fs::write(bucket.join("000002.jsonl"), vec![b'y'; 512]).unwrap();
+        // Everything the cap must exclude: meta, machine logs, ext status.
+        let meta = stage.join("meta/m-unit");
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(meta.join("machine.json"), vec![b'm'; 4096]).unwrap();
+        std::fs::create_dir_all(stage.join("ext-status")).unwrap();
+        std::fs::write(stage.join("ext-status/report.json"), vec![b'e'; 256]).unwrap();
+        let walked = stage_shard_body_bytes(&stage).unwrap();
+        assert_eq!(
+            walked,
+            body_bytes + 512,
+            "the sessions tree only — meta and ext-status never count: {walked}"
+        );
+        assert_eq!(
+            stage_shard_body_bytes(&dir.path().join("nowhere")).unwrap_or(0),
+            0,
+            "an absent sessions tree is a real zero: the stage holds no body"
+        );
+        // And the refusal-shape fixtures stay honest through the fact: a
+        // missing stage directory is a zero, a *file* where the tree goes
+        // is an error, never a laundered number.
+        assert!(stage_shard_body_bytes(&stage.join("sessions/m-unit/s-one/000001.jsonl")).is_err());
+    }
+
+    /// D5's alarm-only rule, end to end through `reconcile`: a stage over
+    /// the effective cap raises exactly one red job alert with the
+    /// measured bytes, the cap and the advice — and nothing else in the
+    /// reconciliation changes: under the cap no alert fires, an
+    /// unconfigured stage stays quiet, and a stage that cannot be walked
+    /// is an unknown that does not read as zero.
+    #[test]
+    fn an_over_cap_stage_alarms_red_and_changes_nothing_else() {
+        let stage_dir = tempfile::TempDir::new().unwrap();
+        let stage = stage_dir.path().join("stage");
+        let sessions = stage.join("sessions/m-unit/s-one");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("000001.jsonl"), vec![b'x'; 2048]).unwrap();
+
+        let run = |stage: Option<&Path>, cap: Option<&str>| {
+            let config: Config = match cap {
+                // reason: a cap unset at the call site means the config
+                // has no [reclaim] section at all — D5's documented
+                // default (10 GiB) is what the fact reports, the same
+                // effective value the CLI hands the run.
+                None => Config::default(),
+                Some(cap) => {
+                    toml::from_str(&format!("[reclaim]\nstage_cap_bytes = \"{cap}\"\n")).unwrap()
+                }
+            };
+            reconcile(&Inputs {
+                config: &config,
+                format: Format::Launchd,
+                home: Path::new("/nonexistent-home-for-this-fixture"),
+                state_dir: Path::new("/nonexistent-state-for-this-fixture"),
+                now_unix: 1_750_000_000,
+                scheduler_readable: false,
+                stage,
+            })
+        };
+
+        // Over a 1 KiB configured cap: one red job alert, carrying the
+        // measured bytes, the cap, and the alarm-only promise.
+        let out = run(Some(&stage), Some("1KiB"));
+        let cap_alerts: Vec<&Alert> = out
+            .job_alerts
+            .iter()
+            .filter(|alert| alert.sentence.contains("over the configured cap"))
+            .collect();
+        assert_eq!(
+            cap_alerts.len(),
+            1,
+            "exactly one cap alarm, nothing about it doubles: {:?}",
+            out.job_alerts
+        );
+        let alert = cap_alerts[0];
+        assert_eq!(alert.severity, Severity::Red, "over the cap is red (D5)");
+        assert!(
+            alert.sentence.contains("2.0 KiB")
+                && alert.sentence.contains("1.0 KiB")
+                && alert.sentence.contains("This is an alarm, not a block"),
+            "measured bytes, cap and the alarm-only promise, in one wording: {}",
+            alert.sentence
+        );
+        assert!(
+            alert
+                .fix
+                .as_deref()
+                .is_some_and(|fix| fix.contains("reclaim-stage")),
+            "the fix command is the dry reclaim that names what holds the stage: {:?}",
+            alert.fix
+        );
+
+        // Under the same cap: quiet — an in-bounds stage is not a finding.
+        std::fs::write(sessions.join("000001.jsonl"), vec![b'x'; 64]).unwrap();
+        let out = run(Some(&stage), Some("1KiB"));
+        assert!(
+            out.job_alerts.is_empty(),
+            "under the cap, no job alert at all: {:?}",
+            out.job_alerts
+        );
+
+        // Over D5's *default* 10 GiB cap with no [reclaim] section: a
+        // 2 KiB stage is within it — the alarm does not fire on the
+        // default for a small stage.
+        let out = run(Some(&stage), None);
+        assert!(
+            out.job_alerts.is_empty(),
+            "the 10 GiB default does not alarm a 64-byte stage: {:?}",
+            out.job_alerts
+        );
+        // And the same stage through the JSON: measured, within, the cap
+        // named — so the menubar reads the fact the surfaces print.
+        let json = destinations_json(&out);
+        assert_eq!(json["stage_cap"]["kind"], "measured");
+        assert_eq!(json["stage_cap"]["cap"], DEFAULT_STAGE_CAP_BYTES);
+
+        // An unconfigured stage ([native_host] stage absent): its own
+        // state, quiet everywhere.
+        let out = run(None, Some("1KiB"));
+        assert!(out.job_alerts.is_empty());
+        assert_eq!(out.stage_cap, StageCapFact::NoStage);
+
+        // A configured stage that cannot be walked: an unknown with the
+        // reason, quiet in the alerts and never a zero.
+        let out = run(
+            Some(Path::new("/nonexistent-stage-root-for-this-fixture")),
+            Some("1KiB"),
+        );
+        assert!(
+            out.job_alerts.is_empty(),
+            "an unmeasurable stage does not alarm — its bytes are unknown: {:?}",
+            out.job_alerts
+        );
+        assert!(
+            matches!(&out.stage_cap, StageCapFact::Unmeasurable { why } if why.contains("could not be walked")),
+            "the unmeasurable case words its why: {:?}",
+            out.stage_cap
+        );
+        let json = destinations_json(&out);
+        assert_eq!(json["stage_cap"]["kind"], "unknown");
     }
 }

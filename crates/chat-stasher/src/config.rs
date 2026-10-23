@@ -210,10 +210,49 @@ pub struct Config {
     /// destination on this machine, never an allowance per destination.
     pub cache: Option<CacheSectionConfig>,
 
+    /// The `[reclaim]` section (ADR-060 D5): the stage reclaim's two knobs —
+    /// the degrade-after window that turns a destination healthy or
+    /// degraded (globally; per-destination overrides in
+    /// [`DestinationConfig::degrade_after_days`]), and the stage cap whose
+    /// only consequence is a red alarm on `status`, `doctor` and the menu
+    /// bar. Absent means both defaults apply: 7 days (the weekly reclaim
+    /// cadence) and 10 GiB.
+    pub reclaim: Option<ReclaimSectionConfig>,
+
     /// The `[pull]` section: API-pull producers the scheduled pass pulls
     /// before its collect step (LETTA-P3). Absent means no producer is
     /// declared and the pass's behaviour is unchanged.
     pub pull: Option<PullSectionConfig>,
+}
+
+/// The `[reclaim]` section (ADR-060 D5).
+///
+/// Every key is optional; absent keys take the documented defaults. The
+/// section never *acts*: `stage_cap_bytes` is a bounded threshold behind an
+/// alarm only — a stage over the cap is red on `status` / `doctor` / the
+/// menu bar and nothing else happens (not a stop, not a forced reclaim) —
+/// and `degrade_after_days` decides a destination's health, never its push
+/// targeting (a degraded destination keeps receiving pushes exactly as
+/// before).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReclaimSectionConfig {
+    /// A destination whose last successful push is older than this many
+    /// days is degraded: not consulted by the reclaim's proof, alarmed on
+    /// every run. Overridable per destination with
+    /// `[destinations.<name>] degrade_after_days`. Default 7 — the weekly
+    /// reclaim cadence, long enough that a network blip cannot out-age a
+    /// healthy destination, short enough that a misconfigured machine
+    /// alarms instead of quietly growing forever.
+    pub degrade_after_days: Option<u64>,
+    /// The stage-cap alarm threshold: the stage's shard-body bytes (the
+    /// `sessions/` tree only, `meta/` excluded) are compared against this
+    /// and nothing else ever happens with the answer. Default
+    /// [`crate::destdiag::DEFAULT_STAGE_CAP_BYTES`] (10 GiB); written with
+    /// the same dual spelling `cache.max_bytes` accepts — `stage_cap_bytes
+    /// = "10GB"` is 10⁹ bytes and `stage_cap_bytes = "10GiB"` is 2³⁰, so a
+    /// value meant as one thing cannot be read as the other.
+    pub stage_cap_bytes: Option<crate::body_cache::CacheSize>,
 }
 
 /// The `[pull]` section. Only the `letta` producer exists today, and the
@@ -336,6 +375,15 @@ pub struct DestinationConfig {
     pub cache_dir: Option<String>,
     /// Per-destination `rustic_no_cache` (overrides the singular field).
     pub no_cache: Option<bool>,
+    /// Per-destination degrade-after override (ADR-060 D2/D5, review ruling A1): the
+    /// number of days after which a destination with no successful push is
+    /// classified degraded. A hand-pushed destination — an external disk
+    /// pushed about once a month, the shape `destinations.md` recommends —
+    /// declares its own rhythm and stays healthy on it; *past* its own
+    /// threshold it degrades and alarms exactly like the global rule.
+    /// This never removes the destination's protection: it only answers
+    /// "how behind is behind" for this one destination.
+    pub degrade_after_days: Option<u64>,
 }
 
 /// What [`Config::set_native_host_stage`] did to the file.
@@ -1884,6 +1932,29 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # carrying.
 # dir = "~/Library/Caches/chat-stasher/body"
 
+# ----------------------------------------------------------------- reclaim
+# The stage reclaim's two knobs (ADR-060). Neither one stops anything:
+# a stage over the cap is a red alarm on `status`, `doctor` and the menu bar
+# and nothing else, and a degraded destination keeps receiving pushes exactly
+# as before — degradation only decides who the weekly reclaim asks for proof,
+# and it heals automatically with the next successful push.
+#
+# [reclaim]
+# A destination whose last successful push is older than this many days is
+# degraded: not asked for proof by the weekly stage clean-up, listed with a
+# two-road alarm on every run (repair the push, or remove the destination
+# from the config if it is no longer needed). Default 7 (the weekly cadence).
+# Per destination, `[destinations.<name>] degrade_after_days` overrides this
+# value — use it for a hand-pushed destination with its own rhythm (an
+# external disk pushed about once a month declares something like 35).
+# degrade_after_days = 7
+#
+# The stage's shard-body bytes (the sessions/ tree only; meta is excluded)
+# are compared against this and the answer is an alarm only — collection and
+# the weekly clean-up run exactly as before either way. Same dual spelling as
+# the cache quota: "10GB" is 10 x 10^9, "10GiB" is 10 x 2^30. Default 10 GiB.
+# stage_cap_bytes = "10GiB"
+
 # ---------------------------------------------------------------- harness_roots
 # Tell the tool where a harness actually keeps its sessions, keyed by the
 # registry harness id. Use this when your install is not where the shipped path
@@ -2853,6 +2924,95 @@ max_bytes = "50GB"
         assert!(
             text.contains("50G"),
             "the error must quote the value the user wrote: {text}"
+        );
+    }
+
+    /// ADR-060 D5: the `[reclaim]` section parses with both knobs, keeps the
+    /// dual size spelling `cache.max_bytes` uses (10GB = 10⁹ is not 10GiB
+    /// = 2³⁰, so a value meant as one thing cannot be read as the other),
+    /// and rides beside the unaffected `[cache]` section.
+    #[test]
+    fn reclaim_section_parses_both_knobs_with_the_dual_size_spelling() {
+        let cfg: Config = toml::from_str(
+            "[reclaim]\ndegrade_after_days = 4\nstage_cap_bytes = \"10GB\"\n[cache]\nmax_bytes = \
+             \"50GB\"\n",
+        )
+        .unwrap();
+        let reclaim = cfg.reclaim.as_ref().expect("[reclaim] present");
+        assert_eq!(reclaim.degrade_after_days, Some(4));
+        assert_eq!(
+            reclaim
+                .stage_cap_bytes
+                .map(crate::body_cache::CacheSize::bytes),
+            Some(10_000_000_000),
+            "GB is the power-of-1000 spelling"
+        );
+        assert_eq!(
+            cfg.cache
+                .as_ref()
+                .and_then(|cache| cache.max_bytes)
+                .map(crate::body_cache::CacheSize::bytes),
+            Some(50_000_000_000),
+            "the body cache quota is untouched by the new section"
+        );
+
+        let cfg: Config = toml::from_str("[reclaim]\nstage_cap_bytes = \"10GiB\"\n").unwrap();
+        assert_eq!(
+            cfg.reclaim
+                .as_ref()
+                .unwrap()
+                .stage_cap_bytes
+                .map(crate::body_cache::CacheSize::bytes),
+            Some(10 * 1024 * 1024 * 1024),
+            "GiB is the power-of-1024 spelling"
+        );
+    }
+
+    /// ADR-060 D2/D5: the section and both keys are optional, and a
+    /// destination's `degrade_after_days` override parses beside the
+    /// singular destination knobs — the A1 key, on the destination it
+    /// overrides. Absent everywhere is `None`s, which the reclaim reads as
+    /// the documented defaults (7 days, 10 GiB), never as zeros.
+    #[test]
+    fn reclaim_knobs_and_the_per_destination_override_are_optional() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.reclaim.is_none());
+
+        let cfg: Config = toml::from_str("[destinations.extdisk]\nrepo = \"x\"\n").unwrap();
+        assert!(cfg.reclaim.is_none());
+        assert_eq!(cfg.destinations["extdisk"].degrade_after_days, None);
+
+        let cfg: Config = toml::from_str(
+            "[reclaim]\ndegrade_after_days = 14\n\n[destinations.extdisk]\nrepo = \"x\"\n\
+             degrade_after_days = 35\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.reclaim.as_ref().unwrap().degrade_after_days, Some(14));
+        assert_eq!(
+            cfg.destinations["extdisk"].degrade_after_days,
+            Some(35),
+            "the per-destination override is the A1 key, on its own destination"
+        );
+    }
+
+    /// An unparsable `[reclaim]` value is a config error, quoted like every
+    /// other unusable value — the section never carries the [cache]
+    /// quarantine, because a broken stage cap or a non-numeric
+    /// degrade-after must not quietly run the reclaim under defaults the
+    /// user did not write.
+    #[test]
+    fn an_unparsable_reclaim_value_is_a_config_error() {
+        let err = toml::from_str::<Config>("[reclaim]\nstage_cap_bytes = \"10G\"\n")
+            .expect_err("an unknown unit must not be read as a number");
+        assert!(
+            err.to_string().contains("10G"),
+            "the error must quote the value the user wrote: {err}"
+        );
+        let err = toml::from_str::<Config>("[reclaim]\ndegrade_after_days = \"week\"\n")
+            .expect_err("a day count is a number");
+        assert!(
+            err.to_string().contains("week"),
+            "the error must quote the value the user wrote: {err}"
         );
     }
 

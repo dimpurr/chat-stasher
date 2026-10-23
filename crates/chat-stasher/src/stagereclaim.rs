@@ -5,21 +5,40 @@
 //! provably holds every byte, keeping only the per-session digest summaries
 //! ([`crate::manifest`]) that L3 verify uses as its baseline.
 //!
-//! The hard rule, first and only: **no shard is deleted until every declared
-//! destination proves it holds that session.** Proof means asking the archive
-//! itself — never a local cursor, never "I pushed, so it should be there" —
-//! for each session's digest triple `(shard_count, concat_bytes,
-//! concat_sha256)` and matching it against the stage. A destination that
-//! cannot be consulted is *unproven*, which blocks the reclaim: it is never
-//! treated as "does not have it" (that would delete data) nor as "has it"
-//! (that would guess).
+//! The hard rule (ADR-060 D1, amending ADR-020's role B): **no shard is
+//! deleted before the archive is proven to hold it — enforced for every
+//! healthy declared destination, with at least one proof overall.** Proof
+//! means asking the archive itself — never a local cursor, never "I
+//! pushed, so it should be there" — for each session's digest triple
+//! `(shard_count, concat_bytes, concat_sha256)` and matching it against
+//! the stage.
+//!
+//! Who must prove is decided by destination *health*, derived from the
+//! durable push record through the one classifier in [`crate::destdiag`]
+//! (ADR-060 D2/D3): `healthy` (and fail-safe `unknown`) destinations form
+//! the must-prove set; `lagging` and `never-pushed` destinations are
+//! degraded — **not consulted**, listed with their health and their stats
+//! on every run, and never allowed to hold the whole machine's reclaim
+//! hostage. A degraded destination's protection is the alarm layer and the
+//! union backfill (ADR-013 via ADR-021's cumulative read), never stage
+//! retention. The ≥1 guard is what keeps that safe: with no destination
+//! left to prove against (the empty healthy set), nothing is deleted and
+//! the loud refusal of D7's own shape speaks. A must-prove destination
+//! that cannot be consulted is still *unproven* and blocks: unreachable is
+//! never "does not have it" nor "has it".
+//!
+//! The mirror precondition (ADR-060 D6, 47 §5.3) is a no-op until a mirror
+//! exists: this build has no `[mirror]` configuration, so condition (ii) —
+//! the proof's snapshot closure complete in a configured-and-on mirror —
+//! is vacuous by construction, and the seam where LM-2's mirror-state
+//! reader plugs in is the per-session proof decision below.
 //!
 //! Default is a dry run: report what would be reclaimed and delete nothing.
 //! `--apply` writes each machine's retained summaries first — so the L3
-//! baseline lands before the body goes — then removes every proven session's
-//! shard body while keeping the session's persistent `shard-seq` counter,
-//! which is what stops the next sequence from falling back onto archived
-//! shard names. Deletion is per session, resumable and idempotent.
+//! baseline lands before the body goes — then removes every proven
+//! session's shard body while keeping the session's persistent `shard-seq`
+//! counter, which is what stops the next sequence from falling back onto
+//! archived shard names. Deletion is per session, resumable and idempotent.
 
 use anyhow::Context;
 use rustic_core::repofile::MasterKey;
@@ -27,16 +46,55 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
+use crate::destdiag::DestinationHealth;
 use crate::manifest;
 use crate::store::{self, BackupStore, StoreConfig};
 
-/// One declared destination handed to the reclaim: its config plus its name for
-/// reporting. The masterkey is loaded by the reclaim itself, so a destination
-/// whose key cannot be read is reported `Unreachable` rather than aborting.
+/// One declared destination handed to the reclaim: its config plus its
+/// name for reporting, plus the health the one classifier derived for it
+/// (ADR-060 D2). The classification is the caller's job — `reclaim-stage`
+/// reads the durable push record through `destdiag` the same way the
+/// three surfaces do, so the reclaim and `status` can never disagree about
+/// health — never a clock read or a push-state read inside this module.
+///
+/// The masterkey is loaded by the reclaim itself, so a destination whose
+/// key cannot be read is reported `Unreachable` rather than aborting.
 #[derive(Debug, Clone)]
 pub struct NamedStore {
     pub name: String,
     pub cfg: StoreConfig,
+    /// The derived health, consulted only through
+    /// [`DestinationHealth::is_degraded`] and its slug — this module holds
+    /// no second classification.
+    pub health: DestinationHealth,
+}
+
+/// One row of D7's per-destination report rows: the health the run judged
+/// and the proof role that fell out of it. Every declared destination gets
+/// one, on every run — degradation is listed, never swallowed.
+#[derive(Debug, Clone)]
+pub struct DestinationProofState {
+    pub name: String,
+    pub health: DestinationHealth,
+    /// `must-prove` / `degraded-not-consulted`, D7's words.
+    pub role: &'static str,
+}
+
+/// The run's health rows in the durable record's shape (D7's snapshot):
+/// one row per declared destination, recorded verbatim from the same
+/// classification the report carries — the CLI calls this for every
+/// outcome, so even a refused run's record says what the run saw.
+pub fn destination_states_as_state(
+    destinations: &[NamedStore],
+) -> Vec<crate::reclaimstate::ReclaimDestinationHealth> {
+    destinations
+        .iter()
+        .map(|dest| crate::reclaimstate::ReclaimDestinationHealth {
+            destination: dest.name.clone(),
+            health: dest.health.slug().to_string(),
+            role: dest.health.proof_role_word().to_string(),
+        })
+        .collect()
 }
 
 /// A session with a body in the stage, carrying the expected digest triple.
@@ -98,10 +156,20 @@ pub struct Reclaimed {
 pub struct ReclaimReport {
     /// Destination names consulted, in the order given.
     pub destinations: Vec<String>,
+    /// D7's per-destination rows — every declared destination's derived
+    /// health and proof role, in the order given. Degraded destinations
+    /// appear with their role even though they produced no `Blocked` row:
+    /// a state the user must see may not fold into silence.
+    pub destination_states: Vec<DestinationProofState>,
     /// Every session with a body in the stage, with its expected triple.
     pub candidates: Vec<Candidate>,
     /// Sessions that have a stored summary but no body (already reclaimed).
     pub already_reclaimed: usize,
+    /// The empty-proof-set refusal (ADR-060 D7): every declared destination
+    /// was degraded, so no destination could be consulted and the ≥1
+    /// guard deleted nothing. Its own blocked shape — `blocked()` reports
+    /// it, the caller prints D7's prose, the refusal exit code stays.
+    pub no_healthy_prover: bool,
     /// Non-empty means the reclaim is refused and nothing was deleted.
     pub blocked: Vec<Blocked>,
     /// Only populated when `apply` ran with an empty `blocked`.
@@ -111,9 +179,10 @@ pub struct ReclaimReport {
 }
 
 impl ReclaimReport {
-    /// Whether the reclaim is refused (a proof failed on some destination).
+    /// Whether the reclaim is refused (a proof failed on some destination,
+    /// or no destination could prove at all — the empty healthy set).
     pub fn blocked(&self) -> bool {
-        !self.blocked.is_empty()
+        !self.blocked.is_empty() || self.no_healthy_prover
     }
 }
 
@@ -150,7 +219,10 @@ pub fn blocks_as_state(blocks: &[Blocked]) -> Vec<crate::reclaimstate::ReclaimBl
         .collect()
 }
 
-/// Reclaim the stage body, proving every session against every destination first.
+/// Reclaim the stage body, proving every session against every **healthy**
+/// destination first (ADR-060 D1/D3): degraded destinations are listed on
+/// every run but not consulted; the ≥1 guard refuses the whole run when no
+/// destination is left to prove.
 ///
 /// Returns `Ok(report)` even when the reclaim is refused: the refusal lives in
 /// [`ReclaimReport::blocked`], and the caller decides the exit code from it.
@@ -198,6 +270,18 @@ pub fn reclaim_stage(
     }
 
     if report.candidates.is_empty() {
+        // The no-candidate run is a genuine no-op (nothing at stake, nothing
+        // held back), and D7's per-destination rows still record what the
+        // run's classification saw — the snapshot below is filled here too,
+        // because the phases that follow are the ones with something to do.
+        report.destination_states = destinations
+            .iter()
+            .map(|dest| DestinationProofState {
+                name: dest.name.clone(),
+                health: dest.health.clone(),
+                role: dest.health.proof_role_word(),
+            })
+            .collect();
         return Ok(report);
     }
 
@@ -217,10 +301,43 @@ pub fn reclaim_stage(
         return Ok(report);
     }
 
-    // Phase 1 — consult every destination. One unconsultable destination blocks
-    // the whole reclaim: nothing at all can be proven against it.
+    // Phase 0 (ADR-060 D1/D2/D3/D7): partition the declared set by the
+    // health the caller classified. Degraded destinations (`lagging` /
+    // `never-pushed`) are not consulted — D3's own words — but are listed
+    // on every run through `destination_states`, so their state is a
+    // report row rather than a swallowed row. `unknown` stays in the
+    // must-prove set: an unreadable push record is fail-safe, never
+    // permission to skip a destination.
+    report.destination_states = destinations
+        .iter()
+        .map(|dest| DestinationProofState {
+            name: dest.name.clone(),
+            health: dest.health.clone(),
+            role: dest.health.proof_role_word(),
+        })
+        .collect();
+    let must_prove: Vec<&NamedStore> = destinations
+        .iter()
+        .filter(|dest| !dest.health.is_degraded())
+        .collect();
+
+    // D7's empty-proof-set refusal, the ≥1 guard's own blocked shape: with
+    // no destination able to prove, nothing can be proven at all — never
+    // 0-with-success, never silence, and the exit code stays the refusal
+    // code for it. The destination rows above are what name the degraded
+    // set; `blocked` stays empty so the per-destination arms keep meaning
+    // "this destination answered and failed".
+    if must_prove.is_empty() {
+        report.no_healthy_prover = true;
+        return Ok(report);
+    }
+
+    // Phase 1 — consult every must-prove destination. One unconsultable
+    // destination in the must-prove set blocks the whole reclaim: nothing
+    // at all can be proven against it (an unconsultable destination is
+    // *unproven*, never "does not have it" nor "has it").
     let mut ready: Vec<(&NamedStore, BTreeMap<(String, String), Candidate>)> = Vec::new();
-    for dest in destinations {
+    for dest in must_prove {
         let mk = match store::load_key_file(&dest.cfg) {
             Ok(mk) => mk,
             Err(e) => {
@@ -257,9 +374,19 @@ pub fn reclaim_stage(
         return Ok(report);
     }
 
-    // Phase 2 — per-session proof across every destination. A session that any
-    // destination fails to hold is held back, and one held-back session blocks
-    // the whole reclaim: nothing is deleted.
+    // Phase 2 — per-session proof across every must-prove destination. A
+    // session that any of them fails to hold is held back (exactly that
+    // session and its bytes, in the report), and one held-back session
+    // blocks the whole reclaim: nothing is deleted while any healthy
+    // destination's answer stands against it — the blocked ⇒ delete-nothing
+    // / exit-1 contract, narrowed to the must-prove set, intact for it
+    // (ADR-060's Invalidates).
+    //
+    // The ADR-062/LM mirror precondition (D6, 47 §5.3) plugs in here when
+    // this build gains `[mirror]`: a session whose proof's snapshot S is
+    // not closure-complete in a configured-and-on mirror is held back per
+    // session, `not-mirrored` — the hook is config-gated off today, a
+    // no-op until a mirror exists.
     let mut held: BTreeMap<&str, (usize, u64, BlockedKind)> = BTreeMap::new();
     for cand in &report.candidates {
         let key = (cand.machine.clone(), cand.session_id.clone());

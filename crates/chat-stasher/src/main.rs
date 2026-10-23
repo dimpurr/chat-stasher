@@ -1137,18 +1137,26 @@ enum Command {
         shard_bucket_cap: usize,
     },
     /// Reclaim the sealed shard body from the staging tree, but only where the
-    /// archive provably holds every byte (ADR-020 Phase 4).
+    /// archive provably holds every byte (ADR-020 Phase 4; ADR-060's
+    /// health-gated proof).
     ///
     /// The stage is an unbounded local full copy; nothing ever shrinks it.
-    /// This command retires the shard body once every declared destination
-    /// proves it holds each session. Proof means asking the archive itself —
-    /// never the local cursor — for every session's digest triple (shard
-    /// count / concatenated bytes / concatenated sha256) and matching it
-    /// against the stage. A destination that cannot be consulted is
-    /// "unproven" and blocks the reclaim: it is never treated as "does not
-    /// have it". Every declared destination must prove it holds each session,
-    /// or
-    /// nothing is deleted.
+    /// Every declared destination is first classified from its last
+    /// successful push against its degrade-after (per-destination override,
+    /// else the `[reclaim]` global, default 7 days): `healthy` destinations
+    /// — and, fail-safe, a destination whose push record is unreadable —
+    /// must prove; a destination whose last successful push is older than
+    /// its degrade-after, or with no push on record, is degraded: not
+    /// consulted for proof, listed and alarmed on every run with the
+    /// two-road advice (repair the push, or remove the destination from the
+    /// config). The command then retires the shard body once every
+    /// must-prove destination proves it holds each session. Proof means
+    /// asking the archive itself — never the local cursor — for the digest
+    /// triple (shard count / concatenated bytes / concatenated sha256) and
+    /// matching it against the stage. A must-prove destination that cannot
+    /// be consulted is "unproven" and blocks: it is never treated as "does
+    /// not have it". If no destination can prove at all, nothing is deleted
+    /// either — the ≥1 guard.
     ///
     /// Default is a dry run that reports what would be reclaimed and deletes
     /// nothing; pass `--apply` to actually remove the body. `--apply` writes
@@ -1156,9 +1164,14 @@ enum Command {
     /// session, keeping each session's persistent `shard-seq` counter so the
     /// next sequence never falls back onto archived shard names.
     ///
+    /// The stage-cap alarm (`[reclaim] stage_cap_bytes`, default 10 GiB)
+    /// prints when the stage is over it, and it is an alarm only — never a
+    /// stop, never a forced reclaim.
+    ///
     /// Exit codes: 0 = reclaimable (dry run) or reclaimed (apply); 1 =
-    /// blocked — at least one destination is unreachable, partial, or fails
-    /// to hold a session, so nothing was deleted; 2 = usage error.
+    /// blocked — a must-prove destination is unreachable, partial, or fails
+    /// to hold a session, or no destination was healthy to prove at all, so
+    /// nothing was deleted; 2 = usage error.
     ReclaimStage {
         /// Stage directory that holds the sealed `sessions/` tree.
         #[arg(long)]
@@ -12311,14 +12324,53 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
     println!("[verify] L3 verdict       : {verdict}");
 }
 
-/// `reclaim-stage` — reclaim the sealed shard body once every declared
-/// destination proves it holds each session (ADR-020 Phase 4).
+/// The ③ fact in the one wording the health lines print beside: the age of
+/// the last successful push in `destdiag`'s bands, or the absence / unknown
+/// phrasings D2 keeps apart.
+fn last_push_age_words(last_push: &chat_stasher::destdiag::LastPush, now_unix: u64) -> String {
+    match last_push {
+        chat_stasher::destdiag::LastPush::At {
+            finished_at_unix, ..
+        } => chat_stasher::destdiag::human_age(now_unix.saturating_sub(*finished_at_unix)),
+        chat_stasher::destdiag::LastPush::NoRecord => "not on record".to_string(),
+        chat_stasher::destdiag::LastPush::Unknown { .. } => {
+            "unknown (record unreadable)".to_string()
+        }
+    }
+}
+
+/// ADR-060 A2's two roads, printed by `reclaim-stage` under every degraded
+/// destination on every run: repair the push, or remove the destination
+/// from the config if it is no longer needed — never one road only. The
+/// surfaces' alarms (`destdiag`) give the same pair in their own wording,
+/// one advice everywhere.
+fn print_degraded_two_roads(name: &str) {
+    println!(
+        "[reclaim-stage]     two roads: repair the push — `chat-stasher push --destination \
+         {name} --stage <stage>` (health heals automatically with the next successful push),"
+    );
+    println!(
+        "[reclaim-stage]     or remove `[destinations.{name}]` from the config if this \
+         destination is no longer needed"
+    );
+}
+
+/// `reclaim-stage` — reclaim the sealed shard body once every **healthy**
+/// declared destination proves it holds each session (ADR-020 Phase 4, as
+/// amended by ADR-060 D1/D3).
 ///
-/// The destination set is the whole debt set: with a `destinations` table the
-/// command proves against *every* declared destination; without one it proves
-/// against the single default repository. A destination that is unreachable or
-/// read only partially is "unproven" and blocks the reclaim — never "does
-/// not have it" and never "has it". A blocked reclaim deletes nothing and
+/// The destination set is the whole declared set, partitioned by derived
+/// health (ADR-060 D2): with a `destinations` table every declared
+/// destination is classified from its last successful push against its
+/// degrade-after; without one the single default repository is. A
+/// degraded destination (`lagging` / no push on record) is not consulted
+/// and never blocks on account of the consult itself — the reclaim
+/// proceeds against the healthy set and the degraded rows are listed with
+/// the two-road alarm on every run. A must-prove destination that is
+/// unreachable or read only partially is "unproven" and blocks — never
+/// "does not have it" and never "has it" — and the whole run deletes
+/// nothing. With no destination healthy enough to prove at all, nothing is
+/// deleted either (the ≥1 guard). A blocked reclaim deletes nothing and
 /// exits 1.
 fn cmd_reclaim_stage(
     stage: &PathBuf,
@@ -12341,23 +12393,90 @@ fn cmd_reclaim_stage(
             );
         }
     }
-    let destinations: Vec<NamedStore> = if multi {
+
+    // ADR-060 D2/D7: classify every destination's health before the proof —
+    // through the one classifier in `destdiag`, fed by the same durable
+    // push record `status` / `doctor` / the menu bar read, so the reclaim
+    // and the surfaces can never disagree about health on the same
+    // minute. The `now` is read once here, never inside the computation
+    // (the destdiag testability rule).
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // reason: NOT an honest default — the same (a)-fragile
+        // pre-1970-clock branch `runstate` documents. Reached only by a
+        // clock before the epoch; a 1970 `now` ages every record by
+        // decades, so every destination would classify as lagging —
+        // the refusal direction, never the deletion-permission one.
+        .unwrap_or(0);
+    let push_records = chat_stasher::pushstate::load(&state_dir);
+    let global_degrade_after_days = config
+        .reclaim
+        .as_ref()
+        .and_then(|reclaim| reclaim.degrade_after_days);
+    let stage_cap_bytes = config
+        .reclaim
+        .as_ref()
+        .and_then(|reclaim| reclaim.stage_cap_bytes)
+        .map(chat_stasher::body_cache::CacheSize::bytes)
+        // reason: absence of the key is ADR-060 D5's documented default
+        // (10 GiB) — a configured default like the body cache's quota,
+        // never an unknown read as a number.
+        .unwrap_or(chat_stasher::destdiag::DEFAULT_STAGE_CAP_BYTES);
+
+    // One (store, its ③ fact, its effective degrade-after) per declared
+    // destination, classified at read time; the `NamedStore` handed to the
+    // proof carries the derived health with it.
+    let mut classified: Vec<(NamedStore, chat_stasher::destdiag::LastPush, u64)> = if multi {
         config
             .destinations
             .keys()
-            .map(|name| NamedStore {
-                name: name.clone(),
-                cfg: resolve_store_config(&config, Some(name), None, None, None, &[]),
+            .map(|name| {
+                let last_push = chat_stasher::destdiag::last_push_of(&push_records, name);
+                let degrade_after_days = chat_stasher::destdiag::effective_degrade_after_days(
+                    global_degrade_after_days,
+                    config.destinations[name].degrade_after_days,
+                );
+                let health = chat_stasher::destdiag::classify_destination_health(
+                    &last_push,
+                    degrade_after_days,
+                    now_unix,
+                );
+                (
+                    NamedStore {
+                        name: name.clone(),
+                        cfg: resolve_store_config(&config, Some(name), None, None, None, &[]),
+                        health,
+                    },
+                    last_push,
+                    degrade_after_days,
+                )
             })
             .collect()
     } else {
-        vec![NamedStore {
-            name: "default".to_string(),
-            cfg: store_config_from(&config, repo, key_file, connections, options),
-        }]
+        let name = chat_stasher::pushstate::DEFAULT_DESTINATION.to_string();
+        let last_push = chat_stasher::destdiag::last_push_of(&push_records, &name);
+        let degrade_after_days =
+            chat_stasher::destdiag::effective_degrade_after_days(global_degrade_after_days, None);
+        let health = chat_stasher::destdiag::classify_destination_health(
+            &last_push,
+            degrade_after_days,
+            now_unix,
+        );
+        vec![(
+            NamedStore {
+                name,
+                cfg: store_config_from(&config, repo, key_file, connections, options),
+                health,
+            },
+            last_push,
+            degrade_after_days,
+        )]
     };
-    let mut destinations = destinations;
-    destinations.sort_by(|a, b| a.name.cmp(&b.name));
+    classified.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+    let destinations: Vec<NamedStore> =
+        classified.iter().map(|(dest, _, _)| dest.clone()).collect();
 
     println!("[reclaim-stage] stage        : {}", stage.display());
     println!(
@@ -12372,6 +12491,57 @@ fn cmd_reclaim_stage(
             .collect::<Vec<_>>()
             .join(", ")
     );
+
+    // ADR-060 D1/D7: every declared destination is listed with its health
+    // and its push-record fact **on every run** — including the degraded
+    // ones the proof will not consult, which is the whole point of listing
+    // them. The two degraded states carry the two-road advice [A2]; an
+    // unreadable record carries the W1012g alarm, co-appearing with the
+    // reclaim's own refusal when it produces one.
+    for (dest, last_push, degrade_after_days) in &classified {
+        let age = last_push_age_words(last_push, now_unix);
+        match &dest.health {
+            chat_stasher::destdiag::DestinationHealth::Healthy => println!(
+                "[reclaim-stage]   health: {} — healthy; last successful push {}, within its \
+                 degrade-after of {degrade_after_days} day(s); role: must-prove",
+                dest.name, age,
+            ),
+            chat_stasher::destdiag::DestinationHealth::Lagging => {
+                println!(
+                    "[reclaim-stage]   health: {name} — degraded (lagging); last successful \
+                     push {age}, past its degrade-after of {degrade_after_days} day(s); not \
+                     consulted this run",
+                    name = dest.name,
+                );
+                print_degraded_two_roads(&dest.name);
+            }
+            chat_stasher::destdiag::DestinationHealth::NeverPushed => {
+                // Prose keeps the absence rule (D2): "no push on record",
+                // never "never pushed" — the slug in the durable record is
+                // `never-pushed`, and the human line does not repeat it.
+                println!(
+                    "[reclaim-stage]   health: {} — degraded; no push on record; not consulted \
+                     this run",
+                    dest.name
+                );
+                print_degraded_two_roads(&dest.name);
+            }
+            chat_stasher::destdiag::DestinationHealth::Unknown { why } => {
+                println!(
+                    "[reclaim-stage]   health: {} — unknown; the push-state record exists but \
+                     is unreadable ({why}); role: must-prove — an unreadable record may never \
+                     become deletion permission, so this destination is consulted and can only \
+                     block, never vouch",
+                    dest.name,
+                );
+                println!(
+                    "[reclaim-stage]     fix: the next successful push rebuilds the record — \
+                     chat-stasher push --destination {} --stage <stage>",
+                    dest.name
+                );
+            }
+        }
+    }
 
     let report = match stagereclaim::reclaim_stage(stage, &destinations, apply) {
         Ok(report) => report,
@@ -12388,11 +12558,15 @@ fn cmd_reclaim_stage(
             // The refusal is durably recorded too (SG-1): a run that ends
             // here is a week the stage was not reclaimed, and the
             // consecutive-streak counter must not reset on it. The counts
-            // stay absent — this run ended before it surveyed the stage.
+            // stay absent — this run ended before it surveyed the stage —
+            // while the health snapshot is present: the classification
+            // happened before the failure, and the record says what the
+            // run saw (ADR-060 D7).
             record_reclaim_state(
                 apply,
                 chat_stasher::reclaimstate::ReclaimOutcome::Refused,
                 Vec::new(),
+                Some(stagereclaim::destination_states_as_state(&destinations)),
                 None,
                 None,
             );
@@ -12416,6 +12590,55 @@ fn cmd_reclaim_stage(
             "[reclaim-stage] already reclaimed: {} session(s) (summary retained, no body)",
             report.already_reclaimed
         );
+    }
+
+    // ADR-060 D5's stage cap, reported on the run itself — even while the
+    // reclaim is blocked, so the held-back backlog and the cap are two
+    // visible, separately-worded facts, and never an input to this run's
+    // outcome: over the cap is an alarm, not a stop and not a forced
+    // reclaim. The basis is the sessions tree only (stat-only, `meta/`
+    // excluded); a tree that could not be walked is an unknown, not zero.
+    match chat_stasher::destdiag::stage_shard_body_bytes(stage) {
+        Ok(bytes) if bytes > stage_cap_bytes => {
+            println!(
+                "[reclaim-stage] warning      : the stage holds {} of shard body (sessions tree \
+                 only; meta is excluded) — over the configured cap {}",
+                fmt_bytes(bytes),
+                fmt_bytes(stage_cap_bytes),
+            );
+            println!(
+                "[reclaim-stage]               this is an alarm, not a block: collection and this \
+                 run continue exactly as before; the bytes stay until a proven reclaim removes \
+                 them — run `chat-stasher status` for the standing red alert and its fix \
+                 commands"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => println!(
+            "[reclaim-stage] stage cap     : unknown — the sessions tree could not be walked: {e}"
+        ),
+    }
+
+    // D7's empty-proof-set refusal, the ≥1 guard's own blocked shape: with
+    // every declared destination degraded there is nothing to consult and
+    // nothing to prove, so nothing is deleted — never 0-with-success, never
+    // silence, and the exit code stays the refusal code. The health lines
+    // above have already named every degraded destination and its two
+    // roads; this line says what that adds up to.
+    if report.no_healthy_prover {
+        println!(
+            "[reclaim-stage] RESULT       : BLOCKED — no healthy destination to prove against; \
+             nothing was deleted; restoration path: fix pushes, health heals automatically"
+        );
+        record_reclaim_state(
+            apply,
+            chat_stasher::reclaimstate::ReclaimOutcome::Blocked,
+            Vec::new(),
+            Some(stagereclaim::destination_states_as_state(&destinations)),
+            Some(report.candidates.len()),
+            Some(report.candidate_bytes),
+        );
+        return ExitCode::FAILURE;
     }
 
     if report.blocked() {
@@ -12478,6 +12701,7 @@ fn cmd_reclaim_stage(
             apply,
             chat_stasher::reclaimstate::ReclaimOutcome::Blocked,
             stagereclaim::blocks_as_state(&report.blocked),
+            Some(stagereclaim::destination_states_as_state(&destinations)),
             Some(report.candidates.len()),
             Some(report.candidate_bytes),
         );
@@ -12488,6 +12712,7 @@ fn cmd_reclaim_stage(
         apply,
         chat_stasher::reclaimstate::ReclaimOutcome::Ok,
         Vec::new(),
+        Some(stagereclaim::destination_states_as_state(&destinations)),
         Some(report.candidates.len()),
         Some(report.candidate_bytes),
     );
@@ -12540,6 +12765,7 @@ fn record_reclaim_state(
     apply: bool,
     outcome: chat_stasher::reclaimstate::ReclaimOutcome,
     blocks: Vec<chat_stasher::reclaimstate::ReclaimBlock>,
+    destination_health: Option<Vec<chat_stasher::reclaimstate::ReclaimDestinationHealth>>,
     candidates: Option<usize>,
     candidate_bytes: Option<u64>,
 ) {
@@ -12559,6 +12785,7 @@ fn record_reclaim_state(
         apply,
         outcome,
         blocked: blocks,
+        destination_health,
         consecutive_blocked: 0,
         candidates,
         candidate_bytes,
@@ -19670,6 +19897,11 @@ fn local_layer_json(config: &Config, info: &RunStateInfo) -> serde_json::Value {
         );
         object.insert("dest_alerts".to_string(), reconciled["alerts"].clone());
         object.insert("reclaim".to_string(), reconciled["reclaim"].clone());
+        // ADR-060 D5: the stage-cap fact rides the same layer — the
+        // measured bytes, the cap and `exceeded` are what the menu bar
+        // needs to show the alarm the surfaces print, and an unknown
+        // stays an unknown here too, never a zero.
+        object.insert("stage_cap".to_string(), reconciled["stage_cap"].clone());
     }
     value
 }
@@ -19693,6 +19925,16 @@ fn dest_reconciliation(
         // over: a platform whose scheduler this build cannot read must not
         // have the reconciliation read its silence as "no timer".
         scheduler_readable: chat_stasher::schedule::scheduler_readable_on(std::env::consts::OS),
+        // ADR-060 D5's cap fact needs the one stage the config itself
+        // names (`[native_host] stage`, expanded at load) — the same
+        // source doctor's stage-duplicate scan reads, so the two walk the
+        // same tree. A config without a stage keeps its own state, never a
+        // guessed path.
+        stage: config
+            .native_host
+            .as_ref()
+            .and_then(|native_host| native_host.stage.as_deref())
+            .map(Path::new),
     })
 }
 

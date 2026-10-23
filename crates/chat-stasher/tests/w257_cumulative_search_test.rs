@@ -79,6 +79,11 @@ fn named(dir: &Path, name: &str) -> NamedStore {
     NamedStore {
         name: name.to_string(),
         cfg: store_config(dir, name),
+        // ADR-060: the proof consults the must-prove set; these tests
+        // exercise the archive mechanics, so their destinations enter as
+        // healthy the way a real classification after a successful push
+        // would have them.
+        health: chat_stasher::destdiag::DestinationHealth::Healthy,
     }
 }
 
