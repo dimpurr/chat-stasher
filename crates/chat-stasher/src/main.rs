@@ -533,6 +533,14 @@ enum Command {
         /// identical captured bodies. Nothing is deleted by either policy.
         #[arg(long)]
         no_collapse: bool,
+        /// ADR-061: also emit the records the source deleted, at their
+        /// original positions, each carrying `"deleted": true`. The default
+        /// view stays the source's final state; this switch is how the
+        /// deleted history — still stored, never erased — becomes
+        /// reachable. Snapshot-source sessions (opencode) only; other
+        /// harnesses ignore the switch (their bodies are growth logs).
+        #[arg(long)]
+        include_deleted: bool,
         /// Machine partition to read. Uses this machine's id when available;
         /// if it is unavailable, use `--machine` explicitly. Unused by
         /// `--all-machines`, which reads every machine.
@@ -832,6 +840,14 @@ enum Command {
         /// manifest's `untimed_lines`. Requires a window.
         #[arg(long)]
         trim_to_window: bool,
+        /// ADR-061: also emit the records the source deleted, at their
+        /// original positions, each carrying `"deleted": true`. The default
+        /// view stays the source's final state; this switch is how the
+        /// deleted history — still stored, never erased — becomes
+        /// reachable. Snapshot-source sessions (opencode) only; other
+        /// harnesses ignore the switch (their bodies are growth logs).
+        #[arg(long)]
+        include_deleted: bool,
         /// Write into a non-empty `--out`. Nothing is ever deleted, so files
         /// from an earlier export stay where they are.
         #[arg(long)]
@@ -2198,6 +2214,7 @@ fn run() -> ExitCode {
             all_machines,
             full_ids,
             no_collapse,
+            include_deleted,
             machine,
             destination,
             repo,
@@ -2211,6 +2228,7 @@ fn run() -> ExitCode {
             all_machines,
             full_ids,
             no_collapse,
+            include_deleted,
             machine.as_deref(),
             destination,
             repo,
@@ -2410,6 +2428,7 @@ fn run() -> ExitCode {
             filters,
             turns,
             trim_to_window,
+            include_deleted,
             force,
             no_collapse,
             dry_run,
@@ -2424,6 +2443,7 @@ fn run() -> ExitCode {
             &filters,
             turns,
             trim_to_window,
+            include_deleted,
             force,
             no_collapse,
             dry_run,
@@ -3281,7 +3301,6 @@ impl ActivityIndexContext {
         // count, and the sha256 of the shards concatenated in sequence order.
         // The digest is over the raw shard bytes, not the decoded lines, so it
         // is the same digest `reclaim-stage` proves when it deletes this body.
-        let mut lines: Vec<String> = Vec::new();
         let mut hasher = Sha256::new();
         let mut shard_bodies = Vec::with_capacity(shards.len());
         for (_, shard) in shards {
@@ -3307,14 +3326,48 @@ impl ActivityIndexContext {
         } else {
             BTreeSet::new()
         };
+        let mut selected_bodies: Vec<&Vec<u8>> = Vec::with_capacity(shard_bodies.len());
         for (index, bytes) in shard_bodies.iter().enumerate() {
             if duplicate_indices.contains(&index) {
                 continue;
             }
-            for line in String::from_utf8_lossy(bytes).lines() {
-                lines.push(line.to_string());
-            }
+            selected_bodies.push(bytes);
         }
+        // ADR-061: a snapshot-source session indexes as its assembled
+        // current-state body — the measured body above stays a function of
+        // the raw shard bytes (it is what the manifest and reclaims prove),
+        // while the analyzed lines are the assembled view, so an
+        // increment-era session keeps an honest line count and deleted
+        // turns stay out of the index (reachable through
+        // `read`/`export --include-deleted` instead). An assembly failure
+        // is a read failure, never a short index row.
+        let lines: Vec<String> = if chat_stasher::opencode_records::harness_is_opencode(session_id)
+        {
+            let owned: Vec<Vec<u8>> = selected_bodies.into_iter().cloned().collect();
+            let assembled = chat_stasher::opencode_records::project_session_body(
+                session_id,
+                &owned,
+                chat_stasher::opencode_records::BodyView::Current,
+            )
+            .map_err(|error| {
+                ActivityIndexError::Read(format!(
+                    "cannot assemble session {}: {error}",
+                    chat_stasher::id::short_session_id(session_id)
+                ))
+            })?;
+            String::from_utf8_lossy(&assembled)
+                .lines()
+                .map(|line| line.to_string())
+                .collect()
+        } else {
+            let mut collected: Vec<String> = Vec::with_capacity(selected_bodies.len());
+            for bytes in selected_bodies {
+                for line in String::from_utf8_lossy(bytes).lines() {
+                    collected.push(line.to_string());
+                }
+            }
+            collected
+        };
         let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
         let mut row = activity::build_row(session_id, &self.machine, &harness, &refs);
         // Merged, not assigned: `build_row` has already read what the harness's
@@ -4538,10 +4591,28 @@ fn rebuild_activity_index_from_archive(
                 sessions_without_harness += 1;
                 "unknown".to_string()
             });
-            let bytes: Vec<u8> = shard_bodies
-                .iter()
-                .flat_map(|(_, body)| body.iter().copied())
-                .collect();
+            // ADR-061: a snapshot-source session indexes as its assembled
+            // current-state body, so an increment-era session keeps its
+            // line count and timeline instead of counting every record
+            // several times (and deleted turns stay out of the index —
+            // they remain reachable through `read`/`export --include-deleted`).
+            // An assembly failure is a read failure, never a short count.
+            let bytes: Vec<u8> = if chat_stasher::opencode_records::harness_is_opencode(session_id)
+            {
+                chat_stasher::opencode_records::project_session_body(
+                    session_id,
+                    &shard_bodies
+                        .iter()
+                        .map(|(_, body)| body.clone())
+                        .collect::<Vec<_>>(),
+                    chat_stasher::opencode_records::BodyView::Current,
+                )?
+            } else {
+                shard_bodies
+                    .iter()
+                    .flat_map(|(_, body)| body.iter().copied())
+                    .collect()
+            };
             let text = String::from_utf8_lossy(&bytes);
             let owned: Vec<String> = text.lines().map(|line| line.to_string()).collect();
             let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
@@ -5638,7 +5709,26 @@ fn cmd_search_text(
                 Ok(dumped) => {
                     let found = dumped.len();
                     for (session, shards) in dumped {
-                        let raw: Vec<u8> = shards.into_iter().flatten().collect();
+                        let raw: Vec<u8> =
+                            if chat_stasher::opencode_records::harness_is_opencode(&session) {
+                                // ADR-061: a snapshot-source session is searched
+                                // as its assembled current-state body — searching
+                                // the raw set would weight repeated whole-file
+                                // copies and count deleted turns as hits.
+                                match chat_stasher::opencode_records::project_session_body(
+                                    &session,
+                                    &shards,
+                                    chat_stasher::opencode_records::BodyView::Current,
+                                ) {
+                                    Ok(body) => body,
+                                    Err(_) => {
+                                        read_failures += 1;
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                shards.into_iter().flatten().collect()
+                            };
                         let id = format!("{machine}/{session}");
                         let extracted = chat_stasher::fts::extract_index_document_for(
                             chat_stasher::fts::harness_of_document_id(&id),
@@ -6003,6 +6093,7 @@ fn cmd_export(
     filters: &chat_stasher::selector::SelectorArgs,
     turns: TurnsArg,
     trim_to_window: bool,
+    include_deleted: bool,
     force: bool,
     no_collapse: bool,
     dry_run: bool,
@@ -6092,6 +6183,7 @@ fn cmd_export(
         out: out.to_path_buf(),
         turns: turns.to_turns(),
         trim_to_window,
+        include_deleted,
         force,
         dry_run,
     };
@@ -8698,6 +8790,13 @@ fn run_once_pass(
     state.phases.shard_bytes_read_hashed = report.shard_bytes_read_hashed;
     state.phases.sqlite_sessions_queried = report.sqlite_sessions_queried;
     state.phases.sqlite_sessions_exported = report.sqlite_sessions_exported;
+    // ADR-061 (SG-3): the increment era's own counters, into the durable
+    // run-state the live-day gate reads (D6's written-vs-growth rule).
+    state.phases.sqlite_full_exports = report.sqlite_full_exports;
+    state.phases.sqlite_increment_passes = report.sqlite_increment_passes;
+    state.phases.sqlite_increment_records = report.sqlite_increment_records;
+    state.phases.sqlite_increment_bytes = report.sqlite_increment_bytes;
+    state.phases.sqlite_growth_bytes = report.sqlite_growth_bytes;
     state.phases.state_saves = report.state_saves;
     print_collect_report(&report, stage, &state_dir, &machine_name);
     if !report.errors.is_empty()
@@ -10661,6 +10760,7 @@ fn cmd_read(
     all_machines: bool,
     full_ids: bool,
     no_collapse: bool,
+    include_deleted: bool,
     machine: Option<&str>,
     destination: Option<String>,
     repo: Option<String>,
@@ -10771,7 +10871,16 @@ fn cmd_read(
         // stage root is only useful locally, as the thing to compare the read
         // against, so that is the one job it keeps below.
         let (bytez, hashes) = match chat_stasher::reader_guard::catching_panic("read", || {
-            store.read_session_concat(machine, session, &mk)
+            store.read_session_concat_with_view(
+                machine,
+                session,
+                &mk,
+                if include_deleted {
+                    store::BodyView::IncludeDeleted
+                } else {
+                    store::BodyView::Current
+                },
+            )
         }) {
             Ok(v) => v,
             Err(e) => {
@@ -10812,6 +10921,11 @@ fn cmd_read(
             bytez.len(),
             sha256_hex(&bytez)
         );
+        if include_deleted {
+            println!(
+                "[read] view            : include-deleted (deleted records are marked inline)"
+            );
+        }
         // Only when the operator named a local stage, and never fatal: this
         // line is a comparison aid, not part of the read. `expected_concat_sha`
         // needs the shards on this machine's disk, which the archive read above
@@ -11263,10 +11377,33 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                         bytes_read += shard.len() as u64;
                         shard_bodies.push(shard);
                     }
-                    let raw = store::select_shard_bodies(shard_bodies, fts_shard_policy)
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>();
+                    let selected: Vec<Vec<u8>> =
+                        store::select_shard_bodies(shard_bodies, fts_shard_policy);
+                    // ADR-061: a snapshot-source session is indexed as its
+                    // assembled current-state body, so repeated whole-file
+                    // copies cannot inflate the text and deleted turns stay
+                    // out of the searchable index (they remain reachable
+                    // through `read`/`export --include-deleted`). An
+                    // assembly failure is a load failure, never an empty
+                    // document.
+                    let raw: Vec<u8> = match id.split_once('/') {
+                        Some((_machine, session))
+                            if chat_stasher::opencode_records::harness_is_opencode(session) =>
+                        {
+                            chat_stasher::opencode_records::project_session_body(
+                                session,
+                                &selected,
+                                chat_stasher::opencode_records::BodyView::Current,
+                            )
+                            .map_err(|error| {
+                                LoadFailure::new(
+                                    bytes_read,
+                                    anyhow::anyhow!("assembling `{id}`: {error}"),
+                                )
+                            })?
+                        }
+                        _ => selected.into_iter().flatten().collect(),
+                    };
                     // The shard was read in full before it was handed to the
                     // extractor, so those bytes are part of what this build read
                     // whatever comes back (C6). Only a *read* that failed is

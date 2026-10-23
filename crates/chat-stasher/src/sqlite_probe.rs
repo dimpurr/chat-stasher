@@ -1376,14 +1376,25 @@ pub fn opencode_session_cursor(db: &Path, session_id: &str) -> Result<OpenCodeCu
     opencode_session_cursor_with_conn(&conn, session_id)
 }
 
-/// Export exactly one session as exactly one JSON line. The line is returned
-/// to collect as bytes and is never printed. Session, message, and part rows
-/// are read from one SQLite snapshot so a concurrent writer cannot combine
-/// rows from two logical database versions.
-pub fn read_opencode_session(
-    db: &Path,
-    session_id: &str,
-) -> Result<OpenCodeSessionSnapshot, String> {
+/// One complete read of a session's rows, in the record form ADR-061 writes
+/// records from: the session row, every message row **without** its parts
+/// inlined (parts are records of their own), and every part row. The rows are
+/// read from one SQLite snapshot so a concurrent writer cannot combine rows
+/// from two logical database versions; the orders are the source's own —
+/// messages by `(time_created, id)`, parts by `(message_id, time_created, id)`
+/// — and are what ADR-061's assembly sorts by, never arrival order.
+#[derive(Debug, Clone)]
+pub struct OpenCodeSessionSweep {
+    pub cursor: OpenCodeCursor,
+    pub session_row: Value,
+    pub message_rows: Vec<Value>,
+    pub part_rows: Vec<Value>,
+}
+
+/// Read one session's full row set once (the serialize-and-hash sweep ADR-061
+/// D1 describes: the pass still *reads* the session in full; the saving is on
+/// write bytes, not read bytes).
+pub fn read_opencode_sweep(db: &Path, session_id: &str) -> Result<OpenCodeSessionSweep, String> {
     let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
     conn.busy_timeout(Duration::from_secs(2))
         .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
@@ -1392,13 +1403,13 @@ pub fn read_opencode_session(
         .map_err(|error| format!("failed to start read-only transaction: {error}"))?;
     let cursor = opencode_session_cursor_with_conn(&conn, session_id)?;
 
-    let session = conn
+    let session_row = conn
         .query_row("SELECT * FROM session WHERE id = ?1", [session_id], |row| {
             row_to_json_object(row, false)
         })
         .map_err(|error| format!("failed to read session rows: {error}"))?;
 
-    let mut messages = Vec::new();
+    let mut message_rows = Vec::new();
     {
         let mut statement = conn
             .prepare("SELECT * FROM message WHERE session_id = ?1 ORDER BY time_created, id")
@@ -1410,12 +1421,13 @@ pub fn read_opencode_session(
             })
             .map_err(|error| format!("failed to enumerate message rows: {error}"))?;
         for row in rows {
-            messages.push(row.map_err(|error| format!("failed to read message rows: {error}"))?);
+            let (_id, message) =
+                row.map_err(|error| format!("failed to read message rows: {error}"))?;
+            message_rows.push(message);
         }
     }
 
-    let mut parts_by_message: std::collections::BTreeMap<String, Vec<Value>> =
-        std::collections::BTreeMap::new();
+    let mut part_rows = Vec::new();
     {
         let mut statement = conn
             .prepare(
@@ -1429,33 +1441,44 @@ pub fn read_opencode_session(
             })
             .map_err(|error| format!("failed to enumerate part rows: {error}"))?;
         for row in rows {
-            let (message_id, part) =
+            let (_message_id, part) =
                 row.map_err(|error| format!("failed to read part rows: {error}"))?;
-            parts_by_message.entry(message_id).or_default().push(part);
+            part_rows.push(part);
         }
     }
 
-    let messages: Vec<Value> = messages
-        .into_iter()
-        .map(|(id, mut message)| {
-            if let Value::Object(object) = &mut message {
-                // reason: when a message has no corresponding entries in the part table, the parts array itself is empty list []
-                let parts = parts_by_message.remove(&id).unwrap_or_default();
-                object.insert("parts".to_string(), Value::Array(parts));
-            }
-            message
-        })
-        .collect();
-    let orphan_parts: Vec<Value> = parts_by_message.into_values().flatten().collect();
-    let envelope = serde_json::json!({
-        "schema": "chat-stasher.opencode.session.v1",
-        "session": session,
-        "messages": messages,
-        "orphan_parts": orphan_parts,
-    });
-    let json_line = serde_json::to_vec(&envelope)
-        .map_err(|error| format!("failed to serialize opencode session: {error}"))?;
-    Ok(OpenCodeSessionSnapshot { cursor, json_line })
+    Ok(OpenCodeSessionSweep {
+        cursor,
+        session_row,
+        message_rows,
+        part_rows,
+    })
+}
+
+/// Export exactly one session as exactly one JSON line. The line is returned
+/// to collect as bytes and is never printed. Session, message, and part rows
+/// are read from one SQLite snapshot so a concurrent writer cannot combine
+/// rows from two logical database versions.
+///
+/// The bytes come from [`crate::opencode_records::compose_v1_line`] — the
+/// one serializer the fresh export and ADR-061's assembled views share, so
+/// "the assembled default view equals a fresh export" is a byte contract
+/// made of the same code, not two formats that happen to agree.
+pub fn read_opencode_session(
+    db: &Path,
+    session_id: &str,
+) -> Result<OpenCodeSessionSnapshot, String> {
+    let sweep = read_opencode_sweep(db, session_id)?;
+    let json_line_row = crate::opencode_records::compose_v1_line(
+        &sweep.session_row,
+        &sweep.message_rows,
+        &sweep.part_rows,
+    )
+    .map_err(|error| format!("failed to compose opencode session: {error}"))?;
+    Ok(OpenCodeSessionSnapshot {
+        cursor: sweep.cursor,
+        json_line: json_line_row,
+    })
 }
 
 /// Enumerate one-row sessions using the registry-declared SQLite schema.

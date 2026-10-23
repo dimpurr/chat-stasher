@@ -26,6 +26,7 @@
 //!     backend `connections` option; locally we pin the global rayon pool,
 //!     which backs `decrypt.rs`'s read fan-out).
 
+pub use crate::opencode_records::BodyView;
 use anyhow::{anyhow, Context};
 use rayon::ThreadPoolBuilder;
 use rustic_backend::BackendOptions;
@@ -982,6 +983,25 @@ impl BackupStore {
         session_id: &str,
         mk: &MasterKey,
     ) -> anyhow::Result<(Vec<u8>, Vec<(String, String)>)> {
+        self.read_session_concat_with_view(machine, session_id, mk, BodyView::Current)
+    }
+
+    /// [`Self::read_session_concat`] with the ADR-061 body view chosen: the
+    /// default ([`BodyView::Current`]) is the source's final state — for a
+    /// snapshot-source session, the assembled last-version-per-record
+    /// projection, byte-equal to a fresh export at quiescence;
+    /// [`BodyView::IncludeDeleted`] additionally emits records the source
+    /// deleted at their original positions, marked `"deleted": true`. The
+    /// raw shard-set identity the caller can also get stays a function of
+    /// the raw bytes (D3: the raw triple remains the proof, the assembled
+    /// body is the projection, and they differ by design).
+    pub fn read_session_concat_with_view(
+        &self,
+        machine: &str,
+        session_id: &str,
+        mk: &MasterKey,
+        view: BodyView,
+    ) -> anyhow::Result<(Vec<u8>, Vec<(String, String)>)> {
         let (repo, _adoption) = self
             .open_indexed(mk)
             .context("open repository for session content")?;
@@ -1026,6 +1046,7 @@ impl BackupStore {
             session_id,
             self.body_cache.as_ref(),
             self.shard_policy,
+            view,
         )? {
             return Ok(result);
         }
@@ -1063,6 +1084,17 @@ impl BackupStore {
         mk: &MasterKey,
         wanted: &BTreeSet<(String, String)>,
     ) -> anyhow::Result<BTreeMap<(String, String), (Vec<u8>, Vec<(String, String)>)>> {
+        self.read_selected_sessions_with_view(mk, wanted, BodyView::Current)
+    }
+
+    /// [`Self::read_selected_sessions`] with the ADR-061 body view chosen —
+    /// see [`Self::read_session_concat_with_view`].
+    pub fn read_selected_sessions_with_view(
+        &self,
+        mk: &MasterKey,
+        wanted: &BTreeSet<(String, String)>,
+        view: BodyView,
+    ) -> anyhow::Result<BTreeMap<(String, String), (Vec<u8>, Vec<(String, String)>)>> {
         let mut out = BTreeMap::new();
         if wanted.is_empty() {
             return Ok(out);
@@ -1090,6 +1122,7 @@ impl BackupStore {
                     session_id,
                     self.body_cache.as_ref(),
                     self.shard_policy,
+                    view,
                 )? {
                     out.insert((machine.clone(), session_id.to_string()), result);
                 }
@@ -1102,6 +1135,10 @@ impl BackupStore {
 /// Read one session cumulatively across a machine's snapshots. Reclaimed
 /// snapshots may contain only the newest sealed sequence, so retain the newest
 /// copy of each archive-relative shard path while walking every snapshot.
+///
+/// `view` selects the ADR-061 body projection for snapshot-source sessions
+/// (see [`BackupStore::read_session_concat_with_view`]); the raw
+/// concat is still what the L3 triple is proved over.
 fn dump_cumulative_session<S: rustic_core::IndexedFull>(
     repo: &Repository<S>,
     snapshots: &[SnapshotFile],
@@ -1109,6 +1146,7 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
     session_id: &str,
     body_cache: Option<&std::sync::Arc<crate::body_cache::BodyCache>>,
     policy: DuplicateShardPolicy,
+    view: BodyView,
 ) -> anyhow::Result<Option<(Vec<u8>, Vec<(String, String)>)>> {
     let mut held: BTreeMap<(u64, String), (Option<u64>, String, rustic_core::repofile::Node)> =
         BTreeMap::new();
@@ -1206,6 +1244,7 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
     };
     let mut concat = Vec::new();
     let mut hashes = Vec::new();
+    let mut selected_bodies: Vec<Vec<u8>> = Vec::new();
     for (index, (sequence, name, body)) in shards.into_iter().enumerate() {
         if duplicates.contains(&index)
             && !sequence.is_some_and(|sequence| observed_sequences.contains(&sequence))
@@ -1214,9 +1253,31 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
         }
         let digest: [u8; 32] = Sha256::digest(&body).into();
         concat.extend_from_slice(&body);
+        selected_bodies.push(body);
         hashes.push((name, hex_digest(&digest)));
     }
-    Ok(Some((concat, hashes)))
+    // ADR-061 D3: the reader-facing body of a snapshot-source session is the
+    // assembled last-version-per-record projection (whole-file and increment
+    // records mixed, tombstones applied), while the per-shard identities the
+    // caller just collected remain the raw proof. Inbox capture bundles —
+    // which live under `opencode.*` ids too — classify as byte-verbatim and
+    // pass through untouched (W213). Every other harness keeps the raw
+    // concat, which for append-style sources already is the growth log and
+    // stays byte-identical. An assembly that cannot be completed is an
+    // error, never a short body ("did not finish reading").
+    let body = if crate::opencode_records::harness_is_opencode(session_id) {
+        crate::opencode_records::project_session_body(session_id, &selected_bodies, view).map_err(
+            |error| {
+                anyhow::anyhow!(
+                    "session `{}` cannot be assembled: {error}",
+                    crate::id::short_session_id(session_id)
+                )
+            },
+        )?
+    } else {
+        concat
+    };
+    Ok(Some((body, hashes)))
 }
 
 /// Declare the plaintext size of the session about to be dumped, so ADR-034's

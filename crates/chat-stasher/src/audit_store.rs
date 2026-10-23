@@ -353,7 +353,24 @@ pub fn backfill_archive(
         machine,
         crate::store::DuplicateShardPolicy::KeepAll,
         |session, shards| {
-            for (_, bytes) in shards {
+            // ADR-061: snapshot-source sessions hand the audit backfill the
+            // assembled current-state body, not the raw shard set — a
+            // multi-copy or increment-era session would otherwise audit
+            // every record several times. Inbox capture bundles (which also
+            // live under `opencode.*` ids) classify as byte-verbatim and
+            // pass through, and other harnesses keep the raw bodies.
+            let is_opencode = crate::opencode_records::harness_is_opencode(session);
+            let bodies: Vec<Vec<u8>> = if is_opencode {
+                let owned: Vec<Vec<u8>> = shards.iter().map(|(_, bytes)| bytes.clone()).collect();
+                vec![crate::opencode_records::project_session_body(
+                    session,
+                    &owned,
+                    crate::opencode_records::BodyView::Current,
+                )?]
+            } else {
+                shards.iter().map(|(_, bytes)| bytes.clone()).collect()
+            };
+            for bytes in &bodies {
                 backfill_shard(stage, machine, session, bytes, key, &mut report)?;
             }
             Ok(())

@@ -23,9 +23,13 @@ opencode (maintained by anomalyco, formerly sst/opencode) is an open-source Type
 
 opencode persists conversation state across three relational tables: `session`, `message`, and `part`. The collector executes a read-only transaction (`BEGIN`) to read all three tables in a single atomic snapshot, preventing inconsistencies caused by concurrent writes from the CLI.
 
-Each session is exported as a single JSON line under schema `chat-stasher.opencode.session.v1`. The export embeds the session row, each message row, and all child parts belonging to that message. The reader maps part types to conversation blocks: `text` becomes a Text block, `reasoning` becomes a Thinking block, and `tool` (with its input/output states) becomes a ToolCall block. Non-conversational parts (`step-start`, `step-finish`, `patch`) are counted as unrendered lines.
+Each session's first observation is exported as a single JSON line under schema `chat-stasher.opencode.session.v1`. The export embeds the session row, each message row, and all child parts belonging to that message. The reader maps part types to conversation blocks: `text` becomes a Text block, `reasoning` becomes a Thinking block, and `tool` (with its input/output states) becomes a ToolCall block. Non-conversational parts (`step-start`, `step-finish`, `patch`) are counted as unrendered lines.
+
+After the first observation, changed passes write **records** instead of new whole-session copies (schema `chat-stasher.opencode.session.v2`): a message record carries the message row without its parts inlined, each part is a record of its own under its own `part.id`, a session record fires when the session row itself changed, and a deletion the source performed (revert, compaction) is written down as an explicit tombstone record. Unchanged records are never re-written, so an hour that grows a session one to five percent writes about that one to five percent instead of a full copy. Readback assembles the session from every stored line together — whole-file observations and increment records mixed — taking the newest version of each record, so old sessions archived before this change are read the same way, with no conversion of anything already stored; a session whose shard set cannot be assembled is a loud read failure, never a short session.
 
 If message rows have been purged (e.g. due to context compaction) but their parts remain in the database, these are exported under `orphan_parts` and counted rather than arbitrarily reordered into the conversation. Provenance dimensions are also extracted: the working directory from `session.directory`, the project container from `session.project_id`, and archival timestamps from `session.time_archived`.
+
+The default view of an archived session is the source's final state — byte for byte what a fresh export of the same database rows would produce. `read --include-deleted` and `export --include-deleted` emit the records the source deleted at their original positions, each carrying `"deleted": true`; nothing is ever erased to match a deletion, so a session the tool reverted keeps the reverted turns archived and reachable.
 
 ## Coverage and completeness
 
@@ -41,11 +45,11 @@ The seal policy is marked not-applicable because SQLite databases in WAL mode ho
 
 ## Known issues
 
-A one-line modification in an active session currently causes the collector to re-export the entire session as a new full snapshot shard rather than an incremental delta (commit a908a00).
+Writes to a snapshot session are incremental per record since 2026-10-23, so an active session no longer re-stores a full copy per change; the remaining caveat is measurement, not behaviour: the one-day real-session amplification gate (written ≤ 1.2 × true growth per hour, assembled readback byte-identical to the source) has not yet been run on a live deputy session, so no absolute weekly write number is pinned yet.
 
 ## How to check it yourself
 
-Run `chat-stasher doctor` to see whether the opencode SQLite database is detected, along with its total session count. Execute `chat-stasher run-once` to collect the sessions into the staging area. Run `chat-stasher read` on an opencode session to see messages, reasoning blocks, and tool executions. Run `chat-stasher verify` to check cryptographic shard digests, and `chat-stasher search --text "<query>"` to perform full-text search across all sessions.
+Run `chat-stasher doctor` to see whether the opencode SQLite database is detected, along with its total session count. Execute `chat-stasher run-once` to collect the sessions into the staging area. Run `chat-stasher read` on an opencode session to see its shard set and the digest of its assembled body, and `chat-stasher read --include-deleted` (or `export --include-deleted`) to reach the records a revert or compaction removed. Run `chat-stasher verify` to check cryptographic shard digests, and `chat-stasher search --text "<query>"` to perform full-text search across all sessions.
 
 ## Changelog
 
@@ -53,3 +57,4 @@ Run `chat-stasher doctor` to see whether the opencode SQLite database is detecte
 2026-09-25 — verified end to end: entire real database exported into shards and read back successfully (commits 1595419, a908a00, 41db2bf).
 2026-10-11 — provenance dimensions (`cwd`, `project_id`, `time_archived`) extracted and integrated into search indexing.
 2026-10-12 — orphan part handling for compacted messages pinned by test fixtures.
+2026-10-23 — snapshot sources go increment per record (ADR-061): changed sessions write message-row, part and tombstone records under `chat-stasher.opencode.session.v2`; readback assembles whole-file and increment lines by last-version-per-record, the default view equals the source's final state, and `read`/`export --include-deleted` reach deleted records at their original positions. The one-day live-session amplification gate is still pending.

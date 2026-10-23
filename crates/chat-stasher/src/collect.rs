@@ -80,9 +80,8 @@ use crate::models::{SessionRecord, SqliteSessionLayout};
 use crate::scanner;
 use crate::sqlite_probe::{
     cursor_global_schema, grok_schema, opencode_session_cursor, read_cursor_legacy_session,
-    read_github_copilot_session, read_hermes_session, read_openclaw_session, read_opencode_session,
-    read_sqlite_session, read_zed_session, sqlite_session_cursor, sqlite_store_fingerprint,
-    zed_schema, OpenCodeCursor,
+    read_github_copilot_session, read_hermes_session, read_openclaw_session, read_sqlite_session,
+    read_zed_session, sqlite_session_cursor, sqlite_store_fingerprint, zed_schema, OpenCodeCursor,
 };
 use crate::store;
 use anyhow::{anyhow, bail, Context};
@@ -139,6 +138,28 @@ pub struct OffsetEntry {
     /// variant once, and an identical replay delivers nothing.
     #[serde(default)]
     pub grok_bot_row_digests: Option<Vec<String>>,
+    /// ADR-061: the per-record delivered set of one snapshot-source session's
+    /// increment era, in the W986 shape — one entry per delivered record,
+    /// the SHA-256 of the record's own payload serialization (which embeds
+    /// the record's id, so an entry identifies both id and content). This
+    /// is the entry's bounded cache of the increment map;
+    /// [`OpenCodeRecordMapState`] holds the full `{record key → digest}` map
+    /// beside the state directory, and the stage can rebuild the map from
+    /// the sealed records alone. Kept only while the map holds at most
+    /// [`OPENCODE_RECORD_CACHE_CAP`] records; a bigger map stores
+    /// [`Self::opencode_map_digest`] instead. `None` on both fields means
+    /// the increment era was never entered for this entry (or the state
+    /// predates it) — unknown is never "no new messages": the session
+    /// re-exports in full once, which re-derives the map (D2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_record_digests: Option<Vec<String>>,
+    /// The overall digest of the increment map once it passes
+    /// [`OPENCODE_RECORD_CACHE_CAP`] records, replacing the per-record list
+    /// so one long session's debt stays bounded in the state file. The map
+    /// is rebuilt from the staged records (or a fresh complete observation)
+    /// when it disagrees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_map_digest: Option<String>,
 }
 
 /// The evidence a cursor has to produce on demand: the sealed shard set it is
@@ -700,6 +721,8 @@ fn stage_prefix_entry(
             opencode: None,
             store_fingerprint: None,
             grok_bot_row_digests: None,
+            opencode_record_digests: None,
+            opencode_map_digest: None,
         }));
     }
 
@@ -734,6 +757,8 @@ fn stage_prefix_entry(
         opencode: None,
         store_fingerprint: None,
         grok_bot_row_digests: None,
+        opencode_record_digests: None,
+        opencode_map_digest: None,
     }))
 }
 
@@ -775,6 +800,8 @@ fn jsonl_prefix_entry_from_shards(
         opencode: None,
         store_fingerprint: None,
         grok_bot_row_digests: None,
+        opencode_record_digests: None,
+        opencode_map_digest: None,
     }))
 }
 
@@ -1260,6 +1287,22 @@ pub struct CollectReport {
     pub sqlite_sessions_queried: u64,
     /// W880: SQLite sessions exported (re-sealed) into the stage.
     pub sqlite_sessions_exported: u64,
+    /// ADR-061: whole-file observation shards sealed for snapshot-source
+    /// sessions (the pre-increment shape, and the one-pass degrade of an
+    /// unknown increment map).
+    pub sqlite_full_exports: u64,
+    /// ADR-061: changed snapshot-source sessions whose pass sealed
+    /// record-level increment shards.
+    pub sqlite_increment_passes: u64,
+    /// ADR-061: record lines sealed by those passes (new and changed
+    /// records, explicit tombstones, and session-observation records).
+    pub sqlite_increment_records: u64,
+    /// ADR-061: bytes of those record lines.
+    pub sqlite_increment_bytes: u64,
+    /// ADR-061: the measured true growth of the same passes — payload
+    /// bytes of new and changed records (Δ in D6's hourly rule,
+    /// `written ≤ max(1.2 × Δ, 64 KiB)`).
+    pub sqlite_growth_bytes: u64,
     /// W880: collector state saves this pass.
     pub state_saves: u64,
     /// Codebuff sessions this pass read but did **not** archive, because the
@@ -1317,6 +1360,22 @@ pub struct PassContext {
 struct CollectCounters {
     files_statted: u64,
     sqlite_sessions_queried: u64,
+    /// ADR-061: whole-file observation shards sealed for snapshot-source
+    /// sessions (the pre-increment shape, and the one-pass degrade of an
+    /// unknown increment map).
+    sqlite_full_exports: u64,
+    /// ADR-061: changed snapshot-source sessions whose pass sealed
+    /// record-level increment shards.
+    sqlite_increment_passes: u64,
+    /// ADR-061: record lines sealed by those passes (new and changed
+    /// records, explicit tombstones, and session-observation records).
+    sqlite_increment_records: u64,
+    /// ADR-061: bytes of those record lines.
+    sqlite_increment_bytes: u64,
+    /// ADR-061: the measured true growth of the same passes — payload
+    /// bytes of new and changed records (Δ in D6's hourly rule,
+    /// `written ≤ max(1.2 × Δ, 64 KiB)`).
+    sqlite_growth_bytes: u64,
 }
 
 /// Default private state directory. It is owned by chat-stasher, never a
@@ -1892,6 +1951,7 @@ fn collect_one(
                 old,
                 force_reset,
                 stage,
+                state_dir,
                 machine,
                 bucket_cap,
                 counters,
@@ -2096,6 +2156,8 @@ pub(crate) fn grok_bot_delivery_cursor(
         opencode: None,
         store_fingerprint: None,
         grok_bot_row_digests: Some(delivered_now.into_iter().collect()),
+        opencode_record_digests: None,
+        opencode_map_digest: None,
     })
 }
 
@@ -2234,6 +2296,7 @@ fn process_sqlite(
     old: Option<&OffsetEntry>,
     force_reset: bool,
     stage: &Path,
+    state_dir: &Path,
     machine: &str,
     bucket_cap: usize,
     counters: &mut CollectCounters,
@@ -2281,9 +2344,11 @@ fn process_sqlite(
             old,
             force_reset,
             stage,
+            state_dir,
             machine,
             bucket_cap,
             &store_fingerprint,
+            counters,
         ),
         SqliteSessionLayout::OpenClaw => process_openclaw(
             record,
@@ -2590,6 +2655,8 @@ fn process_sqlite_snapshot(
             opencode: Some(cursor),
             store_fingerprint: Some(store_fingerprint.to_string()),
             grok_bot_row_digests: None,
+            opencode_record_digests: None,
+            opencode_map_digest: None,
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -2655,6 +2722,8 @@ fn unchanged_content_sqlite(
             opencode: Some(cursor),
             store_fingerprint: Some(store_fingerprint.to_string()),
             grok_bot_row_digests: None,
+            opencode_record_digests: None,
+            opencode_map_digest: None,
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -2736,6 +2805,8 @@ fn process_jsonl(
             opencode: None,
             store_fingerprint: None,
             grok_bot_row_digests: None,
+            opencode_record_digests: None,
+            opencode_map_digest: None,
         })
     } else {
         plain_state(&record.absolute_path, new_offset)?
@@ -3115,6 +3186,8 @@ fn empty_cursor() -> OffsetEntry {
         opencode: None,
         store_fingerprint: None,
         grok_bot_row_digests: None,
+        opencode_record_digests: None,
+        opencode_map_digest: None,
     }
 }
 
@@ -3329,27 +3402,182 @@ fn collect_machine_logs(
             .or_default() += record_started.elapsed().as_millis() as u64;
     }
     report.files_statted += counters.files_statted;
+    // ADR-061 (SG-3): the outcome counters of the increment era, folded the
+    // same way the W880 counters are.
+    report.sqlite_full_exports += counters.sqlite_full_exports;
+    report.sqlite_increment_passes += counters.sqlite_increment_passes;
+    report.sqlite_increment_records += counters.sqlite_increment_records;
+    report.sqlite_increment_bytes += counters.sqlite_increment_bytes;
+    report.sqlite_growth_bytes += counters.sqlite_growth_bytes;
     Ok(())
 }
 
+/// ADR-061 (SG-3): the increment map of one snapshot-source session, kept
+/// beside the state directory — `{record key → payload digest}` of every
+/// record the collector has sealed to the stage whose last version is live.
+/// It is the W986 grok-unions precedent applied to the increment era: the
+/// state-entry cache (`OffsetEntry::opencode_record_digests` /
+/// `OffsetEntry::opencode_map_digest`) stays bounded, this side file holds
+/// the full map, and the map is a cache over what was *written*, so the
+/// stage can rebuild it from the sealed records alone (ADR-012).
+const OPENCODE_RECORD_MAP_DIR: &str = "opencode-session-maps";
+const OPENCODE_RECORD_MAP_VERSION: u32 = 1;
+/// The ruling's cap: a session's per-record digest list is stored in the
+/// state entry only while it holds at most this many records; bigger maps
+/// store one overall digest instead and rebuild from the stage on mismatch.
+const OPENCODE_RECORD_CACHE_CAP: usize = 5000;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenCodeRecordMapState {
+    version: u32,
+    /// The full session id (`opencode.<machine>.<sid>`).
+    session_id: String,
+    /// `{record key → payload digest}`, sorted by record key.
+    records: BTreeMap<String, String>,
+}
+
+/// The map file of one session's increment map. Keyed by the SHA-256 of the
+/// full session id, exactly like the grok-bot union file, so a session id
+/// can never become a path component.
+fn opencode_record_map_path(state_dir: &Path, session_id: &str) -> PathBuf {
+    state_dir
+        .join(OPENCODE_RECORD_MAP_DIR)
+        .join(format!("{}.json", sha256_hex(session_id.as_bytes())))
+}
+
+/// Persist one session's increment map (tmp + rename, parent fsync like the
+/// state file itself).
+fn save_opencode_record_map(
+    path: &Path,
+    session_id: &str,
+    records: &BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let state = OpenCodeRecordMapState {
+        version: OPENCODE_RECORD_MAP_VERSION,
+        session_id: session_id.to_string(),
+        records: records.clone(),
+    };
+    let bytes = serde_json::to_vec(&state)?;
+    let temp = path.with_extension("json.tmp");
+    {
+        let file = fs::File::create(&temp)?;
+        let mut writer = std::io::BufWriter::new(file);
+        writer.write_all(&bytes)?;
+        writer.flush()?;
+    }
+    fs::rename(&temp, path)?;
+    // Windows has no portable directory fsync; retain its state-file
+    // durability convention. Unix proves the rename durable before the
+    // map is trusted by a later pass.
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let dir = fs::File::open(parent)?;
+        dir.sync_all()?;
+    }
+    Ok(())
+}
+
+/// Load a session's increment map. A missing, unreadable or wrong-version
+/// file answers `None`: unknown is never empty, and the caller degrades to
+/// one full export that re-derives the map (D2) rather than trusting a file
+/// it could not establish.
+fn load_opencode_record_map(path: &Path) -> Option<BTreeMap<String, String>> {
+    let bytes = fs::read(path).ok()?;
+    let state: OpenCodeRecordMapState = serde_json::from_slice(&bytes).ok()?;
+    if state.version != OPENCODE_RECORD_MAP_VERSION {
+        return None;
+    }
+    Some(state.records)
+}
+
+/// The overall digest of one increment map — the bounded shape a session
+/// past the cache cap stores in its state entry.
+fn opencode_map_overall_digest(records: &BTreeMap<String, String>) -> String {
+    let mut hasher = Sha256::new();
+    for (key, digest) in records {
+        hasher.update(key.as_bytes());
+        hasher.update([0]);
+        hasher.update(digest.as_bytes());
+        hasher.update([b'\n']);
+    }
+    sha256_hex(&hasher.finalize())
+}
+
+/// The entry-shaped cache of one map: the per-record digest list while the
+/// map is small, one overall digest once it passes the cap (ADR-061 ruling 2).
+fn opencode_cache_of_map(
+    records: &BTreeMap<String, String>,
+) -> (Option<Vec<String>>, Option<String>) {
+    if records.len() <= OPENCODE_RECORD_CACHE_CAP {
+        (Some(records.values().cloned().collect()), None)
+    } else {
+        (None, Some(opencode_map_overall_digest(records)))
+    }
+}
+
+/// Does the map agree with the cache shape the state entry endorses? An
+/// entry with neither field, or with both, endorses nothing.
+fn opencode_map_matches_entry(records: &BTreeMap<String, String>, entry: &OffsetEntry) -> bool {
+    match (
+        entry.opencode_record_digests.as_ref(),
+        entry.opencode_map_digest.as_ref(),
+    ) {
+        (Some(list), None) => {
+            let mut sorted_values: Vec<String> = records.values().cloned().collect();
+            let mut sorted_list = list.clone();
+            sorted_values.sort();
+            sorted_list.sort();
+            sorted_values == sorted_list
+        }
+        (None, Some(overall)) => *overall == opencode_map_overall_digest(records),
+        _ => false,
+    }
+}
+
+/// Process one opencode session record (ADR-061, SG-3).
+///
+/// The cursor fast path is unchanged: a session whose logical cursor still
+/// equals the stored one skips for free. A session the store did move is
+/// read in full (the serialize-and-hash sweep — the saving is on write
+/// bytes, not read bytes), and then one of two write shapes applies:
+///
+/// * a **full observation**: the whole session as one v1 line, exactly the
+///   pre-increment shape. It is the first sight of a session, the
+///   forced-reset reread, and D2's one-pass degrade of an unknown increment
+///   map — a complete observation, so D3's implicit tombstones apply to it.
+///   Every full pass (re)derives the increment map from the sweep it just
+///   read, which is what makes the degrade path data-safe.
+/// * a **record increment**: message-row records, part records, a
+///   session-observation record when the session row itself changed, and
+///   explicit tombstones for records the source dropped — one shard holding
+///   one line per record. Records whose `(id → digest)` already equal the
+///   map are never re-serialized (the unchanged-content guard stays as a
+///   second dedup layer beneath the map); a pass whose cursor moved without
+///   a single record changing writes nothing at all and only advances the
+///   cursor.
 fn process_opencode(
     record: &SessionRecord,
     old: Option<&OffsetEntry>,
     force_reset: bool,
     stage: &Path,
+    state_dir: &Path,
     machine: &str,
     bucket_cap: usize,
     store_fingerprint: &str,
+    counters: &mut CollectCounters,
 ) -> anyhow::Result<Processed> {
-    let session_id = record
+    let session_native = record
         .id
         .splitn(3, '.')
         .nth(2)
         .ok_or_else(|| anyhow!("invalid opencode session id"))?;
-    let cursor = opencode_session_cursor(&record.absolute_path, session_id)
+    let cursor = opencode_session_cursor(&record.absolute_path, session_native)
         .map_err(|error| anyhow!("failed to read opencode session cursor: {error}"))?;
     // This session's own fields, and nothing else — see
-    // `process_sqlite_snapshot` for why the store-wide fingerprint is not here.
+    // `process_sqlite` for why the store-wide fingerprint is not here.
     if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
         return Ok(unchanged_sqlite(
             record,
@@ -3359,44 +3587,258 @@ fn process_opencode(
         ));
     }
 
-    let snapshot = read_opencode_session(&record.absolute_path, session_id)
-        .map_err(|error| anyhow!("failed to read opencode session snapshot: {error}"))?;
+    // The serialize-and-hash sweep: one SQLite transaction, every row, and
+    // the same serializer the assembled views use for the export line.
+    let sweep = crate::sqlite_probe::read_opencode_sweep(&record.absolute_path, session_native)
+        .map_err(|error| anyhow!("failed to read opencode session sweep: {error}"))?;
+    let snapshot = crate::sqlite_probe::OpenCodeSessionSnapshot {
+        cursor: sweep.cursor.clone(),
+        json_line: crate::opencode_records::compose_v1_line(
+            &sweep.session_row,
+            &sweep.message_rows,
+            &sweep.part_rows,
+        )
+        .map_err(|error| anyhow!("failed to compose opencode session: {error}"))?,
+    };
     let source_bytes = snapshot.json_line.len() as u64;
     let digest = sha256_hex(&snapshot.json_line);
-    if old.is_none()
-        && !force_reset
-        && stage_holds_this_export(stage, machine, &record.id, &snapshot.json_line)?
+
+    // The fresh increment map from the sweep the pass just read: what a
+    // *complete observation* of the source's current state would deliver.
+    let mut fresh_map = BTreeMap::new();
     {
-        return Ok(unchanged_content_sqlite(
-            record,
-            snapshot.cursor,
-            store_fingerprint,
-            source_bytes,
-            &digest,
-            Default::default(),
-        ));
-    }
-    if let Some(entry) = old {
-        if !force_reset && export_content_matches(entry, source_bytes, &digest) {
-            return Ok(unchanged_content_sqlite(
-                record,
-                snapshot.cursor,
-                store_fingerprint,
-                source_bytes,
-                &digest,
-                Default::default(),
-            ));
+        use crate::opencode_records::{payload_digest, record_key, RecordKind};
+        let session_id_column = sweep
+            .session_row
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow!("opencode session row has no id"))?;
+        fresh_map.insert(
+            record_key(RecordKind::Session, session_id_column),
+            payload_digest(&sweep.session_row),
+        );
+        for row in &sweep.message_rows {
+            let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
+                return Err(anyhow!("opencode message row has no id"));
+            };
+            fresh_map.insert(record_key(RecordKind::Message, id), payload_digest(row));
+        }
+        for row in &sweep.part_rows {
+            let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
+                return Err(anyhow!("opencode part row has no id"));
+            };
+            fresh_map.insert(record_key(RecordKind::Part, id), payload_digest(row));
         }
     }
-    let lines = vec![snapshot.json_line];
-    // As above, an advanced per-session cursor is a validated source delta;
-    // identical export bytes can still represent a new observation.
-    let shard_writer = if old.is_some_and(|entry| {
-        entry
-            .opencode
-            .as_ref()
-            .is_some_and(|previous| previous != &snapshot.cursor)
-    }) {
+
+    let increment_era = !force_reset
+        && old.is_some_and(|entry| {
+            entry.opencode_record_digests.is_some() || entry.opencode_map_digest.is_some()
+        });
+
+    // What does this pass already hold? Three eras, one rule (ADR-012: the
+    // archive/stage is the truth, the state a cache over it):
+    //
+    // * an increment-era entry reconciles its endorsement — the map file
+    //   first, then a rebuild from the staged records — and anything that
+    //   cannot be endorsed degrades to a full observation below;
+    // * a fresh destination (no entry of its own) folds the stage this
+    //   machine already holds: if the fold equals the fresh map there is
+    //   nothing to seal (W283, one session shared by every destination), and
+    //   a difference is delivered as the records that are missing — never
+    //   as a whole-file re-export;
+    // * a pre-increment entry or a forced reset has no map: unknown is
+    //   never "no new messages", so the pass below writes one complete
+    //   observation, which re-derives the map (D2).
+    let stored_map = if force_reset {
+        None
+    } else if let Some(entry) = old {
+        if increment_era {
+            reconcile_opencode_increment_map(entry, state_dir, &record.id, stage, machine)
+        } else {
+            None
+        }
+    } else {
+        fold_opencode_staged_map(stage, machine, &record.id)
+    };
+
+    let outcome = |lines_written: usize, shard: Option<String>, reset: bool| CollectOutcome {
+        session_prefix: id_prefix(&record.id),
+        source_path_sha256: path_digest(&record.absolute_path),
+        source_bytes,
+        bytes_read: source_bytes,
+        prefix_bytes_validated: 0,
+        lines_written,
+        shard,
+        reset,
+        compressed: false,
+    };
+    let entry_state = |cursor: crate::sqlite_probe::OpenCodeCursor,
+                       records: &BTreeMap<String, String>| {
+        let (record_digests, map_digest) = opencode_cache_of_map(records);
+        OffsetEntry {
+            offset: source_bytes,
+            prefix_len: source_bytes,
+            prefix_sha256: digest.clone(),
+            compressed: false,
+            opencode: Some(cursor),
+            store_fingerprint: Some(store_fingerprint.to_string()),
+            grok_bot_row_digests: None,
+            opencode_record_digests: record_digests,
+            opencode_map_digest: map_digest,
+        }
+    };
+
+    if let Some(stored_map) = stored_map {
+        // ---- the increment pass ----
+        use crate::opencode_records::{record_line, tombstone_line, RecordKind};
+        let mut lines: Vec<Vec<u8>> = Vec::new();
+        let mut growth_bytes: u64 = 0;
+        // Session observation record: only when the session row's own bytes
+        // changed (in practice: exactly the passes that observed change).
+        let session_key = fresh_map
+            .keys()
+            .find(|key| key.starts_with("session:"))
+            .cloned();
+        if let Some(session_key) = session_key {
+            if stored_map.get(&session_key) != fresh_map.get(&session_key) {
+                let id = session_key.split_once(':').expect("record key").1;
+                let row = &sweep.session_row;
+                growth_bytes += serde_json::to_vec(row)
+                    .map(|bytes| bytes.len())
+                    // reason: serde only fails on non-string object keys,
+                    // which a sqlite row never produces; a zero shrink of Δ
+                    // only tightens the hourly ceiling the gate checks.
+                    .unwrap_or(0) as u64;
+                lines.push(record_line(session_native, RecordKind::Session, id, row));
+            }
+        }
+        for row in &sweep.message_rows {
+            let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
+                return Err(anyhow!("opencode message row has no id"));
+            };
+            let key = crate::opencode_records::record_key(RecordKind::Message, id);
+            if stored_map.get(&key) == fresh_map.get(&key) {
+                continue; // delivered already, identical bytes
+            }
+            growth_bytes += serde_json::to_vec(row)
+                .map(|bytes| bytes.len())
+                // reason: same as the session row above — a zero shrink of
+                // Δ only tightens the hourly ceiling.
+                .unwrap_or(0) as u64;
+            lines.push(record_line(session_native, RecordKind::Message, id, row));
+        }
+        for row in &sweep.part_rows {
+            let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
+                return Err(anyhow!("opencode part row has no id"));
+            };
+            let key = crate::opencode_records::record_key(RecordKind::Part, id);
+            if stored_map.get(&key) == fresh_map.get(&key) {
+                continue;
+            }
+            growth_bytes += serde_json::to_vec(row)
+                .map(|bytes| bytes.len())
+                // reason: same as the session row above — a zero shrink of
+                // Δ only tightens the hourly ceiling.
+                .unwrap_or(0) as u64;
+            lines.push(record_line(session_native, RecordKind::Part, id, row));
+        }
+        // Explicit tombstones for records the source dropped: the increment
+        // era must mark its deletions, or the assembled default view could
+        // never equal the source's final state. Sorted by record key for a
+        // deterministic shard.
+        let mut deaths: Vec<String> = stored_map
+            .keys()
+            .filter(|key| !fresh_map.contains_key(*key))
+            .cloned()
+            .collect();
+        deaths.sort();
+        for key in &deaths {
+            let Some((kind, id)) = crate::opencode_records::parse_record_key(key) else {
+                continue;
+            };
+            lines.push(tombstone_line(session_native, kind, &id));
+        }
+
+        if lines.is_empty() {
+            // The cursor moved, and not one record changed: a validated new
+            // observation that writes nothing (ADR-024's rule, kept) — the
+            // map subsumes the whole-export guard in this era.
+            counters.sqlite_increment_passes += 1;
+            return Ok(Processed {
+                state: entry_state(snapshot.cursor, &fresh_map),
+                outcome: outcome(0, None, false),
+                dimensions: Default::default(),
+            });
+        }
+
+        let increment_bytes: u64 = lines.iter().map(|line| line.len() as u64).sum();
+        let mut owned_lines = Vec::with_capacity(lines.len());
+        for mut line in lines {
+            line.push(b'\n');
+            owned_lines.push(line);
+        }
+        let shard = Some(store::write_sealed_shard_bytes_allow_exact_repeat_with_cap(
+            store::StageWriter::Collect,
+            stage,
+            machine,
+            &record.id,
+            &owned_lines,
+            bucket_cap,
+        )?);
+        save_opencode_record_map(
+            &opencode_record_map_path(state_dir, &record.id),
+            &record.id,
+            &fresh_map,
+        )?;
+        counters.sqlite_increment_passes += 1;
+        counters.sqlite_increment_records += owned_lines.len() as u64;
+        counters.sqlite_increment_bytes += increment_bytes;
+        counters.sqlite_growth_bytes += growth_bytes;
+        return Ok(Processed {
+            state: entry_state(snapshot.cursor, &fresh_map),
+            outcome: outcome(owned_lines.len(), shard, old.is_some() || force_reset),
+            dimensions: Default::default(),
+        });
+    }
+
+    // ---- the full-observation path ----
+    // First sight (a stage the fold could not answer from), forced reread,
+    // or the map the entry endorses was not recoverable (D2's degrade). A
+    // whole-line observation is a complete observation, so this pass
+    // re-derives the map it just serialized — which is what lets the next
+    // changed pass go incremental again.
+    //
+    // Guards: the ADR-024 unchanged-content layer, applied only to entries
+    // that never entered the increment era. In the increment era the map
+    // subsumes it, and a degrade must write — the entry's offset fields
+    // describe the last observed export, not bytes this entry may skip.
+    // (First sight with a stage already folded above never lands here.)
+    let guards_apply = !force_reset
+        && old.is_some_and(|entry| {
+            entry.opencode_record_digests.is_none() && entry.opencode_map_digest.is_none()
+        });
+    if guards_apply {
+        if let Some(entry) = old {
+            if export_content_matches(entry, source_bytes, &digest) {
+                save_opencode_record_map(
+                    &opencode_record_map_path(state_dir, &record.id),
+                    &record.id,
+                    &fresh_map,
+                )?;
+                return Ok(Processed {
+                    state: entry_state(snapshot.cursor, &fresh_map),
+                    outcome: outcome(0, None, false),
+                    dimensions: Default::default(),
+                });
+            }
+        }
+    }
+    let lines = vec![snapshot.json_line.clone()];
+    // An advanced per-session cursor is a validated source delta; identical
+    // export bytes can still represent a new observation.
+    let shard_writer = if incremental_write_allowed(old, &snapshot.cursor) {
         store::write_sealed_shard_bytes_allow_exact_repeat_with_cap
     } else {
         store::write_sealed_shard_bytes_with_cap
@@ -3409,29 +3851,90 @@ fn process_opencode(
         &lines,
         bucket_cap,
     )?);
+    save_opencode_record_map(
+        &opencode_record_map_path(state_dir, &record.id),
+        &record.id,
+        &fresh_map,
+    )?;
+    counters.sqlite_full_exports += 1;
+    counters.sqlite_growth_bytes += source_bytes;
     Ok(Processed {
-        state: OffsetEntry {
-            offset: source_bytes,
-            prefix_len: source_bytes,
-            prefix_sha256: digest,
-            compressed: false,
-            opencode: Some(snapshot.cursor),
-            store_fingerprint: Some(store_fingerprint.to_string()),
-            grok_bot_row_digests: None,
-        },
-        outcome: CollectOutcome {
-            session_prefix: id_prefix(&record.id),
-            source_path_sha256: path_digest(&record.absolute_path),
-            source_bytes,
-            bytes_read: source_bytes,
-            prefix_bytes_validated: 0,
-            lines_written: 1,
-            shard,
-            reset: old.is_some() || force_reset,
-            compressed: false,
-        },
+        state: entry_state(snapshot.cursor, &fresh_map),
+        outcome: outcome(1, shard, old.is_some() || force_reset),
         dimensions: Default::default(),
     })
+}
+
+/// The pre-change rule, verbatim: whose writer gets the exact-repeat
+/// allowance on the full-observation path.
+fn incremental_write_allowed(
+    old: Option<&OffsetEntry>,
+    cursor: &crate::sqlite_probe::OpenCodeCursor,
+) -> bool {
+    old.is_some_and(|entry| {
+        entry
+            .opencode
+            .as_ref()
+            .is_some_and(|previous| previous != cursor)
+    })
+}
+
+/// Fold the session's staged shard set into its live record map — the map
+/// the stage proves by itself (ADR-012: the stage is the truth a cursor
+/// claims to copy). An empty set, an unreadable file or an unfoldable body
+/// answers `None`: unknown, never an empty map.
+fn fold_opencode_staged_map(
+    stage: &Path,
+    machine: &str,
+    session_id: &str,
+) -> Option<BTreeMap<String, String>> {
+    let dir = store::session_shard_dir(stage, machine, session_id);
+    let mut shards = store::sealed_shard_entries(&dir).ok()?;
+    shards.sort_by_key(|(seq, _)| *seq);
+    if shards.is_empty() {
+        return None;
+    }
+    let native = crate::opencode_records::native_session_id(session_id)?;
+    let mut assembly = crate::opencode_records::Assembly::for_session(native);
+    for (_, shard_path) in &shards {
+        let body = fs::read(shard_path).ok()?;
+        assembly.feed_shard_body(&body).ok()?;
+    }
+    Some(assembly.live_map())
+}
+
+/// Recover the increment map the state entry endorses, in ADR-012's order:
+/// the map file first (the durable copy), then a rebuild from the staged
+/// records (the stage is the truth the map claims to copy), and only a
+/// matching result is trusted. Anything else answers `None`, and the caller
+/// degrades to one full export that re-derives the map — never a silent
+/// empty map, never a mismatched map.
+fn reconcile_opencode_increment_map(
+    entry: &OffsetEntry,
+    state_dir: &Path,
+    session_id: &str,
+    stage: &Path,
+    machine: &str,
+) -> Option<BTreeMap<String, String>> {
+    let path = opencode_record_map_path(state_dir, session_id);
+    if let Some(records) = load_opencode_record_map(&path) {
+        if opencode_map_matches_entry(&records, entry) {
+            return Some(records); // intact fast path: no stage read at all
+        }
+    }
+    // Rebuild from the staged records (D2: "the map is rebuilt from the
+    // staged records on mismatch"). A reclaimed stage reads back empty,
+    // which endorses nothing — and that is the degrade case's own
+    // statement.
+    let records = fold_opencode_staged_map(stage, machine, session_id)?;
+    if opencode_map_matches_entry(&records, entry) {
+        // Restored; persist so the next pass takes the fast path. A failed
+        // persist only costs the same rebuild on the next pass — the
+        // verified map is in hand either way — so the write is best effort.
+        save_opencode_record_map(&path, session_id, &records).ok();
+        return Some(records);
+    }
+    None
 }
 
 /// The codebuff whole-file arm (ADR-054 D2/D5/D6/D9). Distinct from
@@ -3547,6 +4050,8 @@ fn process_codebuff_whole_file(
             opencode: None,
             store_fingerprint: None,
             grok_bot_row_digests: None,
+            opencode_record_digests: None,
+            opencode_map_digest: None,
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -3696,6 +4201,8 @@ fn process_whole_file(
             opencode: None,
             store_fingerprint: None,
             grok_bot_row_digests: None,
+            opencode_record_digests: None,
+            opencode_map_digest: None,
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -3760,6 +4267,8 @@ fn process_compressed(
         opencode: None,
         store_fingerprint: None,
         grok_bot_row_digests: None,
+        opencode_record_digests: None,
+        opencode_map_digest: None,
     };
     let decoded = zstd::stream::decode_all(&compressed[..]).context("decompress jsonl.zst")?;
     let (lines, _) = complete_lines(&decoded);
@@ -3940,6 +4449,8 @@ fn plain_state(path: &Path, offset: u64) -> anyhow::Result<OffsetEntry> {
         opencode: None,
         store_fingerprint: None,
         grok_bot_row_digests: None,
+        opencode_record_digests: None,
+        opencode_map_digest: None,
     })
 }
 
@@ -4737,6 +5248,8 @@ mod grok_bot_debt_key_tests {
                     opencode: None,
                     store_fingerprint: None,
                     grok_bot_row_digests: digests,
+                    opencode_record_digests: None,
+                    opencode_map_digest: None,
                 },
                 shards: ShardFact {
                     shard_count: 1,
@@ -4885,5 +5398,137 @@ mod grok_bot_debt_key_tests {
             files, before,
             "an already session-keyed entry merges to itself, unchanged"
         );
+    }
+}
+
+/// ADR-061 (SG-3) writer-side pins: the state-entry cache's shape (the W986
+/// digest list below the cap, one overall digest above it), the endorsement
+/// rule (a mismatched or half-broken cache endorses nothing), and the map
+/// side file's round trip.
+#[cfg(test)]
+mod opencode_increment_tests {
+    use super::*;
+
+    fn entry_with(record_digests: Option<Vec<String>>, map_digest: Option<String>) -> OffsetEntry {
+        OffsetEntry {
+            offset: 0,
+            prefix_len: 0,
+            prefix_sha256: String::new(),
+            compressed: false,
+            opencode: None,
+            store_fingerprint: None,
+            grok_bot_row_digests: None,
+            opencode_record_digests: record_digests,
+            opencode_map_digest: map_digest,
+        }
+    }
+
+    fn map_of(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, digest)| ((*key).to_string(), (*digest).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_state_cache_keeps_a_digest_list_up_to_the_cap_and_an_overall_digest_above_it() {
+        let small = map_of(&[("message:m1", "aaaa"), ("part:p1", "bbbb")]);
+        let (list, overall) = opencode_cache_of_map(&small);
+        assert_eq!(
+            list.as_deref(),
+            Some(["aaaa".to_string(), "bbbb".to_string()].as_slice())
+        );
+        assert!(overall.is_none());
+
+        let mut big = BTreeMap::new();
+        for i in 0..=(OPENCODE_RECORD_CACHE_CAP as u64) {
+            big.insert(format!("message:m{i}"), format!("{i:064x}"));
+        }
+        let (list, overall) = opencode_cache_of_map(&big);
+        assert!(
+            list.is_none(),
+            "past the cap the bounded entry stores no list"
+        );
+        let overall = overall.expect("the overall digest replaces the list");
+        // The bound the entry keeps is the ruling's own: 5000.
+        assert_eq!(OPENCODE_RECORD_CACHE_CAP, 5000);
+        // The overall digest is stable and order-anchored, so a hand-shuffled
+        // cache file cannot silently re-endorse a different map.
+        assert_eq!(overall, opencode_map_overall_digest(&big));
+        assert_ne!(
+            overall,
+            opencode_map_overall_digest(&map_of(&[("message:m1", "aaaa")]))
+        );
+    }
+
+    #[test]
+    fn an_entry_endorses_a_map_only_through_the_exact_shape_it_stores() {
+        let map = map_of(&[("message:m1", "aaaa"), ("part:p1", "bbbb")]);
+        let (list, _) = opencode_cache_of_map(&map);
+        assert!(opencode_map_matches_entry(
+            &map,
+            &entry_with(list.clone(), None)
+        ));
+        // A different map is not endorsed by the same list.
+        let other = map_of(&[("message:m1", "aaaa"), ("part:p1", "cccc")]);
+        assert!(!opencode_map_matches_entry(&other, &entry_with(list, None)));
+        // Neither field alone in the wrong shape, both fields, or nothing.
+        assert!(!opencode_map_matches_entry(&map, &entry_with(None, None)));
+        let (list_none, _overall_from_small) = opencode_cache_of_map(&map);
+        let _ = list_none;
+        assert!(
+            !opencode_map_matches_entry(
+                &map,
+                &entry_with(
+                    Some(map.values().cloned().collect()),
+                    Some(opencode_map_overall_digest(&map)),
+                ),
+            ),
+            "an entry carrying both shapes endorses nothing"
+        );
+    }
+
+    #[test]
+    fn the_map_side_file_round_trips_and_a_wrong_version_answers_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = opencode_record_map_path(dir.path(), "opencode.m.ses");
+        let map = map_of(&[("session:ses", "deadbeefcafe")]);
+        save_opencode_record_map(&path, "opencode.m.ses", &map).unwrap();
+        assert_eq!(load_opencode_record_map(&path), Some(map));
+        // Corrupt file: unknown is not empty — None, and the caller degrades.
+        fs::write(&path, b"{not json").unwrap();
+        assert_eq!(load_opencode_record_map(&path), None);
+        let wrong = OpenCodeRecordMapState {
+            version: OPENCODE_RECORD_MAP_VERSION + 1,
+            session_id: "opencode.m.ses".to_string(),
+            records: map_of(&[]),
+        };
+        fs::write(&path, serde_json::to_vec(&wrong).unwrap()).unwrap();
+        assert_eq!(load_opencode_record_map(&path), None);
+        // Missing entirely.
+        let other = opencode_record_map_path(dir.path(), "opencode.m.other");
+        assert_eq!(load_opencode_record_map(&other), None);
+    }
+
+    /// The entry-level digest list is derived from a *state file* round trip:
+    /// `#[serde(default)]` means a pre-change state (no fields named) loads
+    /// as never-increment-era, and a state that carries them keeps them.
+    #[test]
+    fn a_state_entry_round_trips_the_increment_caches() {
+        let entry = entry_with(Some(vec!["aaaa".to_string()]), Some("deadbeef".to_string()));
+        let bytes = serde_json::to_vec(&entry).unwrap();
+        let parsed: OffsetEntry = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed, entry);
+        let legacy = serde_json::json!({
+            "offset": 0,
+            "prefix_len": 0,
+            "prefix_sha256": "abc",
+            "compressed": false,
+            "opencode": null,
+            "grok_bot_row_digests": null
+        });
+        let parsed: OffsetEntry = serde_json::from_value(legacy).unwrap();
+        assert!(parsed.opencode_record_digests.is_none());
+        assert!(parsed.opencode_map_digest.is_none());
     }
 }

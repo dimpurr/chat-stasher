@@ -172,6 +172,10 @@ pub struct ExportOptions {
     pub turns: Turns,
     /// Trim written lines to the selector's window. Rejected without a window.
     pub trim_to_window: bool,
+    /// ADR-061: emit the records the source deleted too, at their original
+    /// positions, each carrying `"deleted": true` (snapshot-source sessions;
+    /// other harnesses ignore the switch).
+    pub include_deleted: bool,
     /// Write into a non-empty `--out`. Nothing is ever deleted either way.
     pub force: bool,
     /// Print the plan and stop.
@@ -928,7 +932,15 @@ pub fn export_sessions(
         .iter()
         .map(|h| (h.machine.clone(), h.session_id.clone()))
         .collect();
-    let dumped = store.read_selected_sessions(mk, &wanted)?;
+    let dumped = store.read_selected_sessions_with_view(
+        mk,
+        &wanted,
+        if opts.include_deleted {
+            crate::opencode_records::BodyView::IncludeDeleted
+        } else {
+            crate::opencode_records::BodyView::Current
+        },
+    )?;
 
     // Everything that could fail before the first byte is now behind us: the
     // archive was read. Only now is the output directory created, so a read
@@ -1330,6 +1342,7 @@ mod tests {
             out: PathBuf::from("/nonexistent-for-unit-tests"),
             turns,
             trim_to_window: trim,
+            include_deleted: false,
             force: false,
             dry_run: true,
         }
