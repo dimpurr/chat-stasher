@@ -203,7 +203,9 @@ uses, not a new one. For the command itself see [cli.md](cli.md#mirror).
   readability) is a pause, not a failure, and the next round resumes.
 - A round that *checked and failed* is the exception: a file that hashes
   against its own name twice and fails both times is source corruption
-  and exits `1`, not a pause that retries every hour forever.
+  and exits `1`, recorded `failed`. The exception is that verdict, not
+  any hold: the mirror re-checks the source every round until it is
+  fixed, and a retry alone does not heal it.
 - Turning the mirror off stops the copying and deletes nothing.
 
 ## Files chat-stasher keeps outside the config

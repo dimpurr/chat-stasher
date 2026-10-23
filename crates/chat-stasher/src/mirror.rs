@@ -1317,9 +1317,9 @@ fn open_mirror_for_survey(
 // ---------------------------------------------------------------------------
 
 /// The per-round progress record (ADR-062 C2's "X% of the first fill"):
-/// written at the end of *every* round — completed, stopped, refused — so
-/// the display can answer "how far along" without ever weakening the
-/// completed-only rule of [`crate::mirrorstate`] (ruling 2).
+/// written at the end of *every* round — completed, stopped, refused,
+/// failed — so the display can answer "how far along" without ever weakening
+/// the completed-only rule of [`crate::mirrorstate`] (ruling 2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MirrorProgress {
     pub version: u32,
@@ -1336,7 +1336,7 @@ pub struct MirrorProgress {
     /// [`Self::outcome_note`] when there is one.
     pub outcome: String,
     /// The human note for the last outcome (why it stopped, why it
-    /// refused), when there is one.
+    /// refused, why it failed), when there is one.
     pub outcome_note: Option<String>,
     /// Bytes the last round's listing held in total (the " of" denominator).
     pub remote_total_bytes: u64,
