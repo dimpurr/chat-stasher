@@ -214,7 +214,8 @@ libc = "0.2"
 # The same free-space question on Windows is `GetDiskFreeSpaceExW`; std has no
 # disk-space API there either. `winapi` is already in this workspace's lock
 # file as several crates' dependency, so enabling its features adds only a
-# direct edge (`fileapi` brings the call, `winnt` the ULARGE_INTEGER type it
-# fills) and no new package to the build graph. Held to `cfg(windows)`.
+# direct edge (`fileapi` brings the call, `ntdef` the ULARGE_INTEGER type it
+# fills, `impl-default` that type's zeroed constructor) and no new package to
+# the build graph. Held to `cfg(windows)`.
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["fileapi", "winnt"] }
+winapi = { version = "0.3", features = ["fileapi", "ntdef", "impl-default"] }

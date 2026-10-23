@@ -262,8 +262,8 @@ fn available_and_capacity_bytes(path: &Path) -> anyhow::Result<(u64, u64)> {
 #[cfg(windows)]
 fn available_and_capacity_bytes(path: &Path) -> anyhow::Result<(u64, u64)> {
     use std::os::windows::ffi::OsStrExt;
+    use winapi::shared::ntdef::ULARGE_INTEGER;
     use winapi::um::fileapi::GetDiskFreeSpaceExW;
-    use winapi::winnt::ULARGE_INTEGER;
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     wide.push(0);
     let mut available = ULARGE_INTEGER::default();
@@ -280,11 +280,11 @@ fn available_and_capacity_bytes(path: &Path) -> anyhow::Result<(u64, u64)> {
             std::io::Error::last_os_error()
         ));
     }
-    // SAFETY: the union field QuadPart is the whole of a ULARGE_INTEGER's
-    // value and winapi declares it as a plain u64 inside a union with BYTEs
-    // only for alignment; reading it after a successful call is sound.
-    let available = unsafe { available.u.QuadPart };
-    let capacity = unsafe { total.u.QuadPart };
+    // SAFETY: `QuadPart()` is winapi's u64 view of the same eight bytes the
+    // call filled; reading it after a successful call is sound, and the three
+    // locals above were zero-initialized by `ULARGE_INTEGER::default()`.
+    let available = unsafe { *available.QuadPart() };
+    let capacity = unsafe { *total.QuadPart() };
     Ok((available, capacity))
 }
 
