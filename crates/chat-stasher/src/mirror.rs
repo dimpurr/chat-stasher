@@ -71,9 +71,26 @@ pub const MIRROR_CONNECTIONS: usize = 2;
 
 /// Hard cap on a single worker's in-memory file read: the copy stage streams
 /// files whole via `read_full`: a content-addressed file has to be hashed
-/// as one unit before it is written. The bound exists so a corrupted or
-/// malicious listing cannot turn the copy stage into an unbounded
-/// allocation — a size beyond it stops the round as a hard failure.
+/// as one unit before it is written. The cap is enforced at two points,
+/// and each point holds half of the promise an honest reader may take
+/// from it:
+///
+/// * the listing's own declared size is checked *before* the read, so a
+///   declaration over the cap is refused before `read_full` allocates
+///   anything (twice over, with 2 workers) — the half a listing cannot
+///   disagree with itself about, and also the half that only sees what
+///   the listing *says*;
+/// * the returned length is checked *after* the read, so a listing that
+///   under-declares and then serves more bytes is refused before any of
+///   them are written — but by then the allocation has already happened,
+///   and the bytes for the under-declared tail have already been held.
+///
+/// Both refusals end the round as a hard failure (never a pause), and
+/// neither lies about a moving `read_full`: the backend read itself is
+/// not length-capped, so the *declared* size is the only bound the
+/// pre-read half can honor, and a lying listing meets the cap only after
+/// its bytes are in memory. A size beyond either check stops the round
+/// rather than letting the mirror grow toward an unbounded read.
 const MAX_WHOLE_FILE_BYTES: u64 = 1 << 34;
 
 /// File name for the per-round progress record inside the state dir. This is
@@ -135,9 +152,14 @@ impl MirrorSettings {
     /// max(10 GiB, 5% of the volume's capacity) (ruling 6): on the machines
     /// this mirror targets the 5% term dominates large disks, while the 10
     /// GiB floor keeps a small volume from computing a threshold no write
-    /// can respect. When the capacity cannot be queried the floor keeps the
-    /// documented GiB term rather than inventing a percentage of an unknown
-    /// size — never zero, which would read "unbounded".
+    /// can respect. `mirror_root` need not exist yet — a caller resolves
+    /// the floor *before* the round creates the directory — so the
+    /// capacity is measured on [`capacity_of_volume`]'s nearest existing
+    /// ancestor, which is the volume the directory will be created on;
+    /// that keeps the caller's floor equal to the one the round itself
+    /// derives mid-copy. When no capacity can be queried the floor keeps
+    /// the documented GiB term rather than inventing a percentage of an
+    /// unknown size — never zero, which would read "unbounded".
     #[must_use]
     pub fn min_free_bytes(&self, mirror_root: &Path) -> u64 {
         const GIB: f64 = 1_073_741_824.0;
@@ -145,13 +167,40 @@ impl MirrorSettings {
             return (gib.max(0.0) * GIB) as u64;
         }
         let floor = 10.0 * GIB;
-        match capacity_bytes(mirror_root) {
+        match capacity_of_volume(mirror_root) {
             Ok(capacity) => {
                 let five_percent = 0.05 * capacity as f64;
                 floor.max(five_percent) as u64
             }
             Err(_) => floor as u64,
         }
+    }
+}
+
+/// The capacity of the volume `path` names, where the volume is found by
+/// walking to the nearest existing ancestor: callers resolve the floor
+/// before the round creates the mirror directory, and the volume
+/// `fs::create_dir_all` will place that directory on is the one its
+/// nearest existing ancestor is already on — so the pre-round floor
+/// measures the real future volume instead of falling to the flat 10 GiB
+/// the unmeasurable path used to trigger (the first round then enforced
+/// two different floors; rev2's finding).
+fn capacity_of_volume(path: &Path) -> anyhow::Result<u64> {
+    let mut probe = path.to_path_buf();
+    loop {
+        if let Ok(capacity) = capacity_bytes(&probe) {
+            return Ok(capacity);
+        }
+        let Some(parent) = probe.parent().map(Path::to_path_buf) else {
+            // No ancestor exists to measure either — the honest answer
+            // stays the error, and the caller keeps its documented
+            // fallback.
+            return capacity_bytes(&probe);
+        };
+        if parent == probe {
+            return capacity_bytes(&probe);
+        }
+        probe = parent;
     }
 }
 
@@ -376,9 +425,10 @@ pub enum HardClass {
     /// permissions, a vanished parent); the round refuses to guess what a
     /// retry would find, but the class is honest that it may heal.
     LocalWrite,
-    /// The listing named a file over [`MAX_WHOLE_FILE_BYTES`], so the read
-    /// is refused before it starts rather than turning the copy stage into
-    /// an unbounded allocation.
+    /// The listing named a file over [`MAX_WHOLE_FILE_BYTES`] — refused
+    /// before the read when the declaration itself is over the cap, and
+    /// after the read when the bytes are (the constant's doc states what
+    /// each half can and cannot bound).
     OversizeListing,
 }
 
@@ -576,6 +626,14 @@ pub struct SyncRequest<'a> {
     pub master_key: &'a MasterKey,
     /// Wall time of the epoch, supplied so records are testable.
     pub now_unix: u64,
+    /// The free-disk floor for this round, in bytes — computed once by the
+    /// caller ([`MirrorSettings::min_free_bytes`]) so the round's
+    /// pre-estimate and the caller-built stop-rule share one floor
+    /// (rev2's finding: when the round derives its own, a first round can
+    /// enforce two — the caller's pre-creation fallback and the
+    /// engine's — and the mid-round one is the weaker). The floor is the
+    /// caller's to pass because the [`RoundEnds`] stop-rule already is.
+    pub min_free_bytes: u64,
     /// The round's stop-rule.
     pub round_ends: &'a dyn RoundEnds,
 }
@@ -719,7 +777,12 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
         .sum();
 
     // ---- C3 pre-estimate: refuse before the first byte moves ----
-    let min_free_bytes = req.settings.min_free_bytes(&mirror_root);
+    // The caller computed this floor before the round, on the same volume
+    // (min_free_bytes measures the nearest existing ancestor while the
+    // mirror directory does not exist yet), so its stop-rule and this
+    // pre-estimate are one floor — not two the round could disagree with
+    // itself over (rev2's finding).
+    let min_free_bytes = req.min_free_bytes;
     let free_now =
         available_bytes(&mirror_root).context("query free space on the mirror volume")?;
     let needed_bytes = missing_bytes.saturating_add(min_free_bytes);
@@ -996,11 +1059,12 @@ fn copy_one(
             file.hex.get(..12).unwrap_or(&file.hex)
         )
     };
-    // The bound's whole point (see [`MAX_WHOLE_FILE_BYTES`]): the listing
-    // already told us the size, so a file over the bound is refused *before*
-    // `read_full` allocates it — twice over with 2 workers — and only then
-    // is the round failed, rather than the round failing after an
-    // unbounded read has already happened.
+    // The pre-read half of the whole-file cap (see
+    // [`MAX_WHOLE_FILE_BYTES`]): the listing declared this size, so it is
+    // refused *before* `read_full` allocates it — twice over with 2
+    // workers. The half a lying listing meets is the post-read check
+    // below, which fires after the read has already held the bytes the
+    // declaration understated.
     if file.size > MAX_WHOLE_FILE_BYTES {
         return Err(StopCause::Hard(HardFailure {
             class: HardClass::OversizeListing,
@@ -1025,8 +1089,9 @@ fn copy_one(
         })?;
         if bytes.len() as u64 > MAX_WHOLE_FILE_BYTES {
             // The listing under-declared: the bytes are already in memory
-            // (the defense-in-depth half of the bound; the listing guard
-            // above fires first in the normal case).
+            // (the cap's post-read half — the pre-read guard above fired
+            // first in the normal case, exactly because it only sees the
+            // declared size).
             return Err(StopCause::Hard(HardFailure {
                 class: HardClass::OversizeListing,
                 why: format!(
@@ -1266,8 +1331,9 @@ pub struct MirrorProgress {
     /// mirror holds every file that round's listing had.
     pub complete: bool,
     /// Machine-friendly outcome of the last round: "complete", "stopped",
-    /// "refused" — and a free-form human note in
-    /// [`Self::outcome_note`].
+    /// "refused" or "failed" — the last is the hard-failure class
+    /// ([`HardFailure`]) — and a free-form human note about it in
+    /// [`Self::outcome_note`] when there is one.
     pub outcome: String,
     /// The human note for the last outcome (why it stopped, why it
     /// refused), when there is one.
@@ -1689,6 +1755,42 @@ mod tests {
         );
     }
 
+    /// A caller resolves the default floor *before* the round creates the
+    /// mirror directory, so the directory need not exist for the default
+    /// to mean what its doc says: the capacity is measured on the nearest
+    /// existing ancestor — the volume the directory will be created on —
+    /// and the pre-round floor equals the in-round one. Without this the
+    /// first round enforced two floors: the flat 10 GiB mid-round (its
+    /// caller could not query a path that did not exist yet) and the
+    /// documented max(10 GiB, 5% of capacity) at the pre-estimate.
+    ///
+    /// On a volume whose 5% is under the 10 GiB floor the two answers
+    /// coincide by arithmetic, so the capacity-relative assertion below
+    /// only bites on the large volumes the double floor actually
+    /// mis-floored.
+    #[test]
+    fn the_floor_for_a_mirror_dir_that_does_not_exist_measures_its_future_volume() {
+        let (_dir, root) = temp_root();
+        let unset = MirrorSettings {
+            enabled: false,
+            mirror_of: "storagebox".to_string(),
+            min_free_gib: None,
+        };
+        let future = root.join("mirror").join("storagebox");
+        assert!(!future.exists());
+        assert_eq!(
+            unset.min_free_bytes(&future),
+            unset.min_free_bytes(&root),
+            "the not-yet-created mirror dir is floored by the same volume as \
+             its existing ancestor"
+        );
+        let ten_gib = 10_u64 * 1_073_741_824;
+        let five_percent = capacity_bytes(&root).unwrap() / 20;
+        if five_percent > ten_gib {
+            assert_eq!(unset.min_free_bytes(&future), five_percent);
+        }
+    }
+
     /// Local layout matches the backend's own: packs under data/xx/, the
     /// rest under their section dir, config at the root — the copied
     /// directory must open with the same backend that wrote the original.
@@ -1823,13 +1925,15 @@ mod tests {
         assert_eq!(sha256_file(&p).unwrap(), hex_sha256(&bytes));
     }
 
-    /// MAX_WHOLE_FILE_BYTES guards on the *listing's* size, before the read
-    /// allocates the file — that is the whole claim of the constant's doc:
-    /// a corrupted or malicious listing cannot turn the copy stage into an
-    /// unbounded allocation. Assertions are on the guard's own class and
-    /// wording, so a regression folds the bound after the read again (the
-    /// pre-fix shape) and the test goes red through the class, not through
-    /// timing.
+    /// MAX_WHOLE_FILE_BYTES' pre-read half fires on the *listing's own*
+    /// declared size, before the read allocates anything — the half of
+    /// the cap an honestly-declared size cannot escape. The post-read
+    /// half, which the constant's doc names as the half an
+    /// under-declaring listing meets, catches the served bytes only
+    /// after the read and is unreachable through a local file's truthful
+    /// metadata. Assertions are on the guard's own class and wording, so
+    /// a regression that folds the cap back after the read again (the
+    /// pre-fix shape) goes red through the class, not through timing.
     #[test]
     fn an_oversized_listing_is_refused_before_the_read() {
         let dir = tempfile::tempdir().unwrap();

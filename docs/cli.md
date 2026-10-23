@@ -345,7 +345,7 @@ a "checked and failed" answer exists for the *remote*:
 `0` the mirror holds everything the remote listed, verified ·
 `3` the round did not finish — the budget ran out, the free-disk floor tripped, the space pre-estimate refused to start, or the remote could not be read mid-round — progress is recorded and the next round resumes ·
 `1` a finished read that failed: the source proved corrupt (a file hashed against its own name twice and failed both times — not a transfer a later round can heal), a local write failed, or the listing named a file over the whole-file bound ·
-`2` usage error — no `[mirror]` section, the switch is off, `mirror_of` names no declared destination, or the destination has never been initialised (run a push first). Nothing was read or written.
+`2` usage error — no `[mirror]` section, the switch is off, `mirror_of` names no declared destination, the destination has never been initialised (run a push first), or the destination's masterkey file is missing on this machine or unusable. Nothing was read or written.
 
 The round's own records (`mirror-state.json`, written only by a completed
 round, and `mirror-progress.json`, written every round) carry ids, counts

@@ -1246,8 +1246,11 @@ enum Command {
     /// verify (budget spent, disk floor, remote unreadable, space
     /// pre-estimate refused — the next round resumes); 1 = a finished
     /// read that failed (the source proved corrupt, a refused local
-    /// write); 2 = usage error (unconfigured, switch off, an undeclared
-    /// `mirror_of`, or an uninitialised destination).
+    /// write, or the listing named a file over the whole-file bound);
+    /// 2 = usage error (unconfigured, switch off, an undeclared
+    /// `mirror_of`, an uninitialised destination, or the destination's
+    /// masterkey file missing on this machine or unusable) — nothing
+    /// was read or written there.
     Mirror {
         #[command(subcommand)]
         action: MirrorAction,
@@ -9310,10 +9313,13 @@ fn run_once_pass_with(
 /// pass's own outcome: a stopped fill round is the mirror's progress
 /// statement, not a failed collect-and-push (W964's principle, applied to
 /// the mirror by ruling C2). A hard engine error — the checked-and-failed
-/// class — is a loud warning whose wording follows the class: corruption
-/// is *not* a transfer the next round can heal, and saying so would keep
-/// re-reading a corrupt source forever; the archive push already succeeded
-/// and the stage is protected, which is this pass's primary duty.
+/// class — is a loud warning whose wording follows the class: nothing
+/// holds the mirror stopped between rounds, so the warning says each
+/// round re-checks the source — the only thing that heals corruption is
+/// fixing it, and the re-check is how the next round *sees* the fix —
+/// instead of claiming a hold no code keeps. The archive push already
+/// succeeded and the stage is protected, which is this pass's primary
+/// duty.
 ///
 /// On any round that touched the remote it reaps the ssh ControlPersist
 /// masters the mirror's own reads opened (reap.rs says every opendal SFTP
@@ -9398,11 +9404,13 @@ fn mirror_step_after_push(
     let data_root = chat_stasher::config::default_data_root();
     let state_dir = chat_stasher::collect::default_state_dir();
     let mirror_root = chat_stasher::mirror::mirror_dir(&data_root, &settings.mirror_of);
-    let round_ends = chat_stasher::mirror::DeadlineAndDisk::new(
-        Some(deadline),
-        settings.min_free_bytes(&mirror_root),
-        mirror_root,
-    );
+    // One floor for the whole round (rev2's finding): the step's stop-rule
+    // and the engine's pre-estimate share the value computed here, so the
+    // round cannot promise the pre-estimate's floor and then enforce a
+    // different one mid-copy.
+    let min_free_bytes = settings.min_free_bytes(&mirror_root);
+    let round_ends =
+        chat_stasher::mirror::DeadlineAndDisk::new(Some(deadline), min_free_bytes, mirror_root);
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -9417,6 +9425,7 @@ fn mirror_step_after_push(
         state_dir: &state_dir,
         master_key: &mk,
         now_unix,
+        min_free_bytes,
         round_ends: &round_ends,
     };
     let percent_done = |present: u64, total: u64| {
@@ -9481,18 +9490,24 @@ fn mirror_step_after_push(
                 );
             } else if let Some(hard) = e.downcast_ref::<chat_stasher::mirror::HardFailure>() {
                 let wait = match hard.class {
-                    // Corruption is not a transfer the next round can heal:
-                    // saying "retries next round" here would send the next
-                    // hour's round to re-read the same corrupt source
-                    // forever, which is the loop this wording exists to
-                    // break.
+                    // No state holds the mirror stopped between rounds: the
+                    // step re-runs on every pass and each round re-checks
+                    // the source itself, so the wait worded here is what
+                    // the rounds do. Corruption and an over-bound listing
+                    // are cured only by fixing the source — surviving a
+                    // retry heals nothing — but the re-check is also how
+                    // the next round *sees* the fix, which is why the
+                    // wording claims the re-check and never a hold
+                    // (claiming "stays stopped" for behavior no code kept
+                    // was the rev2 review's finding).
                     chat_stasher::mirror::HardClass::SourceCorrupt
                     | chat_stasher::mirror::HardClass::OversizeListing => {
-                        "the mirror stays stopped until the source is fixed — this is \
-                         not healed by a retry"
+                        "the mirror re-checks the source every round until it is \
+                         fixed — a retry alone does not heal it"
                     }
                     chat_stasher::mirror::HardClass::LocalWrite => {
-                        "the next round retries once the local cause is fixed"
+                        "each round retries the write and completes once the local \
+                         cause is fixed"
                     }
                 };
                 eprintln!(
@@ -13046,8 +13061,9 @@ fn cmd_reclaim_stage(
 /// `mirror sync` — one copy round against the declared mirror destination
 /// (ADR-062 / LM-2). The engine ([`chat_stasher::mirror::sync_once`]) holds
 /// the semantics; this command pins the CLI contract around it: usage
-/// errors for a mirror that is not configured on or a destination that is
-/// not a repository (exit 2, nothing done), and the trichotomy the
+/// errors for a mirror that is not configured on, a destination that is
+/// not a repository, or the destination's masterkey being missing or
+/// unusable on this machine (exit 2, nothing done), and the trichotomy the
 /// command's doc states (0 complete / 3 stopped or refused / 1 a finished
 /// read that failed: verified source corruption, a refused local write, or
 /// a listing over the whole-file bound — each with its class's own
@@ -13108,6 +13124,12 @@ fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode
     };
     let mk = match store::load_key_file_state(&remote) {
         store::KeyFileState::Loaded(mk) => mk,
+        // Both key refusals answer with exit 2 (usage), never 1: the
+        // round never ran — nothing was read or written — so exit 1
+        // would report a checked answer for a check that never happened
+        // (`docs/cli.md` keeps exit 1 for finished reads that failed;
+        // rev2's fix, the key half rev0 issue 10's destination fix left
+        // at exit 1).
         store::KeyFileState::Missing => {
             eprintln!(
                 "mirror: the masterkey file for `{}` is not on this machine ({}); \
@@ -13116,7 +13138,8 @@ fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode
                 settings.mirror_of,
                 remote.key_file.display()
             );
-            return ExitCode::FAILURE;
+            eprintln!("mirror: exit_code=2 — usage error; nothing was done");
+            return ExitCode::from(2);
         }
         store::KeyFileState::Unusable(_) => {
             eprintln!(
@@ -13125,7 +13148,8 @@ fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode
                 settings.mirror_of,
                 remote.key_file.display()
             );
-            return ExitCode::FAILURE;
+            eprintln!("mirror: exit_code=2 — usage error; nothing was done");
+            return ExitCode::from(2);
         }
     };
     let data_root = chat_stasher::config::default_data_root();
@@ -13137,9 +13161,16 @@ fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode
         // reading that gives the letta pull its 600 s.
         .unwrap_or(600);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(deadline_secs);
+    // One floor for the whole round (rev2's finding): the stop-rule and the
+    // engine's pre-estimate share this value, and `min_free_bytes` measures
+    // the nearest existing ancestor when the mirror directory does not
+    // exist yet — so a first round's mid-copy floor is the documented
+    // max(10 GiB, 5% of capacity), not the flat 10 GiB the unmeasurable
+    // path used to fall back to while the pre-estimate promised more.
+    let min_free_bytes = settings.min_free_bytes(&mirror_root);
     let round_ends = chat_stasher::mirror::DeadlineAndDisk::new(
         Some(deadline),
-        settings.min_free_bytes(&mirror_root),
+        min_free_bytes,
         mirror_root.clone(),
     );
     let now_unix = std::time::SystemTime::now()
@@ -13157,6 +13188,7 @@ fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode
         state_dir: &state_dir,
         master_key: &mk,
         now_unix,
+        min_free_bytes,
         round_ends: &round_ends,
     };
     println!(

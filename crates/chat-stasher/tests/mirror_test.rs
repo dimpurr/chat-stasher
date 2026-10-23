@@ -158,6 +158,10 @@ fn build_rig(min_free_gib: Option<f64>) -> Rig {
 /// real roots; the engine itself takes paths, which is what keeps these
 /// tests off the machine's live data home).
 fn run_round(rig: &Rig, round_ends: &dyn RoundEnds) -> (SyncReport, mirror::SyncOutcome) {
+    // The floor is the caller's to compute (rev2's single-floor fix):
+    // the rig pins a near-zero `min_free_gib`, so the settings-derived
+    // value is `gib.max(0.0) * GIB` — computed once, shared by the
+    // request and the stop-rule, the same shape the CLI callers keep.
     sync_once(&SyncRequest {
         settings: &rig.settings,
         remote: &rig.remote,
@@ -165,6 +169,7 @@ fn run_round(rig: &Rig, round_ends: &dyn RoundEnds) -> (SyncReport, mirror::Sync
         state_dir: &rig.state_dir,
         master_key: &rig.mk,
         now_unix: 1_800_000_000,
+        min_free_bytes: rig.settings.min_free_bytes(&rig.mirror_root()),
         round_ends,
     })
     .unwrap()
@@ -781,6 +786,7 @@ fn a_twice_corrupt_source_fails_the_round_not_pauses_it() {
         state_dir: &rig.state_dir,
         master_key: &rig.mk,
         now_unix: 1_800_000_000,
+        min_free_bytes: rig.settings.min_free_bytes(&rig.mirror_root()),
         round_ends: &NeverStops,
     };
     let err = sync_once(&request)
@@ -851,6 +857,7 @@ fn a_local_write_failure_fails_the_round_and_the_note_carries_no_path() {
         state_dir: &rig.state_dir,
         master_key: &rig.mk,
         now_unix: 1_800_000_000,
+        min_free_bytes: rig.settings.min_free_bytes(&rig.mirror_root()),
         round_ends: &NeverStops,
     };
     let err = sync_once(&request).expect_err("a refused local write is a hard failure");
@@ -997,6 +1004,11 @@ fn an_uninitialised_destination_is_a_usage_refusal_that_creates_nothing() {
         state_dir: &state_dir,
         master_key: &MasterKey::new(),
         now_unix: 1_800_000_000,
+        // The engine never reads the floor on this path (the round is
+        // refused before the round starts), but the field is part of the
+        // one-floor contract, so the fixture hands the settings-derived
+        // value in like every caller does.
+        min_free_bytes: settings.min_free_bytes(&mirror_dir(&data_root, &settings.mirror_of)),
         round_ends: &NeverStops,
     };
     let err = sync_once(&request).expect_err("no config file listed is a usage refusal");
@@ -1572,6 +1584,71 @@ fn mirror_sync_reports_an_uninitialised_destination_as_usage() {
     );
 }
 
+/// The two masterkey "nothing was done" refusals are usage (exit 2), not
+/// a checked-and-failed read (exit 1): with the key missing or unreadable
+/// the round never ran, and `docs/cli.md`'s exit-code contract puts
+/// exactly that under 2 ("usage error … Nothing was read or written").
+/// Invariant 2 makes exit 1 a report of a check that actually ran, so
+/// answering 1 here would claim a verification that never happened. No
+/// test pinned either branch before (rev2's finding, the key half of
+/// rev0 issue 10's fix).
+#[test]
+fn mirror_sync_answers_a_missing_or_unreadable_masterkey_with_usage() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let sandbox = sb.path();
+    cli_fixture_remote(sandbox);
+    write_config(
+        sandbox,
+        "enabled = true\nmirror_of = \"storagebox\"\nmin_free_gib = 1.0",
+    );
+
+    // Missing: refused before the round reads or writes anything.
+    fs::remove_file(sandbox.join("remote.key")).unwrap();
+    let out = binary_command(sandbox)
+        .args(["mirror", "sync"])
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a missing masterkey is usage (nothing was read or written): {all}"
+    );
+    assert!(all.contains("is not on this machine"), "{all}");
+    assert!(all.contains("exit_code=2"), "{all}");
+    assert!(
+        !mirror_root_of(sandbox).exists(),
+        "the refused round moves nothing: {all}"
+    );
+
+    // Unusable: a key file that exists but cannot be used — same class.
+    fs::write(sandbox.join("remote.key"), "not a masterkey file").unwrap();
+    let out = binary_command(sandbox)
+        .args(["mirror", "sync"])
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "an unusable masterkey is usage too (nothing was read or written): {all}"
+    );
+    assert!(all.contains("cannot be read"), "{all}");
+    assert!(all.contains("exit_code=2"), "{all}");
+    assert!(
+        !mirror_root_of(sandbox).exists(),
+        "the refused round moves nothing: {all}"
+    );
+}
+
 #[test]
 fn the_pass_reaps_the_ssh_masters_its_mirror_step_opened() {
     let sb = tempfile::TempDir::new().unwrap();
@@ -1666,5 +1743,167 @@ fn the_pass_reaps_the_ssh_masters_its_mirror_step_opened() {
         stderr.contains("[reap] host 127.0.0.1 · ssh masters shut down:"),
         "the mirror step must reap the ssh masters its remote reads opened, in \
          the same pass that opened them:\nstderr:\n{stderr}"
+    );
+}
+
+/// The pass's hard-failure warning says what the rounds do — every round
+/// re-checks the source — instead of claiming a hold no code keeps (the
+/// rev2 finding: "stays stopped" described a stopped state nothing
+/// records, while the step actually re-ran each hour), and once the
+/// corrupt bytes are repaired under their own name, the next pass's
+/// round sees the fix and completes with no manual un-hold: the retry is
+/// the observation that *sees* the fix, never what heals it.
+#[test]
+fn the_pass_warns_saying_each_round_re_checks_and_heals_once_the_source_is_fixed() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let sandbox = sb.path();
+    let stage = sandbox.join("stage");
+    let machine = "mbp-test";
+    let session = "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    let config_dir = sandbox.join("config").join("chat-stasher");
+    fs::create_dir_all(&config_dir).unwrap();
+    // The pass pushes healthy data to `storagebox`; the mirror names a
+    // second *local* destination, `box2`, whose pushed repository gets
+    // one pack corrupted under its own name — the corrupt-source shape
+    // the mirror step hits on its first fill of `box2`, with a repo the
+    // step can actually read (unlike the unreachable-endpoint reap
+    // fixture).
+    fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "push_only_if_changed = false\n\n[destinations.storagebox]\nrepo = \
+             \"{}\"\nkey_file = \"{}\"\nno_cache = true\n\n[destinations.box2]\nrepo = \
+             \"{}\"\nkey_file = \"{}\"\nno_cache = true\n\n[mirror]\nenabled = true\nmirror_of = \
+             \"box2\"\nmin_free_gib = 1.0\n",
+            sandbox.join("remote-repo").display(),
+            sandbox.join("remote.key").display(),
+            sandbox.join("box2-repo").display(),
+            sandbox.join("box2.key").display(),
+        ),
+    )
+    .unwrap();
+    store::persist_key_file(
+        &store_config(&sandbox.join("remote-repo"), &sandbox.join("remote.key")),
+        &MasterKey::new(),
+    )
+    .unwrap();
+    let box2 = store_config(&sandbox.join("box2-repo"), &sandbox.join("box2.key"));
+    let mk2 = MasterKey::new();
+    store::persist_key_file(&box2, &mk2).unwrap();
+    let stage2 = sandbox.join("stage2");
+    write_session(&stage2, "machine-b2", "session-b2", 2);
+    BackupStore::new(box2.clone(), "machine-b2".to_string())
+        .push(&stage2, &mk2)
+        .unwrap();
+
+    // Corrupt one box2 pack under its own name, keeping the true bytes,
+    // so the repair can put exactly them back later.
+    let box2_root = sandbox.join("box2-repo");
+    let mut pack_rel = String::new();
+    for rel in inventory(&box2_root) {
+        if rel.starts_with("data/") {
+            pack_rel = rel;
+            break;
+        }
+    }
+    assert!(!pack_rel.is_empty(), "the fixture repository has packs");
+    let pack_path = box2_root.join(&pack_rel);
+    let true_pack = fs::read(&pack_path).unwrap();
+    let mut corrupt = true_pack.clone();
+    let mid = corrupt.len() / 2;
+    corrupt[mid] ^= 0xff;
+    fs::write(&pack_path, &corrupt).unwrap();
+
+    let cc_line = |ts: &str| {
+        format!(
+            r#"{{"parentUuid":null,"isMeta":null,"sessionId":"s","type":"user","message":{{"role":"user","content":"hi"}},"uuid":"u1","timestamp":"{ts}","cwd":"/x","version":"1.0.31"}}"#
+        )
+    };
+    let dir = stage
+        .join("sessions")
+        .join(machine)
+        .join(session)
+        .join("000");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("000001.jsonl"),
+        cc_line("2025-01-15T12:34:56.789Z") + "\n",
+    )
+    .unwrap();
+
+    let mut command = binary_command(sandbox);
+    command.env("CHAT_STASHER_REGISTRY", sandbox.join("registry.json"));
+    fs::write(
+        sandbox.join("registry.json"),
+        r#"{"schema_version":1,"generated":"T1 synthetic","harnesses":[]}"#,
+    )
+    .unwrap();
+    let out = command
+        .args([
+            "run-once",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+            "--destination",
+            "storagebox",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success(),
+        "the mirror's corrupt source is a warning, not a failed pass\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("[run-once] result:"),
+        "the pass itself completed:\nstdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("the source proved corrupt"),
+        "the warning names the hard class:\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("re-checks the source every round"),
+        "the warning says what the rounds actually do — re-check, no hold:\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("stays stopped"),
+        "no code holds the mirror stopped; the warning must not claim one:\nstderr:\n{stderr}"
+    );
+
+    // Repair the source under the same name and run the pass again: the
+    // step re-ran on its own, re-checked, and this fill completes — a
+    // held mirror could not have healed without a manual un-hold, and
+    // there is none to call.
+    fs::write(&pack_path, &true_pack).unwrap();
+    let mut command = binary_command(sandbox);
+    command.env("CHAT_STASHER_REGISTRY", sandbox.join("registry.json"));
+    let out = command
+        .args([
+            "run-once",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+            "--destination",
+            "storagebox",
+        ])
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "the second pass succeeds: {all}");
+    assert!(
+        all.contains("[run-once] mirror-sync: complete"),
+        "a fixed source heals on the next round with no manual step: {all}"
+    );
+    assert!(
+        !all.contains("the source proved corrupt"),
+        "the healed round reports completion, not the old failure: {all}"
     );
 }
