@@ -13,8 +13,9 @@
 //! preamble, so anything that must survive belongs in a state file, not in
 //! the log (SG-0's E6).
 //!
-//! Privacy: counts, byte totals, unix times, destination names and a
-//! classifier slug. No paths, no session ids, no error text bodies.
+//! Privacy: counts, byte totals, unix times, destination names, a
+//! classifier slug and the health words (ADR-060 D7's snapshot). No
+//! paths, no session ids, no error text bodies.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,14 @@ pub const RECLAIM_STATE_FILE: &str = "reclaim-state.json";
 
 /// Bumped whenever the shape below changes incompatibly. An unknown version
 /// is treated as unreadable, never as a healthy record.
-pub const RECLAIM_STATE_VERSION: u32 = 1;
+///
+/// **v2 (ADR-060 D7, SG-2)** adds the run's per-destination health snapshot
+/// ([`ReclaimAttempt::destination_health`]). A v1 record reads as
+/// unreadable — unknown version, so the W1012g policy applies forward: the
+/// streak alert says the record is unreadable rather than trusting a shape
+/// this build cannot interpret for deletion-adjacent facts, and the next
+/// completed reclaim rewrites it.
+pub const RECLAIM_STATE_VERSION: u32 = 2;
 
 /// When a weekly reclaim job is considered overdue: the fixed weekly slot
 /// plus one full week of grace, so a single holiday-week holiday (an asleep
@@ -86,6 +94,27 @@ pub struct ReclaimBlock {
     pub bytes: u64,
 }
 
+/// One destination's health as the run classified it — ADR-060 D7's
+/// snapshot of "what the run actually saw", so the surfaces can report a
+/// destination the run never consulted (`degraded-not-consulted`) as that
+/// state and never as an ordinary quiet row. `health` is D2's slug
+/// vocabulary verbatim (`healthy` / `lagging` / `never-pushed` / `unknown`)
+/// and `role` is D7's proof-role word (`must-prove` /
+/// `degraded-not-consulted`); both are recorded as strings the way
+/// [`ReclaimBlock::kind`] is, so the record is a witness, not a reader, of
+/// the vocabulary.
+///
+/// Privacy: a destination name, two machine words. No paths, no session
+/// ids, no error text bodies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReclaimDestinationHealth {
+    pub destination: String,
+    /// `healthy` / `lagging` / `never-pushed` / `unknown` (ADR-060 D2).
+    pub health: String,
+    /// `must-prove` / `degraded-not-consulted` (ADR-060 D7).
+    pub role: String,
+}
+
 /// One completed reclaim attempt, as durable metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReclaimAttempt {
@@ -97,8 +126,17 @@ pub struct ReclaimAttempt {
     pub outcome: ReclaimOutcome,
     /// Blocked destinations in the order the report listed them. Empty for
     /// an `Ok` attempt, and for a `Refused` attempt whose reasons were not
-    /// per-destination.
+    /// per-destination — and, since ADR-060, empty for the **empty-proof-
+    /// set** refusal too (a `Blocked` attempt where every declared
+    /// destination was degraded: the ≥1 guard deleted nothing, and the
+    /// snapshot below is what names the destinations).
     pub blocked: Vec<ReclaimBlock>,
+    /// The run's per-destination health snapshot (ADR-060 D7): one row per
+    /// declared destination, in the order the report listed them. Absent
+    /// when the run recorded no classification — an unknown, never
+    /// "there were no destinations".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_health: Option<Vec<ReclaimDestinationHealth>>,
     /// Consecutive non-`Ok` attempts ending with this one. Written by
     /// `record` from the previous record; the counter survives crashes
     /// because it lives in the same overwrite the outcome does.
@@ -193,6 +231,7 @@ mod tests {
                 sessions,
                 bytes,
             }],
+            destination_health: None,
             consecutive_blocked: 0,
             candidates: Some(sessions),
             candidate_bytes: Some(bytes),
@@ -206,6 +245,7 @@ mod tests {
             apply: true,
             outcome: ReclaimOutcome::Ok,
             blocked: Vec::new(),
+            destination_health: None,
             consecutive_blocked: 0,
             candidates: Some(candidates),
             candidate_bytes: Some(bytes),
@@ -255,6 +295,7 @@ mod tests {
                 apply: true,
                 outcome: ReclaimOutcome::Refused,
                 blocked: Vec::new(),
+                destination_health: None,
                 consecutive_blocked: 0,
                 // A refused run never surveyed the stage: the counts stay
                 // absent rather than pretending zero was measured.
@@ -287,10 +328,12 @@ mod tests {
 
     /// Missing / unreadable / present stay three states at the reader too,
     /// and the unknown-version case lands in unreadable rather than being
-    /// treated as a fresh install.
+    /// treated as a fresh install — including the v1 shape this v2 build
+    /// can no longer interpret, which must not quietly read as a record
+    /// (ADR-060 D7's forward application of the W1012g policy).
     #[test]
     fn missing_unreadable_and_present_stay_three_states() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
         let state_dir = dir.path().join("state");
         assert!(matches!(load(&state_dir), ReclaimStateRead::Missing));
         fs::create_dir_all(&state_dir).unwrap();
@@ -304,6 +347,77 @@ mod tests {
         match load(&state_dir) {
             ReclaimStateRead::Unreadable(why) => assert!(why.contains("unknown version"), "{why}"),
             other => panic!("expected Unreadable, got {other:?}"),
+        }
+        // The v1 shape (pre-SG-2, no health snapshot) is an unknown
+        // version to this build exactly the same way: unreadable, never a
+        // present record the surfaces could read a healthy set out of.
+        fs::write(
+            reclaim_state_path(&state_dir),
+            r#"{ "version": 1, "finished_at_unix": 1, "apply": true,
+                "outcome": "blocked", "blocked": [], "consecutive_blocked": 2,
+                "candidates": 5, "candidate_bytes": 500 }"#,
+        )
+        .unwrap();
+        match load(&state_dir) {
+            ReclaimStateRead::Unreadable(why) => {
+                assert!(why.contains("unknown version 1"), "{why}");
+            }
+            other => panic!("a v1 record is unreadable to a v2 build: {other:?}"),
+        }
+    }
+
+    /// ADR-060 D7's health snapshot round-trips: the run's own words
+    /// (`healthy` / `lagging` / `never-pushed` / `unknown`, and the roles
+    /// `must-prove` / `degraded-not-consulted`) are recorded verbatim and
+    /// read back without reinterpretation — the record is a witness of the
+    /// vocabulary it was handed, so a future rename shows up as a diff in
+    /// the surfaces instead of being silently translated here.
+    #[test]
+    fn the_destination_health_snapshot_round_trips() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state_dir = dir.path().join("state");
+        let mut attempt = blocked("r2", 2, 200);
+        attempt.blocked.clear();
+        attempt.outcome = ReclaimOutcome::Blocked;
+        attempt.destination_health = Some(vec![
+            ReclaimDestinationHealth {
+                destination: "storagebox".to_string(),
+                health: "healthy".to_string(),
+                role: "must-prove".to_string(),
+            },
+            ReclaimDestinationHealth {
+                destination: "r2".to_string(),
+                health: "never-pushed".to_string(),
+                role: "degraded-not-consulted".to_string(),
+            },
+        ]);
+        record(&state_dir, &attempt).unwrap();
+        match load(&state_dir) {
+            ReclaimStateRead::Present(a) => {
+                let snapshot = a.destination_health.expect("snapshot recorded");
+                assert_eq!(snapshot.len(), 2);
+                assert_eq!(snapshot[0].destination, "storagebox");
+                assert_eq!(snapshot[0].role, "must-prove");
+                assert_eq!(snapshot[1].health, "never-pushed");
+                assert_eq!(snapshot[1].role, "degraded-not-consulted");
+                assert!(
+                    a.blocked.is_empty(),
+                    "the empty-proof-set refusal carries its destinations in the snapshot"
+                );
+                assert_eq!(
+                    a.consecutive_blocked, 1,
+                    "it still counts toward the streak"
+                );
+            }
+            other => panic!("expected a present record, got {other:?}"),
+        }
+        // And the absent case stays absent — a run that recorded no
+        // classification reads back as no classification, not as an
+        // empty-and-therefore-meaningless zero-row list.
+        record(&state_dir, &ok(1, 10)).unwrap();
+        match load(&state_dir) {
+            ReclaimStateRead::Present(a) => assert!(a.destination_health.is_none()),
+            other => panic!("expected a present record, got {other:?}"),
         }
     }
 }

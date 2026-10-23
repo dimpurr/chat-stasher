@@ -244,6 +244,7 @@ fn status_names_the_destination_the_timers_do_not_push() {
             sessions: 9_869,
             bytes: 12_900_000_000,
         }],
+        destination_health: None,
         consecutive_blocked: 0,
         candidates: Some(9_869),
         candidate_bytes: Some(12_900_000_000),
@@ -536,27 +537,51 @@ fn reclaim_stage_records_the_block_and_counts_the_streak() {
         value["consecutive_blocked"], 2,
         "two blocked runs in a row is the number the notification threshold counts"
     );
+    // ADR-060 (SG-2) reshaped this machine's refusal: neither declared
+    // destination has a push on record, so both are degraded and neither
+    // was consulted — the per-destination `blocked` list is empty, the
+    // refusal is the empty-proof-set shape, and the health snapshot is
+    // what names both destinations (D7: a run that refuses must say who
+    // it could not ask).
     let blocked = value["blocked"]
         .as_array()
-        .expect("the blocked destinations are recorded");
-    assert_eq!(blocked.len(), 2, "both declared destinations blocked");
-    assert!(blocked.iter().all(|row| row["kind"] == "unreachable"));
-    // The candidates were surveyed (the dry run had real work to prove)
-    // and both destinations held every byte back.
+        .expect("the blocked list is recorded");
+    assert_eq!(
+        blocked.len(),
+        0,
+        "no destination was consulted, so no per-destination block"
+    );
+    let snapshot = value["destination_health"]
+        .as_array()
+        .expect("the run's health snapshot is recorded");
+    assert_eq!(snapshot.len(), 2, "one row per declared destination");
+    assert!(snapshot
+        .iter()
+        .all(|row| { row["destination"] == "storagebox" || row["destination"] == "r2" }));
+    assert!(snapshot
+        .iter()
+        .all(|row| { row["health"] == "never-pushed" && row["role"] == "degraded-not-consulted" }));
+    // The candidates were surveyed (the dry run had real work it refused
+    // to reclaim) and the whole candidate set was held back.
     assert_eq!(value["candidates"], 1);
 
-    // The dry-run output names the class of failure in its "blocked" line
-    // for both destinations, which is what the machine's weekly log would
-    // carry from here on — and the streak line that used to live nowhere
-    // but the log is now also the durable record just asserted.
-    // One more blocked run from the CLI would make it three; the record
-    // is the counter, the run just increments it.
+    // The dry-run output names the refusal for what it is — the §2
+    // machine's two never-pushed destinations are now the loud
+    // empty-proof-set shape, not an unreachable pair — and the streak
+    // line that used to live nowhere but the log is the durable record
+    // just asserted. One more blocked run from the CLI would make it
+    // three; the record is the counter, the run just increments it.
     let third = machine.run(&[
         "reclaim-stage",
         "--stage",
         stage.to_str().expect("utf-8 stage path"),
     ]);
     assert_eq!(third.status.code(), Some(1));
+    let text = combined(&third);
+    assert!(
+        text.contains("no healthy destination to prove against"),
+        "the refusal names itself in D7's wording: {text}"
+    );
     let body = fs::read_to_string(&state).expect("the reclaim rewrote its record");
     let value: serde_json::Value =
         serde_json::from_str(&body).unwrap_or_else(|e| panic!("rewrite: {e}\n{body}"));

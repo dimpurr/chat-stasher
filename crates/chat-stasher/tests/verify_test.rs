@@ -290,6 +290,11 @@ fn core_e2e_reclaimed_session_survives_subsequent_push_and_matches_l3() {
     let dests = vec![chat_stasher::stagereclaim::NamedStore {
         name: "local-repo".to_string(),
         cfg: cfg.clone(),
+        // ADR-060: the proof consults the destinations the caller's
+        // classification marks must-prove; these tests prove the archive
+        // mechanics, so the destination is handed in as healthy the way a
+        // fresh successful push would have classified it.
+        health: chat_stasher::destdiag::DestinationHealth::Healthy,
     }];
     let reclaim_report = chat_stasher::stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
     assert!(!reclaim_report.blocked());
@@ -382,6 +387,11 @@ fn core_e2e_reclaimed_session_missing_in_all_snapshots_reports_missing_in_archiv
     let dests = vec![chat_stasher::stagereclaim::NamedStore {
         name: "local-repo".to_string(),
         cfg: cfg.clone(),
+        // ADR-060: the proof consults the destinations the caller's
+        // classification marks must-prove; these tests prove the archive
+        // mechanics, so the destination is handed in as healthy the way a
+        // fresh successful push would have classified it.
+        health: chat_stasher::destdiag::DestinationHealth::Healthy,
     }];
     let reclaim_report = chat_stasher::stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
     assert!(!reclaim_report.blocked());
@@ -477,6 +487,11 @@ fn core_e2e_reclaimed_session_corrupt_manifest_reports_unverifiable() {
     let dests = vec![chat_stasher::stagereclaim::NamedStore {
         name: "local-repo".to_string(),
         cfg: cfg.clone(),
+        // ADR-060: the proof consults the destinations the caller's
+        // classification marks must-prove; these tests prove the archive
+        // mechanics, so the destination is handed in as healthy the way a
+        // fresh successful push would have classified it.
+        health: chat_stasher::destdiag::DestinationHealth::Healthy,
     }];
     let reclaim_report = chat_stasher::stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
     assert!(!reclaim_report.blocked());

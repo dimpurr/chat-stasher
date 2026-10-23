@@ -1046,6 +1046,9 @@ fn pull_cli_requires_readback_from_every_destination_and_survives_reclamation() 
         .map(|(i, cfg)| chat_stasher::stagereclaim::NamedStore {
             name: format!("synthetic-{i}"),
             cfg: cfg.clone(),
+            // ADR-060: these destinations were just pushed to successfully,
+            // so the classification a real run would derive is healthy.
+            health: chat_stasher::destdiag::DestinationHealth::Healthy,
         })
         .collect();
     assert!(
