@@ -174,7 +174,7 @@ involve a network: **step 4**, whose only destination is the one you put in
 your own config; and an **API pull** — `chat-stasher pull letta`, or the
 `[pull.letta]` producer a scheduled `run-once` pass reads before its collect
 step — which talks, over HTTPS, to the API you name the account on
-(`crates/chat-stasher/src/letta.rs:232-242`; see [API
+(`crates/chat-stasher/src/letta.rs:236-246`; see [API
 pull](../docs/pull.md)). The Native Messaging hop in step 3 is a local
 process-to-process call: it is not a network connection, and the host it reaches
 is one you registered yourself.

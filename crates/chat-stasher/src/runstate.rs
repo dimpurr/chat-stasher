@@ -544,13 +544,29 @@ fn letta_line_of(state: &RunState) -> Option<LettaLine> {
         return None;
     }
     if let Some(backfill) = &state.pull_letta_backfill {
+        // The counted unit of `pulled` is the conversation, so a record at
+        // `pulled == estimated_total` is the sandwich state a round that
+        // published every conversation but could not reach the agent-level
+        // material leaves: wording it "N of ~N conversations still
+        // backfilling" would imply an unarchived conversation where every
+        // one is archived — the remainder is named for what it is.
+        let progress = if backfill.pulled >= backfill.estimated_total {
+            format!(
+                "every conversation is archived and the agent-level material \
+                  (window, listing, metadata and capture order) is what remains"
+            )
+        } else {
+            format!(
+                "{} of ~{} conversations archived so far",
+                backfill.pulled, backfill.estimated_total
+            )
+        };
         return Some(LettaLine {
             sentence: format!(
                 "Letta pull did not finish reading: the account is still backfilling — \
-                 {} of ~{} conversations archived so far; the next pass continues from \
-                 where this one stopped, and the pass stays at exit 3 (\"did not finish \
-                 reading\") until the backfill completes.",
-                backfill.pulled, backfill.estimated_total
+                  {progress}; the next pass continues from where this one stopped, and \
+                  the pass stays at exit 3 (\"did not finish reading\") until the \
+                  backfill completes."
             ),
             fix: None,
         });

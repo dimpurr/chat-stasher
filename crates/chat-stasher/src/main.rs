@@ -21544,25 +21544,30 @@ mod api_pull_boundary_tests {
 
     /// The CLI page-size knob accepts only the band the provider serves;
     /// the default sits inside it, so an unqualified `pull letta` keeps
-    /// its existing behaviour.
+    /// its existing behaviour. The parse runs on the worker stack the
+    /// product's own `main` grants itself ([`parse_cli_on_worker_stack`]):
+    /// clap's derive chain covers every subcommand in one debug frame, and
+    /// on a libtest thread's default stack that frame overflows — an
+    /// abort whose argv, parse and assertions are exactly these.
     #[test]
     fn api_pull_page_size_defaults_inside_the_accepted_band() {
         let root = "/w964-synthetic-root";
         let parse = |extra: &[&str]| {
-            let mut words = vec![
-                "chat-stasher".to_string(),
-                "pull".to_string(),
-                "letta".to_string(),
-                "--account-id".to_string(),
-                "synthetic-account".to_string(),
-                "--inbox".to_string(),
-                format!("{root}/inbox"),
-                "--stage".to_string(),
-                format!("{root}/stage"),
+            let inbox = format!("{root}/inbox");
+            let stage = format!("{root}/stage");
+            let mut words: Vec<&str> = vec![
+                "chat-stasher",
+                "pull",
+                "letta",
+                "--account-id",
+                "synthetic-account",
+                "--inbox",
+                inbox.as_str(),
+                "--stage",
+                stage.as_str(),
             ];
-            words.extend(extra.iter().map(|word| word.to_string()));
-            let lines: Vec<&str> = words.iter().map(String::as_str).collect();
-            match Cli::try_parse_from(lines) {
+            words.extend(extra.iter().copied());
+            match parse_cli_on_worker_stack(&words) {
                 Ok(cli) => match cli.command {
                     Command::Pull(parsed) => Ok(parsed),
                     _ => panic!("pull command required"),

@@ -224,6 +224,43 @@ fn backfill_progress_has_its_own_line_and_never_claims_completion() {
     );
 }
 
+/// The sandwich state of a large backfill: every conversation is archived,
+/// and what the pass still owes is the agent-level material of a round
+/// that was cut short. `pulled` is a conversation count, so the line must
+/// not word that state as "N of ~N conversations" — an unarchived
+/// conversation every archive record contradicts — and the agent-level
+/// remainder is named for what it is (rev3's caught-up-from-empty-position
+/// hole, surfaced as its own wording).
+#[test]
+fn a_position_with_every_conversation_published_names_its_agent_level_remainder() {
+    let mut state = ok_state(NOW - 600);
+    state.outcome = RunOutcome::Error;
+    state.failed_step = Some("pull-letta".to_string());
+    state.pull_letta_unread = true;
+    state.pull_letta_backfill = Some(chat_stasher::runstate::PullLettaBackfill {
+        pulled: 25,
+        estimated_total: 25,
+    });
+    let verdict = runstate::summarize(&RunStateRead::Present(state), NOW, 4 * HOUR);
+    assert!(!verdict.healthy);
+    let letta = verdict.letta.as_ref().expect("the progress line exists");
+    assert!(
+        letta.sentence.contains("agent-level material"),
+        "the remainder is named for what it is: {}",
+        letta.sentence
+    );
+    assert!(
+        !letta.sentence.contains("25 of ~25"),
+        "a fully published conversation position is not worded as an \
+         unarchived conversation: {}",
+        letta.sentence
+    );
+    assert!(
+        letta.sentence.contains("did not finish reading"),
+        "the pass is honestly unfinished while the material is owed"
+    );
+}
+
 /// A pass that deferred to the sibling timer holding the producer's lock is
 /// the recurring shape of a multi-destination install, so its line is the
 /// hand-off itself: the first line stays the green verdict, the producer's

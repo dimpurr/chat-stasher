@@ -243,12 +243,6 @@ pub enum ReclaimJobRecord {
     },
 }
 
-/// The whole reconciliation: rows plus the alerts both prose surfaces and
-/// the menu bar display. `alerts` and `job_alerts` are already worded —
-/// the three surfaces display them unchanged, which is the shared-
-/// wording half of C1; the fact enums beside them are what `--json`
-/// consumers and `doctor`'s table read.
-///
 /// ②, extended to the pull producers (W964): whether the declared
 /// `[pull.letta]` producer's credential resolves in the scheduled pass
 /// that pulls it — the same question the per-destination credentials fact
@@ -288,15 +282,11 @@ and the next pass pulls it again"
     }
 }
 
-/// The declared pull producer's credential fact, W964's extension of
-/// ② to the producers the scheduled pass pulls. `None` when no
-/// `[pull.letta]` is declared.
-///
 /// The whole reconciliation: rows plus the alerts both prose surfaces and
 /// the menu bar display. `alerts` and `job_alerts` are already worded —
-/// the three surfaces display them unchanged, which is the shared-
-/// wording half of C1; the fact enums beside them are what `--json`
-/// consumers and `doctor`'s table read.
+/// the three surfaces display them unchanged, which is the shared-wording
+/// half of C1; the fact enums beside them are what `--json` consumers and
+/// `doctor`'s table read.
 #[derive(Debug, Clone)]
 pub struct Reconciliation {
     pub destinations: Vec<DestinationFacts>,

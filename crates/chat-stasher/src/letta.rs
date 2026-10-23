@@ -213,6 +213,10 @@ pub struct Api {
     key: Option<String>,
     deadline: Instant,
     pace: Duration,
+    /// The whole-pass budget as declared, kept beside the derived deadline
+    /// so the pass can measure its request allowance in pacing intervals
+    /// without consulting the running clock.
+    budget: Duration,
     next: Instant,
     response_bytes: usize,
     page_size: u64,
@@ -244,6 +248,14 @@ impl Api {
     pub fn deadline(&self) -> Instant {
         self.deadline
     }
+    /// The whole-pass request budget, measured in pacing intervals. Both
+    /// numbers are declared before the first request, so the answer is the
+    /// same however slow the machine is while it runs — the derived quantity
+    /// a load-slowed pass may still plan against, where the wall clock that
+    /// remains is not one.
+    fn request_quanta(&self) -> usize {
+        (self.budget.as_millis() / std::cmp::max(1, self.pace.as_millis().max(1))) as usize
+    }
     fn new(
         base: &str,
         key: Option<String>,
@@ -262,6 +274,7 @@ impl Api {
             key,
             deadline: Instant::now() + budget,
             pace,
+            budget,
             next: Instant::now(),
             response_bytes: 0,
             page_size,
@@ -469,14 +482,20 @@ struct Snapshot {
     /// byte-identical capture order instead of an emptied one.
     #[serde(default)]
     orders: BTreeMap<String, String>,
-    /// Conversations of this agent whose first publication is still owed:
-    /// the backfill position. `None` means the account is caught up and
-    /// every round walks the whole inventory against the cursors above;
-    /// `Some(pending)` means the round starts where the previous one
-    /// stopped (a conversation already present stays in the set until its
-    /// bundles are both published and durably journaled), which is how a
-    /// large account completes across several rounds instead of restarting
-    /// from zero and staying unfinished forever.
+    /// Conversations of this agent whose first publication is still owed,
+    /// plus the agent-level marker (`agent-default-<agent>`), which leaves
+    /// the set only when the round that journals the default-session
+    /// material — window, listing, metadata, capture order — commits: that
+    /// is the state where the position empties, never the last
+    /// conversation's publication. `None` therefore means the account is
+    /// caught up and every round walks the inventory's slice against the
+    /// cursors above; `Some(pending)` means the round starts where the
+    /// previous one stopped (a conversation already present stays in the
+    /// set until its bundles are both published and durably journaled),
+    /// which is how a large account completes across several rounds instead
+    /// of restarting from zero and staying unfinished forever — a
+    /// marker-only position included, because the agent-level material is
+    /// publications the account still owes.
     #[serde(default)]
     backlog: Option<BTreeSet<String>>,
 }
@@ -498,10 +517,12 @@ pub struct Report {
     pub bundles: usize,
     pub committed: usize,
     pub incomplete: usize,
-    /// Some while conversations of the declared account are still owed
-    /// their first publication: the pass did not finish reading, and the
-    /// next round continues from the persisted position. None means the
-    /// account is caught up.
+    /// Some while the account still owes publications — conversations
+    /// awaiting their first publication, or the agent-level material of a
+    /// scope whose conversations are all published and whose window,
+    /// listing and metadata are not. The pass did not finish reading, and
+    /// the next round continues from the persisted position. None means
+    /// the account is caught up: a round journaled everything it owed.
     pub backfill: Option<Backfill>,
 }
 fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -647,23 +668,6 @@ pub fn run(
         &[("archive_status", "all".into())],
         false,
     )?;
-    // The sweep's per-round slice: how many conversations a caught-up round
-    // re-reads before handing the rest to the next round. Derived, not a
-    // knob — each conversation costs at least one paced request for its
-    // content page and one for the empty terminator that ends paging, and
-    // the round still owes the agent window, its metadata and listings, so
-    // the slice takes half the requests the remaining budget admits and
-    // spends half of those on conversations at two requests apiece. A
-    // deadline that strikes inside the slice still reports "did not finish
-    // reading" and resumes from the persisted position.
-    let verify_slice: usize = std::cmp::max(
-        1,
-        (api.deadline()
-            .saturating_duration_since(Instant::now())
-            .as_millis()
-            / std::cmp::max(1, api.pace.as_millis())) as usize
-            / 4,
-    );
     let mut known: BTreeSet<String> = agents
         .iter()
         .map(|v| id(v).map(str::to_owned))
@@ -713,6 +717,22 @@ pub fn run(
         Err(_) => anyhow::bail!("local agent discovery unavailable"),
     }
     report.agents = known.len();
+    // The sweep's per-round slice: how many conversations a caught-up round
+    // re-reads before handing the rest to the next round. Derived from the
+    // pass's **declared** request budget — the whole-pass budget in pacing
+    // intervals ([`Api::request_quanta`]), never the clock remaining at the
+    // moment the slice is computed — so a load-slowed round plans the same
+    // slice a quiet one does instead of collapsing toward one conversation
+    // per agent. The slice takes a quarter of the round's requests and
+    // shares that quarter across the account's agents: a conversation costs
+    // at least one paced request for its content page and one for the empty
+    // terminator that ends paging, and each agent still owes its metadata
+    // and window, so the slices add up inside the budget the round was
+    // given rather than onto the wall clock the next agent trips over. A
+    // deadline that strikes inside the slice still reports "did not finish
+    // reading" and resumes from the persisted position.
+    let verify_slice: usize =
+        std::cmp::max(1, api.request_quanta() / 4 / std::cmp::max(1, known.len()));
     for agent in known.iter().cloned() {
         let scope = format!("{tenant}/{agent}");
         let mut pass_proven = false;
@@ -774,20 +794,34 @@ pub fn run(
                 backlog: previous.backlog.clone(),
                 ..Snapshot::default()
             };
+            // The default session's id is also the backlog's agent-level
+            // marker: the conversations are tracked per id, and the scope's
+            // window, listing, metadata and capture order are tracked under
+            // this one name.
+            let default = format!("agent-default-{agent}");
             // The backfill position: a scope with no row owes every
-            // conversation it has; a scope mid-backfill continues the set
-            // it persisted; every other scope is caught up.
+            // conversation it has plus its agent-level material; a scope
+            // mid-backfill continues the set it persisted; every other
+            // scope is caught up.
             if !existed {
-                snapshot.backlog = Some(
-                    per_agent_conversations
-                        .get(&agent)
-                        .cloned()
-                        // reason: an agent with no row in the conversation
-                        // listing has no conversations to owe — an empty
-                        // pending set is the position to continue from,
-                        // not a fallback standing in for an unknown one.
-                        .unwrap_or_default(),
-                );
+                let mut pending = per_agent_conversations
+                    .get(&agent)
+                    .cloned()
+                    // reason: an agent with no row in the conversation
+                    // listing has no conversations to owe — an empty
+                    // conversation set is the position to continue from,
+                    // not a fallback standing in for an unknown one.
+                    .unwrap_or_default();
+                // The agent-level marker: every conversation may publish
+                // while the default-session material is still unwritten, so
+                // the position never empties before the round that journals
+                // that material. An emptied position read as completion was
+                // the rev3 hole — a round could persist "no conversations
+                // owed" and the next computation report the account caught
+                // up while its window, listing and metadata were never
+                // fetched.
+                pending.insert(default.clone());
+                snapshot.backlog = Some(pending);
             }
             let mut conversation_ids = BTreeSet::new();
             let mut overlap = BTreeSet::new();
@@ -826,9 +860,13 @@ pub fn run(
             // conversations before handing the rest to the next round. Mid
             // backfill there is no slice — that round owes first
             // publication, and the deadline alone bounds how far it gets.
-            let verify_budget = match snapshot.backlog {
-                None => verify_slice,
-                Some(_) => usize::MAX,
+            // A position that holds only the agent-level marker owes no
+            // conversation walks, so it gets the caught-up slice (never an
+            // unbounded one): a scope that walked everything under
+            // `usize::MAX` was the other half of the rev3 hole.
+            let verify_budget = match &snapshot.backlog {
+                Some(pending) if pending.iter().any(|session| *session != default) => usize::MAX,
+                _ => verify_slice,
             };
             let mut reverified: usize = 0;
             let mut last_read: Option<String> = None;
@@ -977,15 +1015,19 @@ pub fn run(
             // is still there, so the position drops what is gone instead of
             // owing it forever. Its bytes were never archived, so the
             // observation surface stays honest: there is nothing recorded to
-            // compare against, and none is invented.
+            // compare against, and none is invented. The agent-level marker
+            // is not a conversation and never leaves with the inventory — it
+            // leaves when the round that journals the default-session
+            // material sets the position caught up.
             if let Some(pending) = &mut snapshot.backlog {
                 let inventory = per_agent_conversations.get(&agent);
-                pending.retain(|id| inventory.is_some_and(|set| set.contains(id)));
+                pending
+                    .retain(|id| *id == default || inventory.is_some_and(|set| set.contains(id)));
             }
             if snapshot
                 .backlog
                 .as_ref()
-                .is_some_and(|pending| !pending.is_empty())
+                .is_some_and(|pending| pending.iter().any(|session| *session != default))
             {
                 // The budget stopped this agent mid-backfill: its remaining
                 // conversations stay pending, its agent-level material is
@@ -999,10 +1041,12 @@ pub fn run(
                 report.incomplete += 1;
                 return Ok(());
             }
-            // The position clears with the walk: this scope is caught up,
-            // and it is the snapshot (not a local variable) that persists.
+            // The conversations' part of the position has cleared; the
+            // marker leaves with the journal that publishes the
+            // default-session material below — only that journal makes
+            // "caught up" true, and it is the snapshot (not a local
+            // variable) that persists.
             snapshot.backlog = None;
-            let default = format!("agent-default-{agent}");
             let rows = api.pages(&format!("/v1/agents/{agent}/messages"), &[], true)?;
             snapshot.orders.insert(
                 default.clone(),
@@ -1198,8 +1242,15 @@ pub fn run(
     // Backfill progress: what the listing says exists minus what the scopes'
     // journals still owe. A scope this round never reached has no row, so
     // its conversations count as owed — `status` words the difference as
-    // pulled-so-far of an estimated total, never a completion claim.
+    // pulled-so-far of an estimated total, never a completion claim. A
+    // scope whose journal still holds a position at all — conversations
+    // pending, or only the agent-level marker, which is the state a round
+    // that published every conversation but could not reach its window
+    // leaves — has not completed, whatever its pending set counts: "caught
+    // up" is what a round that journals everything may claim, not what an
+    // emptied conversation position implies.
     let mut remaining = 0usize;
+    let mut owes_agent_phase = false;
     for agent_id in &known {
         let scope = format!("{tenant}/{agent_id}");
         let row = db
@@ -1207,16 +1258,29 @@ pub fn run(
                 r.get::<_, String>(0)
             })
             .optional()?;
-        remaining += match row {
-            None => per_agent_conversations
-                .get(agent_id)
-                .map_or(0, |set| set.len()),
-            Some(serialized) => serde_json::from_str::<Snapshot>(&serialized)?
-                .backlog
-                .map_or(0, |pending| pending.len()),
-        };
+        match row {
+            None => {
+                remaining += per_agent_conversations
+                    .get(agent_id)
+                    .map_or(0, |set| set.len());
+            }
+            Some(serialized) => {
+                let snapshot = serde_json::from_str::<Snapshot>(&serialized)?;
+                if let Some(pending) = snapshot.backlog {
+                    // Conversations are the counted unit; the marker is the
+                    // agent-level material's own line in the position, so a
+                    // marker-only journal keeps `pulled` at the conversation
+                    // truth instead of inventing an owed conversation.
+                    remaining += pending
+                        .iter()
+                        .filter(|session| !session.starts_with("agent-default-"))
+                        .count();
+                    owes_agent_phase = true;
+                }
+            }
+        }
     }
-    if remaining > 0 {
+    if remaining > 0 || owes_agent_phase {
         report.backfill = Some(Backfill {
             pulled: total_conversations.saturating_sub(remaining),
             estimated_total: total_conversations,
@@ -1664,7 +1728,7 @@ mod tests {
                             if after {
                                 json!([])
                             } else {
-                                let conversations: Vec<Value> = (1..=40)
+                                let conversations: Vec<Value> = (1..=90)
                                     .map(|n| {
                                         json!({"id":format!("conv-{n:02}"),
                                                "agent_id":"agent-big",
@@ -1697,6 +1761,14 @@ mod tests {
                         } else {
                             json!([{"id":"message-a","seq_id":1,"content":if mode==1 || mode==14 {"synthetic edit"} else {"synthetic"},"unknown":{"null":null}}])
                         }
+                    } else if mode == 15 && limit.is_some() && path.contains("/messages?") {
+                        // A source that can serve every conversation but
+                        // not the agent-level window: the regime where a
+                        // round can finish all first publications and still
+                        // owe its default-session material — the state that
+                        // must not report itself as caught up.
+                        status = "500 Internal Server Error";
+                        json!({})
                     } else if limit.is_some() && path.contains("/messages?") {
                         if after {
                             json!([])
@@ -2213,6 +2285,82 @@ mod tests {
         assert_eq!(pull().bundles, 0, "and the settled source is a no-op again");
     }
 
+    /// A round that publishes every conversation but cannot reach the
+    /// agent-level material (window, listing, metadata, capture order — mode
+    /// 15 serves exactly the conversations and refuses the window) has
+    /// **not** finished the account. "Caught up" is what the round that
+    /// journals the agent-level material may claim, never what an emptied
+    /// conversation position implies: the rev3 hole read the empty pending
+    /// set as completion while five publications were still owed.
+    #[test]
+    fn caught_up_stays_false_until_the_agent_level_material_publishes() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let root = sandbox.root();
+        let server = Server::start();
+        server.mode.store(15, Ordering::SeqCst);
+        let pull = || {
+            run(
+                &mut server.api(),
+                "synthetic-account",
+                &root.join("agents"),
+                &root.join("inbox"),
+                &root.join("state"),
+                &root.join("stage"),
+                "synthetic-machine",
+                &Proof(true),
+            )
+            .unwrap()
+        };
+        // Phase one: every conversation publishes, the window route refuses,
+        // and the round honestly says "did not finish" — with the account's
+        // progress still reported, because the agent-level material is owed.
+        let partial = pull();
+        assert!(partial.bundles >= 2, "the conversation classes publish");
+        assert_eq!(partial.incomplete, 1, "the round did not finish reading");
+        assert!(
+            partial.backfill.is_some(),
+            "a round whose agent-level material is unwritten must not report \
+             the account caught up: {:?}",
+            partial.backfill
+        );
+        let conversations_published = fs::read_dir(root.join("inbox")).unwrap().count();
+        // The durable position names what is owed: no conversations, and the
+        // agent-level marker — not an emptied set that reads as completion.
+        let db = rusqlite::Connection::open(root.join("state/letta.sqlite3")).unwrap();
+        let serialized: String = db
+            .query_row("SELECT pending FROM agents", [], |r| r.get(0))
+            .unwrap();
+        let snapshot = serde_json::from_str::<Value>(&serialized).unwrap();
+        assert_eq!(
+            snapshot["backlog"],
+            json!(["agent-default-agent-visible"]),
+            "the persisted position holds the agent-level marker, not an \
+             emptied set: {serialized}"
+        );
+        // Phase two: the source serves the window again. The next round
+        // publishes exactly the agent-level classes it still owes, publishes
+        // no conversation bytes, and only now may claim caught up.
+        server.mode.store(0, Ordering::SeqCst);
+        let finishing = pull();
+        assert_eq!(
+            finishing.bundles, 5,
+            "the finishing round publishes exactly the five agent-level \
+             classes and no conversation bytes"
+        );
+        assert_eq!(finishing.incomplete, 0);
+        assert_eq!(
+            finishing.backfill, None,
+            "caught up is the finishing round's claim, backed by the \
+             journal it just wrote"
+        );
+        assert_eq!(
+            fs::read_dir(root.join("inbox")).unwrap().count(),
+            conversations_published + 5,
+            "every publication happened exactly once: conversations in the \
+             first round, agent-level material in the second"
+        );
+    }
+
     /// The decision's large-account promise: an account too big for one
     /// round's budget completes across several rounds, each continuing from
     /// the persisted position, reporting progress (`pulled` of the estimated
@@ -2225,17 +2373,22 @@ mod tests {
         let root = sandbox.root();
         let server = Server::start();
         server.mode.store(13, Ordering::SeqCst);
-        // The fixture: one agent, forty conversations, two paced requests
+        // The fixture: one agent, ninety conversations, two paced requests
         // each plus the durable per-conversation commits — a whole first
-        // pull costs many multiples of one round's 900 ms budget at this
-        // 25 ms pace, so the account provably spans several rounds.
+        // pull costs about three of one round's 3200 ms budget at this
+        // 50 ms pace, so the account provably spans several rounds. The
+        // budget leaves the steady rounds half of their request budget
+        // for the slice (a quarter of 64 request quanta = 16 conversations)
+        // and the other half for jitter and the fixed route fetches, so a
+        // steady round completes under ordinary load instead of tripping
+        // its own deadline by construction.
         let pull = || {
             run(
                 &mut Api::new(
                     &server.base,
                     None,
-                    Duration::from_millis(25),
-                    Duration::from_millis(900),
+                    Duration::from_millis(50),
+                    Duration::from_millis(3200),
                     DEFAULT_PAGE_SIZE,
                 )
                 .unwrap(),
@@ -2272,7 +2425,7 @@ mod tests {
                          {pulled_so_far} -> {}",
                         backfill.pulled
                     );
-                    assert_eq!(backfill.estimated_total, 40);
+                    assert_eq!(backfill.estimated_total, 90);
                     assert_eq!(
                         report.incomplete, 1,
                         "a mid-backfill round did not finish reading"
@@ -2291,13 +2444,16 @@ mod tests {
         let published = fs::read_dir(root.join("inbox")).unwrap().count();
         assert_eq!(
             published,
-            40 * 2 + 5,
+            90 * 2 + 5,
             "each conversation archived exactly once"
         );
         // The steady rounds are no-ops that re-verify one bounded slice each:
         // the sweep rotates through the account a conversation at a time,
         // resuming where the previous round stopped, so repeated rounds
-        // stay flat-cost instead of restarting the walk.
+        // stay flat-cost instead of restarting the walk. Both slice sizes
+        // are derived from the declared budget and pacing — never from the
+        // clock that remains mid-round — so the two counts are equal
+        // exactly, not within a load-sensitive tolerance.
         let requests_before = server.requests.load(Ordering::SeqCst);
         let steady = pull();
         assert_eq!(
@@ -2325,11 +2481,12 @@ mod tests {
             "the steady round re-verifies one bounded slice of the account, \
              not a growing re-walk: {steady_requests} requests"
         );
-        assert!(
-            (second_steady_requests as i64 - steady_requests as i64).abs() <= 8,
-            "consecutive steady rounds cost the same bounded slice — a restart \
-             would re-read what the first round already verified: \
-             {second_steady_requests} vs {steady_requests}"
+        assert_eq!(
+            second_steady_requests, steady_requests,
+            "consecutive steady rounds cost the same slice — its size comes \
+             from the declared budget and pacing, not from the clock, so the \
+             counts are equal exactly, not within a tolerance: \
+             {steady_requests} vs {second_steady_requests} requests"
         );
     }
 

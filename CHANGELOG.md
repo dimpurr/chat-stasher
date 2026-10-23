@@ -37,15 +37,23 @@ under its own heading below.
   republishes zero bytes and the unchanged hour is a genuine NOOP. The
   re-verification is a paced, resumable sweep rather than a metadata
   shortcut — no conversation is skipped on its listing row's word — so a
-  steady round re-reads a bounded slice (up to a few hundred conversations
-  per hour at the ~1/s pacing, resuming where the previous round stopped)
-  and every conversation is content-verified within a bounded number of
-  rounds; an account too big for one round persists its
-  position and completes across rounds, each reporting progress, with the
+  steady round re-reads a bounded slice (a quarter of the round's
+  requests, derived from the declared budget and pacing and shared across
+  the account's agents — never from the clock that remains mid-round, so
+  a load-slowed round keeps the same slice: about 150 conversations per
+  hour for a single agent at the ~1/s pacing — resuming where the previous
+  round stopped) and every conversation is content-verified within a
+  bounded number of rounds; an account too big for one round persists its
+  position and completes across rounds, each reporting progress — and a
+  round whose conversations are all published but whose agent-level
+  material (window, listing, metadata, capture order) is unwritten still
+  reports progress rather than a premature "caught up", because caught up
+  is a round's claim, not an emptied conversation position's — with the
   declared path's pacing floored at one request per second and its budget
   capped at 45 minutes — below the hourly period — a deadline the archive
   proof shares, opening each destination once per round to ask about every
-  receipt in one batch. See [API pull](docs/pull.md).
+  receipt in one batch and retiring a receipt only when every declared
+  destination holds it. See [API pull](docs/pull.md).
 - **User-initiated hide, unhide, and a purge preview (ADR-046 draft, Phase 1).**
   `hide` and `unhide` append durable one-record control events to this
   machine's `meta/<machine>/deletion-control-v1.jsonl` stage file; the next

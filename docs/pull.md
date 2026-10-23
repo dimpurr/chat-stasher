@@ -86,8 +86,10 @@ forever. 429/503 honors delta-seconds or HTTP-date `Retry-After`; invalid
 headers use bounded exponential backoff with jitter. Redirects are refused.
 Diagnostics show counts only; no API key or response body is printed.
 Concurrent passes using the same state directory serialize through a
-durable-state file lock; contention returns an incomplete result rather
-than racing a receipt journal update.
+durable-state file lock. Contention on the standalone command returns an
+incomplete result rather than racing a receipt journal update; the
+scheduled pass records a **deferral** instead (see below) and lets the
+pass that won the lock report the producer that hour.
 
 ## The scheduled pass
 
@@ -123,7 +125,7 @@ the integration. The local cycle (collect, push) still runs, so a later pass
 can settle the producer's pending receipts — halting the whole pass instead
 would deadlock the producer, whose proof needs an earlier push. But the pass
 does not stop there being something left to read: it ends with exit 3
-("did not finish reading") and   records the failed `pull-letta` step, so
+("did not finish reading") and records the failed `pull-letta` step, so
 `status` reports the failure — never a clean exit 0 that would read "no
 messages". The unread remainder stays pending in the producer state exactly
 as the standalone command leaves it. The record keeps the producer's
@@ -152,11 +154,13 @@ the content:
   republishes **nothing**: no inbox bytes, `run-once` sees no new shards,
   and the unchanged hour is a genuine `NOOP` pass. The re-verification is a
   paced, resumable sweep, not a whole account per round: it starts where
-  the previous round stopped and re-reads as many conversations as the
-  budget paces (up to a few hundred per hour at the ~1/s pacing), so a
-  caught-up round costs a bounded slice and every conversation is
-  content-verified within a bounded number of rounds — whatever its
-  listing row claims about it.
+  the previous round stopped and re-reads a bounded slice — a quarter of
+  the round's requests, derived from the declared budget and pacing and
+  shared across the account's agents, never from the clock that remains
+  mid-round, so a load-slowed round keeps the same slice (about 150
+  conversations per hour for a single agent at the ~1/s pacing) — so every
+  conversation is content-verified within a bounded number of rounds —
+  whatever its listing row claims about it.
 - A conversation that moved — new or edited messages, archived flag,
   content that changed while its row stayed still — republishes exactly
   its own bundles (its messages and conversation metadata) plus a new
@@ -166,9 +170,14 @@ the content:
   position, and a round whose budget runs out leaves the unwalked
   conversations pending — reported as progress (`pulled N of ~M`) in the
   pass line and in `status`, never as "no messages" — while the next round
-  continues from the position instead of restarting. The sweep hand-off is
-  the same mechanism: a steady round that cannot finish its slice resumes
-  from the persisted position. The declared path's
+  continues from the position instead of restarting. A round that
+  publishes every conversation but cannot reach the agent-level material
+  (window, listing, metadata, capture order) keeps the account at "did
+  not finish reading" the same way: caught up is what a round that
+  journals everything it owes may claim, never what an emptied
+  conversation position implies. The sweep hand-off is the same
+  mechanism: a steady round that cannot finish its slice resumes from
+  the persisted position. The declared path's
   budget is capped at 45 minutes precisely so a round can never reach its
   own hourly period. The proof phase shares the round's deadline, so no
   phase of a pass borrows unbounded time from the next one.

@@ -747,7 +747,7 @@ crates/chat-stasher/src/inbox.rs:1562-1570  07a89684eece  lines=9
   <- docs-dev/threat-model.md:382  :: };
 crates/chat-stasher/src/inbox.rs:2207-2229  77fcf2eb736c  lines=23
   <- docs-dev/threat-model.md:398  :: inbox.join("deepseek-sess-unk.json"),
-crates/chat-stasher/src/letta.rs:232-242  72e855d41735  lines=11
+crates/chat-stasher/src/letta.rs:236-246  72e855d41735  lines=11
   <- docs-dev/privacy.md:177, docs-dev/threat-model.md:55, docs-dev/threat-model.md:67  :: ) -> Result<Self> {
 crates/chat-stasher/src/main.rs:114  51c934204980  lines=1
   <- docs-dev/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…

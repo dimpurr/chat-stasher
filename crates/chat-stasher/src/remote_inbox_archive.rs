@@ -131,26 +131,34 @@ impl ArchiveProof for DestinationArchive<'_> {
         }
         // One query per destination for the whole batch: the wanted set is
         // built once, so a destination is read once per call and opened once
-        // per round (the open cache above), never once per bundle.
-        for destination in self.open_once()? {
-            let sessions = destination
-                .archive
-                .read_selected_sessions(&destination.master_key, &wanted)?;
-            for (index, (id, shard, digest)) in records.iter().enumerate() {
-                // Continue after a completed negative: a later unreadable
-                // copy makes the overall observation unknown for that
-                // receipt, rather than absent.
-                if sessions
+        // per round (the open cache above), never once per bundle. Every
+        // destination is read before any receipt is answered, because the
+        // quantifier is AND: a receipt is held only when each declared
+        // destination holds it — one repository holding it settles nothing,
+        // and the receipts only the first destination holds must stay in the
+        // journal until the rest can prove them too.
+        let read_per_destination: Vec<_> = self
+            .open_once()?
+            .iter()
+            .map(|destination| {
+                destination
+                    .archive
+                    .read_selected_sessions(&destination.master_key, &wanted)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        for (index, (id, shard, digest)) in records.iter().enumerate() {
+            // Continue after a completed negative: a later unreadable
+            // copy makes the overall observation unknown for that
+            // receipt, rather than absent.
+            held[index] = read_per_destination.iter().all(|sessions| {
+                sessions
                     .get(&(machine.to_owned(), id.clone()))
                     .is_some_and(|(_, hashes)| {
                         hashes
                             .iter()
                             .any(|(name, hash)| name == shard && hash == digest)
                     })
-                {
-                    held[index] = true;
-                }
-            }
+            });
         }
         Ok(held)
     }
@@ -165,6 +173,93 @@ mod tests {
     /// present them, each destination repository is opened exactly once per
     /// archive instance — once per round — and every open is counted here,
     /// so a per-bundle re-open regresses this test rather than a sentence.
+    /// The proof quantifier (rev3): a receipt is proven only when **every**
+    /// declared destination holds it. One repository holding a receipt must
+    /// settle nothing while another destination's copy is missing — otherwise
+    /// the journal retires receipts only the first destination holds, and the
+    /// second is never proven at all. This is the split-destination case the
+    /// all-hold test above cannot see: the same stage is pushed to the first
+    /// destination only, and the batch answered across both.
+    #[test]
+    fn a_receipt_held_by_one_destination_is_not_proven_until_every_destination_holds_it() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let root = sandbox.root();
+        let stage = root.join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/fixtures/inbox");
+        let machine = "synthetic-machine";
+        let configs: Vec<StoreConfig> = ["synthetic-a", "synthetic-b"]
+            .into_iter()
+            .map(|name| StoreConfig {
+                repo_root: root.join(name).to_string_lossy().into_owned(),
+                key_file: root.join(format!("{name}.key")),
+                connections: 1,
+                cache_dir: Some(root.join(format!("{name}-cache"))),
+                ..StoreConfig::default()
+            })
+            .collect();
+        for config in &configs {
+            let key = MasterKey::new();
+            store::persist_key_file(config, &key).unwrap();
+            BackupStore::new(config.clone(), machine.to_string())
+                .open_or_init(&key)
+                .unwrap();
+        }
+        let bytes = std::fs::read(fixtures.join("api-export-utf8.json")).unwrap();
+        let outcome = crate::inbox::seal_payload(
+            "api-export-utf8.json",
+            &bytes,
+            &stage,
+            machine,
+            1000,
+            None,
+            None,
+        )
+        .unwrap();
+        let crate::inbox::SealOutcome::Stored(row) = outcome else {
+            panic!("fixture must store, not duplicate");
+        };
+        let outcome = crate::inbox::SealOutcome::Stored(row);
+        // The stage lands on the first destination only: the receipt is a
+        // fact there and nowhere else.
+        let key = store::load_key_file(&configs[0]).unwrap();
+        BackupStore::new(configs[0].clone(), machine.to_string())
+            .push(&stage, &key)
+            .unwrap();
+        let proof = DestinationArchive::new(&stage, &configs);
+        let held = proof
+            .holds_many(machine, std::slice::from_ref(&outcome))
+            .unwrap();
+        assert_eq!(
+            held,
+            vec![false],
+            "one destination holding the receipt proves nothing while \
+             the other destination's copy is missing"
+        );
+        assert!(!proof.holds(machine, &outcome).unwrap());
+        // The moment the second destination holds the same sealed bytes, the
+        // receipt is proven — the same query, now answered true everywhere.
+        // (The receipt is re-sealed from the same stage for the second
+        // query, the way a later round's journal would present it.)
+        let key = store::load_key_file(&configs[1]).unwrap();
+        BackupStore::new(configs[1].clone(), machine.to_string())
+            .push(&stage, &key)
+            .unwrap();
+        let outcome = crate::inbox::seal_payload(
+            "api-export-utf8.json",
+            &bytes,
+            &stage,
+            machine,
+            1000,
+            None,
+            None,
+        )
+        .unwrap();
+        let proof = DestinationArchive::new(&stage, &configs);
+        let held = proof.holds_many(machine, &[outcome]).unwrap();
+        assert_eq!(held, vec![true], "every destination holding it proves it");
+    }
+
     #[test]
     fn every_destination_opens_once_per_round_however_many_receipts() {
         let sandbox = crate::test_support::Sandbox::new();
