@@ -282,6 +282,13 @@ impl UiSession {
 pub struct DestinationState {
     /// The name the user typed in `--destination`, never a repository path.
     pub label: String,
+    /// The behindness sentence a serving local mirror owes where reads
+    /// happen (ADR-062 D3: the ui shows "the local copy as of HH:MM",
+    /// 47 §5.5's own wording). `None` for
+    /// every destination with no mirror serving it — a page that named the
+    /// mirror a machine does not have would be noise, and one that named it
+    /// without the copy being behind would be noise twice.
+    pub mirror: Option<String>,
     pub snapshots_scanned: usize,
     pub snapshots_in_repo: usize,
     /// Sessions this destination held, before any filter and before the merge.
@@ -5543,6 +5550,59 @@ mod tests {
                 "<pre>chat-stasher export --destination &#39;dest-one&#39; --out ~/out</pre>"
             ),
             "one destination still gets its ready-to-copy command: {html}"
+        );
+    }
+
+    /// The behindness note a serving mirror owes where reads happen
+    /// (ADR-062 D3; 47 §5.5's "local copy as of HH:MM"): the sentence renders on
+    /// the pages a dashboard actually reads, names its destination when
+    /// several are merged, and renders **nothing** for a destination no
+    /// mirror serves — a note about a read policy the machine does not have
+    /// would be noise on every page, which is the same reason the CLI's
+    /// mirror line is absent for unconfigured machines.
+    #[test]
+    fn the_mirror_behindness_note_renders_where_reads_happen() {
+        let mut data = data_of(vec![fixture::hit_for("m-1", "deepseek.s1")]);
+        for target in ["/", "/sessions"] {
+            let body = req(target, &data, &NoContent).body;
+            assert!(
+                !body.contains("local copy"),
+                "no mirror serving, no note on {target}"
+            );
+        }
+        data.destinations[0].mirror = Some(
+            "local copy as of 02:07 UTC — the mirror serves what it holds; the remote answers \
+             what it lacks"
+                .to_string(),
+        );
+        for target in ["/", "/sessions"] {
+            let body = req(target, &data, &NoContent).body;
+            assert!(
+                body.contains("local copy as of 02:07 UTC"),
+                "the note travels to {target}"
+            );
+        }
+        // With several destinations each sentence belongs to its copy, so
+        // the reader never has to guess whose copy is how old.
+        let mut merged = UiData::from_reports(
+            &[
+                DestinationRead {
+                    label: "dest-one".into(),
+                    outcome: Ok(&fixture::report()),
+                },
+                DestinationRead {
+                    label: "dest-two".into(),
+                    outcome: Ok(&fixture::report()),
+                },
+            ],
+            Selector::default(),
+            NOW,
+        );
+        merged.destinations[1].mirror = Some("local copy's first sync is in progress: 70%".into());
+        let body = req("/sessions", &merged, &NoContent).body;
+        assert!(
+            body.contains("<b>dest-two</b> — local copy's first sync is in progress: 70%"),
+            "the merged view names the copy each sentence is about: {body}"
         );
     }
 

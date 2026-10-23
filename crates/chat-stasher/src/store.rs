@@ -262,6 +262,13 @@ pub struct BackupStore {
     /// from (SRCH-1b). `None` is the default and the whole-cache-off case — see
     /// [`BackupStore::with_snapshot_cache`].
     snapshot_cache: Option<std::sync::Arc<crate::snapshot_cache::SnapshotCache>>,
+    /// The mirror-first read seam (ADR-062 D3 / LM-3): when set, this store's
+    /// reads take the local mirror of the destination before the remote, file
+    /// by file, falling back to the remote per missing file. `None` is the
+    /// default, the every-store-before-LM-3 shape — and the guarantee
+    /// `verify` keeps for good (a copy may never certify itself, so its
+    /// store is built without this and its reads stay remote).
+    mirror_reads: Option<std::sync::Arc<crate::mirror_read::MirrorReads>>,
     /// How this store joins a session's shards: collapse unbound byte-identical
     /// replay shards by default, while retaining exact sequence-bound captured
     /// duplicates; or hand back every shard. See [`DuplicateShardPolicy`].
@@ -290,6 +297,7 @@ impl BackupStore {
             machine,
             body_cache: None,
             snapshot_cache: None,
+            mirror_reads: None,
             shard_policy: DuplicateShardPolicy::Collapse,
         }
     }
@@ -305,6 +313,7 @@ impl BackupStore {
             machine: String::new(),
             body_cache: None,
             snapshot_cache: None,
+            mirror_reads: None,
             shard_policy: DuplicateShardPolicy::Collapse,
         }
     }
@@ -377,6 +386,36 @@ impl BackupStore {
         self.snapshot_cache.as_ref()
     }
 
+    /// Serve this store's reads from the local mirror first, when it has the
+    /// file (ADR-062 D3 / LM-3).
+    ///
+    /// Deliberately a per-store decision, exactly like [`Self::with_body_cache`],
+    /// and for the same reason with an ADR behind it: **`verify` never gets
+    /// one** — it asks the remote so a copy may never certify itself (47
+    /// §5.5) — and neither do the write paths, which read exactly the
+    /// repository they write. The readers ADR-062 D3 names — `read` /
+    /// `search` / `ui` / index rebuild / `export` — attach one when the
+    /// configuration owns a usable mirror of this destination
+    /// ([`crate::mirror_read::decide`]); a store built without this call
+    /// keeps its pre-LM-3 reads bit for bit.
+    ///
+    /// Ruling 7 rides in the combination: with a mirror set, the body cache
+    /// is installed **inside** the mirror seam rather than around it, so
+    /// mirror-served bytes never enter the cache and remote-fallback bytes
+    /// still do.
+    pub fn with_mirror_reads(
+        mut self,
+        mirror: Option<std::sync::Arc<crate::mirror_read::MirrorReads>>,
+    ) -> Self {
+        self.mirror_reads = mirror;
+        self
+    }
+
+    /// The mirror seam this store reads through, if any.
+    pub fn mirror_reads(&self) -> Option<&std::sync::Arc<crate::mirror_read::MirrorReads>> {
+        self.mirror_reads.as_ref()
+    }
+
     /// Build the backend handles.
     ///
     /// Local paths use rustic_backend's `LocalBackend` directly. When a remote
@@ -393,6 +432,29 @@ impl BackupStore {
             opts = opts.options(self.cfg.backend_options());
         }
         let backends = opts.to_backends().context("build backend options")?;
+        // The read seam, outermost first: ADR-062 D3's mirror-first reads
+        // (LM-3) hold the body cache inside them when a mirror is attached,
+        // because ruling 7 keys on provenance — a cache wrapped *around* a
+        // mirror seam would store exactly the mirror bytes the ruling keeps
+        // out. With no mirror attached, the stack is unchanged from ADR-034:
+        // the body cache sits *below* rustic, wrapped over the backend
+        // handles themselves.
+        if let Some(mirror) = &self.mirror_reads {
+            let repository = crate::mirror_read::MirrorFirstBackend::wrap(
+                backends.repository(),
+                std::sync::Arc::clone(mirror),
+                self.body_cache.clone(),
+            )?;
+            let hot = match backends.repo_hot() {
+                Some(hot) => Some(crate::mirror_read::MirrorFirstBackend::wrap(
+                    hot,
+                    std::sync::Arc::clone(mirror),
+                    self.body_cache.clone(),
+                )?),
+                None => None,
+            };
+            return Ok(RepositoryBackends::new(repository, hot));
+        }
         // ADR-034: the body cache sits *below* rustic, as a wrapper over the
         // backend handles — the only seam where a conversation body can be
         // observed as the remote's own ciphertext. `rustic_backend` hands back

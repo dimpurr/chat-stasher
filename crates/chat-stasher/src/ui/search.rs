@@ -36,7 +36,8 @@ use crate::search::SessionLabel;
 use crate::selector::Resolved;
 
 use super::html::{
-    completeness_banner, describe_selector, esc, fmt_unix, head, marked_html, search_footer,
+    completeness_banner, describe_selector, esc, fmt_unix, head, marked_html, mirror_note,
+    search_footer,
 };
 use super::{
     archive_document_ids, count_by_machine_id, page_from_query, page_href, paging_nav, param,
@@ -444,6 +445,7 @@ fn page_search(request: &Request, answer: &Answer, token: &str, data: &UiData) -
 
     out.push_str(&search_form(request, token, data));
     out.push_str(&completeness_banner(data));
+    out.push_str(&mirror_note(data));
     if let Some(text) = describe_selector(&request.resolved.selector) {
         out.push_str(&format!(
             "<div class=note><b>Filter:</b> {}<br><span class=sub>Applied by the same selector \

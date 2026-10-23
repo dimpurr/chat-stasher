@@ -311,6 +311,36 @@ pub(super) fn completeness_banner(data: &UiData) -> String {
     )
 }
 
+/// The mirror behindness note (ADR-062 D3): one sentence per destination a
+/// local mirror is serving — 47 §5.5's own "local copy as of HH:MM" — because
+/// where the reads of an offline-capable dashboard come from is a fact about
+/// the page's own answers, not an administrative detail. Nothing renders for
+/// a machine with no mirror serving the destinations it reads: the note is
+/// the behindness the copy owes, not a narration of the read policy.
+///
+/// A `<p class=sub>` rather than the completeness banner's class family: the
+/// banner grades the read (complete / floor), while this states a source and
+/// its age — a fully-synced mirror and a two-day-old one render the same
+/// colour and differ only in the sentence, and neither may read as a
+/// failure, because the reads still answer from a copy the machine holds.
+pub(super) fn mirror_note(data: &UiData) -> String {
+    let mut lines = Vec::new();
+    for destination in &data.destinations {
+        let Some(sentence) = &destination.mirror else {
+            continue;
+        };
+        if data.destinations.len() > 1 {
+            lines.push(format!(
+                "<p class=sub><b>{}</b> — {sentence}.</p>\n",
+                esc(&destination.label)
+            ));
+        } else {
+            lines.push(format!("<p class=sub>{sentence}.</p>\n"));
+        }
+    }
+    lines.join("")
+}
+
 /// Which copy of this session the payload routes open (`/session`, `/content`,
 /// `/reader`), when there is more than one.
 ///

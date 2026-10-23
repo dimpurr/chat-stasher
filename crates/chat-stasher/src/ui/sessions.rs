@@ -17,7 +17,7 @@ use crate::selector::{Resolved, UnplacedBy};
 use super::facets;
 use super::html::{
     completeness_banner, conjoined_flags, describe_selector, destinations_block, esc, fmt_bytes,
-    fmt_unix, footer, head, merged_counts, read_from_note,
+    fmt_unix, footer, head, merged_counts, mirror_note, read_from_note,
 };
 use super::{
     bad_index_response, index_param, page_from_query, page_href, page_window, paging_nav,
@@ -108,6 +108,7 @@ fn page_sessions(
         out.push_str(&format!("<div class=warn>{}</div>\n", esc(w)));
     }
     out.push_str(&completeness_banner(data));
+    out.push_str(&mirror_note(data));
     out.push_str(&destinations_block(data));
     out.push_str(&label_coverage_note(sel, data));
     // The facet bar (29-UI-DESIGN §2.3) renders for every state the page can
