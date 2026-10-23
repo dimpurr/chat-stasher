@@ -625,15 +625,15 @@ crates/chat-stasher/src/collect.rs:1746-1757  3369985c763c  lines=12
   <- docs-dev/privacy.md:504  :: crate::activity::record_session_provenance(
 crates/chat-stasher/src/collect.rs:2192-2199  c70a2797398c  lines=8
   <- docs-dev/privacy.md:574  :: let mut dimensions = crate::provenance::SessionProvenance::…
-crates/chat-stasher/src/collect.rs:3940-4076  45ed4da88916  lines=137
+crates/chat-stasher/src/collect.rs:3984-4120  45ed4da88916  lines=137
   <- docs-dev/privacy.md:1146  :: /// The codebuff whole-file arm (ADR-054 D2/D5/D6/D9). Dist…
-crates/chat-stasher/src/collect.rs:4084-4139  e659775e292e  lines=56
+crates/chat-stasher/src/collect.rs:4128-4183  e659775e292e  lines=56
   <- docs-dev/privacy.md:1146  :: fn seal_codebuff_sidecars(
-crates/chat-stasher/src/collect.rs:4151-4220  1cb260f1d689  lines=70
+crates/chat-stasher/src/collect.rs:4195-4264  1cb260f1d689  lines=70
   <- docs-dev/privacy.md:1146  :: fn process_whole_file(
-crates/chat-stasher/src/collect.rs:4196-4211  7426ef38be6f  lines=16
+crates/chat-stasher/src/collect.rs:4240-4255  7426ef38be6f  lines=16
   <- docs-dev/openclaw-scanner.md:46  :: state: OffsetEntry {
-crates/chat-stasher/src/collect.rs:4373-4387  4979f697033d  lines=15
+crates/chat-stasher/src/collect.rs:4417-4431  4979f697033d  lines=15
   <- docs-dev/openclaw-scanner.md:46  :: continue;
 crates/chat-stasher/src/config.rs:22-24  c438bae30d5f  lines=3
   <- docs-dev/install.md:294  :: /// Directory + filename of the config relative to the user…
