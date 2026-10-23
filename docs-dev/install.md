@@ -303,7 +303,7 @@ scheduled `push` would then run exactly as if you had never declared one, and th
 archive would quietly stop being copied anywhere
 (`crates/chat-stasher/src/config.rs:170-179`, and the refusal that stops every
 command that reads the config rather than falling back to those defaults,
-`crates/chat-stasher/src/main.rs:14752-14803`).
+`crates/chat-stasher/src/main.rs:14753-14804`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
@@ -608,7 +608,7 @@ each declared destination has its own, defaulting to
 `~/.local/share/chat-stasher/masterkey-<destination>.json` and settable with that
 destination's `key_file` (`crates/chat-stasher/src/config.rs:269-289`, and the
 per-destination default that synthesises that path rather than reusing the local
-one, `crates/chat-stasher/src/main.rs:9782-9785`). A second
+one, `crates/chat-stasher/src/main.rs:9783-9786`). A second
 machine reads a destination with **that destination's** key and does not use the
 local one at all — so a backup that copies only the local key cannot read the
 off-site copies. Measured on a real second machine: restoring only the local key
@@ -626,8 +626,8 @@ does not exist yet — so a headless run that owes nothing but
 (`steps.local_save` is `not_attempted`) creates every key it will ask about,
 reports them in `masterkey.keys` (`masterkey.path` is the local one), and stops
 before the local archive pass and the timer
-(`crates/chat-stasher/src/main.rs:15969-15976`; the refusal's own wording is
-`crates/chat-stasher/src/main.rs:15532-15546`). Nothing is archived on that run,
+(`crates/chat-stasher/src/main.rs:15970-15977`; the refusal's own wording is
+`crates/chat-stasher/src/main.rs:15533-15547`). Nothing is archived on that run,
 and every other missing parameter still refuses before the first write.
 
 The `steps.local_save` half is what tells that bootstrap apart from a run that
@@ -659,11 +659,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:7077-7092`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:7078-7093`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:7082-7107`). An
+it does anything else (`crates/chat-stasher/src/main.rs:7083-7108`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -695,10 +695,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:7091-7103`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:7092-7104`;
 `crates/chat-stasher/src/remote_err.rs:597-630`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:7082-7090`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:7083-7091`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -962,7 +962,7 @@ Windows every `schedule` action refuses with exit 2 before writing anything,
 and the refusal points at the manual Task Scheduler steps in
 `docs/schedule.md`, which carry a copy-pasteable `schtasks /Create` command and
 the logon caveat that keeps a per-user task from looking scheduled while it
-sleeps (`crates/chat-stasher/src/main.rs:8394-8449`).
+sleeps (`crates/chat-stasher/src/main.rs:8395-8450`).
 
 `run-once` is one complete collect-and-push pass; it exits when done, and
 repeated invocation is safe (`crates/chat-stasher/src/main.rs:294-331`).
@@ -990,12 +990,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:19331-19332`). This is the
+does not (`crates/chat-stasher/src/main.rs:19332-19333`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its timer and scan output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:19000-19001`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:19001-19002`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:325-373`):
 
 - No timer installed / never run successfully:
@@ -1011,7 +1011,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:325-373`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:19322-19408`):
+(`crates/chat-stasher/src/main.rs:19323-19409`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -1024,7 +1024,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:18843-18850`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:18844-18851`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -1034,7 +1034,7 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 or a requested destination; unavailable counts remain unknown) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:14752-14763`, the shared refusal that stops
+(`crates/chat-stasher/src/main.rs:14753-14764`, the shared refusal that stops
 every command that reads the config rather than falling back to defaults).
 **Note:** the human-readable report goes to **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
