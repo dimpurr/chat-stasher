@@ -118,18 +118,33 @@ pub fn load(state_dir: &Path) -> MirrorStateRead {
 
 /// The reclaim leg's read-side interface (ADR-062 D4/D6.2, wired by the
 /// reclaim implementation on its own schedule): is snapshot `snapshot_id`'s
-/// closure complete in the mirror?
+/// closure complete in the mirror of `expected_mirror_of` — the destination
+/// the *caller* is about to grant a deletion against?
 ///
-/// The answer is `true` only when the state file is readable and its
-/// completed-sync set names the snapshot. A missing file — the first fill has
-/// simply never finished — and an unreadable one — corrupt or an unknown
-/// version — both answer `false`: an unreadable record may never become
-/// deletion permission, and the caller is expected to report the held-back
-/// session as `not-mirrored` with the corresponding alarm, not to delete it.
+/// The answer is `true` only when the state file is readable, **names the
+/// destination currently configured** (`mirror_of` matches
+/// `expected_mirror_of`), and its completed-sync set contains the snapshot.
+/// A record left behind by a different `mirror_of` is exactly the stale
+/// record this file's own `mirror_of` field exists to catch
+/// (mirrorstate, struct doc): snapshot ids are content hashes, so a
+/// repointed mirror looking at a second destination that holds a copy of
+/// the same repository would otherwise read the old record's coverage as
+/// covering a directory this machine has not verified — deletion permission
+/// granted by a record about some other mirror. A mismatch is therefore
+/// `false`, stated as such, and the missing and unreadable cases both
+/// answer `false` too: an unreadable record may never become deletion
+/// permission, and the caller is expected to report the held-back session
+/// as `not-mirrored` with the corresponding alarm, not to delete it.
 #[must_use]
-pub fn snapshot_covered(state: &MirrorStateRead, snapshot_id: &str) -> bool {
+pub fn snapshot_covered(
+    state: &MirrorStateRead,
+    expected_mirror_of: &str,
+    snapshot_id: &str,
+) -> bool {
     match state {
-        MirrorStateRead::Present(state) => state.closure_complete.contains(snapshot_id),
+        MirrorStateRead::Present(state) => {
+            state.mirror_of == expected_mirror_of && state.closure_complete.contains(snapshot_id)
+        }
         MirrorStateRead::Missing | MirrorStateRead::Unreadable(_) => false,
     }
 }
@@ -178,23 +193,51 @@ mod tests {
         assert!(matches!(load(&state_dir), MirrorStateRead::Present(_)));
     }
 
-    /// The reclaim-side interface: covered only for a readonly record that
-    /// names the snapshot; missing and unreadable both answer false, because
-    /// an unreadable record may never become deletion permission.
+    /// The reclaim-side interface: covered only for a readable record that
+    /// names the destination the caller is asking about **and** contains
+    /// the snapshot; a record left by a different `mirror_of`, a missing
+    /// file and an unreadable file all answer false, because neither a
+    /// stale nor an unreadable record may become deletion permission.
     #[test]
     fn coverage_requires_a_readable_record_that_names_the_snapshot() {
         let covered = "a".repeat(64);
         let uncovered = "b".repeat(64);
         let present = MirrorStateRead::Present(state());
-        assert!(snapshot_covered(&present, &covered));
-        assert!(!snapshot_covered(&present, &uncovered));
+        assert!(snapshot_covered(&present, "storagebox", &covered));
+        assert!(!snapshot_covered(&present, "storagebox", &uncovered));
 
         let dir = tempfile::tempdir().unwrap();
         let missing = load(&dir.path().join("state"));
-        assert!(!snapshot_covered(&missing, &covered));
+        assert!(!snapshot_covered(&missing, "storagebox", &covered));
 
         let unreadable = MirrorStateRead::Unreadable("malformed json".to_string());
-        assert!(!snapshot_covered(&unreadable, &covered));
+        assert!(!snapshot_covered(&unreadable, "storagebox", &covered));
+    }
+
+    /// The expiry case the `mirror_of` field exists for: a record built
+    /// when some *other* destination was mirrored is not coverage for the
+    /// destination currently configured, even when its closure set names
+    /// the snapshot — a repointed `[mirror] mirror_of` must never inherit
+    /// the old mirror's coverage (snapshot ids are content hashes, so the
+    /// ids can genuinely match; the coverage claim still belongs to the
+    /// other mirror's verified bytes).
+    #[test]
+    fn a_record_from_another_destination_is_expired_not_covered() {
+        let covered = "a".repeat(64);
+        let present = MirrorStateRead::Present(state());
+        assert_eq!(present_mirror_of(&present), "storagebox");
+        assert!(
+            !snapshot_covered(&present, "storagebox-v2", &covered),
+            "a stale record must not grant coverage for the newly mirrored destination"
+        );
+    }
+
+    /// The record's own destination name, stated for the assertion above.
+    fn present_mirror_of(state: &MirrorStateRead) -> &str {
+        match state {
+            MirrorStateRead::Present(record) => &record.mirror_of,
+            _ => "",
+        }
     }
 
     /// The save is crash-safe in the same shape as the other state files:

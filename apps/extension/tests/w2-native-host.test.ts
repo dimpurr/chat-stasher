@@ -2,8 +2,8 @@
  * W2 · The transport layer: the only success that counts is a matching ack.
  *
  * Spec §1:
- *   「A conversation counts as delivered only when the extension holds an `ack`
- *     whose `request_id` and `sha256` equal the ones it sent.」
+ *   "A conversation counts as delivered only when the extension holds an `ack`
+ *     whose `request_id` and `sha256` equal the ones it sent."
  *
  * 🔴 **Every** negative case in this file pins two things at once:
  *      · the transport must report `delivered:false` (not true, and not "probably worked");
@@ -387,7 +387,7 @@ describe('W2 · an environment with no API', () => {
 });
 
 // ===========================================================================
-// 5 · hello（§6.1）
+// 5 · hello (§6.1)
 // ===========================================================================
 describe('W2 · hello', () => {
   it('a conforming answer ⇒ {ok:true, machine, stage, hostVersion}', async () => {

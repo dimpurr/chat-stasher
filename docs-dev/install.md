@@ -23,7 +23,7 @@ It is not one app, it is **two pieces**, each doing its own job:
 **On the CLI side:** its self-description is "Append-only archive for every LLM
 conversation, across harnesses." (`crates/chat-stasher/src/main.rs:114`). It
 reads session files that already exist on your machine, and reads them
-read-only (`crates/chat-stasher/src/main.rs:983`).
+read-only (`crates/chat-stasher/src/main.rs:1003`).
 
 **On the extension side:** it currently recognizes **seven** web platforms —
 DeepSeek (`chat.deepseek.com`), Perplexity (`www.perplexity.ai`), ChatGPT
@@ -593,7 +593,7 @@ See section 2. If you already did it, you do not need to do it again.
 The archive's destination is decided by your config and command-line arguments
 — a local path, or a backend you configure yourself. `push` / `read` / `verify`
 read the repository and key file you select in config or arguments
-(`crates/chat-stasher/src/main.rs:420-452,515-576,589-626`).
+(`crates/chat-stasher/src/main.rs:440-472,535-596,609-646`).
 
 🔴 **A key file is the only key to the repository it opens. Lose it and that
 repository can never be read again; there is no way to recover it.** The
@@ -965,7 +965,7 @@ the logon caveat that keeps a per-user task from looking scheduled while it
 sleeps (`crates/chat-stasher/src/main.rs:8508-8563`).
 
 `run-once` is one complete collect-and-push pass; it exits when done, and
-repeated invocation is safe (`crates/chat-stasher/src/main.rs:296-337`).
+repeated invocation is safe (`crates/chat-stasher/src/main.rs:316-357`).
 Every pass prints one summary line last in its output —
 `[run-once] phases ms: …` — carrying the wall time of each phase
 (scan, collect per harness, stage audit, metadata hash, activity
@@ -1020,7 +1020,7 @@ few lines and does not flood the screen
 - Finally, a fixed last line: `details (one line per session): chat-stasher status --sessions`
 
 To see the per-session detail, add `--sessions`; that will be hundreds of lines
-(`crates/chat-stasher/src/main.rs:476-478`).
+(`crates/chat-stasher/src/main.rs:496-498`).
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
@@ -1058,7 +1058,7 @@ is initialized; it does not contact network backends
 There is also a related command: `doctor`. It answers a different question —
 **whether any tool is silently deleting your history**. Its report contains
 only paths, counts, bytes, and timestamps
-(`crates/chat-stasher/src/main.rs:577-588`).
+(`crates/chat-stasher/src/main.rs:597-608`).
 
 `doctor` also **connects to each destination you declared**, read-only, and
 reports what came back in three separate states rather than two: reached (and
@@ -1110,7 +1110,7 @@ no directory is created and no file is written.
 Exit codes are the same family `search` uses: `0` wrote at least one session ·
 `1` read everything and selected nothing · `3` did not finish (the files it did
 write are real, and the manifest says what is missing) · `2` usage error
-(`crates/chat-stasher/src/main.rs:792-888`).
+(`crates/chat-stasher/src/main.rs:812-908`).
 
 ---
 
@@ -1124,9 +1124,9 @@ confirmed in the code, not a temporary disclaimer.
   has no `restore` entry (`crates/chat-stasher/src/main.rs:218-1568`). Getting
   content *out* does have a bulk path: `export --out <dir>` writes every session
   a time window selects to files in one command
-  (`crates/chat-stasher/src/main.rs:792-888`). `read` reports one session's
+  (`crates/chat-stasher/src/main.rs:812-908`). `read` reports one session's
   archived length and digest without printing its conversation content
-  (`crates/chat-stasher/src/main.rs:511-576`). Restoring exported files into a
+  (`crates/chat-stasher/src/main.rs:531-596`). Restoring exported files into a
   harness still requires a script that understands that harness's format.
 
 - **🔴 Lose a master key file and there is no way to recover the repository it
@@ -1280,7 +1280,7 @@ touch it again.**
 - Install the timer
 
 **Then it runs automatically:** the timer runs `run-once` at each scheduled
-point — collect, push, exit (`crates/chat-stasher/src/main.rs:296-337`). It does
+point — collect, push, exit (`crates/chat-stasher/src/main.rs:316-357`). It does
 not need you to confirm anything.
 
 **What you should occasionally do** (not required, but recommended):
@@ -1292,7 +1292,7 @@ not need you to confirm anything.
   for you (`crates/chat-stasher/src/runstate.rs:1-11`). This is also why "never
   ran" is judged **unhealthy** rather than "fine": an absent record is the
   **absence of evidence**, not **evidence of health**
-  (`crates/chat-stasher/src/runstate.rs:424-432`).
+  (`crates/chat-stasher/src/runstate.rs:443-451`).
 - Run `doctor` occasionally, to check whether any tool has started deleting
   your history.
 

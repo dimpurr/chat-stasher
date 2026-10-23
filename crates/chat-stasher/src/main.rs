@@ -1245,9 +1245,9 @@ enum Command {
     /// 3 = the round stopped or refused and made no progress it did not
     /// verify (budget spent, disk floor, remote unreadable, space
     /// pre-estimate refused — the next round resumes); 1 = a finished
-    /// read that failed (the source proved corrupt); 2 = usage error
-    /// (no `[mirror]` section, switch off, or `mirror_of` names no
-    /// declared destination).
+    /// read that failed (the source proved corrupt, a refused local
+    /// write); 2 = usage error (unconfigured, switch off, an undeclared
+    /// `mirror_of`, or an uninitialised destination).
     Mirror {
         #[command(subcommand)]
         action: MirrorAction,
@@ -9176,7 +9176,7 @@ fn run_once_pass_with(
                 }
             }
         }
-        mirror_step_after_push(config, pass_started, &mut state.phases);
+        mirror_step_after_push(config, pass_started, &mut state.phases, keep_ssh_masters);
         // A partially-read or halted declared producer keeps this pass from
         // reporting health even though the local cycle archived cleanly:
         // the run-state record carries the failed step, `status` reports the
@@ -9281,7 +9281,7 @@ fn run_once_pass_with(
     // failure of a collect-and-push round. It runs before the producer's
     // exit-3 return below for the same reason: the mirror copies the remote
     // and is independent of whether this pass finished reading the producer.
-    mirror_step_after_push(config, pass_started, &mut state.phases);
+    mirror_step_after_push(config, pass_started, &mut state.phases, keep_ssh_masters);
     // Same discipline as the no-push exit above: the snapshot was created,
     // which the record says, but a pass whose declared producer did not
     // finish reading is a failed pass with "did not finish reading" exit 3 —
@@ -9309,14 +9309,23 @@ fn run_once_pass_with(
 /// refuse (free-space pre-estimate), print why, and it never moves the
 /// pass's own outcome: a stopped fill round is the mirror's progress
 /// statement, not a failed collect-and-push (W964's principle, applied to
-/// the mirror by ruling C2). A hard engine error — the one class that says
-/// the source is corrupt, not slow — is a loud warning for the same reason:
-/// the archive push already succeeded and the stage is protected, which is
-/// this pass's primary duty; the mirror retries next round.
+/// the mirror by ruling C2). A hard engine error — the checked-and-failed
+/// class — is a loud warning whose wording follows the class: corruption
+/// is *not* a transfer the next round can heal, and saying so would keep
+/// re-reading a corrupt source forever; the archive push already succeeded
+/// and the stage is protected, which is this pass's primary duty.
+///
+/// On any round that touched the remote it reaps the ssh ControlPersist
+/// masters the mirror's own reads opened (reap.rs says every opendal SFTP
+/// operation opens a new one): the pass runs hourly, and a mirror enabled
+/// against an ssh destination would otherwise leak one live master per
+/// remote read, every hour. `keep_ssh_masters` is the pass's own flag,
+/// threaded here exactly the way `cmd_push` threads its own.
 fn mirror_step_after_push(
     config: &Config,
     pass_started: std::time::Instant,
     phases: &mut chat_stasher::runstate::PassMetrics,
+    keep_ssh_masters: bool,
 ) {
     let Some(settings) = chat_stasher::mirror::MirrorSettings::for_config(config) else {
         return;
@@ -9464,12 +9473,47 @@ fn mirror_step_after_push(
             ),
         },
         Err(e) => {
-            eprintln!(
-                "[run-once] mirror-sync warning: the mirror step failed this round and the \
-                 pass's result stands; the next round retries: {e:#}"
-            );
+            if e.is::<chat_stasher::mirror::MirrorUsageError>() {
+                eprintln!(
+                    "[run-once] mirror-sync warning: the mirror's declaration or \
+                     destination is unusable; the copy step does not run until the config \
+                     is fixed: {e:#}"
+                );
+            } else if let Some(hard) = e.downcast_ref::<chat_stasher::mirror::HardFailure>() {
+                let wait = match hard.class {
+                    // Corruption is not a transfer the next round can heal:
+                    // saying "retries next round" here would send the next
+                    // hour's round to re-read the same corrupt source
+                    // forever, which is the loop this wording exists to
+                    // break.
+                    chat_stasher::mirror::HardClass::SourceCorrupt
+                    | chat_stasher::mirror::HardClass::OversizeListing => {
+                        "the mirror stays stopped until the source is fixed — this is \
+                         not healed by a retry"
+                    }
+                    chat_stasher::mirror::HardClass::LocalWrite => {
+                        "the next round retries once the local cause is fixed"
+                    }
+                };
+                eprintln!(
+                    "[run-once] mirror-sync warning: {}: {hard}; {}",
+                    hard.class.sentence(),
+                    wait
+                );
+            } else {
+                eprintln!(
+                    "[run-once] mirror-sync warning: the mirror step failed this round and the \
+                     pass's result stands; the next round retries: {e:#}"
+                );
+            }
         }
     }
+    // Every path that resolved the remote and ran a round ends here —
+    // completed, paused, refused, or failed — so the ssh masters the
+    // mirror's own reads opened are reaped on all of them (issue 2 of the
+    // rev0 review: a mirror enabled against an ssh destination used to leak
+    // one live master per remote read, every hour, forever).
+    reap_remote(&remote, keep_ssh_masters);
     phases.mirror_sync_ms = step_started.elapsed().as_millis() as u64;
 }
 
@@ -13002,9 +13046,12 @@ fn cmd_reclaim_stage(
 /// `mirror sync` — one copy round against the declared mirror destination
 /// (ADR-062 / LM-2). The engine ([`chat_stasher::mirror::sync_once`]) holds
 /// the semantics; this command pins the CLI contract around it: usage
-/// errors for a mirror that is not configured on, and the trichotomy the
-/// command's doc states (0 complete / 3 stopped or refused / 1 corrupt
-/// source). A remote read error is not classified as corruption here — it
+/// errors for a mirror that is not configured on or a destination that is
+/// not a repository (exit 2, nothing done), and the trichotomy the
+/// command's doc states (0 complete / 3 stopped or refused / 1 a finished
+/// read that failed: verified source corruption, a refused local write, or
+/// a listing over the whole-file bound — each with its class's own
+/// sentence). A remote read error is not classified as corruption here — it
 /// stops the round the same way a budget does, because a read failure says
 /// "unknown, retry", never "checked and failed" ([`chat_stasher::remote_err`]
 /// owns the ADR-023 family).
@@ -13122,6 +13169,27 @@ fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode
     reap_remote(&remote, keep_ssh_masters);
     let (report, outcome) = match outcome {
         Ok(pair) => pair,
+        Err(e) if e.is::<chat_stasher::mirror::MirrorUsageError>() => {
+            // The declaration or the destination it names cannot be used:
+            // usage (exit 2), nothing was read or written, and the message
+            // already names what to change. Checked before everything else
+            // so no later classifier can re-word a usage problem as a read
+            // failure.
+            eprintln!("mirror: {e:#}");
+            eprintln!("mirror: exit_code=2 — usage error; nothing was done");
+            return ExitCode::from(2);
+        }
+        Err(e) if e.is::<chat_stasher::mirror::HardFailure>() => {
+            // The checked-and-failed class (invariant 2, `CLAUDE.md`):
+            // verified source corruption, a refused local write, an
+            // over-bound listing. Exit 1 with the class's own sentence —
+            // never "did not finish" (exit 3), which a later round cannot
+            // heal its way out of for the corruption half.
+            if let Some(hard) = e.downcast_ref::<chat_stasher::mirror::HardFailure>() {
+                eprintln!("mirror: exit_code=1 — {}: {hard}", hard.class.sentence());
+            }
+            return ExitCode::FAILURE;
+        }
         Err(e) => {
             // ADR-023: a remote-classified error says "unknown, retry next
             // round", never "checked and failed" — so this branch reports

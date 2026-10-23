@@ -171,7 +171,7 @@ fn assert_anchored_but_not_counted(
         "{shape}: an unexpanded %VAR% remains in the root path: {shown}"
     );
     assert!(
-        !shown.contains('（') && !shown.contains('）'),
+        !shown.contains('（') && !shown.contains('）'), // t5-allow: asserting the template's CJK annotation tail stays out of this render
         "{shape}: the template's Chinese annotation tail leaked into the root path: {shown}"
     );
 

@@ -27,10 +27,15 @@
 //!   push-state discipline (ruling 2). Progress is a separate record
 //!   ([`MIRROR_PROGRESS_FILE`]), written at the end of every round including
 //!   stopped ones, so the first fill can answer "how far along" without
-//!   weakening the state file's completed-only rule.
+//!   weakening the state file's completed-only rule. A **hard failure**
+//!   ([`HardFailure`]: verified source corruption, a refused local write, an
+//!   over-bound listing) is the one class outside this pause family — a
+//!   checked-and-failed fact is the exit `1` class and is worded as the
+//!   failure it is, never as "did not finish" (invariant 2, `CLAUDE.md`).
 //! * [`mirror_status_lines`] reports the first fill as progress, never as an
 //!   alarm, so a multi-day first fill does not paint `status` red while it
-//!   is merely large (commit C2).
+//!   is merely large (commit C2) — and a *failed* round is the exception
+//!   that does read as the failure it is.
 //!
 //! Connections: the same account a push draws from carries a ceiling shared
 //! with every other reader (ADR-062 D2) — so the copy stage never holds more than
@@ -351,9 +356,91 @@ pub enum RoundEnd {
     },
     /// The remote could not be read mid-copy (network, credentials, service);
     /// ADR-023's family — a classification of the read failure, never proof
-    /// the file does not exist.
+    /// the file does not exist. `why` is terminal-only: it may carry a
+    /// repository path, so it is never written to a state file (the progress
+    /// record gets a class word instead).
     RemoteRead { why: String },
 }
+
+/// The hard-failure classes the copy loop cannot pause out of. A hard
+/// failure is a *checked and failed* fact (invariant 2, `CLAUDE.md`): the
+/// source no longer holds the bytes its own listing claims, the local write
+/// refused, or the listing names a file over the whole-file bound. It is
+/// the caller's exit `1` family, never "did not finish" (exit `3`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardClass {
+    /// A content-addressed file failed verification twice in a row; not a
+    /// transfer a later round can heal.
+    SourceCorrupt,
+    /// Writing the verified bytes to the mirror volume failed (full disk,
+    /// permissions, a vanished parent); the round refuses to guess what a
+    /// retry would find, but the class is honest that it may heal.
+    LocalWrite,
+    /// The listing named a file over [`MAX_WHOLE_FILE_BYTES`], so the read
+    /// is refused before it starts rather than turning the copy stage into
+    /// an unbounded allocation.
+    OversizeListing,
+}
+
+impl HardClass {
+    /// The wording each class carries on every surface, so the CLI's
+    /// exit-1 line and the pass's warning cannot disagree.
+    #[must_use]
+    pub fn sentence(self) -> &'static str {
+        match self {
+            Self::SourceCorrupt => "the source proved corrupt",
+            Self::LocalWrite => "a local write failed",
+            Self::OversizeListing => "the listing named a file over the whole-file bound",
+        }
+    }
+}
+
+/// A hard failure carrying the round out as `Err` ([`sync_once`]'s exit-1
+/// class). Two halves on purpose:
+///
+/// * `why` is **safe for a state file**: ids, sizes and class words only,
+///   built by this module, path-free by construction. It is the progress
+///   record's `outcome_note` when a round fails.
+/// * `detail` is the terminal-only half (a local or backend error chain,
+///   paths and all). It prints through `Display` for the human at the
+///   keyboard, and nothing in this module writes it to disk.
+#[derive(Debug, Clone)]
+pub struct HardFailure {
+    pub class: HardClass,
+    /// State-file-safe sentence; never a raw error chain.
+    pub why: String,
+    /// Terminal-only error detail, if any was captured; never recorded.
+    pub detail: Option<String>,
+}
+
+impl std::fmt::Display for HardFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.why)?;
+        if let Some(detail) = &self.detail {
+            write!(f, " ({detail})")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for HardFailure {}
+
+/// A usage-class refusal ([`sync_once`]'s exit-2 family): the `[mirror]`
+/// declaration or the destination it names cannot be used — an unset
+/// `mirror_of`, a negative `min_free_gib`, a destination with no repository
+/// to mirror. Nothing was read or written when one of these is returned, so
+/// no progress record is written either: usage is "nothing was done", not
+/// "a round ran and stopped".
+#[derive(Debug, Clone)]
+pub struct MirrorUsageError(pub String);
+
+impl std::fmt::Display for MirrorUsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for MirrorUsageError {}
 
 /// The stop-decision hook the copy loop asks before every file. Production
 /// runs use [`DeadlineAndDisk`]; tests inject deterministic stoppers without
@@ -499,27 +586,36 @@ pub struct SyncRequest<'a> {
 ///
 /// # Errors
 ///
-/// Hard failures — the backend cannot be built, the listing fails, the
-/// remote serves a hash-mismatching file twice in a row (corrupt source,
-/// the one thing a re-download cannot heal), a local write fails. These
-/// propagate as errors and are the caller's "finished and failed" (exit 1)
-/// class;
+/// Three classes, and the caller must keep them apart:
+///
+/// * `MirrorUsageError` — the declaration or the destination is unusable.
+///   Nothing was done; the CLI's exit `2`.
+/// * `HardFailure` — a checked-and-failed fact: the source no longer holds
+///   the bytes its own listing claims (a re-read cannot heal it), a local
+///   write refused, or the listing named a file over the whole-file bound.
+///   The CLI's exit `1`, with the class's own sentence.
+/// * Everything else — a read that did not finish (ADR-023's family) —
+///   propagates as an ordinary error; the CLI's exit `3`, a pause the next
+///   round resumes.
+///
 /// [`SyncOutcome`] variants are the pause-and-resume class.
 pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)> {
     anyhow::ensure!(
         !req.settings.mirror_of.trim().is_empty(),
-        "[mirror] mirror_of is empty; name the declared destination to mirror"
+        MirrorUsageError(
+            "[mirror] mirror_of is empty; name the declared destination to mirror".to_string()
+        )
     );
     anyhow::ensure!(
         req.settings
             .min_free_gib
             .is_none_or(|gib| gib.is_finite() && gib >= 0.0),
-        "[mirror] min_free_gib must be 0 or a positive number of GiB, not {:?}",
-        req.settings.min_free_gib
+        MirrorUsageError(format!(
+            "[mirror] min_free_gib must be 0 or a positive number of GiB, not {:?}",
+            req.settings.min_free_gib
+        ))
     );
     let mirror_root = mirror_dir(req.data_root, &req.settings.mirror_of);
-    fs::create_dir_all(&mirror_root)
-        .with_context(|| format!("create mirror dir {}", mirror_root.display()))?;
 
     let store = BackupStore::for_metadata_query(req.remote.clone());
     let backends = store.backends().context("build the destination backend")?;
@@ -561,13 +657,23 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
         "the destination listing holds {config_count} config files; a repository has one"
     );
     if config_count == 0 {
-        return Err(anyhow::anyhow!(
+        // A destination with no `config` file is not a repository, so
+        // nothing about this command's inputs can work: it is a usage
+        // problem (exit 2), reported before the mirror directory is
+        // created — a refused round must not leave an empty tree behind.
+        return Err(anyhow::Error::new(MirrorUsageError(format!(
             "the destination at {} has not been initialised (no config file listed); \
              run a push first — a mirror copies an existing repository, and there is \
              no repository there yet",
             req.remote.repo_root
-        ));
+        ))));
     }
+
+    // The mirror directory is created only once the destination proved to
+    // be a repository: the earlier ensure!s and the uninitialised refusal
+    // above leave nothing on disk.
+    fs::create_dir_all(&mirror_root)
+        .with_context(|| format!("create mirror dir {}", mirror_root.display()))?;
 
     // ---- Classify: present-and-verified, or missing ----
     // `config` has no content address, so its check is a byte comparison
@@ -674,7 +780,7 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
     });
 
     let counters = Counters::default();
-    let stop = Mutex::new(None::<RoundEnd>);
+    let stop = Mutex::new(None::<StopCause>);
     std::thread::scope(|scope| {
         for _ in 0..MIRROR_CONNECTIONS.min(queue.len()) {
             scope.spawn(|| {
@@ -684,25 +790,46 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
     });
     let downloaded_files = counters.files.load(Ordering::SeqCst);
     let downloaded_bytes = counters.bytes.load(Ordering::SeqCst);
-    // A poisoned lock means a worker unwound through a guard — that is a
-    // bug, not a readable stop reason; flattening it to None lets the
-    // completeness check below say so in its own words.
     let ended = stop.into_inner().ok().flatten();
-    if let Some(end) = ended {
-        let report = SyncReport {
-            mirror_of: req.settings.mirror_of.clone(),
-            remote_files: planned.len() as u64,
-            remote_total_bytes,
-            present_files,
-            present_bytes,
-            downloaded_files,
-            downloaded_bytes,
-            missing_bytes_remaining: missing_bytes.saturating_sub(downloaded_bytes),
-            snapshots_remote: snapshot_ids.len() as u64,
-            ..SyncReport::default()
-        };
-        write_progress(req, &report, Ok(ProgressOutcome::Stopped(&end)))?;
-        return Ok((report, SyncOutcome::Stopped(end)));
+    let hard_report = |downloaded_files: u64, downloaded_bytes: u64| SyncReport {
+        mirror_of: req.settings.mirror_of.clone(),
+        remote_files: planned.len() as u64,
+        remote_total_bytes,
+        present_files,
+        present_bytes,
+        downloaded_files,
+        downloaded_bytes,
+        missing_bytes_remaining: missing_bytes.saturating_sub(downloaded_bytes),
+        snapshots_remote: snapshot_ids.len() as u64,
+        ..SyncReport::default()
+    };
+    match ended {
+        Some(StopCause::Hard(failure)) => {
+            // The one class that is not a pause (invariant 2, `CLAUDE.md`):
+            // a checked-and-failed fact is recorded as `failed`, and its
+            // `why` is built path-free by this module, so the progress
+            // record still honours the no-paths privacy claim. The raw
+            // error (`detail`) stays on the terminal via the returned
+            // error chain.
+            write_progress(
+                req,
+                &hard_report(downloaded_files, downloaded_bytes),
+                Err(failure.why.clone()),
+            )?;
+            return Err(anyhow::Error::new(failure.clone()));
+        }
+        Some(StopCause::Pause(end)) => {
+            write_progress(
+                req,
+                &hard_report(downloaded_files, downloaded_bytes),
+                Ok(ProgressOutcome::Stopped(&end)),
+            )?;
+            return Ok((
+                hard_report(downloaded_files, downloaded_bytes),
+                SyncOutcome::Stopped(end),
+            ));
+        }
+        None => {}
     }
     anyhow::ensure!(
         downloaded_files == queue.len() as u64,
@@ -780,18 +907,27 @@ struct Counters {
     bytes: AtomicU64,
 }
 
+/// What ended the round: a pause ([`RoundEnd`], resumable by design) or a
+/// hard failure ([`HardFailure`], the checked-and-failed class that must not
+/// be worded as "did not finish").
+#[derive(Debug, Clone)]
+enum StopCause {
+    Pause(RoundEnd),
+    Hard(HardFailure),
+}
+
 /// Whether a stop has been recorded this round. A poisoned lock reads as
 /// stopped: the only way it can poison is a worker unwinding through a
 /// guard, and letting the sibling keep draining the queue after that would
 /// hide the panic from the join's own failure mode.
-fn stop_set(stop: &Mutex<Option<RoundEnd>>) -> bool {
+fn stop_set(stop: &Mutex<Option<StopCause>>) -> bool {
     stop.lock().map(|guard| guard.is_some()).unwrap_or(true)
 }
 
 /// Record the round's ending; the first reason wins. A poisoned lock leaves
 /// the flag unset (and [`stop_set`] reads that as stopped) — nothing
 /// reliable remains to coordinate, and the join reports the panic instead.
-fn set_stop_once(stop: &Mutex<Option<RoundEnd>>, end: RoundEnd) {
+fn set_stop_once(stop: &Mutex<Option<StopCause>>, end: StopCause) {
     if let Ok(mut guard) = stop.lock() {
         if guard.is_none() {
             *guard = Some(end);
@@ -809,7 +945,7 @@ fn worker(
     queue: &[&PlannedFile],
     round_ends: &dyn RoundEnds,
     counters: &Counters,
-    stop: &Mutex<Option<RoundEnd>>,
+    stop: &Mutex<Option<StopCause>>,
 ) {
     loop {
         // Claim the next file, then decide about it: the stop-rule needs the
@@ -824,7 +960,7 @@ fn worker(
         }
         if let Some(end) = round_ends.round_end(file) {
             counters.next.fetch_sub(1, Ordering::SeqCst);
-            set_stop_once(stop, end);
+            set_stop_once(stop, StopCause::Pause(end));
             return;
         }
         match copy_one(mirror_root, be, file) {
@@ -832,26 +968,13 @@ fn worker(
                 counters.files.fetch_add(1, Ordering::SeqCst);
                 counters.bytes.fetch_add(bytes, Ordering::SeqCst);
             }
-            // Both copy-failure classes end this round without failing the
-            // pass: a remote read error is "unknown, retry next round" (the
-            // ADR-023 family — a failed read is not proof the file is
-            // absent), and the hard class is reported as the stop's `why`
-            // so the command layer can word it as the corruption it is.
-            Err(CopyError::Remote(why)) => {
-                set_stop_once(stop, RoundEnd::RemoteRead { why });
-                return;
-            }
-            Err(CopyError::Hard(why)) => {
-                set_stop_once(stop, RoundEnd::RemoteRead { why });
+            Err(end) => {
+                counters.next.fetch_sub(1, Ordering::SeqCst);
+                set_stop_once(stop, end);
                 return;
             }
         }
     }
-}
-
-enum CopyError {
-    Remote(String),
-    Hard(String),
 }
 
 /// Copy one file: read whole ([`MAX_WHOLE_FILE_BYTES`] bounded), verify its
@@ -863,27 +986,56 @@ fn copy_one(
     mirror_root: &Path,
     be: &std::sync::Arc<dyn rustic_core::WriteBackend>,
     file: &PlannedFile,
-) -> Result<u64, CopyError> {
+) -> Result<u64, StopCause> {
+    let label = if file.kind == FileKind::Config {
+        "config".to_string()
+    } else {
+        format!(
+            "file {}/{}",
+            file.kind.name(),
+            file.hex.get(..12).unwrap_or(&file.hex)
+        )
+    };
+    // The bound's whole point (see [`MAX_WHOLE_FILE_BYTES`]): the listing
+    // already told us the size, so a file over the bound is refused *before*
+    // `read_full` allocates it — twice over with 2 workers — and only then
+    // is the round failed, rather than the round failing after an
+    // unbounded read has already happened.
+    if file.size > MAX_WHOLE_FILE_BYTES {
+        return Err(StopCause::Hard(HardFailure {
+            class: HardClass::OversizeListing,
+            why: format!(
+                "{label} is listed at {} bytes, over the {} whole-file bound; the read \
+                 was refused rather than allocation the copy stage cannot bound",
+                file.size, MAX_WHOLE_FILE_BYTES
+            ),
+            detail: None,
+        }));
+    }
     let attempts = if file.kind == FileKind::Config { 1 } else { 2 };
     for attempt in 0..attempts {
-        let bytes = be
-            .read_full(file.kind.file_type(), &file.id)
-            .map_err(|e| CopyError::Remote(format!("{e:#}")))?;
+        let bytes = be.read_full(file.kind.file_type(), &file.id).map_err(|e| {
+            // ADR-023's family exactly because it is terminal-only: the
+            // chain `why` can carry a repository path or endpoint, so it
+            // may flow to a pause message on a terminal, never to a state
+            // file.
+            StopCause::Pause(RoundEnd::RemoteRead {
+                why: format!("{e:#}"),
+            })
+        })?;
         if bytes.len() as u64 > MAX_WHOLE_FILE_BYTES {
-            let label = if file.kind == FileKind::Config {
-                "config".to_string()
-            } else {
-                format!(
-                    "file {}/{}",
-                    file.kind.name(),
-                    file.hex.get(..12).unwrap_or(&file.hex)
-                )
-            };
-            return Err(CopyError::Hard(format!(
-                "{label} reads at {} bytes, over the {} whole-file bound",
-                bytes.len(),
-                MAX_WHOLE_FILE_BYTES
-            )));
+            // The listing under-declared: the bytes are already in memory
+            // (the defense-in-depth half of the bound; the listing guard
+            // above fires first in the normal case).
+            return Err(StopCause::Hard(HardFailure {
+                class: HardClass::OversizeListing,
+                why: format!(
+                    "{label} reads at {} bytes, over the {} whole-file bound",
+                    bytes.len(),
+                    MAX_WHOLE_FILE_BYTES
+                ),
+                detail: None,
+            }));
         }
         let verified = match file.kind {
             // config is the one non-content-addressed file: byte-copied,
@@ -892,29 +1044,65 @@ fn copy_one(
             _ => hex_sha256(&bytes) == file.hex,
         };
         if verified {
-            let label = if file.kind == FileKind::Config {
-                "config".to_string()
-            } else {
-                file.hex.clone()
-            };
-            write_atomic(&local_path(mirror_root, file), &bytes)
-                .map_err(|e| CopyError::Hard(format!("write {label}: {e:#}")))?;
+            write_atomic(&local_path(mirror_root, file), &bytes).map_err(|e| {
+                // `why` is safe for a state file by construction: the
+                // error's io class only, never the path (the raw chain is
+                // the terminal-only `detail`).
+                StopCause::Hard(HardFailure {
+                    class: HardClass::LocalWrite,
+                    why: format!(
+                        "write {label}: the local write failed ({})",
+                        io_class_word(&e)
+                    ),
+                    detail: Some(format!("{e:#}")),
+                })
+            })?;
             return Ok(bytes.len() as u64);
         }
         if attempt + 1 == attempts {
             let short = file.hex.get(..12).unwrap_or(&file.hex);
-            return Err(CopyError::Hard(format!(
-                "file {}/{} hashed against its own name twice and failed both times; \
-                 the destination no longer holds the bytes its listing claims — \
-                 this is source corruption, not a transfer a later round can heal",
-                file.kind.name(),
-                short
-            )));
+            return Err(StopCause::Hard(HardFailure {
+                class: HardClass::SourceCorrupt,
+                why: format!(
+                    "file {}/{} hashed against its own name twice and failed both times; \
+                     the destination no longer holds the bytes its listing claims — \
+                     this is source corruption, not a transfer a later round can heal",
+                    file.kind.name(),
+                    short
+                ),
+                detail: None,
+            }));
         }
     }
-    Err(CopyError::Hard(
-        "the copy loop fell through its own attempt count".to_string(),
-    ))
+    Err(StopCause::Hard(HardFailure {
+        class: HardClass::SourceCorrupt,
+        why: "the copy loop fell through its own attempt count".to_string(),
+        detail: None,
+    }))
+}
+
+/// One short io-class word for a failed write, for state-file-safe notes.
+/// io error Display text is generally path-free, but "generally" is not a
+/// boundary a privacy claim can rest on, so the class word is derived from
+/// `ErrorKind` — the raw error stays terminal-only.
+fn io_class_word(error: &anyhow::Error) -> String {
+    let kind = error
+        .root_cause()
+        .downcast_ref::<std::io::Error>()
+        .map(std::io::Error::kind);
+    match kind {
+        Some(std::io::ErrorKind::PermissionDenied) => "permission denied".to_string(),
+        Some(std::io::ErrorKind::StorageFull) | Some(std::io::ErrorKind::QuotaExceeded) => {
+            "no space left".to_string()
+        }
+        Some(std::io::ErrorKind::NotFound) => "a path component is missing".to_string(),
+        Some(std::io::ErrorKind::TimedOut) => "the write timed out".to_string(),
+        // reason: an unmapped io kind still deserves an honest class word
+        // rather than the none `map` would leave behind; "an i/o error"
+        // asserts the class (an io failure) without inventing a detail the
+        // kind does not carry.
+        _ => "an i/o error".to_string(),
+    }
 }
 
 /// Temp file + rename, the write shape every store path here already uses: a
@@ -946,7 +1134,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// honesty clauses that keep it from over-claiming.
 ///
 /// C1's mechanism, restated as the check it runs (ADR-062 D4/D6.1): the
-/// closure of snapshot S is S's file ＋ the round's index files ＋ the packs
+/// closure of snapshot S is S's file + the round's index files + the packs
 /// S's tree references — *in the mirror*, which is why the snapshot set
 /// here is the mirror's own listing, not the remote's: the question is
 /// "what does this directory vouch for", never "what does the remote hold".
@@ -1112,7 +1300,10 @@ pub fn mirror_progress_path(state_dir: &Path) -> PathBuf {
     state_dir.join(MIRROR_PROGRESS_FILE)
 }
 
-/// What one round was, for the progress record's outcome fields.
+/// What one round was, for the progress record's outcome fields. The `Err`
+/// half takes the *note text itself*, already redacted by the caller: state
+/// files carry no paths, so no raw error chain is ever formatted inside
+/// `write_progress`.
 enum ProgressOutcome<'a> {
     Complete,
     Stopped(&'a RoundEnd),
@@ -1123,7 +1314,7 @@ enum ProgressOutcome<'a> {
 fn write_progress(
     req: &SyncRequest,
     report: &SyncReport,
-    outcome: Result<ProgressOutcome<'_>, anyhow::Error>,
+    outcome: Result<ProgressOutcome<'_>, String>,
 ) -> anyhow::Result<()> {
     let (complete, outcome_word, note): (bool, &str, Option<String>) = match outcome {
         Ok(ProgressOutcome::Complete) => (true, "complete", None),
@@ -1142,8 +1333,23 @@ fn write_progress(
                      floor {min_free_bytes} bytes); this round paused before \
                      writing toward a full disk"
                 ),
+                // `why` is terminal-only (it can carry a repository path),
+                // so the recorded note keeps only the error's *class* — the
+                // one privacy boundary this module states for its state
+                // files ("no paths", see the module doc).
                 RoundEnd::RemoteRead { why } => {
-                    format!("the destination could not be read mid-fill: {why}")
+                    let class = crate::remote_err::classify_error_str(why)
+                        .map(|kind| kind.label().to_string())
+                        // reason: an unclassified read failure has no honest
+                        // class word, and inventing a guess ("network",
+                        // "credentials") is exactly the over-claim the
+                        // three-state rule forbids; "a read error" states
+                        // the fact without the chain.
+                        .unwrap_or_else(|| "a read error".to_string());
+                    format!(
+                        "the destination could not be read mid-fill ({class}); the raw \
+                         error is not recorded in state files"
+                    )
                 }
             }),
         ),
@@ -1155,7 +1361,7 @@ fn write_progress(
                  floor is {headroom} bytes, and only {free} bytes are free"
             )),
         ),
-        Err(e) => (false, "failed", Some(format!("{e:#}"))),
+        Err(note) => (false, "failed", Some(note)),
     };
     let progress = MirrorProgress {
         version: MIRROR_PROGRESS_VERSION,
@@ -1236,6 +1442,27 @@ pub fn mirror_status_lines(config: &Config, state_dir: &Path) -> Vec<String> {
     }
     let progress = load_progress(state_dir);
     let state = mirrorstate::load(state_dir);
+    // A record that names some other destination is not coverage for this
+    // one (mirrorstate.rs's own doc for `mirror_of`): repoint `[mirror]
+    // mirror_of` and the old record's closure set answers about a directory
+    // this machine does not mirror anymore, so the mismatch is stated and
+    // reclaim keeps holding back.
+    let state_names_other = matches!(
+        &state,
+        mirrorstate::MirrorStateRead::Present(record) if record.mirror_of != settings.mirror_of
+    );
+    if state_names_other {
+        let other = match &state {
+            mirrorstate::MirrorStateRead::Present(record) => record.mirror_of.clone(),
+            _ => String::new(),
+        };
+        lines.push(format!(
+            "[mirror] mirror-state.json names `{other}`, but this machine mirrors `{}`; \
+             the record is stale, so coverage is unknown — reclaim must hold sessions \
+             back until a completed round rewrites it",
+            settings.mirror_of
+        ));
+    }
     match (&progress, &state) {
         (MirrorProgressRead::Missing, mirrorstate::MirrorStateRead::Missing) => {
             lines.push(format!(
@@ -1269,7 +1496,27 @@ pub fn mirror_status_lines(config: &Config, state_dir: &Path) -> Vec<String> {
             }
         }
         (MirrorProgressRead::Present(progress), _) => {
-            if !progress.complete {
+            if progress.outcome == "failed" {
+                // The one outcome that is not the pause family (invariant 2,
+                // `CLAUDE.md`): a round that checked and failed — corrupt
+                // source, refused write — reads as the failure it is, with
+                // the class sentence the record carries. The paused-line
+                // below is deliberately not printed too: its "none of which
+                // is a failure" tail would say the opposite in the same
+                // breath.
+                // reason: a missing note on a failed outcome prints the
+                // failure with its percentages and no class sentence — an
+                // incomplete sentence, never a fabricated cause.
+                let note = progress.outcome_note.clone().unwrap_or_default();
+                lines.push(format!(
+                    "[mirror] the last mirror round failed at {}% ({} of {}): {note} — the \
+                     next round resumes only after the cause is fixed; reclaim holds \
+                     sessions back until a round completes",
+                    progress.percent(),
+                    progress.mirror_bytes,
+                    progress.remote_total_bytes
+                ));
+            } else if !progress.complete {
                 lines.push(format!(
                     "[mirror] first sync of `{}` in progress: {}% ({} of {}) — reclaim holds \
                      sessions back until it completes; rounds end by budget, disk floor or \
@@ -1351,11 +1598,24 @@ pub fn status_json(config: &Config, state_dir: &Path) -> serde_json::Value {
         }
     };
     let closure_record = match mirrorstate::load(state_dir) {
+        mirrorstate::MirrorStateRead::Present(state) if state.mirror_of == settings.mirror_of => {
+            serde_json::json!({
+                "kind": "known",
+                "covered_snapshots": state.closure_complete.len(),
+                "snapshots_on_remote": state.snapshots_on_remote,
+                "finished_at_unix": state.finished_at_unix,
+            })
+        }
+        // A record naming some other destination is not coverage for this
+        // one: unknown, with the two names so `--json` says what was
+        // compared rather than a bare null.
         mirrorstate::MirrorStateRead::Present(state) => serde_json::json!({
-            "kind": "known",
-            "covered_snapshots": state.closure_complete.len(),
-            "snapshots_on_remote": state.snapshots_on_remote,
-            "finished_at_unix": state.finished_at_unix,
+            "kind": "unknown",
+            "why": format!(
+                "mirror-state.json names `{}`, but this machine mirrors `{}`; the record \
+                 is stale, so no snapshot's closure can be claimed for this destination",
+                state.mirror_of, settings.mirror_of
+            ),
         }),
         mirrorstate::MirrorStateRead::Unreadable(why) => serde_json::json!({
             "kind": "unknown",
@@ -1561,6 +1821,65 @@ mod tests {
         let bytes: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
         std::fs::write(&p, &bytes).unwrap();
         assert_eq!(sha256_file(&p).unwrap(), hex_sha256(&bytes));
+    }
+
+    /// MAX_WHOLE_FILE_BYTES guards on the *listing's* size, before the read
+    /// allocates the file — that is the whole claim of the constant's doc:
+    /// a corrupted or malicious listing cannot turn the copy stage into an
+    /// unbounded allocation. Assertions are on the guard's own class and
+    /// wording, so a regression folds the bound after the read again (the
+    /// pre-fix shape) and the test goes red through the class, not through
+    /// timing.
+    #[test]
+    fn an_oversized_listing_is_refused_before_the_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StoreConfig {
+            repo_root: dir.path().join("repo").to_string_lossy().into_owned(),
+            key_file: PathBuf::new(),
+            connections: 1,
+            options: BTreeMap::new(),
+            cache_dir: None,
+            no_cache: true,
+        };
+        let be = BackupStore::for_metadata_query(store)
+            .backends()
+            .expect("a local-path backend always builds")
+            .repository();
+        let hex = "ab".to_string() + &"cd".repeat(31);
+        let huge = PlannedFile {
+            kind: FileKind::Pack,
+            id: Id::from_hex(&hex).unwrap(),
+            hex: hex.clone(),
+            size: MAX_WHOLE_FILE_BYTES + 1,
+        };
+        match copy_one(dir.path().join("mirror").as_path(), &be, &huge) {
+            Err(StopCause::Hard(failure)) => {
+                assert_eq!(failure.class, HardClass::OversizeListing);
+                assert!(failure.why.contains("listed at"), "{}", failure.why);
+                assert!(failure.why.contains("whole-file bound"), "{}", failure.why);
+            }
+            other => panic!("the over-bound listing must fail hard, got {other:?}"),
+        }
+    }
+
+    /// The state-file-safe write-class word: an io error's *kind* only, so
+    /// the note a failed round records cannot leak the local path the raw
+    /// chain carries.
+    #[test]
+    fn io_class_word_keeps_paths_out_of_state_file_notes() {
+        let e = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            .context("create /a/very/private/mirror/dir");
+        assert_eq!(io_class_word(&e), "permission denied");
+        let word = io_class_word(&e);
+        assert!(
+            !word.contains("private") && !word.contains('/'),
+            "the class word must not carry the error's path: {word}"
+        );
+        let unmapped = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "unmapped kind",
+        ));
+        assert_eq!(io_class_word(&unmapped), "an i/o error");
     }
 
     /// The atomic write leaves no temp file behind and overwrites an

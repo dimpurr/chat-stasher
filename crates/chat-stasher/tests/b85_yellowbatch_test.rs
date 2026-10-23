@@ -2,7 +2,8 @@
 //!
 //! Rollback proof: before this change, the old source paths were verified by
 //! reading the pre-change lines in `git show HEAD` (no checkout or write):
-//! `unwrap_or_default()` rendered an unresolved root as `（）`; `root.is_dir()`
+//! `unwrap_or_default()` rendered an unresolved root as the Unicode
+//! fullwidth parentheses (U+FF08 and U+FF09); `root.is_dir()`
 //! erased records after a concurrent removal; `metadata`/`ps` failures were
 //! skipped or flattened to zero; Gemini parse failures continued to defaults;
 //! and `status` used 3600 after an invalid explicit interval. Each fixture

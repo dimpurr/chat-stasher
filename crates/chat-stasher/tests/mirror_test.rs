@@ -15,6 +15,14 @@
 //!   * disk-floor pause: `disk_floor_pauses_the_round_without_failing_it`
 //!   * the C3 pre-estimate refusal: `space_pre_estimate_refuses_before_any_download`
 //!     and `mirror_sync_refuses_to_start_when_the_floor_cannot_fit` (CLI).
+//!   * the exit-code trichotomy of the rev0 fixes: hard failures
+//!     (`a_twice_corrupt_source_fails_the_round_not_pauses_it`,
+//!     `a_local_write_failure_fails_the_round_and_the_note_carries_no_path`,
+//!     CLI `mirror_sync_exits_1_when_the_source_proved_corrupt`), the
+//!     usage class (`an_uninitialised_destination_is_a_usage_refusal_that_creates_nothing`,
+//!     CLI `mirror_sync_reports_an_uninitialised_destination_as_usage`), and
+//!     the pass-side ssh-master reap
+//!     (`the_pass_reaps_the_ssh_masters_its_mirror_step_opened`).
 //!
 //! Everything is local and synthetic, under temp dirs; the spawned-binary
 //! tests redirect the full XDG envelope into a sandbox the way the other
@@ -255,11 +263,15 @@ fn assert_files_byte_equal(left: &Path, right: &Path, rel: &str) {
     );
 }
 
-/// The `status` config a machine declaring this mirror would hold.
+/// The `status` config a machine declaring this mirror would hold. A second
+/// declared destination, `storagebox-v2`, rides along so a repointed
+/// `mirror_of` can name a destination that *is* declared — the fixture for
+/// the stale-record tests.
 fn mirror_config(toml_section: &str) -> Config {
     let raw = format!(
         "[destinations.storagebox]\nrepo = \"/tmp/formal-repo\"\nkey_file = \
-         \"/tmp/formal-key.json\"\n\n[mirror]\n{toml_section}"
+         \"/tmp/formal-key.json\"\n\n[destinations.storagebox-v2]\nrepo = \
+         \"/tmp/formal-repo-2\"\nkey_file = \"/tmp/formal-key-2.json\"\n\n[mirror]\n{toml_section}"
     );
     toml::from_str(&raw).expect("the fixture config must parse")
 }
@@ -301,7 +313,7 @@ fn first_fill_copies_every_file_and_records_closure() {
 
     // Byte-exact, file by file: the whole remote inventory, equal in the
     // mirror, with `config` and every content-addressed file byte equal.
-    // （`locks/` is nothing to compare: this build never writes locks.)
+    // (`locks/` is nothing to compare: this build never writes locks.)
     let remote_files = inventory(Path::new(&rig.remote.repo_root));
     let mirror_files = inventory(&rig.mirror_root());
     assert_eq!(
@@ -559,10 +571,12 @@ fn missing_pack_un_covers_and_the_next_sync_heals() {
     });
     assert!(!mirrorstate::snapshot_covered(
         &broken_state,
+        "storagebox",
         &rig.machine_of("machine-a")
     ));
     assert!(!mirrorstate::snapshot_covered(
         &broken_state,
+        "storagebox",
         &rig.machine_of("machine-b")
     ));
 
@@ -726,6 +740,341 @@ fn an_up_to_date_round_rewrites_state_without_downloading() {
     assert!(matches!(outcome, mirror::SyncOutcome::Completed));
     assert_eq!(report.downloaded_files, 0, "nothing new to copy");
     assert_eq!(report.covered_snapshots, 2);
+}
+
+// --------------------------------------------------- exit-code trichotomy
+// A hard failure must not fold into "did not finish" (invariant 2,
+// `CLAUDE.md`): verified source corruption and a refused local write are
+// checked-and-failed facts — `Err` out of the engine, exit 1 at the CLI —
+// while the pause family (budget, disk floor, remote readability) stays
+// the resumable exit 3.
+
+/// Corrupt one remote file's bytes under its own name, so both download
+/// attempts fail verification against the name its listing still claims.
+fn corrupt_first_remote_pack(rig: &Rig) -> String {
+    let remote_root = Path::new(&rig.remote.repo_root);
+    let mut pack_rel = String::new();
+    for rel in inventory(remote_root) {
+        if rel.starts_with("data/") {
+            pack_rel = rel;
+            break;
+        }
+    }
+    assert!(!pack_rel.is_empty(), "the fixture repository has packs");
+    let pack_path = remote_root.join(&pack_rel);
+    let mut pack = fs::read(&pack_path).unwrap();
+    let mid = pack.len() / 2;
+    pack[mid] ^= 0xff;
+    fs::write(&pack_path, &pack).unwrap();
+    pack_rel
+}
+
+#[test]
+fn a_twice_corrupt_source_fails_the_round_not_pauses_it() {
+    let rig = build_rig(None);
+    corrupt_first_remote_pack(&rig);
+
+    let request = SyncRequest {
+        settings: &rig.settings,
+        remote: &rig.remote,
+        data_root: &rig.data_root,
+        state_dir: &rig.state_dir,
+        master_key: &rig.mk,
+        now_unix: 1_800_000_000,
+        round_ends: &NeverStops,
+    };
+    let err = sync_once(&request)
+        .expect_err("a twice-mismatching source is checked and failed, not a pause");
+    assert!(
+        err.is::<chat_stasher::mirror::HardFailure>(),
+        "the hard class is typed for the CLI's exit-1 arm, got: {err:#}"
+    );
+    match err.downcast_ref::<chat_stasher::mirror::HardFailure>() {
+        Some(hard) => {
+            assert_eq!(hard.class, chat_stasher::mirror::HardClass::SourceCorrupt);
+            assert!(
+                hard.why.contains("hashed against its own name twice"),
+                "{}",
+                hard.why
+            );
+        }
+        None => panic!("downcast cannot fail right after `is` matched"),
+    }
+
+    // The progress record words the failure as a failure, with the
+    // state-file-safe sentence (ids only, no path).
+    match mirror::load_progress(&rig.state_dir) {
+        MirrorProgressRead::Present(progress) => {
+            assert_eq!(progress.outcome, "failed", "not the pause family");
+            let note = progress.outcome_note.unwrap_or_default();
+            assert!(note.contains("hashed against its own name twice"), "{note}");
+            assert!(
+                !note.contains(&rig.remote.repo_root),
+                "state files carry no paths: {note}"
+            );
+        }
+        other => panic!("a failed round still writes progress, got {other:?}"),
+    }
+    assert!(matches!(
+        mirrorstate::load(&rig.state_dir),
+        MirrorStateRead::Missing
+    ));
+
+    // And `status` reads it as the failure it is, with the class sentence.
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let lines = mirror_status_lines(&config, &rig.state_dir);
+    let joined = lines.join("\n");
+    assert!(
+        joined.contains("the last mirror round failed"),
+        "a failed round is not first-fill progress: {joined}"
+    );
+    assert!(
+        joined.contains("source corruption"),
+        "the status line carries the class sentence: {joined}"
+    );
+}
+
+#[test]
+fn a_local_write_failure_fails_the_round_and_the_note_carries_no_path() {
+    let rig = build_rig(None);
+    // Plant a directory where `config` must be written: the temp file is
+    // created and written fine, the rename onto the existing directory
+    // fails on every platform — a local (ENOTDIR/EISDIR-style) write error.
+    let mirror_root = rig.mirror_root();
+    fs::create_dir_all(&mirror_root).unwrap();
+    fs::create_dir(mirror_root.join("config")).unwrap();
+
+    let request = SyncRequest {
+        settings: &rig.settings,
+        remote: &rig.remote,
+        data_root: &rig.data_root,
+        state_dir: &rig.state_dir,
+        master_key: &rig.mk,
+        now_unix: 1_800_000_000,
+        round_ends: &NeverStops,
+    };
+    let err = sync_once(&request).expect_err("a refused local write is a hard failure");
+    assert!(err.is::<chat_stasher::mirror::HardFailure>(), "{err:#}");
+    match err.downcast_ref::<chat_stasher::mirror::HardFailure>() {
+        Some(hard) => {
+            assert_eq!(hard.class, chat_stasher::mirror::HardClass::LocalWrite);
+            assert!(hard.why.contains("the local write failed"), "{}", hard.why);
+            assert!(
+                !hard.why.contains("mirror"),
+                "the state-file-safe sentence carries the why, not the path: {}",
+                hard.why
+            );
+            // The terminal-only half exists and carries the raw io detail
+            // (its wording is platform-specific; the boundary under test is
+            // that it is a *separate* half from the state-file `why`).
+            let detail = hard.detail.clone();
+            assert!(
+                detail
+                    .as_deref()
+                    .map_or(false, |d| !d.is_empty() && d != hard.why),
+                "the terminal-only detail keeps what humans need at the keyboard: {detail:?}"
+            );
+        }
+        None => panic!("downcast cannot fail right after `is` matched"),
+    }
+
+    // The recorded note keeps the io class, never the raw chain.
+    match mirror::load_progress(&rig.state_dir) {
+        MirrorProgressRead::Present(progress) => {
+            assert_eq!(progress.outcome, "failed");
+            let note = progress.outcome_note.unwrap_or_default();
+            assert!(note.contains("the local write failed"), "{note}");
+            assert!(
+                !note.contains(mirror_root.to_string_lossy().as_ref()),
+                "state files carry no paths: {note}"
+            );
+        }
+        other => panic!("a failed round still writes progress, got {other:?}"),
+    }
+    // A local write failure is not a remote-read pause: nothing anywhere
+    // says the destination could not be read.
+    let joined_progress = format!("{:?}", mirror::load_progress(&rig.state_dir));
+    assert!(
+        !joined_progress.contains("could not be read mid-fill"),
+        "a local error is not worded as a remote one: {joined_progress}"
+    );
+}
+
+// The paused (exit 3) half keeps its redaction: a mid-round remote read
+// failure records the *class* of the error in the progress file, never the
+// raw backend chain, which carries the repository path.
+struct DeleteOneRemoteOnFirstAsk {
+    path: PathBuf,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+impl RoundEnds for DeleteOneRemoteOnFirstAsk {
+    fn round_end(&self, _next: &mirror::PlannedFile) -> Option<RoundEnd> {
+        if !self.fired.swap(true, Ordering::SeqCst) {
+            // The remove is the fixture's whole point, so its outcome is
+            // asserted rather than dropped: half of the test's premise is
+            // that the pack really is gone before the first read.
+            assert!(
+                fs::remove_file(&self.path).is_ok(),
+                "the fixture must be able to delete the pack it names"
+            );
+        }
+        None
+    }
+}
+
+#[test]
+fn a_mid_round_remote_read_pause_records_a_class_not_the_raw_error() {
+    let rig = build_rig(None);
+    let pack_rel = {
+        let remote_root = Path::new(&rig.remote.repo_root);
+        let mut found = String::new();
+        for rel in inventory(remote_root) {
+            if rel.starts_with("data/") {
+                found = rel;
+                break;
+            }
+        }
+        found
+    };
+    assert!(!pack_rel.is_empty());
+
+    let stopper = DeleteOneRemoteOnFirstAsk {
+        path: Path::new(&rig.remote.repo_root).join(&pack_rel),
+        fired: std::sync::atomic::AtomicBool::new(false),
+    };
+    let (report, outcome) = run_round(&rig, &stopper);
+    assert!(
+        matches!(
+            &outcome,
+            mirror::SyncOutcome::Stopped(RoundEnd::RemoteRead { .. })
+        ),
+        "the deleted pack's failed read pauses the round, got {outcome:?} (report: {report:?})"
+    );
+
+    match mirror::load_progress(&rig.state_dir) {
+        MirrorProgressRead::Present(progress) => {
+            let note = progress.outcome_note.unwrap_or_default();
+            assert!(
+                note.contains("the destination could not be read mid-fill"),
+                "{note}"
+            );
+            assert!(
+                note.contains("the raw error is not recorded in state files"),
+                "{note}"
+            );
+            assert!(
+                !note.contains(&rig.remote.repo_root),
+                "a remote-read pause still writes no paths: {note}"
+            );
+        }
+        other => panic!("a paused round writes progress, got {other:?}"),
+    }
+}
+
+// ------------------------------------------------------------- usage class
+// A destination with no repository on it is a usage problem (exit 2, per
+// the command's own list), and a refused usage round creates nothing: no
+// empty mirror directory left behind.
+
+#[test]
+fn an_uninitialised_destination_is_a_usage_refusal_that_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("empty-dest");
+    fs::create_dir_all(&repo).unwrap();
+    let remote = store_config(&repo, &dir.path().join("some-key.json"));
+    let settings = MirrorSettings {
+        enabled: true,
+        mirror_of: "empty-dest".to_string(),
+        min_free_gib: None,
+    };
+    let data_root = dir.path().join("data");
+    let state_dir = dir.path().join("state");
+    let request = SyncRequest {
+        settings: &settings,
+        remote: &remote,
+        data_root: &data_root,
+        state_dir: &state_dir,
+        master_key: &MasterKey::new(),
+        now_unix: 1_800_000_000,
+        round_ends: &NeverStops,
+    };
+    let err = sync_once(&request).expect_err("no config file listed is a usage refusal");
+    assert!(
+        err.is::<chat_stasher::mirror::MirrorUsageError>(),
+        "usage is typed for the CLI's exit-2 arm, got: {err:#}"
+    );
+    let text = format!("{err:#}");
+    assert!(text.contains("has not been initialised"), "{text}");
+    assert!(text.contains("run a push first"), "{text}");
+    assert!(
+        !mirror_dir(&data_root, "empty-dest").exists(),
+        "a usage refusal creates no empty mirror directory"
+    );
+    assert!(matches!(
+        mirrorstate::load(&state_dir),
+        MirrorStateRead::Missing
+    ));
+    assert!(matches!(
+        mirror::load_progress(&state_dir),
+        MirrorProgressRead::Missing
+    ));
+}
+
+// ------------------------------------------------------------ stale record
+// Repoint `[mirror] mirror_of` and the completed record the old destination
+// left behind must not stand as coverage for the new one (issue 4): the
+// status surfaces day the mismatch, `--json` answers unknown, and the
+// reclaim-side read interface answers false even for a snapshot id the
+// record genuinely contains.
+
+#[test]
+fn a_repointed_mirror_of_expires_the_old_record_not_the_new_machine() {
+    let rig = build_rig(None);
+    run_round(&rig, &NeverStops);
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox-v2\"");
+    let lines = mirror_status_lines(&config, &rig.state_dir);
+    let joined = lines.join("\n");
+    assert!(
+        joined.contains(
+            "mirror-state.json names `storagebox`, but this machine \
+                         mirrors `storagebox-v2`"
+        ),
+        "the stale record is stated as stale: {joined}"
+    );
+    assert!(
+        joined.contains("reclaim must hold sessions back"),
+        "{joined}"
+    );
+    let json = status_json(&config, &rig.state_dir);
+    assert_eq!(json["closure_record"]["kind"], "unknown");
+    let why = json["closure_record"]["why"].as_str().unwrap_or_default();
+    assert!(
+        why.contains("this machine mirrors `storagebox-v2`"),
+        "{why}"
+    );
+
+    // The read interface agrees: membership alone grants nothing when the
+    // record names another destination.
+    let recorded = match mirrorstate::load(&rig.state_dir) {
+        MirrorStateRead::Present(record) => record,
+        other => panic!("the first fill completed, got {other:?}"),
+    };
+    let covered_id = rig.machine_of("machine-a");
+    assert!(mirrorstate::snapshot_covered(
+        &MirrorStateRead::Present(recorded.clone()),
+        "storagebox",
+        &covered_id
+    ));
+    assert!(
+        !mirrorstate::snapshot_covered(
+            &MirrorStateRead::Present(recorded),
+            "storagebox-v2",
+            &covered_id
+        ),
+        "a record from the old mirror_of is not coverage for the new one"
+    );
 }
 
 // ------------------------------------------------------- CLI + serverless
@@ -1027,7 +1376,6 @@ fn run_once_mirrors_after_its_push_and_again_on_a_noop_pass() {
             machine,
             "--destination",
             "storagebox",
-            "--keep-ssh-masters",
         ])
         .output()
         .unwrap();
@@ -1076,7 +1424,6 @@ fn run_once_mirrors_after_its_push_and_again_on_a_noop_pass() {
             machine,
             "--destination",
             "storagebox",
-            "--keep-ssh-masters",
         ])
         .output()
         .unwrap();
@@ -1086,6 +1433,11 @@ fn run_once_mirrors_after_its_push_and_again_on_a_noop_pass() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(out.status.success(), "the second pass succeeds too: {all}");
+    assert!(
+        !all.contains("[reap] skipped"),
+        "the fixture never passed --keep-ssh-masters, so nothing may print a \
+         skip line: {all}"
+    );
     // The steady follow-up pass copies again at its tail whether its push
     // made a snapshot or skipped-as-unchanged: the pull half of "push, then
     // mirror" exists so a machine with no changes of its own still picks up
@@ -1094,5 +1446,225 @@ fn run_once_mirrors_after_its_push_and_again_on_a_noop_pass() {
     assert!(
         all.contains("[run-once] mirror-sync:"),
         "every pass tail runs the mirror step:\n{all}"
+    );
+}
+
+// ------------------------------------------------------- CLI exit codes
+
+#[test]
+fn mirror_sync_exits_1_when_the_source_proved_corrupt() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let sandbox = sb.path();
+    cli_fixture_remote(sandbox);
+    write_config(
+        sandbox,
+        "enabled = true\nmirror_of = \"storagebox\"\nmin_free_gib = 1.0",
+    );
+
+    // Corrupt one pack under its own name: the listing keeps claiming the
+    // bytes, both downloads fail verification, and the round is a
+    // checked-and-failed fact — exit 1, with the class's own sentence.
+    let remote_root = sandbox.join("remote-repo");
+    let mut pack_rel = String::new();
+    for rel in inventory(&remote_root) {
+        if rel.starts_with("data/") {
+            pack_rel = rel;
+            break;
+        }
+    }
+    assert!(!pack_rel.is_empty());
+    let pack_path = remote_root.join(&pack_rel);
+    let mut pack = fs::read(&pack_path).unwrap();
+    let mid = pack.len() / 2;
+    pack[mid] ^= 0xff;
+    fs::write(&pack_path, &pack).unwrap();
+
+    let out = binary_command(sandbox)
+        .args(["mirror", "sync", "--budget-secs", "120"])
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "verified source corruption is the finished-and-failed class: {all}"
+    );
+    assert!(
+        all.contains("exit_code=1 — the source proved corrupt"),
+        "{all}"
+    );
+    // And the command never words it as a pause.
+    assert!(
+        !all.contains("not a failure"),
+        "the corrupt-source exit 1 must not print pause wording: {all}"
+    );
+
+    // The durable note from the same failed round carries no repository path.
+    let state_record = mirror_progress_record(sandbox);
+    assert!(
+        state_record.contains("\"outcome\": \"failed\""),
+        "the record words the class: {state_record}"
+    );
+    assert!(
+        !state_record.contains(sandbox.to_string_lossy().as_ref()),
+        "state files carry no paths: {state_record}"
+    );
+}
+
+/// The CLI-visible text of `mirror-progress.json`: the state dir is
+/// `<XDG_DATA_HOME>/chat-stasher/state` (`collect::default_state_dir`), the
+/// same root `mirror_root_of` has.
+fn mirror_progress_record(sandbox: &Path) -> String {
+    let candidate = sandbox
+        .join("data")
+        .join("chat-stasher")
+        .join("state")
+        .join("mirror-progress.json");
+    if candidate.is_file() {
+        fs::read_to_string(&candidate).unwrap()
+    } else {
+        String::new()
+    }
+}
+
+#[test]
+fn mirror_sync_reports_an_uninitialised_destination_as_usage() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let sandbox = sb.path();
+    // A declared destination whose directory exists but has never been
+    // pushed to: no repository there to mirror. The key file is planted so
+    // the round reaches the listing and discovers the empty repository —
+    // the usage refusa must be about the destination, not the key.
+    fs::create_dir_all(sandbox.join("remote-repo")).unwrap();
+    store::persist_key_file(
+        &store_config(&sandbox.join("remote-repo"), &sandbox.join("remote.key")),
+        &MasterKey::new(),
+    )
+    .unwrap();
+    write_config(
+        sandbox,
+        "enabled = true\nmirror_of = \"storagebox\"\nmin_free_gib = 0.0",
+    );
+
+    let out = binary_command(sandbox)
+        .args(["mirror", "sync"])
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "an uninitialised destination is a usage problem, nothing was done: {all}"
+    );
+    assert!(all.contains("has not been initialised"), "{all}");
+    assert!(all.contains("exit_code=2"), "{all}");
+    assert!(
+        !mirror_root_of(sandbox).exists(),
+        "the refused usage round creates no empty mirror directory: {all}"
+    );
+}
+
+#[test]
+fn the_pass_reaps_the_ssh_masters_its_mirror_step_opened() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let sandbox = sb.path();
+    let stage = sandbox.join("stage");
+    let machine = "mbp-test";
+    let session = "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    let config_dir = sandbox.join("config").join("chat-stasher");
+    fs::create_dir_all(&config_dir).unwrap();
+    // The pass pushes to the healthy local `storagebox`; the mirror names a
+    // *second* declared destination with an ssh endpoint no server answers —
+    // so the only ControlPersist-masters bookkeeping in this pass is the
+    // mirror step's own, and the reap line it must print (issue 2) cannot
+    // be confused with push's or verify's.
+    fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "push_only_if_changed = false\n\n[destinations.storagebox]\nrepo = \
+             \"{}\"\nkey_file = \"{}\"\nno_cache = true\n\n[destinations.backup2]\nrepo = \
+             \"opendal:sftp\"\nkey_file = \"{}\"\n\n[destinations.backup2.options]\nendpoint = \
+             \"ssh://127.0.0.1:1/none\"\n\n[mirror]\nenabled = true\nmirror_of = \
+             \"backup2\"\nmin_free_gib = 1.0\n",
+            sandbox.join("remote-repo").display(),
+            sandbox.join("remote.key").display(),
+            sandbox.join("backup2.key").display(),
+        ),
+    )
+    .unwrap();
+    // Both key files must exist and parse: `storagebox`'s for the pass's
+    // own push, `backup2`'s for the mirror step to reach its remote read —
+    // the goal is the mirror *round* running against the unreachable
+    // endpoint, not the step refusing earlier at the key check.
+    store::persist_key_file(
+        &store_config(&sandbox.join("remote-repo"), &sandbox.join("remote.key")),
+        &MasterKey::new(),
+    )
+    .unwrap();
+    store::persist_key_file(
+        &store_config(&sandbox.join("none"), &sandbox.join("backup2.key")),
+        &MasterKey::new(),
+    )
+    .unwrap();
+
+    let cc_line = |ts: &str| {
+        format!(
+            r#"{{"parentUuid":null,"isMeta":null,"sessionId":"s","type":"user","message":{{"role":"user","content":"hi"}},"uuid":"u1","timestamp":"{ts}","cwd":"/x","version":"1.0.31"}}"#
+        )
+    };
+    let dir = stage
+        .join("sessions")
+        .join(machine)
+        .join(session)
+        .join("000");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("000001.jsonl"),
+        cc_line("2025-01-15T12:34:56.789Z") + "\n",
+    )
+    .unwrap();
+
+    let mut command = binary_command(sandbox);
+    command.env("CHAT_STASHER_REGISTRY", sandbox.join("registry.json"));
+    fs::write(
+        sandbox.join("registry.json"),
+        r#"{"schema_version":1,"generated":"T1 synthetic","harnesses":[]}"#,
+    )
+    .unwrap();
+    let out = command
+        .args([
+            "run-once",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+            "--destination",
+            "storagebox",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success(),
+        "the pass itself succeeds: the mirror's unreachable destination is a \
+         warning, not a failed pass\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("[run-once] result:") && stderr.contains("mirror-sync warning"),
+        "the pass completed and the mirror step warned:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("[reap] host 127.0.0.1 · ssh masters shut down:"),
+        "the mirror step must reap the ssh masters its remote reads opened, in \
+         the same pass that opened them:\nstderr:\n{stderr}"
     );
 }

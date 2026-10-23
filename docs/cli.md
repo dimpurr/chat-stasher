@@ -35,6 +35,7 @@ chat-stasher <command> --help
 | [`cache`](#cache) | Shows or clears the local body cache | Local cache (`clear`) |
 | [`reclaim-stage`](#reclaim-stage) | Removes staged copies every destination proves it holds | Stage (with `--apply`) |
 | [`prune-orphans`](#prune-orphans) | Reports the archive packs no index file names | No |
+| [`mirror`](#mirror) | Keeps a byte-exact local copy of one declared destination's repository | Mirror copy under the data directory (see [config.md](config.md#mirror)) |
 | [`install-native-host`](#install-native-host) | Registers the browser host | Browser manifests, config |
 | [`ingest`](#ingest) | Archives an extension export file | Stage |
 | [`import`](#import) | Turns an official export (a takeout) into inbox bundles, or feeds a copied Grok Bot cache backup in as an archive pass | Takeout mode: an existing `--stage` and a named `--inbox`. Backup mode: `--stage` and one or more `--from` directories, read-only |
@@ -313,6 +314,42 @@ is produced only after a complete survey.
 
 Nothing calls this command for you: no schedule, no `push`, no `run-once`, no
 browser host.
+
+### `mirror`
+
+`mirror sync` runs one copy round: list the declared destination's whole
+repository, download the files the local mirror lacks, and hash every file
+against its own name (`config`, the one non-addressed file, is compared and
+copied byte for byte). The result lives under
+`~/.local/share/chat-stasher/mirror/<name>/` — the *storage*, the `keys/`
+directory, `index/`, `snapshots/` and `data/`, everything except `locks/`,
+which this build never holds. Nothing is decrypted to copy it; with
+`[mirror]` enabled, the scheduled pass runs the same round after its own
+push, inside the pass's leftover budget. Declare one in
+[config.md](config.md#mirror).
+
+One run is one bounded round: a large first fill spans several rounds, each
+resuming where the previous stopped, and `status` reports the progress as
+progress — a round that stops early is not a failure. Before a first fill
+starts, the command estimates whether the remaining download plus the
+free-disk floor fits the free space, and refuses with both numbers when it
+does not.
+
+| Flag | Meaning |
+|---|---|
+| `--budget-secs <n>` | The round's budget. Default 600. A stop here is a pause; the next round resumes. |
+| `--keep-ssh-masters` | Leave SSH connection masters open after this run (they are shut down by default on every exit path). |
+
+Exit codes, the same vocabulary `verify` and `read` use — and the one place
+a "checked and failed" answer exists for the *remote*:
+`0` the mirror holds everything the remote listed, verified ·
+`3` the round did not finish — the budget ran out, the free-disk floor tripped, the space pre-estimate refused to start, or the remote could not be read mid-round — progress is recorded and the next round resumes ·
+`1` a finished read that failed: the source proved corrupt (a file hashed against its own name twice and failed both times — not a transfer a later round can heal), a local write failed, or the listing named a file over the whole-file bound ·
+`2` usage error — no `[mirror]` section, the switch is off, `mirror_of` names no declared destination, or the destination has never been initialised (run a push first). Nothing was read or written.
+
+The round's own records (`mirror-state.json`, written only by a completed
+round, and `mirror-progress.json`, written every round) carry ids, counts
+and destination names — no repository paths, and no raw error chains.
 
 ## Getting your conversations back
 

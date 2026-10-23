@@ -22,9 +22,12 @@ semantic constraints this repo will not bend on (they are spec, not style):
   T4 · one-word-one-meaning-reap. "reap" is only permitted in ssh master connection
         reclaim context; all stage shard-body reclamation must say reclaim.
   T5 · no-cjk-characters.       Source code and tests under crates/ and under
-        apps/extension/ must not contain Chinese characters in comments or code
-        strings. The extension's Chinese lives in apps/extension/locales/zh_CN.yml
-        and nowhere else; T5_SCOPES below lists what is scanned and what is not.
+        apps/extension/ must not contain Chinese characters nor CJK/fullwidth
+        punctuation in comments or code strings. The extension's Chinese lives
+        in apps/extension/locales/zh_CN.yml and nowhere else; T5_SCOPES below
+        lists what is scanned and what is not. A line carrying the literal
+        marker "t5-allow:" is exempt — for test *data* that must quote CJK
+        punctuation to assert something about it, never for prose.
   T6 · captured-by-this-browser-≠-saved. Decision D6 (36-EXTENSION-TOPOLOGY §5):
         the extension's surfaces may state what THIS install has confirmed only
         as "captured by this browser", the archive layer (CLI, dashboard) speaks
@@ -153,12 +156,22 @@ RULES = [
         "id": "T5",
         "name": "no-cjk-characters",
         "patterns": [
-            {"forbidden": r"[\u4e00-\u9fff]"},
+            # The ideograph block is the original rule; the two punctuation
+            # blocks were added because the language invariant (CLAUDE.md
+            # "Language") is about the *public surface being English*, and
+            # fullwidth `＋` / `（）` slipped through shipped comments while
+            # the gate stayed green (W1022 rev0 issue 7). U+3000-303F is CJK
+            # punctuation and spacing, U+FF00-FFEF is the fullwidth latin
+            # forms — together they close the loophole without scanning every
+            # non-ASCII glyph (em-dashes, «guillemets», emoji stay English
+            # enough that shipping one is a review judgement, not a rule).
+            {"forbidden": r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]"},
         ],
         "suggestion": (
-            "crates/ 与 apps/extension/ 下源码与测试中禁止出现中文字符（注释与代码均"
-            "包含）；请替换为地道、准确的英文。中文词条只允许出现在 "
-            "apps/extension/locales/zh_CN.yml 里。"
+            "crates/ 与 apps/extension/ 下源码与测试中禁止出现中文字符或全角标点"
+            "（注释与代码均包含）；请替换为地道、准确的英文和半角标点。中文及其"
+            "标点只允许出现在 apps/extension/locales/zh_CN.yml 里；测试数据必须"
+            "引用全角标点时，在该行加 t5-allow: 标记并写明原因。"
         ),
     },
     {
@@ -237,14 +250,28 @@ class FileLineHit:
     text: str
 
 
+# The literal marker that exempts ONE line from T5: for test *data* that must
+# carry CJK punctuation to assert something about it (splitting a registry
+# path on a full-width annotation, asserting the annotation did not leak into
+# a rendered root). Never for comments or prose; a marker is visible in
+# review and rechargeable in a way a silent exclusion is not.
+T5_LINE_ALLOW = "t5-allow:"
+
+
 def check_cjk(root: str, rule: dict) -> list[tuple[FileLineHit, dict]]:
     """Scan the T5_SCOPES source trees for CJK characters, line by line.
 
     `.json` is included under crates/ because the harness registry there ships
-    with the binary and some of its fields reach users; it is as much part of the
-    public English surface as the source. The extension side adds `.ts`, `.tsx`
-    and `.html` for the same reason — those are the popup's markup and the code
-    that fills it.
+    with the binary and some of its fields reach users; it is as much part of
+    the public English surface as the source. The extension side adds `.ts`,
+    `.tsx` and `.html` for the same reason — those are the popup's markup and
+    the code that fills it.
+
+    A line carrying the `t5-allow:` marker is skipped: the marker exists for
+    test data that must *quote* CJK punctuation to assert something about it,
+    and it is deliberately loud, per-line and reviewable — an exemption hidden
+    in a config list rots, one visible in the data's own file gets re-read
+    every time the data does.
 
     A file that cannot be read or decoded is reported, not skipped: a gate that
     treats "could not look" as "clean" is the exact failure this repository
@@ -270,6 +297,8 @@ def check_cjk(root: str, rule: dict) -> list[tuple[FileLineHit, dict]]:
                     with open(full_path, "r", encoding="utf-8") as fh:
                         for lineno, line in enumerate(fh, start=1):
                             line_content = line.rstrip("\r\n")
+                            if T5_LINE_ALLOW in line_content:
+                                continue
                             if pat.search(line_content):
                                 out.append((FileLineHit(path=rel_path, line=lineno, text=line_content.strip()), rule))
                 except (OSError, UnicodeDecodeError) as exc:
@@ -433,6 +462,15 @@ FIXTURE_VIOLATING = {
     "t5_violation.json": (
         '{"display_name": "中文显示名"}\n'
     ),
+    # The punctuation half of T5 (W1022 rev0 issue 7): fullwidth plus and
+    # parentheses are barred from shipped prose the same as ideographs, so
+    # the class widened to U+3000-303F and U+FF00-FFEF must actually fire.
+    "t5_fullwidth_violation.rs": (
+        '// the budget is spent ＋ the round resumes\n'
+        'pub fn bad_fullwidth() {\n'
+        '    println!("not covered（check failed）");\n'
+        '}\n'
+    ),
 }
 
 # The extension half of T5. These live under apps/extension/, so they are written
@@ -547,6 +585,17 @@ FIXTURE_CLEAN = {
         '    retention: String,\n'
         '}\n'
     ),
+    # The t5-allow: marker (W1022 rev0 issue 7): one line of test *data*
+    # carrying CJK punctuation on purpose is exempt only when marked —
+    # only that line, so a marker that muted more than its own line makes
+    # the violating run under-report and fails this selftest.
+    "t5_allow_clean.rs": (
+        'pub fn split_annotation(t: &str) -> &str {\n'
+        "    t.split('（') // t5-allow: registry data quotes fullwidth punctuation on purpose\n"
+        '        .next()\n'
+        '        .unwrap_or("")\n'
+        '}\n'
+    ),
     "t5_clean.rs": (
         '// English comments only\n'
         'pub fn good_english() {\n'
@@ -606,9 +655,11 @@ def selftest() -> int:
             say(f"  {line}")
 
         expect(proc.returncode == 1, "violating tree exits 1")
-        # 14 from crates/ (the 13 plus T6's CLI fixture) + 3 from apps/extension/
-        # (T5) + 2 from the locale files (T6 extension half).
-        expect("FAILED:19" in report, "violating tree reports exactly 19 violations")
+        # 14 from crates/ (the 13 plus T6's CLI fixture) + 2 more from
+        # t5_fullwidth_violation.rs (the fullwidth comment line and the
+        # string line each report once) + 3 from apps/extension/ (T5) + 2
+        # from the locale files (T6 extension half).
+        expect("FAILED:21" in report, "violating tree reports exactly 21 violations")
         expect("t1_violation.rs" in report, "T1 fixture is named in the report")
         expect("t2_violation.rs" in report, "T2 fixture is named in the report")
         expect("t3_violation.rs" in report, "T3 fixture is named in the report")
@@ -616,6 +667,10 @@ def selftest() -> int:
         expect("t5_violation.rs" in report, "T5 fixture is named in the report")
         expect("t6_violation.rs" in report, "T6 CLI fixture is named in the report")
         expect("t5_violation.json" in report, "T5 also covers .json under crates/")
+        expect("t5_fullwidth_violation.rs" in report,
+               "T5's widened class still fires on fullwidth punctuation")
+        expect("t5_allow_clean.rs" not in report,
+               "a t5-allow: marked data line is exempt from T5")
         expect("d6_bad" in report, "T6 catches the count claim in a locale value")
         expect(
             "a comment quoting old wording is not a value" not in report,
