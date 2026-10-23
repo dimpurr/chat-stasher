@@ -224,6 +224,42 @@ fn backfill_progress_has_its_own_line_and_never_claims_completion() {
     );
 }
 
+/// A pass that deferred to the sibling timer holding the producer's lock is
+/// the recurring shape of a multi-destination install, so its line is the
+/// hand-off itself: the first line stays the green verdict, the producer's
+/// line names the deferral and never borrows the "did not finish reading"
+/// vocabulary or a fix, because the winning pass reported the pull.
+#[test]
+fn deferred_producer_renders_the_hand_off_beside_a_green_verdict() {
+    let mut state = ok_state(NOW - 600);
+    state.pull_letta_deferred = true;
+    let verdict = runstate::summarize(&RunStateRead::Present(state), NOW, 4 * HOUR);
+    assert!(verdict.healthy, "a deferred producer is a healthy pass");
+    assert!(
+        verdict.line.starts_with("Healthy:"),
+        "the first line is the archive cycle's own green sentence: {}",
+        verdict.line
+    );
+    let letta = verdict
+        .letta
+        .as_ref()
+        .expect("the deferral is rendered, never silent");
+    assert!(
+        letta.sentence.contains("deferred"),
+        "the producer's line names the hand-off: {}",
+        letta.sentence
+    );
+    assert!(
+        !letta.sentence.contains("did not finish reading"),
+        "the deferral is not worded as a read failure: {}",
+        letta.sentence
+    );
+    assert!(
+        letta.fix.is_none(),
+        "a hand-off carries no fix — nothing is broken: {letta:?}"
+    );
+}
+
 /// The two facts stay two facts even when the local cycle failed too: a
 /// collect failure keeps its step-named line, and the producer's line stays
 /// beside it rather than being erased by the earlier failure (the durable

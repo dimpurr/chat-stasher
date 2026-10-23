@@ -1129,15 +1129,16 @@ fn human_age(secs: u64) -> String {
 /// and state the consequence). Pure, so the wording is assertable in a unit
 /// test; the command itself prints whatever this returns.
 ///
-/// Two findings warn, one per install shape:
+/// Three findings warn:
 ///
-/// * **run-once install** — a declared destination no installed hourly
-///   timer pushes: only a command naming it by hand reaches it, and the
-///   weekly stage clean-up consults every declared destination and holds
-///   every byte until they answer, so one of these keeps the stage from
-///   ever shrinking. Also: a destination the timers *now* push whose
-///   credentials are `env:NAME` — the files this command writes declare
-///   no environment, so the very first scheduled run cannot authenticate.
+/// * **run-once install** — a declared pull producer whose credential the
+///   timer environment cannot resolve; a declared destination no installed
+///   hourly timer pushes; a declared producer shared by more than one
+///   destination timer, whose hourly race this branch explains instead of
+///   leaving the deferred status line to be met unexplained; and shell-only
+///   credentials on a destination the timers *now* push — the files this
+///   command writes declare no environment, so the very first scheduled
+///   run cannot authenticate.
 /// * **reclaim-stage install** — the job proves *every* declared
 ///   destination before deleting, and declared destinations no hourly
 ///   timer pushes are exactly the ones that will block it.
@@ -1160,6 +1161,11 @@ pub fn install_warnings(
     // still works, and the warning plus the per-pass exit 3 are the two
     // places the trap is said out loud.
     let mut producer_line = Vec::new();
+    let producer_declared = config
+        .pull
+        .as_ref()
+        .and_then(|pull| pull.letta.as_ref())
+        .is_some();
     if matches!(
         config
             .pull
@@ -1197,6 +1203,30 @@ pub fn install_warnings(
             // question is answered here at install time with the same
             // sentence every later surface repeats.
             let mut lines = producer_line;
+            // W964: with one timer per destination and one shared producer
+            // state, every hourly race has exactly one winner; the other
+            // passes defer. The deferral is recorded and rendered rather
+            // than an error, so the one moment a user is guaranteed to be
+            // reading — this printout — is where the deferred producer
+            // line they will see each hour is explained as the hand-off it
+            // is, before they meet it unexplained in `status`.
+            if producer_declared && covered.len() > 1 {
+                lines.push(format!(
+                    "schedule install: WARNING ⚠ the declared [pull.letta] producer is pulled \
+                     by each of the {} installed destination timers, and they share one \
+                     producer state: each hour the passes serialize, and all but the one that \
+                     wins the lock defer instead of pulling.",
+                    covered.len()
+                ));
+                lines.push(
+                    "schedule install:   The deferral is recorded, not hidden: the deferring \
+                      passes' status shows the producer line \"Letta pull deferred\" beside a \
+                      green archive cycle and their run-once exits stay clean, the winning \
+                      pass reports the producer's own result that hour, and every pass's push \
+                      moves the shared stage."
+                        .to_string(),
+                );
+            }
             if !missing.is_empty() {
                 lines.push(format!(
                     "schedule install: WARNING ⚠ no installed timer pushes declared \
@@ -2832,6 +2862,76 @@ mod tests {
                 .iter()
                 .any(|alert| alert.sentence.contains("pull.letta")),
             "an undeclared producer is nobody's finding"
+        );
+    }
+
+    /// A declared producer shared by more than one destination timer is
+    /// raced every hour: one pass wins the producer's state lock and the
+    /// others defer. The install warns exactly once, at the moment the user
+    /// is looking, that the deferred status line they will see is that
+    /// hand-off — not an unread failure — while a single timer owns its
+    /// producer uncontended and stays quiet.
+    #[test]
+    fn a_declared_producer_across_multiple_destination_timers_is_explained_at_install() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        plant_units(home.path(), Some("storagebox"));
+        plant_units(home.path(), Some("r2"));
+        let destination = |repo: &str| crate::config::DestinationConfig {
+            repo: Some(repo.to_string()),
+            ..Default::default()
+        };
+        let producer = || crate::config::PullSectionConfig {
+            letta: Some(crate::config::LettaPullConfig {
+                account_id: Some("synthetic-account".to_string()),
+                api_key: Some("synthetic-resolved-secret".to_string()),
+                ..crate::config::LettaPullConfig::default()
+            }),
+        };
+        let both = crate::config::Config {
+            pull: Some(producer()),
+            destinations: [
+                ("storagebox".to_string(), destination("opendal:sftp")),
+                ("r2".to_string(), destination("opendal:s3")),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let warnings =
+            install_warnings(&both, schedule::Unit::RunOnce, Format::Launchd, home.path());
+        let joined = warnings.join("\n");
+        assert!(
+            joined.contains("share one producer state"),
+            "the race the timers create is named: {joined}"
+        );
+        assert!(
+            joined.contains("Letta pull deferred"),
+            "the deferral status line is explained before it is met: {joined}"
+        );
+        assert!(
+            joined.contains("run-once exits stay clean"),
+            "the deferral is said to be a hand-off, not a failure: {joined}"
+        );
+        // One timer, one destination: nobody contends, so the warning does
+        // not fire — the mechanism only speaks for the combination that
+        // produces deferred passes. The destination is an sftp one, which
+        // asks no scheduler-invisible environment variable, so the quiet
+        // assertion isolates exactly the producer-timer combination.
+        let home = tempfile::tempdir().unwrap();
+        plant_units(home.path(), Some("storagebox"));
+        let one = crate::config::Config {
+            pull: Some(producer()),
+            destinations: [("storagebox".to_string(), destination("opendal:sftp"))]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let single_warnings =
+            install_warnings(&one, schedule::Unit::RunOnce, Format::Launchd, home.path());
+        assert!(
+            single_warnings.is_empty(),
+            "an uncontended producer timer warns about nothing: {single_warnings:?}"
         );
     }
 }

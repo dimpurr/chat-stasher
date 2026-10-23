@@ -52,7 +52,7 @@ Steps 1–3 are plaintext on your own machine. Step 4 is the only encrypted
 boundary. Two steps can involve a network: step 4, and an **API pull** —
 `chat-stasher pull letta`, or the `[pull.letta]` producer a scheduled
 `run-once` pass reads before its collect step — which talks, over HTTPS, to
-the API you name the account on (`crates/chat-stasher/src/letta.rs:214-224`,
+the API you name the account on (`crates/chat-stasher/src/letta.rs:232-242`,
 and see [API pull](../docs/pull.md)). Both reach only destinations and
 providers you configure yourself.
 
@@ -64,7 +64,7 @@ providers you configure yourself.
 |---|---|
 | **Can see** | Nothing. |
 | **Cannot see** | Your conversation content, your session ids, your account identity, your destination address, whether you run this at all. |
-| **Evidence** | The repository contains no project-operated endpoint. The CLI's network capabilities are exactly two, both user-configured: the rustic/opendal backend you point `push` at (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:115-120,166-182`), and the declared Letta API a `pull letta` command or a `[pull.letta]` scheduled pass reads (`crates/chat-stasher/src/letta.rs:214-224`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:161-164`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's exact paths (a plan may name three: the list, the body, and a body's optional second step), or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:442-468,470-481`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:33`, `:747-754`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:125`). |
+| **Evidence** | The repository contains no project-operated endpoint. The CLI's network capabilities are exactly two, both user-configured: the rustic/opendal backend you point `push` at (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:115-120,166-182`), and the declared Letta API a `pull letta` command or a `[pull.letta]` scheduled pass reads (`crates/chat-stasher/src/letta.rs:232-242`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:161-164`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's exact paths (a plan may name three: the list, the body, and a body's optional second step), or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:442-468,470-481`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:33`, `:747-754`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:125`). |
 
 **Why this is worth stating precisely:** this is not a promise we are keeping.
 It is a property of there being no such link in the code. We could not read your
@@ -378,8 +378,8 @@ away the only way to notice the same account twice.
 |---|---|---|
 | **The account id** — the platform's own identifier, extracted from a response body (`identity.level` / `identity.value`) | The sealed shard record in your archive, **verbatim** (`apps/extension/entrypoints/background.ts:257-259`; `apps/extension/lib/contract.ts:1361-1366`; `crates/chat-stasher/src/inbox.rs:503-508`, `:592-597`) | **Yes, and in the clear.** It is the platform's own string — a user id, an email address or a handle — not a digest, so anyone who can read the shard can read it. It is stored but deliberately excluded from the shard's id and dedup key, which stay `platform.sessionId` / `file_sha256` (`crates/chat-stasher/src/inbox.rs:503-508`) |
 | **The install-local account fingerprint** (`account`) | The same sealed shard record, verbatim (`crates/chat-stasher/src/inbox.rs:509-527`) | **No.** Its salt is generated once per install and never leaves that profile, so two installs mint two incomparable digests for one account (`apps/extension/lib/account-fingerprint.ts:156-191`; `apps/extension/lib/contract.ts:1495-1499`) |
-| **The masterkey-derived account key** (`account_key`) | Sealed-shard **metadata** — never the payload bytes — and the host's local coordination database (`crates/chat-stasher/src/inbox.rs:531`, `:966`; `crates/chat-stasher/src/nativehost.rs:1608-1611`) | **Yes — the one value deliberately comparable across every install and every machine of one person**, and the only one that is. Derived from the archive masterkey, so it is comparable exactly where that key is, and nowhere else (below) |
-| **The session id** (`platform.sessionId` / `session_id`) | The shard's identity axis: the id and the dedup key | Not account-scoped at all. No account and no instance take part in it, and the same session seen by two installs is the same key by construction (`crates/chat-stasher/src/inbox.rs:1555-1563`) |
+| **The masterkey-derived account key** (`account_key`) | Sealed-shard **metadata** — never the payload bytes — and the host's local coordination database (`crates/chat-stasher/src/inbox.rs:531`, `:973`; `crates/chat-stasher/src/nativehost.rs:1608-1611`) | **Yes — the one value deliberately comparable across every install and every machine of one person**, and the only one that is. Derived from the archive masterkey, so it is comparable exactly where that key is, and nowhere else (below) |
+| **The session id** (`platform.sessionId` / `session_id`) | The shard's identity axis: the id and the dedup key | Not account-scoped at all. No account and no instance take part in it, and the same session seen by two installs is the same key by construction (`crates/chat-stasher/src/inbox.rs:1562-1570`) |
 
 🔴 **The masterkey-derived account key is the mechanism that makes "the same
 account on two machines" answerable, and it is derived rather than observed.**
@@ -395,7 +395,7 @@ the archive can confirm that two conversations belong to one account — which i
 already the party who can read both conversations. The host never returns the
 masterkey or the derived value to the extension, the value is not in the bundle,
 the payload or the export file, and a test asserts the sealed payload never
-contains it (`crates/chat-stasher/src/inbox.rs:2200-2222`). No account id
+contains it (`crates/chat-stasher/src/inbox.rs:2207-2229`). No account id
 visible, no key file resolvable without ambiguity, or a key file that cannot be
 read each mean **no comparable key is derived** — coordination then falls back
 to a platform-wide bucket (`crates/chat-stasher/src/nativehost.rs:1310-1345`,
@@ -615,7 +615,7 @@ The properties that bound this boundary:
 - **Concurrent writers are serialised.** The host and `ingest` both hold an
   exclusive lock on `<stage>/.ingest.lock` while they allocate a shard sequence
   number and seal the shard, with a bounded 10-second wait
-  (`crates/chat-stasher/src/inbox.rs:66-68`, `:1287-1315`). Two browsers, two
+  (`crates/chat-stasher/src/inbox.rs:66-68`, `:1294-1322`). Two browsers, two
   profiles, or a host racing a manual `ingest` therefore cannot pick the same
   sequence number.
 - **A delivery is confirmed twice over.** The host recomputes SHA-256 over the
@@ -749,7 +749,7 @@ words with different consequences:
   fix lives in the browser profile and not in the host: retrying the same bytes
   could never succeed. The capture stays in the outbox, listed rejected with that
   instruction, and is never merged with the first install's record
-  (`crates/chat-stasher/src/inbox.rs:796-804`, `:875-885`, `:1019-1074`;
+  (`crates/chat-stasher/src/inbox.rs:796-804`, `:875-885`, `:1026-1081`;
   `crates/chat-stasher/src/nativehost.rs:1129-1134`, `:1181`). An unnamed label is
   deliberately *not* evidence of a conflict, and neither is the same browser under
   the same label — that case is invisible here, by construction.

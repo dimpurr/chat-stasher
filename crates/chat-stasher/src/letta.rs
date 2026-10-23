@@ -189,6 +189,24 @@ pub fn pass_pull(config: &crate::config::Config) -> Result<Option<PassPull>> {
     }))
 }
 
+/// Another pass of this machine holds the producer's state lock. This is not
+/// a failure of the pull pipeline — with one declared destination per timer,
+/// the passes share one producer state, so all but the pass that won the
+/// lock see this every hour, and the winner reports the producer's own
+/// result that round. The scheduled pass therefore records a **deferral**
+/// (`run-state.json`'s `pull_letta_deferred`, status's producer line)
+/// instead of pretending to have read; the standalone `pull letta` command
+/// still refuses with the same sentence, because a manual invocation has
+/// nothing to defer to.
+#[derive(Debug)]
+pub struct ProducerBusy;
+impl std::fmt::Display for ProducerBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Letta producer state busy")
+    }
+}
+impl std::error::Error for ProducerBusy {}
+
 pub struct Api {
     client: reqwest::blocking::Client,
     base: String,
@@ -435,14 +453,16 @@ struct Snapshot {
     /// the round republishes nothing.
     #[serde(default)]
     cursors: BTreeMap<String, BTreeMap<String, String>>,
-    /// The listing-row digest of each conversation the last round walked:
-    /// a conversation whose row is byte-identical has not reported any
-    /// change at the source, so the steady round skips its message fetch
-    /// altogether — the cost of a caught-up round is the listings plus the
-    /// conversations that moved, not the size of the account. A row change
-    /// re-fetches the content and re-differs it against the cursors above.
+    /// Where the re-verification sweep of this agent resumes: the first
+    /// conversation the previous round did not re-read. A round re-reads as
+    /// many conversations as its pace budget admits, starting here, so a
+    /// caught-up account costs a bounded slice of message fetches per round
+    /// instead of the whole account — and correctness never rests on a
+    /// conversation's listing row saying "unchanged": whatever the row
+    /// claims, the sweep re-reads the conversation and re-diffs the content
+    /// cursors within a bounded number of rounds.
     #[serde(default)]
-    rows: BTreeMap<String, String>,
+    verify: BTreeMap<String, String>,
     /// This session's contribution to the capture-order record, from the
     /// last walk that fetched it. A steady round assembles the record from
     /// these pieces, so a round that skipped every fetch republishes a
@@ -529,12 +549,16 @@ fn bundle(
     Ok(bytes)
 }
 
-/// Replay the complete inventory every round — edit and disappearance
+/// Replay the inventory as a paced, resumable sweep — edit and disappearance
 /// detection is a content comparison, never a metadata shortcut — but let
 /// publication follow the content: an unchanged conversation republishes
-/// nothing, and a conversation the round cannot reach stays in the
-/// backfill position and is continued by the next round. Window
-/// exhaustion cannot establish absence for agent-only messages.
+/// nothing, and a conversation the round cannot reach stays in the backfill
+/// position and is continued by the next round. A round re-reads as many
+/// conversations as its pace budget admits (the sweep's slice), resuming
+/// where the previous round stopped, so every conversation is content-
+/// verified within a bounded number of rounds rather than on the word of
+/// its listing row. Window exhaustion cannot establish absence for
+/// agent-only messages.
 pub fn run(
     api: &mut Api,
     account: &str,
@@ -563,7 +587,7 @@ pub fn run(
         .open(state.join("letta.lock"))?;
     pass_lock
         .try_lock()
-        .map_err(|_| anyhow::anyhow!("Letta producer state busy"))?;
+        .map_err(|_| anyhow::Error::new(ProducerBusy))?;
     let db = rusqlite::Connection::open(state.join("letta.sqlite3"))?;
     #[cfg(unix)]
     {
@@ -623,6 +647,23 @@ pub fn run(
         &[("archive_status", "all".into())],
         false,
     )?;
+    // The sweep's per-round slice: how many conversations a caught-up round
+    // re-reads before handing the rest to the next round. Derived, not a
+    // knob — each conversation costs at least one paced request for its
+    // content page and one for the empty terminator that ends paging, and
+    // the round still owes the agent window, its metadata and listings, so
+    // the slice takes half the requests the remaining budget admits and
+    // spends half of those on conversations at two requests apiece. A
+    // deadline that strikes inside the slice still reports "did not finish
+    // reading" and resumes from the persisted position.
+    let verify_slice: usize = std::cmp::max(
+        1,
+        (api.deadline()
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            / std::cmp::max(1, api.pace.as_millis())) as usize
+            / 4,
+    );
     let mut known: BTreeSet<String> = agents
         .iter()
         .map(|v| id(v).map(str::to_owned))
@@ -728,7 +769,7 @@ pub fn run(
             // the next round continues from.
             let mut snapshot = Snapshot {
                 cursors: previous.cursors.clone(),
-                rows: previous.rows.clone(),
+                verify: previous.verify.clone(),
                 orders: previous.orders.clone(),
                 backlog: previous.backlog.clone(),
                 ..Snapshot::default()
@@ -750,7 +791,49 @@ pub fn run(
             }
             let mut conversation_ids = BTreeSet::new();
             let mut overlap = BTreeSet::new();
-            for conversation in conversations.iter().filter(|c| c["agent_id"] == agent) {
+            // The sweep's order: this agent's conversations in listing
+            // order, rotated so the first one is where the previous round's
+            // slice stopped. The resume point is an id, and a source that
+            // drops or reorders it simply restarts the sweep at the
+            // listing's start — a rotation may loop a second time, it can
+            // never skip a conversation for good.
+            let agent_rows: Vec<usize> = conversations
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row["agent_id"] == agent)
+                .map(|(index, _)| index)
+                .collect();
+            let start = previous
+                .verify
+                .get(&agent)
+                .and_then(|at| {
+                    agent_rows.iter().position(|&index| {
+                        id(&conversations[index]).is_ok_and(|session| session == at)
+                    })
+                })
+                // reason: a resume id the listing no longer names means the
+                // source moved or dropped that conversation — starting the
+                // sweep at the listing's head is the honest fallback, not a
+                // fabricated position; the only cost is re-reading what an
+                // earlier round already verified, never skipping one.
+                .unwrap_or(0);
+            let ordered: Vec<usize> = agent_rows[start..]
+                .iter()
+                .chain(agent_rows[..start].iter())
+                .copied()
+                .collect();
+            // The slice: a caught-up round re-reads exactly `verify_slice`
+            // conversations before handing the rest to the next round. Mid
+            // backfill there is no slice — that round owes first
+            // publication, and the deadline alone bounds how far it gets.
+            let verify_budget = match snapshot.backlog {
+                None => verify_slice,
+                Some(_) => usize::MAX,
+            };
+            let mut reverified: usize = 0;
+            let mut last_read: Option<String> = None;
+            for &row_index in &ordered {
+                let conversation = &conversations[row_index];
                 let session = id(conversation)?;
                 ensure!(
                     !session.starts_with("agent-default-"),
@@ -772,16 +855,14 @@ pub fn run(
                         continue;
                     }
                 }
-                // The row cursor: the listing this round already fetched
-                // names this conversation byte-for-byte as the last walked
-                // round did. A conversation whose row is unchanged has
-                // reported no change at the source, so the steady round
-                // does not spend a request on its messages — the cursors
-                // and the capture-order piece it recorded stand. A row
-                // that changed re-fetches and re-diffs the content below.
-                let row_cursor = hash(crate::import::canonical_json(conversation).as_bytes());
-                if previous.required.is_empty() && previous.rows.get(session) == Some(&row_cursor) {
-                    snapshot.rows.insert(session.to_owned(), row_cursor.clone());
+                if reverified >= verify_budget {
+                    // The round's slice is spent: the conversation keeps
+                    // the memory of its last re-verified state — carried,
+                    // never claimed as current — and the sweep reaches it
+                    // within a bounded number of rounds whatever its
+                    // listing row says. This is the one place memory
+                    // outlives a round, so the carry is bounded by the
+                    // sweep, not by the source's word.
                     if let Some(old) = previous.sessions.get(session) {
                         snapshot.sessions.insert(session.to_owned(), old.clone());
                     }
@@ -817,7 +898,8 @@ pub fn run(
                     "conversation-metadata".to_owned(),
                     hash(complete_metadata.as_bytes()),
                 );
-                snapshot.rows.insert(session.to_owned(), row_cursor.clone());
+                reverified += 1;
+                last_read = Some(session.to_owned());
                 // Two content cursors for the two conversation classes: the
                 // raw the `file` block hashes and the metadata rows —
                 // everything except the bundle wrapper, whose `capturedAt`
@@ -833,45 +915,62 @@ pub fn run(
                             })
                     })
                 });
-                if unchanged {
-                    continue;
-                }
-                publish(
-                    inbox,
-                    &mut report,
-                    &mut snapshot,
-                    &agent,
-                    &tenant,
-                    session,
-                    "messages",
-                    &raw,
-                    status.clone(),
-                    false,
-                )?;
-                publish(
-                    inbox,
-                    &mut report,
-                    &mut snapshot,
-                    &agent,
-                    &tenant,
-                    session,
-                    "conversation-metadata",
-                    &complete_metadata,
-                    status,
-                    false,
-                )?;
-                if let Some(pending) = &mut snapshot.backlog {
-                    pending.remove(session);
+                if !unchanged {
+                    publish(
+                        inbox,
+                        &mut report,
+                        &mut snapshot,
+                        &agent,
+                        &tenant,
+                        session,
+                        "messages",
+                        &raw,
+                        status.clone(),
+                        false,
+                    )?;
+                    publish(
+                        inbox,
+                        &mut report,
+                        &mut snapshot,
+                        &agent,
+                        &tenant,
+                        session,
+                        "conversation-metadata",
+                        &complete_metadata,
+                        status,
+                        false,
+                    )?;
+                    if let Some(pending) = &mut snapshot.backlog {
+                        pending.remove(session);
+                    }
                 }
                 // Durable before the walk reaches for the next conversation,
-                // so a round that stops here keeps every published
-                // conversation plus the position the next one continues
-                // from.
+                // published or not — a re-verified conversation that stayed
+                // unchanged is the sweep's own progress, and the next round
+                // must resume from it rather than re-reading what this one
+                // already proved.
                 db.execute(
                     "INSERT INTO agents VALUES (?1,NULL,?2) ON CONFLICT(scope) DO UPDATE SET pending=excluded.pending",
                     rusqlite::params![scope, serde_json::to_string(&snapshot)?],
                 )?;
                 db.execute_batch("COMMIT; BEGIN IMMEDIATE;")?;
+            }
+            // The sweep position the next round resumes from: the first
+            // listed conversation after the last one this round read, or the
+            // listing's start when the read reached the end — the rotation
+            // cycles rather than completing, so every conversation is
+            // re-read within a bounded number of rounds however large the
+            // account grows.
+            if let Some(last) = last_read {
+                let read_at = agent_rows.iter().position(|&index| {
+                    id(&conversations[index]).is_ok_and(|session| session == last)
+                });
+                if let Some(at) = read_at {
+                    let next = agent_rows[(at + 1) % agent_rows.len()];
+                    if let Ok(resume) = id(&conversations[next]).map(str::to_owned) {
+                        snapshot.verify.insert(agent.clone(), resume);
+                    }
+                }
             }
             // A conversation that left the source during a backfill can no
             // longer be first-published; the listing this round decides what
@@ -1497,10 +1596,13 @@ mod tests {
                     }
                     let mode = m.load(Ordering::SeqCst);
                     let after = path.contains("after=");
-                    // The conversation listing row changes with the modes that
-                    // change the conversation — that is how a provider's row
-                    // says "this conversation moved", and the steady round's
-                    // row cursor reads exactly this.
+                    // The conversation listing row changes with the modes
+                    // that change the conversation — that is how a
+                    // provider's row *usually* says "this conversation
+                    // moved", and mode 14 exists because that word is not
+                    // proof: it serves edited content under a row that
+                    // stays byte-identical, the case a walk must verify by
+                    // re-reading, not trust.
                     let row_updated_at = if mode == 1 {
                         "2026-02-02T00:00:00Z"
                     } else if mode == 2 {
@@ -1557,7 +1659,8 @@ mod tests {
                             // The oversized-account fixture: one agent, many
                             // conversations, all changing nothing between
                             // rounds, so the backfill spans rounds on budget
-                            // and the steady rounds cost only the listings.
+                            // and the steady rounds re-verify a bounded
+                            // slice each.
                             if after {
                                 json!([])
                             } else {
@@ -1592,7 +1695,7 @@ mod tests {
                         } else if after {
                             json!([{"id":"message-a","seq_id":1,"content":"synthetic","render":true},{"id":"message-b","seq_id":2,"content":"synthetic"}])
                         } else {
-                            json!([{"id":"message-a","seq_id":1,"content":if mode==1 {"synthetic edit"} else {"synthetic"},"unknown":{"null":null}}])
+                            json!([{"id":"message-a","seq_id":1,"content":if mode==1 || mode==14 {"synthetic edit"} else {"synthetic"},"unknown":{"null":null}}])
                         }
                     } else if limit.is_some() && path.contains("/messages?") {
                         if after {
@@ -1988,8 +2091,9 @@ mod tests {
     /// The decision's steady-state promise: two rounds against an unchanged
     /// source, and the second publishes nothing — zero new inbox bytes, zero
     /// re-sends — while the round still completes (exit-shape incomplete 0),
-    /// because the listing rows match, the content cursors match and the
-    /// capture order reassembles to identical bytes from its carried pieces.
+    /// because the sweep re-verified the conversations it owed, found the
+    /// content cursors matching and the capture order reassembled to
+    /// identical bytes from its pieces.
     #[test]
     fn second_unchanged_round_republishes_nothing() {
         let sandbox = crate::test_support::Sandbox::new();
@@ -2030,9 +2134,10 @@ mod tests {
         );
         let steady_requests = server.requests.load(Ordering::SeqCst) - requests_before;
         assert!(
-            steady_requests <= 12,
-            "the steady round reads listings and windows, not every conversation again: \
-             {steady_requests} requests"
+            steady_requests <= 16,
+            "the steady round re-verifies the conversations its slice owes — \
+             listings, windows and one re-read per conversation — not a \
+             growing re-walk: {steady_requests} requests"
         );
         // And it stays a no-op on the third round too — the second round
         // re-derived nothing that could grow.
@@ -2040,11 +2145,80 @@ mod tests {
         assert_eq!(inbox_files(), before);
     }
 
+    /// The regression a metadata shortcut once hid: a provider that serves
+    /// edited content while leaving the conversation's listing row
+    /// byte-identical must not be archived as "unchanged". Correctness rests
+    /// on comparing the fetched content, never on the listing row saying
+    /// "nothing moved" — the row staying still is the exact case the walk
+    /// must not trust, because nothing measures that the provider keeps the
+    /// row in step with the content.
+    #[test]
+    fn content_changed_without_row_movement_is_still_captured() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let root = sandbox.root();
+        let server = Server::start();
+        let local = root.join("agents");
+        fs::create_dir_all(local.join("agent-hidden")).unwrap();
+        let pull = || {
+            run(
+                &mut server.api(),
+                "synthetic-account",
+                &local,
+                &root.join("inbox"),
+                &root.join("state"),
+                &root.join("stage"),
+                "synthetic-machine",
+                &Proof(true),
+            )
+            .unwrap()
+        };
+        let first = pull();
+        assert!(first.bundles > 0, "the first round must publish");
+        let steady = pull();
+        assert_eq!(
+            steady.bundles, 0,
+            "the untouched source republishes nothing — the trap is armed"
+        );
+        // The trap: mode 14 serves edited content under a listing row that
+        // stays byte-identical to the settled round's. Skipping the fetch on
+        // the row alone would record the old content as "verified" — the
+        // silent loss this test forbids.
+        server.mode.store(14, Ordering::SeqCst);
+        let edited = pull();
+        assert!(
+            edited.bundles > 0,
+            "a conversation whose content changed underneath an unchanged \
+             listing row must be re-read and republished"
+        );
+        let exports = captured(&root.join("inbox"));
+        assert!(
+            exports.iter().any(|v| v["raw"]["data"]
+                .as_str()
+                .unwrap()
+                .contains("synthetic edit")),
+            "the edited content is in the archive"
+        );
+        assert!(
+            exports
+                .iter()
+                .any(|v| v["raw"]["data"].as_str().unwrap().contains("new version")),
+            "the second variant is observed, not silently dropped"
+        );
+        server.mode.store(0, Ordering::SeqCst);
+        // The revert is itself a content change the sweep must catch —
+        // one round of re-publication — and the round after that settles:
+        // detection is symmetric, and the sweep converges instead of
+        // churning.
+        assert!(pull().bundles > 0, "the reverted content is captured too");
+        assert_eq!(pull().bundles, 0, "and the settled source is a no-op again");
+    }
+
     /// The decision's large-account promise: an account too big for one
     /// round's budget completes across several rounds, each continuing from
     /// the persisted position, reporting progress (`pulled` of the estimated
     /// total) while still honestly "did not finish reading" — and once
-    /// caught up, a steady round costs the listings and windows only.
+    /// caught up, each steady round re-verifies one bounded slice of the
+    /// sweep at no-op cost.
     #[test]
     fn oversized_account_backfills_across_rounds_with_progress() {
         let sandbox = crate::test_support::Sandbox::new();
@@ -2120,9 +2294,10 @@ mod tests {
             40 * 2 + 5,
             "each conversation archived exactly once"
         );
-        // The steady round is a no-op and costs the listings and windows,
-        // not a full re-walk: it must fit even a fraction of one round's
-        // budget.
+        // The steady rounds are no-ops that re-verify one bounded slice each:
+        // the sweep rotates through the account a conversation at a time,
+        // resuming where the previous round stopped, so repeated rounds
+        // stay flat-cost instead of restarting the walk.
         let requests_before = server.requests.load(Ordering::SeqCst);
         let steady = pull();
         assert_eq!(
@@ -2137,10 +2312,24 @@ mod tests {
             "the steady round republishes nothing"
         );
         let steady_requests = server.requests.load(Ordering::SeqCst) - requests_before;
+        let requests_after_first = server.requests.load(Ordering::SeqCst);
+        let second_steady = pull();
+        assert_eq!(second_steady.bundles, 0);
+        assert_eq!(
+            second_steady.incomplete, 0,
+            "the next slice round completes too — the sweep resumes, it does not restart"
+        );
+        let second_steady_requests = server.requests.load(Ordering::SeqCst) - requests_after_first;
         assert!(
-            steady_requests <= 12,
-            "the steady round reads listings and windows, not every conversation: \
-             {steady_requests} requests"
+            steady_requests <= 40,
+            "the steady round re-verifies one bounded slice of the account, \
+             not a growing re-walk: {steady_requests} requests"
+        );
+        assert!(
+            (second_steady_requests as i64 - steady_requests as i64).abs() <= 8,
+            "consecutive steady rounds cost the same bounded slice — a restart \
+             would re-read what the first round already verified: \
+             {second_steady_requests} vs {steady_requests}"
         );
     }
 

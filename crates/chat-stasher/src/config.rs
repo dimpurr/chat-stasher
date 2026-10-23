@@ -2025,9 +2025,77 @@ mod tests {
     /// environment, and one that cannot be resolved refuses the config naming
     /// the option — while `env:NAME` keeps its documented lenient behaviour.
     #[test]
+    fn credential_references_resolve_and_a_missing_one_refuses_the_config() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let secret_file = dir.path().join("secret");
+        std::fs::write(&secret_file, "from-file\n").unwrap();
+
+        let good = format!(
+            "[destinations.d1.options]\naccess_key_id = \"file:{}\"\nsecret_access_key = \"literal\"\n",
+            secret_file.display()
+        );
+        let cfg = Config::from_text(&good).expect("a resolvable file reference must load");
+        assert_eq!(
+            cfg.destinations["d1"].options["access_key_id"], "from-file",
+            "the trailing newline must be trimmed"
+        );
+
+        let missing = "[destinations.d1.options]\naccess_key_id = \"file:/no/such/credential\"\n";
+        let err = Config::from_text(missing)
+            .expect_err("a credential file that cannot be read must refuse the config");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("destinations.d1.options.access_key_id"),
+            "the error must name the option: {text}"
+        );
+        assert!(
+            text.contains("could not be read"),
+            "the error must name the missing credential: {text}"
+        );
+        // The refusal carries its own type, so a `--json` caller classifies it
+        // with a downcast instead of matching the prose. Its message is
+        // `unusable_config`'s own rendering — the same first line and the same
+        // hint, checked with a synthetic reason so the assertion does not
+        // depend on platform io error wording.
+        assert!(
+            err.downcast_ref::<CredentialRefused>().is_some(),
+            "a credential refusal must downcast to its own type"
+        );
+        let rendered = CredentialRefused::new(
+            &std::path::PathBuf::from("/no/such/config"),
+            "synthetic reason".to_string(),
+        )
+        .to_string();
+        assert!(
+            rendered.starts_with(
+                "config file /no/such/config exists but cannot be used: synthetic reason\nhint: fix that file"
+            ),
+            "the typed refusal must render exactly like any other unusable config: {rendered}"
+        );
+        let unresolvable = "[destinations.d1]\nrepo = \"~alice/repo\"\n";
+        let err = Config::from_text(unresolvable)
+            .expect_err("a path the tool cannot resolve must refuse the config");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("destinations.d1.repo"),
+            "the error must name the option: {text}"
+        );
+        assert!(
+            err.downcast_ref::<CredentialRefused>().is_none(),
+            "only the fail-closed credential refusal is typed; every other unusable config is not: {text}"
+        );
+
+        let lenient =
+            "[destinations.d1.options]\naccess_key_id = \"env:CHAT_STASHER_TEST_UNSET_XYZ\"\n";
+        let cfg = Config::from_text(lenient)
+            .expect("an unset `env:` reference is omitted, not fatal (install.md §4.5)");
+        assert!(!cfg.destinations["d1"].options.contains_key("access_key_id"));
+    }
+
     /// W964: the declared pull producer's credential goes through the same
     /// shared resolver, fail-closed with the key named — the timer-reachable
     /// form the `[pull.letta]` section is built around.
+    #[test]
     fn pull_letta_api_key_resolves_and_refuses_named() {
         let dir = tempfile::TempDir::new().unwrap();
         let secret_file = dir.path().join("letta-key");
@@ -2096,74 +2164,6 @@ mod tests {
             "a literal is a valid declaration, left as written"
         );
     }
-
-    fn credential_references_resolve_and_a_missing_one_refuses_the_config() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let secret_file = dir.path().join("secret");
-        std::fs::write(&secret_file, "from-file\n").unwrap();
-
-        let good = format!(
-            "[destinations.d1.options]\naccess_key_id = \"file:{}\"\nsecret_access_key = \"literal\"\n",
-            secret_file.display()
-        );
-        let cfg = Config::from_text(&good).expect("a resolvable file reference must load");
-        assert_eq!(
-            cfg.destinations["d1"].options["access_key_id"], "from-file",
-            "the trailing newline must be trimmed"
-        );
-
-        let missing = "[destinations.d1.options]\naccess_key_id = \"file:/no/such/credential\"\n";
-        let err = Config::from_text(missing)
-            .expect_err("a credential file that cannot be read must refuse the config");
-        let text = format!("{err:#}");
-        assert!(
-            text.contains("destinations.d1.options.access_key_id"),
-            "the error must name the option: {text}"
-        );
-        assert!(
-            text.contains("could not be read"),
-            "the error must name the missing credential: {text}"
-        );
-        // The refusal carries its own type, so a `--json` caller classifies it
-        // with a downcast instead of matching the prose. Its message is
-        // `unusable_config`'s own rendering — the same first line and the same
-        // hint, checked with a synthetic reason so the assertion does not
-        // depend on platform io error wording.
-        assert!(
-            err.downcast_ref::<CredentialRefused>().is_some(),
-            "a credential refusal must downcast to its own type"
-        );
-        let rendered = CredentialRefused::new(
-            &std::path::PathBuf::from("/no/such/config"),
-            "synthetic reason".to_string(),
-        )
-        .to_string();
-        assert!(
-            rendered.starts_with(
-                "config file /no/such/config exists but cannot be used: synthetic reason\nhint: fix that file"
-            ),
-            "the typed refusal must render exactly like any other unusable config: {rendered}"
-        );
-        let unresolvable = "[destinations.d1]\nrepo = \"~alice/repo\"\n";
-        let err = Config::from_text(unresolvable)
-            .expect_err("a path the tool cannot resolve must refuse the config");
-        let text = format!("{err:#}");
-        assert!(
-            text.contains("destinations.d1.repo"),
-            "the error must name the option: {text}"
-        );
-        assert!(
-            err.downcast_ref::<CredentialRefused>().is_none(),
-            "only the fail-closed credential refusal is typed; every other unusable config is not: {text}"
-        );
-
-        let lenient =
-            "[destinations.d1.options]\naccess_key_id = \"env:CHAT_STASHER_TEST_UNSET_XYZ\"\n";
-        let cfg = Config::from_text(lenient)
-            .expect("an unset `env:` reference is omitted, not fatal (install.md §4.5)");
-        assert!(!cfg.destinations["d1"].options.contains_key("access_key_id"));
-    }
-
     #[test]
     fn backend_option_environment_references_resolve_and_missing_values_are_omitted() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());

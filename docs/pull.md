@@ -123,7 +123,7 @@ the integration. The local cycle (collect, push) still runs, so a later pass
 can settle the producer's pending receipts — halting the whole pass instead
 would deadlock the producer, whose proof needs an earlier push. But the pass
 does not stop there being something left to read: it ends with exit 3
-("did not finish reading") and records the failed `pull-letta` step, so
+("did not finish reading") and   records the failed `pull-letta` step, so
 `status` reports the failure — never a clean exit 0 that would read "no
 messages". The unread remainder stays pending in the producer state exactly
 as the standalone command leaves it. The record keeps the producer's
@@ -131,32 +131,44 @@ failure **beside** the local steps, not inside them: a pass whose collect
 also failed keeps both facts, and `status` renders them as two lines — the
 archive cycle's own health, and the producer's sentence. One corner worth
 naming: with more than one destination, each destination's timer runs the
-same declared producer; concurrent passes serialize through the state
-lock, and the contending pass reports the incomplete result the lock
-guarantees (meaning "another pass of this machine is reading it now", not
-"no messages").
+same declared producer, and they all share one producer state. Concurrent
+passes serialize through that state's lock: the pass that wins it pulls the
+producer and reports the producer's own result that hour; every other pass
+**defers** — recorded as its own fact (`pull_letta_deferred` in the
+run-state, surfaced in `status --json`), rendered by `status` as the
+producer's line "Letta pull deferred …" beside the green archive line,
+never as "did not finish reading" and never as an exit-3 failure, because
+the winning pass owns that hour's pull and every pass's push moves the
+shared stage. `schedule install` explains that line at the moment it first
+creates the combination.
 
 ## What a round reads, publishes and costs
 
-Every round replays the account's inventory — edit and disappearance
-detection compares content, never metadata shortcuts — but publication
-follows the content:
+Every round re-verifies content — edit and disappearance detection compares
+the fetched bytes, never a listing-row shortcut — and publication follows
+the content:
 
-- A conversation whose listing row and content match its last published
-  round republishes **nothing**: no inbox bytes, `run-once` sees no new
-  shards, and the unchanged hour is a genuine `NOOP` pass. Measured shaped:
-  a steady, caught-up round costs the agent and conversation listings plus
-  one window fetch per agent (~5 requests at the ~1/s pacing), whatever the
-  account size.
-- A conversation that moved — new or edited messages, archived flag, row
-  change — republishes exactly its own bundles (its messages and
-  conversation metadata) plus a new observation record when the change is
-  an edit or a disappearance.
+- A conversation whose re-read content matches its last published round
+  republishes **nothing**: no inbox bytes, `run-once` sees no new shards,
+  and the unchanged hour is a genuine `NOOP` pass. The re-verification is a
+  paced, resumable sweep, not a whole account per round: it starts where
+  the previous round stopped and re-reads as many conversations as the
+  budget paces (up to a few hundred per hour at the ~1/s pacing), so a
+  caught-up round costs a bounded slice and every conversation is
+  content-verified within a bounded number of rounds — whatever its
+  listing row claims about it.
+- A conversation that moved — new or edited messages, archived flag,
+  content that changed while its row stayed still — republishes exactly
+  its own bundles (its messages and conversation metadata) plus a new
+  observation record when the change is an edit or a disappearance, on the
+  sweep turn that re-reads it.
 - A **large account completes across rounds**: the first pull persists its
   position, and a round whose budget runs out leaves the unwalked
   conversations pending — reported as progress (`pulled N of ~M`) in the
   pass line and in `status`, never as "no messages" — while the next round
-  continues from the position instead of restarting. The declared path's
+  continues from the position instead of restarting. The sweep hand-off is
+  the same mechanism: a steady round that cannot finish its slice resumes
+  from the persisted position. The declared path's
   budget is capped at 45 minutes precisely so a round can never reach its
   own hourly period. The proof phase shares the round's deadline, so no
   phase of a pass borrows unbounded time from the next one.

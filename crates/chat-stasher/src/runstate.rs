@@ -230,6 +230,17 @@ pub struct RunState {
     /// producer's (the two lines `status` renders say both).
     #[serde(default)]
     pub pull_letta_unread: bool,
+    /// Another pass of this machine held the producer's state lock, so this
+    /// pass deferred instead of reading the producer itself. Not a failure
+    /// — the pass that won the lock reports the producer's own result the
+    /// same round, and every pass's push moves the shared stage — but never
+    /// silent either: `status` renders it as the producer's own line beside
+    /// the green archive sentence. Mutually exclusive with
+    /// [`Self::pull_letta_unread`] in practice: a pass that deferred never
+    /// learned the producer's own state, and an unread pass can only be the
+    /// one that held the lock.
+    #[serde(default)]
+    pub pull_letta_deferred: bool,
     /// The producer's backfill progress, when it reported one. Absent when
     /// caught up, undeclared, or never reached — never a zero standing in
     /// for "did not run".
@@ -281,6 +292,7 @@ impl RunState {
             outcome,
             failed_step: failed_step.map(str::to_string),
             pull_letta_unread: false,
+            pull_letta_deferred: false,
             pull_letta_backfill: None,
             shards_written: 0,
             stage_shards: 0,
@@ -484,6 +496,10 @@ pub fn summarize(read: &RunStateRead, now_unix: u64, stale_after_secs: u64) -> V
                     letta: letta_line_of(state),
                 };
             }
+            // The healthy first line can still carry a producer line: a
+            // deferred producer is the one fact that turns up beside a
+            // green archive cycle — the hand-off the deferral sentence
+            // names, never a failure wording.
             Verdict {
                 line: format!(
                     "Healthy: last run {ago} ago, took {} ms, archived {} shard(s), {}.",
@@ -496,16 +512,35 @@ pub fn summarize(read: &RunStateRead, now_unix: u64, stale_after_secs: u64) -> V
                     }
                 ),
                 healthy: true,
-                letta: None,
+                letta: letta_line_of(state),
             }
         }
     }
 }
 
-/// The declared producer's second line, from the record's two facts.
-/// `None` when the pass declared no producer or the producer completed.
+/// The declared producer's second line, from the record's facts. `None`
+/// when the pass declared no producer or the producer completed. A
+/// deferral is rendered as the hand-off it is — never a failure
+/// wording — and an unread producer as the failure it is; the healthy
+/// first line carries either beside it unchanged.
 fn letta_line_of(state: &RunState) -> Option<LettaLine> {
     if !state.pull_letta_unread {
+        // A deferral is the producer's own line too — visible beside the
+        // green archive sentence, but worded as the hand-off it is, never
+        // as a failure: the pass that won the lock reported the pull that
+        // hour.
+        if state.pull_letta_deferred {
+            return Some(LettaLine {
+                sentence: "Letta pull deferred: another pass of this machine held \
+                           the producer's state lock, so this pass did not read the \
+                           producer itself. Not a failure — the pass that held the \
+                           lock reports the producer's result, and every pass's push \
+                           moves the shared stage — but the record names it rather \
+                           than staying silent."
+                    .to_string(),
+                fix: None,
+            });
+        }
         return None;
     }
     if let Some(backfill) = &state.pull_letta_backfill {
@@ -573,6 +608,7 @@ pub fn run_state_json(
                 "duration_ms": state.duration_ms,
                 "failed_step": state.failed_step,
                 "pull_letta_unread": state.pull_letta_unread,
+                "pull_letta_deferred": state.pull_letta_deferred,
                 "pull_letta_backfill": state.pull_letta_backfill.as_ref().map(|backfill| {
                     serde_json::json!({
                         "pulled": backfill.pulled,

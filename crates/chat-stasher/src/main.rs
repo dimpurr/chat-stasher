@@ -8901,12 +8901,29 @@ fn run_once_pass_with(
                         pull_letta_unread = true;
                     }
                 }
-                Err(_) => {
-                    eprintln!(
-                        "[run-once] pull letta incomplete: source, state, publication or archive \
-                         proof unavailable; counts unknown"
-                    );
-                    pull_letta_unread = true;
+                Err(error) => {
+                    if error.is::<chat_stasher::letta::ProducerBusy>() {
+                        // With one timer per destination and one producer
+                        // state, every pass but the one that won the lock
+                        // lands here, every hour. Deferring is a recorded
+                        // hand-off, not a read failure: the winner reports
+                        // the producer's own unread/progress result, the
+                        // shared stage carries the pull to every
+                        // destination, and this pass never claimed to have
+                        // read what it did not.
+                        eprintln!(
+                            "[run-once] pull letta deferred: another pass of this machine held \
+                             the producer; this pass did not read it — the winning pass reports \
+                             the producer's result, never \"no messages\""
+                        );
+                        state.pull_letta_deferred = true;
+                    } else {
+                        eprintln!(
+                            "[run-once] pull letta incomplete: source, state, publication or \
+                             archive proof unavailable; counts unknown"
+                        );
+                        pull_letta_unread = true;
+                    }
                 }
             }
         }
@@ -21957,6 +21974,85 @@ mod run_once_letta_tests {
         assert_eq!(state.failed_step, None);
         assert_eq!(state.phases.letta_pull_ms, 0);
         assert!(!state.snapshot_created);
+    }
+
+    /// The multi-destination timer's recurring case: the producer's state
+    /// lock is already held by a sibling pass, so this pass deferred rather
+    /// than read the producer. The deferral is recorded as its own fact —
+    /// `pull_letta_deferred`, never `pull_letta_unread` or a `failed_step`
+    /// — the local cycle proceeds (stage audit counts what the winner
+    /// sealed, the push runs), and the pass exits clean: the winning pass
+    /// reports the producer's own result that hour, so this one never
+    /// claims an unread it did not see, and `status` renders the
+    /// hand-off's own sentence instead of the failure wording.
+    #[test]
+    fn deferred_producer_is_recorded_not_failed() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sandbox = test_support::Sandbox::new();
+        let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
+        let session = "claude-code.synthetic-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+        let hook = move |_pull: &chat_stasher::letta::PassPull,
+                         _pull_destinations: &[StoreConfig],
+                         machine: &str,
+                         hook_stage: &Path|
+              -> anyhow::Result<Report> {
+            // The winner's work is already in the shared stage: the
+            // deferring pass never touches the producer, but its local
+            // cycle still counts and pushes what the stage holds.
+            write_shard(hook_stage, machine, session);
+            Err(anyhow::Error::new(chat_stasher::letta::ProducerBusy))
+        };
+        let (code, state) = one_pass(&sandbox, &declared_config(&sandbox, None), &hook);
+        assert_eq!(
+            code,
+            ExitCode::SUCCESS,
+            "a deferred producer is a clean pass, not exit 3"
+        );
+        assert_eq!(
+            state.outcome,
+            chat_stasher::runstate::RunOutcome::Completed,
+            "the hand-off is kept out of the failure column by the local duty's own result"
+        );
+        assert_eq!(state.pull_letta_unread, false, "nothing was left unread");
+        assert!(
+            state.pull_letta_deferred,
+            "the deferral is the record's own fact"
+        );
+        assert_eq!(state.failed_step, None, "no local step failed");
+        assert!(
+            state.snapshot_created,
+            "the local duty still archived, and the record says so"
+        );
+        assert_eq!(
+            state.stage_shards, 1,
+            "the winner's stage content is counted"
+        );
+        assert!(sandbox.root().join("repo").exists());
+        // And the record renders as the hand-off's sentence, not the
+        // failure pair: the first line is the archive cycle's health, the
+        // producer's line names the deferral and no fix, and the pass's
+        // verdict never claims an unread producer.
+        let verdict = chat_stasher::runstate::summarize(
+            &chat_stasher::runstate::RunStateRead::Present(state.clone()),
+            state.finished_at_unix,
+            3600 * 2,
+        );
+        assert!(
+            verdict.healthy,
+            "a deferred producer keeps the verdict green: {verdict:?}"
+        );
+        let letta = verdict
+            .letta
+            .as_ref()
+            .expect("the deferral is rendered, never silent");
+        assert!(letta.sentence.contains("deferred"));
+        assert!(letta.fix.is_none(), "a hand-off needs no fix: {letta:?}");
+        assert!(
+            !letta.sentence.contains("did not finish reading"),
+            "the deferral is not worded as a read failure: {letta:?}"
+        );
     }
 
     /// A declaration that cannot run names its key, runs no pull, and still

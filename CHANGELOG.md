@@ -33,10 +33,14 @@ under its own heading below.
   and `status` renders the two as **two lines** — the archive cycle's
   health first, the producer's own sentence second, with a fix, or with
   `pulled N of ~M` progress while a large account backfills. Publication
-  follows the content: an unchanged conversation's listing row and content
-  cursors match, so a steady round republishes zero bytes and the unchanged
-  hour is a genuine NOOP, at ~5 requests plus the conversations that moved
-  however large the account; an account too big for one round persists its
+  follows the content: a re-read conversation whose content cursors match
+  republishes zero bytes and the unchanged hour is a genuine NOOP. The
+  re-verification is a paced, resumable sweep rather than a metadata
+  shortcut — no conversation is skipped on its listing row's word — so a
+  steady round re-reads a bounded slice (up to a few hundred conversations
+  per hour at the ~1/s pacing, resuming where the previous round stopped)
+  and every conversation is content-verified within a bounded number of
+  rounds; an account too big for one round persists its
   position and completes across rounds, each reporting progress, with the
   declared path's pacing floored at one request per second and its budget
   capped at 45 minutes — below the hourly period — a deadline the archive

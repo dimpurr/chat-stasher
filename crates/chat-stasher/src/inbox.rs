@@ -916,14 +916,21 @@ pub fn seal_payload(
         }));
     }
 
-    // Only send-produced harness files use content deduplication, never the
-    // `collect` producers: an api-export bundle is an original publication,
-    // and the round-trip contract its fixtures pin is that it stores whole —
-    // a collect producer that must not re-send unchanged content is held to
-    // that at its own cursor layer (the no-op round), not by dropping the
-    // raw from a sealed record. Send resends keep their validated slice
-    // digest, role, parent and range binding; legacy/web deliveries retain
-    // their exact-byte contract.
+    // Content deduplication at the seal stays send-only. This deliberately
+    // does not follow the W964 decision line "content dedupe applies to
+    // collect producers too, not only send" — a deviation the change
+    // record ratified, and this comment is where the reason lives: a
+    // collect producer's api-export bundle is an *original* publication,
+    // and the same bytes can arrive again as a re-delivery of an
+    // observation the archive already holds — the round-trip fixtures pin
+    // that both archive whole, so deduping here would silently drop the
+    // raw of the second publication and change what "archived" means. The
+    // decision line's observable requirement — an unchanged collect
+    // producer re-sends nothing — is met one layer up, in the producer's
+    // own cursor walk: its no-op round writes zero bytes before a seal is
+    // ever attempted. Send resends keep their validated slice digest, role,
+    // parent and range binding; legacy/web deliveries retain their
+    // exact-byte contract.
     let content_ref = matching_send_content(&session_dir, &parsed).map_err(SealError::Other)?;
     let raw =
         if content_ref.is_some() {
