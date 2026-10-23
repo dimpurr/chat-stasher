@@ -180,6 +180,34 @@ band) stops the pass's pull with the config key named, and the whole pass
 ends with exit 3 ("did not finish reading") while the local archive cycle
 still runs: a partly-read producer is never reported as an empty one.
 
+## `[mirror]`
+
+Declares this machine's **local mirror**: a byte-exact, file-by-file copy
+of one declared destination's whole repository (everything except
+`locks/`, which this build never holds), kept on local disk under
+`~/.local/share/chat-stasher/mirror/<name>`. Nothing is decrypted to copy
+it — the copy is the destination's own ciphertext, and `keys/` is copied
+verbatim, which is the same encrypted master key the destination already
+uses, not a new one. For the command itself see [cli.md](cli.md#mirror).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | The switch. A machine that declares no section, or sets this false, mirrors nothing and changes no behaviour. |
+| `mirror_of` | (required) | The declared destination to mirror, by name. One mirror per machine: repointing this key is safe — the old record is expired rather than inherited (the state file names the destination it was built for, and coverage answers only for that name). |
+| `min_free_gib` | `max(10, 5% of the volume's capacity)` | The free-space floor for the mirror's volume. Before a first fill starts, the remaining download plus this floor must fit in the free space, or the round refuses rather than write toward a full disk; mid-fill, free space falling below it pauses the copy. |
+
+- The scheduled pass runs the copy after its push, inside the round's
+  leftover budget; `mirror sync` runs the same round on demand. A first
+  fill of a large repository spans several rounds and `status` shows its
+  progress — a round that stops early (budget, disk floor, remote
+  readability) is a pause, not a failure, and the next round resumes.
+- A round that *checked and failed* is the exception: a file that hashes
+  against its own name twice and fails both times is source corruption
+  and exits `1`, recorded `failed`. The exception is that verdict, not
+  any hold: the mirror re-checks the source every round until it is
+  fixed, and a retry alone does not heal it.
+- Turning the mirror off stops the copying and deletes nothing.
+
 ## Files chat-stasher keeps outside the config
 
 | What | Where | Safe to delete? |
@@ -188,6 +216,8 @@ still runs: a partly-read producer is never reported as an empty one.
 | Machine identity | `~/.local/share/chat-stasher/machine-identity` | No. A new one starts a new partition. |
 | Collection state | `~/.local/share/chat-stasher/state/` | Not recommended. |
 | Stage | the folder you chose | Only through `reclaim-stage`. |
+| Mirror copy | `~/.local/share/chat-stasher/mirror/<name>/`, one per mirrored destination | Yes — it is a re-downloadable copy; deleting it stops nothing else, the next sync round refills it. Holds ciphertext only, but it does include the mirrored destination's `keys/` directory on the same volume. |
+| Mirror records | `~/.local/share/chat-stasher/state/mirror-state.json`, `…/mirror-progress.json` | Not recommended. Coverage answers come from these. |
 | Metadata cache | the platform cache folder, under `rustic` | Yes. |
 | Body cache | see `[cache]` | Yes: `cache clear`. |
 | Full-text index | the platform cache folder, under `chat-stasher/fts`, one per destination. **Plaintext.** | Yes: `index clear --destination <name>`. |

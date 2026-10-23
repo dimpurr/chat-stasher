@@ -147,6 +147,13 @@ pub struct PassMetrics {
     /// bytes of new and changed records (Δ in D6's hourly rule).
     #[serde(default)]
     pub sqlite_growth_bytes: u64,
+    /// ADR-062 (LM-2): the post-push mirror copy round, when a mirror is
+    /// configured and enabled. Zero is the honest value for a pass that did
+    /// not reach the step or runs with the mirror off; a round that stopped
+    /// early (budget, disk floor, remote readability) still measures its
+    /// wall time, because a stopped mirror round is a fact, not a failure.
+    #[serde(default)]
+    pub mirror_sync_ms: u64,
     /// Collector state saves plus this run-state write.
     pub state_saves: u64,
 }
@@ -154,6 +161,12 @@ pub struct PassMetrics {
 impl PassMetrics {
     /// One line of `key=value` pairs, for the run-once summary line.
     /// Counts and durations only — no names, paths or content.
+    ///
+    /// `mirror_sync` rides on the same line — but only when the pass reached
+    /// the mirror step (ADR-062 / LM-2: the field is 0 for a pass that did
+    /// not run the step, and a zero standing in for "did not run" is the
+    /// shape this module never prints). A pass with the mirror unconfigured
+    /// or off therefore changes no output at all.
     pub fn summary_line(&self) -> String {
         let harness_ms = self
             .collect_harness_ms
@@ -161,10 +174,15 @@ impl PassMetrics {
             .map(|(harness, ms)| format!("{harness}={ms}"))
             .collect::<Vec<_>>()
             .join(",");
+        let mirror_sync = if self.mirror_sync_ms > 0 {
+            format!(" mirror_sync={}", self.mirror_sync_ms)
+        } else {
+            String::new()
+        };
         format!(
             "[run-once] phases ms: letta_pull={} scan={} collect={} collect_harness=[{}] \
              stage_audit={} metadata_hash={} activity_index={} push_preflight={} \
-             backup={} run_state_write={}; counts: records_scanned={} \
+             backup={} run_state_write={}{}; counts: records_scanned={} \
              files_statted={} source_bytes_read={} shard_bytes_read_hashed={} \
              sqlite_sessions_queried={} sqlite_sessions_exported={} \
              state_saves={} activity_index_sessions_carried={}; \
@@ -179,6 +197,7 @@ impl PassMetrics {
             self.push_preflight_ms,
             self.backup_ms,
             self.run_state_write_ms,
+            mirror_sync,
             self.records_scanned,
             self.files_statted,
             self.source_bytes_read,
@@ -796,6 +815,22 @@ mod tests {
         ] {
             assert!(line.contains(key), "summary line must carry {key}: {line}");
         }
+        assert!(
+            !line.contains("mirror_sync="),
+            "a pass that did not reach the mirror step prints no mirror phase, \
+             not a zero standing in for \"did not run\": {line}"
+        );
+
+        // ADR-062 (LM-2): a pass that did reach the mirror step carries it
+        // on the same measured line as every other phase.
+        metrics.mirror_sync_ms = 17;
+        let line = metrics.summary_line();
+        assert!(line.contains("mirror_sync=17"), "{line}");
+        assert!(
+            line.contains("run_state_write=9 mirror_sync=17;"),
+            "mirror_sync belongs inside the phases list, same half as the \
+             other durations: {line}"
+        );
     }
 
     /// W880: `status --json` exposes the per-phase record under
