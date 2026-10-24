@@ -5351,11 +5351,22 @@ fn print_mirror(status: &Option<crate::mirror::MirrorStatus>) {
          never opens a destination, never deletes anything."
     );
     if !status.enabled {
-        eprintln!(
-            "  [mirror] configured but `enabled = false` — this machine mirrors nothing; \
-             the mirror directory, if one is left from before, keeps every byte it holds \
-             until you delete it"
-        );
+        // With a leftover copy on disk, the rows [`mirror_status`] worded
+        // already carry its measured size (rev0 ⑧: the ADR's every-byte
+        // promise shows its number, the same sentence `status` and the
+        // menu bar print); with nothing left, the off-state keeps its one
+        // doctor-only wording.
+        if status.rows.is_empty() {
+            eprintln!(
+                "  [mirror] configured but `enabled = false` — this machine mirrors nothing; \
+                 the mirror directory, if one is left from before, keeps every byte it holds \
+                 until you delete it"
+            );
+        } else {
+            for row in &status.rows {
+                eprintln!("  {}", row.sentence);
+            }
+        }
         eprintln!();
         return;
     }

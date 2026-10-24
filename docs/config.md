@@ -230,7 +230,12 @@ it is never quietly replaced from the remote mid-read.
   wording, appears in `status`, in `doctor` and in the menu bar app. A
   first sync reads as exactly that (`first sync … in progress: X% (bytes
   downloaded of the total)`), never as a red, while `reclaim` holds the
-  sessions it would cover.
+  sessions it would cover — and that hold-back is a code gate, not a
+  promise: `reclaim-stage` refuses a session — `not-mirrored` — until the
+  copy's completed-round record holds that session's proof snapshot
+  closure-complete, and the mirror rows name how many sessions it is
+  currently holding back, so the count comes from the reclaim's own
+  record and never a guess.
 - Orphan files — what a deliberate remote cleanup left behind in the
   mirror — are never deleted automatically. `doctor` reports their count
   and the reclaimable bytes; remove the files by hand, or delete the
@@ -244,7 +249,10 @@ it is never quietly replaced from the remote mid-read.
 - Turning the mirror off stops the copying and deletes nothing, and puts
   reads back on the remote — the copy stays on disk, and reading it
   directly (or verifying it, `--repo` over its directory) still says it
-  is the copy being read.
+  is the copy being read. The leftover copy keeps every byte until you
+  delete it, and its size is still shown (`status`'s `[mirror]` line and
+  `doctor`'s D13 word it with its measured bytes while the switch is
+  off), so a leftover is an inventory fact, never an invisible one.
 
 ## Files chat-stasher keeps outside the config
 

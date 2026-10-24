@@ -1223,14 +1223,18 @@ private final class ArchiveModel: ObservableObject {
             // W1025 / LM-4 (ADR-062): the two shapes the mirror section has
             // to render — the steady row a healthy copy keeps, and the
             // yellow row a degraded copy owes. The sentences are the CLI's
-            // own wordings, so the demo doubles as a screenshot fixture of
-            // the ruling-8 vocabulary.
+            // real formatter output, pasted from the rows `mirror_status`
+            // words (rev0 ⑦): the byte totals print raw — `6.0 GiB
+            // (6442450944 B)`, `(4233000000 of 6221000000)` — and every
+            // phrase is the pinned spelling, so the demo stays a
+            // screenshot fixture of the ruling-8 vocabulary rather than an
+            // invented paraphrase of it.
             localSnapshot = LocalSnapshot(
                 waitingToUpload: 0, scheduleInstalled: true, lastRunFailed: false, reason: nil,
                 cliVersion: "0.5.0", cliNeedsUpdate: false,
                 mirrorRows: [
-                    MirrorRowDoc(severity: "info", sentence: "[mirror] local copy of `storagebox`: 6.0 GiB (6,442,450,944 B) across 47 file(s), last sync 2026-10-24 13:05 UTC (2 hours ago), 0 snapshot(s) behind, 3 orphan file(s) (128.0 KiB reclaimable)"),
-                    MirrorRowDoc(severity: "yellow", sentence: "[mirror] the last mirror round failed at 68% (4_233_000_000 of 6_221_000_000): the destination could not be read mid-fill (a read error); the raw error is not recorded in state files — the next round resumes only after the cause is fixed; reclaim holds sessions back until a round completes"),
+                    MirrorRowDoc(severity: "info", sentence: "[mirror] local copy of `storagebox`: 6.0 GiB (6442450944 B) across 47 file(s), last sync 2026-10-24 13:05 UTC (2 hours ago), 0 snapshot(s) behind, 3 orphan file(s) (128.0 KiB reclaimable)"),
+                    MirrorRowDoc(severity: "yellow", sentence: "[mirror] the last mirror round failed at 68% (4233000000 of 6221000000): the destination could not be read mid-fill (a read error); the raw error is not recorded in state files — the next round resumes only after the cause is fixed; reclaim holds sessions back until a round completes"),
                 ]
             )
             loadDemoArchive(mode: mode, now: Date())

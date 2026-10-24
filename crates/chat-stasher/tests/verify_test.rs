@@ -296,7 +296,8 @@ fn core_e2e_reclaimed_session_survives_subsequent_push_and_matches_l3() {
         // fresh successful push would have classified it.
         health: chat_stasher::destdiag::DestinationHealth::Healthy,
     }];
-    let reclaim_report = chat_stasher::stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    let reclaim_report =
+        chat_stasher::stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
     assert!(!reclaim_report.blocked());
     assert_eq!(reclaim_report.reclaimed.len(), 1);
 
@@ -393,7 +394,8 @@ fn core_e2e_reclaimed_session_missing_in_all_snapshots_reports_missing_in_archiv
         // fresh successful push would have classified it.
         health: chat_stasher::destdiag::DestinationHealth::Healthy,
     }];
-    let reclaim_report = chat_stasher::stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    let reclaim_report =
+        chat_stasher::stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
     assert!(!reclaim_report.blocked());
     assert_eq!(reclaim_report.reclaimed.len(), 1);
 
@@ -493,7 +495,8 @@ fn core_e2e_reclaimed_session_corrupt_manifest_reports_unverifiable() {
         // fresh successful push would have classified it.
         health: chat_stasher::destdiag::DestinationHealth::Healthy,
     }];
-    let reclaim_report = chat_stasher::stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    let reclaim_report =
+        chat_stasher::stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
     assert!(!reclaim_report.blocked());
     assert_eq!(reclaim_report.reclaimed.len(), 1);
 

@@ -260,7 +260,7 @@ keeps the original data in place.
 
 ### `reclaim-stage`
 
-Removes staged copies, but only for sessions that **every** declared destination proves it holds, byte for byte. An unreachable destination blocks it.
+Removes staged copies, but only for sessions that **every** declared destination proves it holds, byte for byte. An unreachable destination blocks it. On a machine whose `[mirror]` is enabled it is also hold-back gated by the copy: a session is refused — `not-mirrored` — until the mirror's completed-round record holds the proof's snapshot closure-complete, so a completed `mirror sync` round is what frees it (the mirror rows name the count it holds back).
 
 | Flag | Meaning |
 |---|---|

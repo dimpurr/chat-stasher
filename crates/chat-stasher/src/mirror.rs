@@ -800,19 +800,22 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
     // ---- Orphan accounting (ADR-062 D2 / 47 §4 C; LM-4's status and
     // `doctor` read it from the progress record) ----
     // Files the mirror holds that this listing does not name: the residue
-    // of a deliberate remote cleanup, plus any torn-write temp file a
-    // crashed round left behind — all equally reclaimable, none ever
-    // deleted automatically (ADR-001). Counted before the pre-estimate
-    // so every progress record this round can leave (refused, stopped,
-    // failed, completed) carries the same verdict. A walk that cannot
-    // finish records `None` — an unmeasured count, never a zero — and
-    // never fails the round: the copy does not depend on it.
+    // of a deliberate remote cleanup — orphan bytes, reclaimable, never
+    // deleted automatically (ADR-001). The tool's own torn-write
+    // `.tmp` names (an interrupted round's un-renamed write) are kept out
+    // of this count: they are the next round's own target, not cleanup
+    // residue, and cleanup advice about them is stale the moment the next
+    // round re-writes the file. Counted before the pre-estimate so every
+    // progress record this round can leave (refused, stopped, failed,
+    // completed) carries the same verdict. A walk that cannot finish
+    // records `None` — an unmeasured count, never a zero — and never
+    // fails the round: the copy does not depend on it.
     let listed_paths: BTreeSet<PathBuf> = planned
         .iter()
         .map(|file| local_path(&mirror_root, file))
         .collect();
     let (orphan_files, orphan_bytes) = match count_unlisted(&mirror_root, &listed_paths) {
-        Ok((files, bytes)) => (Some(files), Some(bytes)),
+        Ok(unlisted) => (Some(unlisted.files), Some(unlisted.bytes)),
         Err(_) => (None, None),
     };
 
@@ -1013,17 +1016,50 @@ fn sha256_file(path: &Path) -> anyhow::Result<String> {
 /// with their bytes (ADR-062 D2 / 47 §4 C). The directories the backend
 /// layout uses are bounded (`config`, `keys/`, `index/`, `snapshots/`,
 /// `data/xx/`), so the walk is a plain recursion; anything regular it
-/// meets that the listing does not claim is counted — including a
-/// torn-write `.tmp` a crashed round left behind, which is equally
-/// reclaimable and equally never deleted automatically.
+/// meets that the listing does not claim lands in one of two buckets:
+///
+/// * **orphan** — residue a deliberate remote cleanup left behind: never
+///   deleted automatically, reported reclaimable, what the doctor's
+///   cleanup advice is about;
+/// * the tool's own **torn-write temp** (a `.<name>.tmp` an interrupted
+///   round never renamed, [`write_atomic`]) — kept apart from the orphan
+///   count, because these bytes are the next round's own target, not
+///   cleanup residue, and advising their manual removal is advice the
+///   next round makes stale. They stay bytes on disk: the size measure
+///   adds both buckets, so the size stays the number deleting the
+///   directory would free.
 ///
 /// A tree that cannot be walked is an error, not a partial count: a lower
 /// bound worded as a measurement is the exact lie the tri-state rule
 /// exists against, so the caller records `None` and rounds that follow
 /// re-measure.
-fn count_unlisted(mirror_root: &Path, listed: &BTreeSet<PathBuf>) -> anyhow::Result<(u64, u64)> {
-    let mut files = 0_u64;
-    let mut bytes = 0_u64;
+struct Unlisted {
+    files: u64,
+    bytes: u64,
+    tmp_files: u64,
+    tmp_bytes: u64,
+}
+
+impl Default for Unlisted {
+    fn default() -> Self {
+        Self {
+            files: 0,
+            bytes: 0,
+            tmp_files: 0,
+            tmp_bytes: 0,
+        }
+    }
+}
+
+/// [`Unlisted`]'s own temp name: [`write_atomic`]'s `.<name>.tmp` shape,
+/// the torn write of an interrupted round.
+fn is_torn_write_tmp(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    name.starts_with('.') && name.ends_with(".tmp")
+}
+
+fn count_unlisted(mirror_root: &Path, listed: &BTreeSet<PathBuf>) -> anyhow::Result<Unlisted> {
+    let mut out = Unlisted::default();
     let mut stack = vec![mirror_root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries =
@@ -1040,18 +1076,28 @@ fn count_unlisted(mirror_root: &Path, listed: &BTreeSet<PathBuf>) -> anyhow::Res
                 if listed.contains(&path) {
                     continue;
                 }
-                files += 1;
-                bytes += entry
+                // reason: the metadata read is inside the loop, so its
+                // `with_context` names the one entry that failed, on the
+                // terminal, while the state-file story counts keep their
+                // class-only word at the status surface.
+                let len = entry
                     .metadata()
                     .with_context(|| format!("size {}", path.display()))?
                     .len();
+                if is_torn_write_tmp(&entry.file_name()) {
+                    out.tmp_files += 1;
+                    out.tmp_bytes += len;
+                } else {
+                    out.files += 1;
+                    out.bytes += len;
+                }
             }
             // Symlinks and anything else a mirror never writes are not
             // counted at all: the number stays about bytes this tool put
             // on the disk and can speak for.
         }
     }
-    Ok((files, bytes))
+    Ok(out)
 }
 
 #[derive(Default)]
@@ -1729,12 +1775,49 @@ pub fn mirror_status(
     let declared = config.destinations.contains_key(&settings.mirror_of);
     let mut rows = Vec::new();
     if !settings.enabled {
+        // rev0 ⑧: the ADR's own promise — the leftover copy keeps every
+        // byte until the user deletes it — is a measurable fact, so with
+        // the switch off the leftover directory still gets walked and
+        // worded: an off machine owes no sync facts, but bytes on its
+        // disk are its own inventory. No directory, nothing to show: the
+        // off-state fields stay not-applicable exactly as before.
+        let leftover_root = mirror_dir(data_root, &settings.mirror_of);
+        let size = if leftover_root.is_dir() {
+            mirror_size(&leftover_root)
+        } else {
+            not_applicable(SWITCH_OFF)
+        };
+        match &size {
+            MirrorUsageState::Known { files, bytes } if *files > 0 => {
+                rows.push(MirrorRow {
+                    severity: MirrorRowSeverity::Info,
+                    sentence: format!(
+                        "[mirror] the switch is off — this machine mirrors nothing; the leftover \
+                         copy of `{}` still holds {} ({bytes} B) across {files} file(s), and it \
+                         keeps every byte until you delete it",
+                        settings.mirror_of,
+                        crate::destdiag::fmt_bytes(*bytes),
+                    ),
+                });
+            }
+            MirrorUsageState::Unknown { why } => {
+                rows.push(MirrorRow {
+                    severity: MirrorRowSeverity::Yellow,
+                    sentence: format!(
+                        "[mirror] the switch is off; a leftover copy of `{}` is on disk but its \
+                         size could not be measured ({why})",
+                        settings.mirror_of
+                    ),
+                });
+            }
+            _ => {}
+        }
         return MirrorStatus {
             configured: true,
             enabled: false,
             mirror_of: settings.mirror_of.clone(),
             declared,
-            size: not_applicable(SWITCH_OFF),
+            size,
             last_sync: not_applicable_time(SWITCH_OFF),
             snapshots_behind: crate::json_out::CountState::not_applicable(SWITCH_OFF),
             orphans: not_applicable(SWITCH_OFF),
@@ -1767,11 +1850,25 @@ pub fn mirror_status(
                     // down, so no fabricated timestamp reaches a surface.
                     unix: i64::try_from(record.finished_at_unix).unwrap_or(i64::MAX),
                 },
-                crate::json_out::CountState::known(
-                    record
-                        .snapshots_on_remote
-                        .saturating_sub(record.closure_complete.len() as u64),
-                ),
+                if record.closure_complete.len() as u64 > record.snapshots_on_remote {
+                    // rev0 ⑤: the two halves of one record disagree —
+                    // more closures verified than the listing they were
+                    // measured against held is a record a rewrite has to
+                    // heal, and a clamped zero would word that
+                    // disagreement as "caught up". Unknown is the honest
+                    // behindness; the covered set itself keeps vouching
+                    // exactly where it can (the reclaim leg).
+                    crate::json_out::CountState::unknown(
+                        "the record disagrees with itself (more closures verified than the \
+                         listing held); the next completed round rewrites it",
+                    )
+                } else {
+                    crate::json_out::CountState::known(
+                        record
+                            .snapshots_on_remote
+                            .saturating_sub(record.closure_complete.len() as u64),
+                    )
+                },
             )
         }
         mirrorstate::MirrorStateRead::Present(record) => (
@@ -1848,6 +1945,53 @@ pub fn mirror_status(
             mirror_of: settings.mirror_of.clone(),
             declared,
             size,
+            last_sync,
+            snapshots_behind,
+            orphans,
+            rows,
+        };
+    }
+    // rev0 ③: records without a directory behind them are an absent copy,
+    // never a healthy empty one. `mirror_root` absent + either record
+    // present reads today as `0 B across 0 file(s)` beside a steady row —
+    // the exact shape the mirror's design razor ("never pretends
+    // completeness") exists against — so the state is worded as what it
+    // is: the copy is gone, or was never filled, and everything that
+    // depends on it (offline reads, the reclaim leg) uses the remote /
+    // holds back. The `is_dir` signal is LM-3's read-seam signal
+    // (mirror_read.rs, "no local copy is on disk yet"), applied here to
+    // the records-claim side; the size becomes unknown-seen-absent, not a
+    // measured-empty that would read as a healthy copy. Only a record
+    // naming *this* `mirror_of` makes the claim: a record naming another
+    // destination is the stale-record ladder's finding (the copy it
+    // describes may well exist under the old name's directory), and the
+    // gone-copy row is not its duplicate.
+    let progress_names_this = matches!(&progress, MirrorProgressRead::Present(record) if record.mirror_of == settings.mirror_of);
+    let state_names_this = matches!(
+        &state,
+        mirrorstate::MirrorStateRead::Present(record) if record.mirror_of == settings.mirror_of
+    );
+    if !mirror_dir(data_root, &settings.mirror_of).is_dir()
+        && (progress_names_this || state_names_this)
+    {
+        rows.push(MirrorRow {
+            severity: MirrorRowSeverity::Yellow,
+            sentence: format!(
+                "[mirror] no local copy of `{}` is on disk, though its records exist — an \
+                 absent copy, not an empty one; reads use the remote, and reclaim holds \
+                 sessions back until `mirror sync` fills it again",
+                settings.mirror_of
+            ),
+        });
+        return MirrorStatus {
+            configured: true,
+            enabled: true,
+            mirror_of: settings.mirror_of.clone(),
+            declared,
+            size: MirrorUsageState::Unknown {
+                why: "the records name a local copy, but no mirror directory is on disk"
+                    .to_string(),
+            },
             last_sync,
             snapshots_behind,
             orphans,
@@ -2026,6 +2170,35 @@ pub fn mirror_status(
             });
         }
     }
+    // rev0 ① / ADR-062 C2's other half: "reclaim holds sessions back"
+    // carries its count. The one data source that cannot disagree with the
+    // run is the reclaim's own durable record (reclaimstate, written after
+    // every attempt); when its latest attempt holds sessions back against
+    // this destination as `not-mirrored`, that count and
+    // [`HELD_BACK_SENTENCE`] ride the rows beside the facts — the same
+    // sentence `status`, `doctor` and the menu bar print, so the promise's
+    // number is one computation like every other row. Only the wired kind
+    // counts: a network block names its own surfaces and is not a mirror
+    // fact.
+    if let crate::reclaimstate::ReclaimStateRead::Present(attempt) =
+        crate::reclaimstate::load(state_dir)
+    {
+        let held_back: usize = attempt
+            .blocked
+            .iter()
+            .filter(|block| block.kind == HELD_BACK_KIND && block.destination == settings.mirror_of)
+            .map(|block| block.sessions)
+            .sum();
+        if held_back > 0 {
+            rows.push(MirrorRow {
+                severity: MirrorRowSeverity::Yellow,
+                sentence: format!(
+                    "[mirror] reclaim holds {held_back} session(s) back — {HELD_BACK_SENTENCE}; \
+                     a completed `mirror sync` round frees them",
+                ),
+            });
+        }
+    }
     MirrorStatus {
         configured: true,
         enabled: true,
@@ -2063,19 +2236,38 @@ pub fn mirror_status_lines(config: &Config, data_root: &Path, state_dir: &Path) 
 }
 
 /// The mirror directory's occupancy: every regular file and its content
-/// bytes, through the same walker the orphan count uses (an orphan count
-/// *is* a usage count minus the listing's claimed paths), so one walk
-/// implementation owns both measures. An unwalkable tree is unknown, never a
-/// zero — and a directory that does not exist is a measured empty: the
-/// mirror occupies nothing.
+/// bytes — orphan residue and the tool's own torn-write temps alike, so
+/// the number stays what deleting the directory would free — through
+/// the same walker the orphan count uses (an orphan count *is* a usage
+/// count minus the listing's claimed paths and the temp names, split
+/// apart by that walk). An unwalkable tree is unknown, never a zero —
+/// and a directory that does not exist is a measured empty: the mirror
+/// occupies nothing.
 fn mirror_size(mirror_root: &Path) -> MirrorUsageState {
     if !mirror_root.exists() {
         return MirrorUsageState::Known { files: 0, bytes: 0 };
     }
     match count_unlisted(mirror_root, &BTreeSet::new()) {
-        Ok((files, bytes)) => MirrorUsageState::Known { files, bytes },
+        Ok(unlisted) => MirrorUsageState::Known {
+            // reason: `0` stays measured (0/0 is a looked-and-empty
+            // copy), and both buckets count — the temp files are real
+            // bytes on this machine's disk even when nothing names them.
+            files: unlisted.files + unlisted.tmp_files,
+            bytes: unlisted.bytes + unlisted.tmp_bytes,
+        },
         Err(error) => MirrorUsageState::Unknown {
-            why: format!("the mirror directory could not be walked: {error}"),
+            // reason: the raw chain carries the walked directory's path,
+            // and this `why` is the one place a walk failure reaches the
+            // user-facing rows — near-side reads, `--json`, the menu bar.
+            // The state files' privacy claim is "no paths, no raw error
+            // chain", so the surface word keeps only the io failure's
+            // class ([`io_class_word`] — the same boundary
+            // `write_progress` draws for its notes) and the whole chain
+            // stays where it belongs: unwritten, unrecorded.
+            why: format!(
+                "the mirror directory could not be walked: {}",
+                io_class_word(&error)
+            ),
         },
     }
 }

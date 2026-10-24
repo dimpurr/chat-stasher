@@ -841,30 +841,30 @@ crates/chat-stasher/src/main.rs:10805-10810  13896e8d543a  lines=6
   <- SECURITY.md:70, docs-dev/threat-model.md:869  :: eprintln!("push: cannot check stage metadata: {e:#}");
 crates/chat-stasher/src/main.rs:11243-11429  b256db959826  lines=187
   <- docs-dev/threat-model.md:933  :: let destination = destination.or_else(|| {
-crates/chat-stasher/src/main.rs:15987-16038  37071c1a3195  lines=52
-  <- docs-dev/install.md:306  :: stage
-crates/chat-stasher/src/main.rs:15987-15998  546a15cedf91  lines=12
-  <- docs-dev/install.md:1037  :: stage
-crates/chat-stasher/src/main.rs:16767-16781  7d261a6b4585  lines=15
-  <- docs-dev/install.md:630  :: )
-crates/chat-stasher/src/main.rs:17204-17211  3de939d1cb32  lines=8
-  <- docs-dev/install.md:629  :: /// honest answer, because 3's meaning is fixed: what was n…
-crates/chat-stasher/src/main.rs:20078-20085  73b7190f73e1  lines=8
-  <- docs-dev/install.md:1027  :: // `config::CredentialRefused` underneath it) vs "unreadabl…
-crates/chat-stasher/src/main.rs:20103-20104  f1874a8a7735  lines=2
-  <- docs-dev/install.md:998  :: let info = run_state_info(&config);
-crates/chat-stasher/src/main.rs:20611-20612  79162596b616  lines=2
-  <- docs-dev/install.md:993  :: /// cannot disagree.
-crates/chat-stasher/src/main.rs:20703-20710  b01741c38798  lines=8
-  <- docs-dev/install.md:1014  :: /// The scan half of `status`.
+crates/chat-stasher/src/main.rs:15987-16038  948cc713bff0  lines=52
+  <- docs-dev/install.md:306  :: "index mtime must advance on rebuild"
+crates/chat-stasher/src/main.rs:15987-15998  9bad804ce7fe  lines=12
+  <- docs-dev/install.md:1037  :: "index mtime must advance on rebuild"
+crates/chat-stasher/src/main.rs:16767-16781  4627ca5d8ff0  lines=15
+  <- docs-dev/install.md:630  :: // same way WIZ-1 names `stage`: only when the step was act…
+crates/chat-stasher/src/main.rs:17204-17211  a123a5eae3c6  lines=8
+  <- docs-dev/install.md:629  :: ///
+crates/chat-stasher/src/main.rs:20078-20085  0374a8563040  lines=8
+  <- docs-dev/install.md:1027  :: value.clear();
+crates/chat-stasher/src/main.rs:20103-20104  7c67e8ddf6c6  lines=2
+  <- docs-dev/install.md:998  :: Ok(config) => config,
+crates/chat-stasher/src/main.rs:20611-20612  4251c1672d4c  lines=2
+  <- docs-dev/install.md:993  :: "destinations".to_string(),
+crates/chat-stasher/src/main.rs:20703-20710  a43d687c3ef0  lines=8
+  <- docs-dev/install.md:1014  :: if let Some(scanner_object) = scanner_value.as_object_mut()…
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:440, docs-dev/threat-model.md:722  :: //! ADR-022: content-addressed hash tracking for stage meta…
 crates/chat-stasher/src/mirror.rs:1-16  fe152090ebb3  lines=16
   <- docs-dev/privacy.md:1155  :: //! The local mirror (ADR-062, LM-2): one declared remote d…
 crates/chat-stasher/src/mirror.rs:48-50  f48b2aff1d75  lines=3
   <- docs-dev/privacy.md:1155  :: //! Privacy: ids, byte counts, times and the declared desti…
-crates/chat-stasher/src/mirror.rs:1474-1477  d6fb40b36068  lines=4
-  <- docs-dev/privacy.md:1155  :: /// What one round was, for the progress record's outcome f…
+crates/chat-stasher/src/mirror.rs:1474-1477  bc5fe3305d28  lines=4
+  <- docs-dev/privacy.md:1155  :: pub outcome: String,
 crates/chat-stasher/src/mirrorstate.rs:30-31  3f1c0e8f18cc  lines=2
   <- docs-dev/privacy.md:1155  :: //! Privacy: a destination name, a unix time, byte counts a…
 crates/chat-stasher/src/nativehost.rs:155-168  b160255bd493  lines=14

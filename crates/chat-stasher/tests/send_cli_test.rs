@@ -1052,7 +1052,7 @@ fn pull_cli_requires_readback_from_every_destination_and_survives_reclamation() 
         })
         .collect();
     assert!(
-        !chat_stasher::stagereclaim::reclaim_stage(&stage, &destinations, true)
+        !chat_stasher::stagereclaim::reclaim_stage(&stage, &destinations, true, None)
             .unwrap()
             .blocked()
     );

@@ -27,11 +27,16 @@
 //! that cannot be consulted is still *unproven* and blocks: unreachable is
 //! never "does not have it" nor "has it".
 //!
-//! The mirror precondition (ADR-060 D6, 47 §5.3) is a no-op until a mirror
-//! exists: this build has no `[mirror]` configuration, so condition (ii) —
-//! the proof's snapshot closure complete in a configured-and-on mirror —
-//! is vacuous by construction, and the seam where LM-2's mirror-state
-//! reader plugs in is the per-session proof decision below.
+//! The mirror precondition (ADR-060 D6(ii), 47 §5.3) is wired: on a machine
+//! whose configured-and-on mirror mirrors a destination this run consults,
+//! a session is proven but still **held back** — `not-mirrored` — until the
+//! copy's completed-round record ([`crate::mirrorstate`]) holds the proof's
+//! snapshot closure-complete. The caller hands the mirror in as
+//! [`MirrorHoldback`]; `None` (no section, switch off) runs the reclaim
+//! exactly as it ran before mirrors existed. A mirror whose `mirror_of` is
+//! degraded and therefore not consulted binds nothing: a degraded
+//! destination may not hold the whole machine's reclaim hostage (D3's own
+//! rule), its protection being the alarm layer and the union backfill.
 //!
 //! Default is a dry run: report what would be reclaimed and delete nothing.
 //! `--apply` writes each machine's retained summaries first — so the L3
@@ -140,6 +145,37 @@ pub enum BlockedKind {
     SessionNotHeld,
     /// The destination holds the session but with a different digest triple.
     TripleMismatch,
+    /// The mirror leg (ADR-060 D6(ii) / 47 §5.3): the session is proven on
+    /// every must-prove destination, but the machine's configured-and-on
+    /// mirror of the mirroring destination has not reached the proof's
+    /// snapshot — the copy is this machine's offline fallback, so the stage
+    /// body stays until the mirror has durably taken it over. The word and
+    /// sentence this kind prints are [`crate::mirror::HELD_BACK_KIND`] and
+    /// [`crate::mirror::HELD_BACK_SENTENCE`], the one spelling D6.3 fixed.
+    NotMirrored,
+}
+
+/// What the caller states about this machine's mirror, for the mirror leg
+/// of the proof (ADR-060 D6(ii) / 47 §5.3). Built by the CLI from the
+/// config and the state dir — never loaded inside this module, so a test
+/// can state any mirror record the fixtures write.
+///
+/// `None` is the no-mirror machine: no section, or `[mirror] enabled =
+/// false` — the reclaim then has no mirror precondition, exactly as it
+/// ran before LM-2. `Some` binds only when the consult set actually holds
+/// `mirror_of` as a must-prove, successfully consulted destination;
+/// a mirror pointed at a degraded destination is not a proof input.
+#[derive(Debug, Clone)]
+pub struct MirrorHoldback {
+    /// The declared destination this machine mirrors (`[mirror] mirror_of`).
+    pub mirror_of: String,
+    /// The copy's directory under the data root. Coverage is a claim about
+    /// bytes on disk, so a record no directory backs ([`Path::is_dir`] is
+    /// false — deleted, or a stale record from a copy that is gone) vouches
+    /// for nothing and the leg holds everything back.
+    pub mirror_root: std::path::PathBuf,
+    /// The mirror's durable completed-round record, read by the caller.
+    pub state: crate::mirrorstate::MirrorStateRead,
 }
 
 /// One session whose body was deleted by `--apply`.
@@ -197,6 +233,9 @@ pub fn block_kind_word(kind: &BlockedKind) -> &'static str {
         BlockedKind::PartialRead { .. } => "partial-read",
         BlockedKind::SessionNotHeld => "not-held",
         BlockedKind::TripleMismatch => "triple-mismatch",
+        // D6.3's fixed `--json` spelling, shared with every surface that
+        // repeats it, so the report word never becomes a second vocabulary.
+        BlockedKind::NotMirrored => crate::mirror::HELD_BACK_KIND,
     }
 }
 
@@ -220,9 +259,13 @@ pub fn blocks_as_state(blocks: &[Blocked]) -> Vec<crate::reclaimstate::ReclaimBl
 }
 
 /// Reclaim the stage body, proving every session against every **healthy**
-/// destination first (ADR-060 D1/D3): degraded destinations are listed on
-/// every run but not consulted; the ≥1 guard refuses the whole run when no
-/// destination is left to prove.
+/// destination first (ADR-060 D1/D3), then past the mirror leg
+/// (ADR-060 D6(ii) / 47 §5.3): with a configured-and-on mirror of a
+/// consulted destination, only sessions whose proof's snapshot the
+/// mirror's completed-round record holds closure-complete are reclaimable
+/// — the rest are held back per session as `not-mirrored`. Degraded
+/// destinations are listed on every run but not consulted; the ≥1 guard
+/// refuses the whole run when no destination is left to prove.
 ///
 /// Returns `Ok(report)` even when the reclaim is refused: the refusal lives in
 /// [`ReclaimReport::blocked`], and the caller decides the exit code from it.
@@ -230,6 +273,7 @@ pub fn reclaim_stage(
     stage: &Path,
     destinations: &[NamedStore],
     apply: bool,
+    mirror: Option<&MirrorHoldback>,
 ) -> anyhow::Result<ReclaimReport> {
     let mut report = ReclaimReport {
         destinations: destinations.iter().map(|d| d.name.clone()).collect(),
@@ -332,11 +376,17 @@ pub fn reclaim_stage(
         return Ok(report);
     }
 
-    // Phase 1 — consult every must-prove destination. One unconsultable
-    // destination in the must-prove set blocks the whole reclaim: nothing
-    // at all can be proven against it (an unconsultable destination is
-    // *unproven*, never "does not have it" nor "has it").
-    let mut ready: Vec<(&NamedStore, BTreeMap<(String, String), Candidate>)> = Vec::new();
+    // Phase 1 — consult every must-prove destination, keeping each answer's
+    // per-session digest map and the machine → newest-snapshot map the
+    // mirror leg needs beside it. One unconsultable destination in the
+    // must-prove set blocks the whole reclaim: nothing at all can be proven
+    // against it (an unconsultable destination is *unproven*, never "does
+    // not have it" nor "has it").
+    let mut ready: Vec<(
+        &NamedStore,
+        BTreeMap<(String, String), Candidate>,
+        BTreeMap<String, String>,
+    )> = Vec::new();
     for dest in must_prove {
         let mk = match store::load_key_file(&dest.cfg) {
             Ok(mk) => mk,
@@ -355,7 +405,7 @@ pub fn reclaim_stage(
             }
         };
         match consult_destination(dest, &mk) {
-            DestinationRead::Ready(map) => ready.push((dest, map)),
+            DestinationRead::Ready(map, snapshots) => ready.push((dest, map, snapshots)),
             DestinationRead::Unreachable { kind, error } => report.blocked.push(Blocked {
                 destination: dest.name.clone(),
                 kind: BlockedKind::Unreachable { kind, error },
@@ -381,16 +431,10 @@ pub fn reclaim_stage(
     // destination's answer stands against it — the blocked ⇒ delete-nothing
     // / exit-1 contract, narrowed to the must-prove set, intact for it
     // (ADR-060's Invalidates).
-    //
-    // The ADR-062/LM mirror precondition (D6, 47 §5.3) plugs in here when
-    // this build gains `[mirror]`: a session whose proof's snapshot S is
-    // not closure-complete in a configured-and-on mirror is held back per
-    // session, `not-mirrored` — the hook is config-gated off today, a
-    // no-op until a mirror exists.
     let mut held: BTreeMap<&str, (usize, u64, BlockedKind)> = BTreeMap::new();
     for cand in &report.candidates {
         let key = (cand.machine.clone(), cand.session_id.clone());
-        for (dest, map) in &ready {
+        for (dest, map, _) in &ready {
             match map.get(&key) {
                 None => {
                     let entry =
@@ -423,6 +467,60 @@ pub fn reclaim_stage(
                 bytes,
             });
         }
+        return Ok(report);
+    }
+
+    // Phase 2½ — the mirror leg (ADR-060 D6(ii) / 47 §5.3). Every candidate
+    // is proven on every must-prove destination; a machine whose
+    // configured-and-on mirror copies a consulted destination may still
+    // not delete a body until the copy's durable completed-round record
+    // holds that proof's snapshot closure-complete. Binding follows the
+    // consult set, not the config alone: the holdback applies only when
+    // `mirror_of` was a must-prove destination this run actually consulted
+    // — a mirror of a degraded destination binds nothing (D3's rule: a
+    // degraded destination may not hold the whole machine's reclaim
+    // hostage; its protection is the alarm layer and the union backfill).
+    // A held-back session is blocked per session as `not-mirrored`
+    // ([`crate::mirror::HELD_BACK_KIND`]), the same word the row and
+    // `--json` spell.
+    if let Some((holdback, mirroring, snapshots)) = mirror.and_then(|holdback| {
+        ready
+            .iter()
+            .find(|(dest, _, _)| dest.name == holdback.mirror_of)
+            .map(|(dest, _, snaps)| (holdback, dest, snaps))
+    }) {
+        // A record no directory backs vouches for nothing: coverage is a
+        // claim about bytes on this machine's disk, so a deleted (or never
+        // filled) copy holds everything back, whatever the record says.
+        let copy_on_disk = holdback.mirror_root.is_dir();
+        let mut held_sessions = 0_usize;
+        let mut held_bytes = 0_u64;
+        for cand in &report.candidates {
+            let covered = copy_on_disk
+                && snapshots
+                    .get(cand.machine.as_str())
+                    .is_some_and(|snapshot_id| {
+                        crate::mirrorstate::snapshot_covered(
+                            &holdback.state,
+                            &holdback.mirror_of,
+                            snapshot_id,
+                        )
+                    });
+            if !covered {
+                held_sessions += 1;
+                held_bytes = held_bytes.saturating_add(cand.concat_bytes);
+            }
+        }
+        if held_sessions > 0 {
+            report.blocked.push(Blocked {
+                destination: mirroring.name.clone(),
+                kind: BlockedKind::NotMirrored,
+                sessions: held_sessions,
+                bytes: held_bytes,
+            });
+        }
+    }
+    if report.blocked() {
         return Ok(report);
     }
 
@@ -471,7 +569,14 @@ pub fn reclaim_stage(
 /// raw chain, so the report can say which failure it was while the original
 /// text stays whole (SG-1 C3).
 enum DestinationRead {
-    Ready(BTreeMap<(String, String), Candidate>),
+    /// The per-session digest map, plus each machine's newest snapshot id —
+    /// the snapshot the proof came from, which is what the mirror leg must
+    /// find coverage for (ADR-060 D6(ii): the proof's snapshot, named by the
+    /// destination's own answer, never by a local cursor).
+    Ready(
+        BTreeMap<(String, String), Candidate>,
+        BTreeMap<String, String>,
+    ),
     Unreachable {
         kind: Option<crate::remote_err::RemoteErrorKind>,
         error: String,
@@ -506,6 +611,7 @@ fn consult_destination(dest: &NamedStore, mk: &MasterKey) -> DestinationRead {
         return DestinationRead::PartialRead(report.warnings.join("; "));
     }
     let mut map = BTreeMap::new();
+    let mut snapshots: BTreeMap<String, String> = BTreeMap::new();
     for machine in &report.machines {
         for session in &machine.sessions {
             map.insert(
@@ -518,9 +624,14 @@ fn consult_destination(dest: &NamedStore, mk: &MasterKey) -> DestinationRead {
                     sha256: session.sha256.clone(),
                 },
             );
+            // The proof's snapshot for this machine: the newest snapshot
+            // the consult read the session's bytes out of. Keyed by the
+            // session's own machine name (the snapshot's hostname equals it
+            // for our pushes, but the path is the fact both sides share).
+            snapshots.insert(session.machine.clone(), machine.snapshot_id.clone());
         }
     }
-    DestinationRead::Ready(map)
+    DestinationRead::Ready(map, snapshots)
 }
 
 /// Merge freshly derived summaries into one machine's manifest file. Rows for
@@ -687,7 +798,7 @@ mod tests {
         write_session(stage, machine, session, 1);
         // Drop the body directly; the counter remains.
         reclaim_session_body(stage, machine, session).unwrap();
-        let report = reclaim_stage(stage, &[], false).unwrap();
+        let report = reclaim_stage(stage, &[], false, None).unwrap();
         assert!(report.candidates.is_empty());
         drop(dir);
     }
