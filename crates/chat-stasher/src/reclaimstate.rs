@@ -84,7 +84,9 @@ impl ReclaimOutcome {
 pub struct ReclaimBlock {
     pub destination: String,
     /// The block kind's word: `unreachable` / `partial-read` / `not-held` /
-    /// `triple-mismatch`.
+    /// `triple-mismatch` / `not-mirrored` (the mirror leg's word,
+    /// [`crate::mirror::HELD_BACK_KIND`] — the mirror rows and the menu bar
+    /// count this week's hold-back from this same field).
     pub kind: String,
     /// The ADR-023 classifier slug when the block carries an error it
     /// classified, otherwise absent.

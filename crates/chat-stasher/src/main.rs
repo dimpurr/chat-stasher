@@ -12953,39 +12953,58 @@ fn cmd_reclaim_stage(
         }
     }
 
-    let report = match stagereclaim::reclaim_stage(stage, &destinations, apply) {
-        Ok(report) => report,
-        Err(e) => {
-            let primary_cfg = destinations
-                .iter()
-                .find(|d| {
-                    d.cfg.repo_root.starts_with("opendal:")
-                        || d.cfg.options.contains_key("endpoint")
-                })
-                .map(|d| &d.cfg)
-                .unwrap_or(&destinations[0].cfg);
-            chat_stasher::remote_err::eprint_remote_error("reclaim-stage", &e, primary_cfg);
-            // The refusal is durably recorded too (SG-1): a run that ends
-            // here is a week the stage was not reclaimed, and the
-            // consecutive-streak counter must not reset on it. The counts
-            // stay absent — this run ended before it surveyed the stage —
-            // while the health snapshot is present: the classification
-            // happened before the failure, and the record says what the
-            // run saw (ADR-060 D7).
-            record_reclaim_state(
-                apply,
-                chat_stasher::reclaimstate::ReclaimOutcome::Refused,
-                Vec::new(),
-                Some(stagereclaim::destination_states_as_state(&destinations)),
-                None,
-                None,
-            );
-            for dest in &destinations {
-                reap_remote(&dest.cfg, keep_ssh_masters);
+    // ADR-060 D6(ii) / 47 §5.3: a configured-and-on mirror makes the proof's
+    // snapshot part of the deletion precondition. The caller states the
+    // mirror — the declared destination, the copy's directory under the data
+    // root, and the durable completed-round record as this run read it —
+    // and the proof decides; nothing mirror-shaped is loaded inside the
+    // proof, so its fixtures can state any record. `None` is the no-mirror
+    // machine (no section, switch off): the reclaim runs exactly as it ran
+    // before mirrors existed, and a mirror whose `mirror_of` this run does
+    // not consult (degraded, not declared) binds nothing inside the proof.
+    let data_root = chat_stasher::config::default_data_root();
+    let mirror_holdback = chat_stasher::mirror::MirrorSettings::for_config(&config)
+        .filter(|settings| settings.enabled)
+        .map(|settings| chat_stasher::stagereclaim::MirrorHoldback {
+            mirror_of: settings.mirror_of.clone(),
+            mirror_root: chat_stasher::mirror::mirror_dir(&data_root, &settings.mirror_of),
+            state: chat_stasher::mirrorstate::load(&state_dir),
+        });
+
+    let report =
+        match stagereclaim::reclaim_stage(stage, &destinations, apply, mirror_holdback.as_ref()) {
+            Ok(report) => report,
+            Err(e) => {
+                let primary_cfg = destinations
+                    .iter()
+                    .find(|d| {
+                        d.cfg.repo_root.starts_with("opendal:")
+                            || d.cfg.options.contains_key("endpoint")
+                    })
+                    .map(|d| &d.cfg)
+                    .unwrap_or(&destinations[0].cfg);
+                chat_stasher::remote_err::eprint_remote_error("reclaim-stage", &e, primary_cfg);
+                // The refusal is durably recorded too (SG-1): a run that ends
+                // here is a week the stage was not reclaimed, and the
+                // consecutive-streak counter must not reset on it. The counts
+                // stay absent — this run ended before it surveyed the stage —
+                // while the health snapshot is present: the classification
+                // happened before the failure, and the record says what the
+                // run saw (ADR-060 D7).
+                record_reclaim_state(
+                    apply,
+                    chat_stasher::reclaimstate::ReclaimOutcome::Refused,
+                    Vec::new(),
+                    Some(stagereclaim::destination_states_as_state(&destinations)),
+                    None,
+                    None,
+                );
+                for dest in &destinations {
+                    reap_remote(&dest.cfg, keep_ssh_masters);
+                }
+                return ExitCode::FAILURE;
             }
-            return ExitCode::FAILURE;
-        }
-    };
+        };
     for dest in &destinations {
         reap_remote(&dest.cfg, keep_ssh_masters);
     }
@@ -13067,9 +13086,19 @@ fn cmd_reclaim_stage(
                 BlockedKind::TripleMismatch => {
                     "holds a different digest for the session(s)".to_string()
                 }
+                // ADR-062 D6.3's fixed human phrase, spelled by the one
+                // constant every surface repeats, so the weekly log cannot
+                // grow a second wording for the same hold-back.
+                BlockedKind::NotMirrored => chat_stasher::mirror::HELD_BACK_SENTENCE.to_string(),
             };
+            // rev2 ⑤: the colon ends the destination's noun phrase, so
+            // each kind's word reads as an assertion about it —
+            // predicate ("does not hold the archived session(s)") or
+            // whole sentence (`HELD_BACK_SENTENCE`, whose own subject is
+            // the mirror, which is why it cannot follow the bare
+            // juxtaposition the sibling words can).
             println!(
-                "  blocked: destination \"{}\" {word} — {} session(s) / {} held back",
+                "  blocked: destination \"{}\": {word} — {} session(s) / {} held back",
                 block.destination,
                 block.sessions,
                 fmt_bytes(block.bytes)
@@ -13102,6 +13131,16 @@ fn cmd_reclaim_stage(
                     println!("    reason: destination was read but not to completion: {detail}");
                 }
                 BlockedKind::SessionNotHeld | BlockedKind::TripleMismatch => {}
+                // The mirror leg's own advice: the block clears itself on
+                // the copy's next completed round — never a re-run alone,
+                // and never a manual delete.
+                BlockedKind::NotMirrored => {
+                    println!(
+                        "    fix: a completed `chat-stasher mirror sync` round takes the copy \
+                         over the proof's snapshot; the body stays until the row's round \
+                         completes, then re-run the reclaim"
+                    );
+                }
             }
         }
         println!(
@@ -20292,13 +20331,15 @@ fn cmd_status(
             eprintln!("    fix: {fix}");
         }
     }
-    // ADR-062 (LM-2) / C2: the mirror's advisory lines — first-fill progress
-    // phrased as progress, never as red. Same family as the key alerts:
-    // silent when no mirror is configured or the fill is complete, never
-    // moving the exit code, and readable after every round because each
-    // round leaves a progress record behind.
+    // ADR-062 (LM-2/LM-4) / C2: the mirror's rows — first-fill progress
+    // phrased as progress, never as red, and the steady row (size, last
+    // sync, snapshots behind, orphans) once the fill is complete. Same
+    // family as the key alerts: empty when no mirror is configured,
+    // never moving the exit code, and readable after every round because
+    // each round leaves a progress record behind.
     for line in chat_stasher::mirror::mirror_status_lines(
         &config,
+        &chat_stasher::config::default_data_root(),
         &chat_stasher::collect::default_state_dir(),
     ) {
         eprintln!("{line}");
@@ -20583,14 +20624,20 @@ fn local_layer_json(config: &Config, info: &RunStateInfo) -> serde_json::Value {
         // needs to show the alarm the surfaces print, and an unknown
         // stays an unknown here too, never a zero.
         object.insert("stage_cap".to_string(), reconciled["stage_cap"].clone());
-        // ADR-062 (LM-2): the mirror rides the same local layer for the same
-        // reason the reconciliation does — every fact is machinery on this
-        // machine, and an unconfigured or complete mirror must be an
-        // explicit `not_applicable` shape, not a zero that reads as
-        // measured.
+        // ADR-062 (LM-2/LM-4): the mirror rides the same local layer for the
+        // same reason the reconciliation does — every fact is machinery on
+        // this machine (its records and its directory), an unconfigured or
+        // complete mirror must be an explicit `not_applicable` shape, never
+        // a zero that reads as measured, and the rows carry the already
+        // worded sentences so the menu bar prints what `status` prints.
         object.insert(
             "mirror".to_string(),
-            chat_stasher::mirror::status_json(config, &chat_stasher::collect::default_state_dir()),
+            chat_stasher::mirror::status_json(
+                config,
+                &chat_stasher::config::default_data_root(),
+                &chat_stasher::collect::default_state_dir(),
+                info.now_unix,
+            ),
         );
     }
     value
@@ -22952,7 +22999,7 @@ mod run_once_letta_tests {
             chat_stasher::runstate::RunOutcome::Completed,
             "the hand-off is kept out of the failure column by the local duty's own result"
         );
-        assert_eq!(state.pull_letta_unread, false, "nothing was left unread");
+        assert!(!state.pull_letta_unread, "nothing was left unread");
         assert!(
             state.pull_letta_deferred,
             "the deferral is the record's own fact"

@@ -310,7 +310,7 @@ reports the error and lists the checks it therefore could not perform, so "no
 destination declared" is never printed as a finding about a config nobody read.
 When the error is an unexpandable `rustic_cache_dir`, it also names that cache
 path check as unavailable and says to fix the value and run doctor again
-(`crates/chat-stasher/src/doctor.rs:2264-2317`). And an **absent** config file is a
+(`crates/chat-stasher/src/doctor.rs:2275-2330`). And an **absent** config file is a
 different state altogether, not an error: that is the normal first run, and it
 does use the defaults (`crates/chat-stasher/src/config.rs:495-504`). If you want
 the defaults back, move the file aside rather than leaving a broken one in place.
@@ -990,7 +990,7 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:20603-20604`). This is the
+does not (`crates/chat-stasher/src/main.rs:20611-20612`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its timer and scan output has two parts. **The first line** is the timer health conclusion,
@@ -1011,7 +1011,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:436-522`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:20695-20702`):
+(`crates/chat-stasher/src/main.rs:20703-20710`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -1065,16 +1065,16 @@ reports what came back in three separate states rather than two: reached (and
 whether a repository is there), not reached (with the classifier's verdict
 attached), and not configured at all — a destination with no `repo` was never
 dialled, and calling it "unreachable" would put a config mistake and a dead
-network in one bucket (`crates/chat-stasher/src/doctor.rs:1746-1756,1884-1905,2037-2090`).
+network in one bucket (`crates/chat-stasher/src/doctor.rs:1756-1766,1894-1915,2047-2100`).
 When the repository is there it also reads each machine's `writer.json` and
 reports the machines whose archived activity index was written by an older
 `chat-stasher`, with the exact command that rebuilds each one
-(`crates/chat-stasher/src/doctor.rs:1774-1881`).
+(`crates/chat-stasher/src/doctor.rs:1784-1891`).
 It creates nothing, so a destination it reports as "not there yet" is still not
 created by running `doctor`. D10 also checks each destination's local FTS index
-without connecting to it (`crates/chat-stasher/src/doctor.rs:2734-2735,3311-3373`).
+without connecting to it (`crates/chat-stasher/src/doctor.rs:2750-2751,3341-3403`).
 The destination probes are the one check that touches the network; see section
-4.4 if it reports a host it cannot trust (`crates/chat-stasher/src/doctor.rs:1746-1756,1884-1905,2037-2090`).
+4.4 if it reports a host it cannot trust (`crates/chat-stasher/src/doctor.rs:1756-1766,1894-1915,2047-2100`).
 
 ### 5.1 Exporting a day
 

@@ -373,26 +373,53 @@ struct StatusDocument: Decodable {
     /// absent from a CLI that predates the field.
     let configErrorKind: String?
     let local: LocalStatus?; let scanner: ScannerStatus?
-    /// W1012 / SG-1: the destination reconciliation's already-worded alerts
-    /// and the reclaim record — optional because a CLI older than this field
-    /// keeps working, with the panel simply not showing these facts.
-    let destAlerts: [DestAlertRow]?
-    let reclaim: ReclaimState?
     enum CodingKeys: String, CodingKey {
-        case command, local, scanner, reclaim
+        case command, local, scanner
         case schemaVersion = "schema_version"
         case exitCode = "exit_code"
         case cliVersion = "cli_version"
         case configSource = "config_source"
         case configError = "config_error"
         case configErrorKind = "config_error_kind"
-        case destAlerts = "dest_alerts"
     }
 }
 struct LocalStatus: Decodable {
     let schedule: ScheduleStatus?; let lastRun: LastRunStatus?; let stage: StageStatus?
     let destinationNames: [String]
-    enum CodingKeys: String, CodingKey { case schedule, stage; case lastRun = "last_run"; case destinationNames = "destination_names" }
+    /// W1012 / SG-1: the destination reconciliation's already-worded alerts
+    /// and the reclaim record, and (W1025 / LM-4) the local mirror's rows —
+    /// all emitted inside the local layer, where the CLI has carried them
+    /// since the fields were introduced. Optional because a CLI older than
+    /// each field keeps working, with the panel simply not showing these
+    /// facts (absence is "this CLI cannot report them", never "the machine
+    /// has none").
+    let destAlerts: [DestAlertRow]?
+    let reclaim: ReclaimState?
+    let mirror: MirrorStatusDoc?
+    enum CodingKeys: String, CodingKey {
+        case schedule, stage, reclaim, mirror
+        case lastRun = "last_run"
+        case destinationNames = "destination_names"
+        case destAlerts = "dest_alerts"
+    }
+}
+/// W1025 / LM-4 (ADR-062): the local mirror's rows, already worded by the
+/// CLI's own wording owner — `status` prints these sentences, `doctor`
+/// shows them, and this panel displays them verbatim (ruling 8's one
+/// vocabulary, three surfaces).
+struct MirrorStatusDoc: Decodable {
+    let rows: [MirrorRowDoc]?
+}
+/// One mirror row as the panel shows it. `severity` is the CLI's own small
+/// vocabulary — "info" (facts: the steady row, first-fill progress, never
+/// a red over a mere large fill, ADR-062 C2) or "yellow" (a degraded
+/// copy: a failed round, a record that cannot be read). There is no red:
+/// the mirror never marks the machine unhealthy.
+struct MirrorRowDoc: Decodable, Identifiable {
+    let severity: String
+    let sentence: String
+    var id: String { sentence }
+    var isWarning: Bool { severity == "yellow" }
 }
 struct ScheduleStatus: Decodable { let kind: String; let installed: Bool?; let units: [String]? }
 struct LastRunStatus: Decodable { let kind: String; let outcome: String? }
@@ -527,6 +554,11 @@ struct LocalSnapshot {
     /// report them", never "the machine has none".
     var destAlerts: [DestAlertRow] = []
     var reclaim: ReclaimState? = nil
+    /// W1025 / LM-4 (ADR-062): the local mirror's rows — the steady row
+    /// (size, last sync, snapshots behind, orphans) and the first-fill
+    /// progress the C2 ruling says is progress, never a red. Empty on a
+    /// CLI that predates the fields or a machine with no mirror.
+    var mirrorRows: [MirrorRowDoc] = []
 }
 
 enum ArchiveStatus {
@@ -544,6 +576,15 @@ enum ArchiveStatus {
     /// facts below them in the ladder: nothing in the last two cases says
     /// anything about whether backups are being made at all.
     case destAlert(String, ArchiveStatus.Severity)
+    /// W1025 / LM-4 (ADR-062): the local mirror's own yellow row — a failed
+    /// sync round, a record that cannot be read, a mirror enabled but never
+    /// run. Machinery like the reconciliation's findings above, but always
+    /// below them: while the local copy is degraded the backups still
+    /// reach their declared destinations, so a mirror finding never
+    /// outranks a destination one. The steady row and first-fill progress
+    /// are `info` and never enter the ladder at all (ADR-062 C2: a large
+    /// first fill is progress, not failure).
+    case mirrorAlert(String, ArchiveStatus.Severity)
     /// The setup card: a fixed sentence plus the CLI's own explanation, so a
     /// config problem names itself instead of hiding behind generic wording.
     case setup(String, String?)
@@ -558,6 +599,7 @@ enum ArchiveStatus {
         switch self {
         case .healthy: .healthy
         case .destAlert(_, let severity): severity
+        case .mirrorAlert(_, let severity): severity
         case .needsAttention, .silent, .extensionStale, .waiting, .sourceStopped, .setup, .offline: .warning
         case .destination(_, _, let severity): severity
         case .unreadable, .localFailure, .cliMissing, .cliTooOld, .credentialsUnavailable: .error
@@ -580,6 +622,10 @@ enum ArchiveStatus {
         case .waiting(let count): "\(count) conversations waiting to upload"
         case .localFailure(let reason): reason
         case .destAlert(let sentence, _): sentence
+        // W1025 / LM-4: the mirror row is the CLI's own wording — the same
+        // sentence `status` prints and `doctor` shows (ADR-062 ruling 8) —
+        // so there is nothing for this panel to reword.
+        case .mirrorAlert(let sentence, _): sentence
         case .setup(let sentence, _): sentence
         case .sourceStopped(let source): "\(source) stopped saving"
         case .cliMissing: "Install the command-line tool"
@@ -595,6 +641,7 @@ enum ArchiveStatus {
         case .setup(_, let explanation): return explanation
         case .destination(_, let sentence, _): return sentence
         case .destAlert(_, _): return nil
+        case .mirrorAlert: return nil
         // W913 review · Same honesty as the sentence: the one-line status
         // words both causes behind the dashboard's stale flag, because the
         // reader who opens the panel should not have to infer that "48 hours"
@@ -676,6 +723,15 @@ func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, fail
     }
     if let alert = local.destAlerts.first {
         return .destAlert(alert.sentence, .warning)
+    }
+    // W1025 / LM-4 (ADR-062): the mirror's yellow rows — a failed round, an
+    // unreadable record, a mirror that never ran — rank with the machinery
+    // findings (above the archive facts below, because they say the local
+    // copy is not doing its job) but below every destination alert, for the
+    // reason the case's own doc states. Info rows (the steady row, first
+    // fill progress) never enter the ladder at all.
+    if let row = local.mirrorRows.first(where: \.isWarning) {
+        return .mirrorAlert(row.sentence, .warning)
     }
     let attention = Set(snapshot.machines.filter {
         $0.health == "missing_index" || $0.health == "writer_behind"
@@ -850,6 +906,17 @@ struct ReclaimNotification {
 /// threshold is two because one blocked week can be a bad weekend, and the
 /// payload carries the machine's own numbers rather than a paraphrase —
 /// the same discipline the panel's sentences come from.
+///
+/// This payload was unreachable from any real document until W1025 fixed
+/// the W1012 decode: the app previously read `reclaim` (and `dest_alerts`)
+/// off the `status --json` document root — a location no CLI ever wrote —
+/// so every real document decoded an empty record and no blocked streak
+/// could ever notify. The decode-contract test pins the current location
+/// (`local`), and that fix is what re-activated the C2 machinery this
+/// delivery step is. rev2 ① adds its own rule: a hold-back whose blocks
+/// are all `not-mirrored` names a destination that *proved* every session,
+/// so the body words the local mirror — never "Blocked for: <destination>"
+/// about a destination that is healthy.
 func reclaimNotificationPayload(reclaim: ReclaimState?, notifiedStreak: Int?, blockedStreakAlarm: Int?) -> ReclaimNotification? {
     guard let reclaim, reclaim.kind == "known", reclaim.state != "ok",
           let consecutive = reclaim.consecutiveBlocked,
@@ -857,7 +924,18 @@ func reclaimNotificationPayload(reclaim: ReclaimState?, notifiedStreak: Int?, bl
     // Re-notifying while the same streak grows keeps the user's attention
     // on a fact they have seen; the streak crossing is the moment to speak.
     guard (notifiedStreak ?? 0) < threshold else { return nil }
-    let names = (reclaim.blocked ?? []).map(\.destination)
+    // rev2 ①: split the held-back list by kind before naming anyone. A
+    // `not-mirrored` block is the mirror leg's own hold-back — the
+    // destination it names proved every session it is counted against — so
+    // it must not drive the "Blocked for" blame sentence, in a mirror-only
+    // streak any more than in a mixed one. The kind literal is the record's
+    // settled spelling (`HELD_BACK_KIND` on the CLI side); the app reads
+    // it here rather than rewording it.
+    let blocks = reclaim.blocked ?? []
+    let failingNames = blocks.filter { $0.kind != "not-mirrored" }.map(\.destination)
+    let mirrorHeld = blocks.filter { $0.kind == "not-mirrored" }
+        .map { $0.sessions ?? 0 }
+        .reduce(0, +)
     var body = "The weekly stage clean-up has been blocked \(consecutive) times in a row"
     if let sessions = reclaim.heldBackSessions, sessions > 0 {
         body += "; \(sessions.formatted()) conversation file\(sessions == 1 ? "" : "s") still held on this machine"
@@ -866,8 +944,11 @@ func reclaimNotificationPayload(reclaim: ReclaimState?, notifiedStreak: Int?, bl
         body += " (\(reclaimHeldBackBytes(bytes)))"
     }
     body += ". Nothing has been reclaimed and the stage keeps growing."
-    if !names.isEmpty {
-        body += " Blocked for: \(names.joined(separator: ", "))."
+    if !failingNames.isEmpty {
+        body += " Blocked for: \(failingNames.joined(separator: ", "))."
+    }
+    if mirrorHeld > 0 {
+        body += " The local mirror holds \(mirrorHeld.formatted()) conversation file\(mirrorHeld == 1 ? "" : "s") back — the copy, not a destination, is why; the [mirror] rows carry the count."
     }
     body += " Open the panel for the reason and the fix."
     return ReclaimNotification(
@@ -1163,6 +1244,27 @@ private final class ArchiveModel: ObservableObject {
             loadDemoArchive(mode: mode, now: Date())
             return
         }
+        if mode == "mirror" {
+            // W1025 / LM-4 (ADR-062): the two shapes the mirror section has
+            // to render — the steady row a healthy copy keeps, and the
+            // yellow row a degraded copy owes. The sentences are the CLI's
+            // real formatter output, pasted from the rows `mirror_status`
+            // words (rev0 ⑦): the byte totals print raw — `6.0 GiB
+            // (6442450944 B)`, `(4233000000 of 6221000000)` — and every
+            // phrase is the pinned spelling, so the demo stays a
+            // screenshot fixture of the ruling-8 vocabulary rather than an
+            // invented paraphrase of it.
+            localSnapshot = LocalSnapshot(
+                waitingToUpload: 0, scheduleInstalled: true, lastRunFailed: false, reason: nil,
+                cliVersion: "0.5.0", cliNeedsUpdate: false,
+                mirrorRows: [
+                    MirrorRowDoc(severity: "info", sentence: "[mirror] local copy of `storagebox`: 6.0 GiB (6442450944 B) across 47 file(s), last sync 2026-10-24 13:05 UTC (2 hours ago), 0 snapshot(s) behind, 3 orphan file(s) (128.0 KiB reclaimable)"),
+                    MirrorRowDoc(severity: "yellow", sentence: "[mirror] the last mirror round failed at 68% (4233000000 of 6221000000): the destination could not be read mid-fill (a read error); the raw error is not recorded in state files — the next round resumes only after the cause is fixed; reclaim holds sessions back until a round completes"),
+                ]
+            )
+            loadDemoArchive(mode: mode, now: Date())
+            return
+        }
         if mode == "offline" { offline = true }
         guard mode != "unreadable" else {
             snapshot = nil
@@ -1367,6 +1469,11 @@ private final class ArchiveModel: ObservableObject {
         else { reason = nil }
         let waiting = count?.kind == "known" ? count?.value : nil
         let version = document.cliVersion
+        // W1012 (SG-1) and W1025 (LM-4): the machinery facts — destination
+        // alerts, the reclaim record, the mirror's rows — decode out of the
+        // local layer the CLI has always emitted them in; `local != nil` was
+        // established above, so `local.destAlerts ?? []` is the miss on an
+        // older CLI, read as "cannot report", never "none".
         return LocalSnapshot(waitingToUpload: waiting,
                              scheduleInstalled: local.schedule?.installed,
                              lastRunFailed: local.lastRun?.kind == "known" && local.lastRun?.outcome == "error",
@@ -1375,10 +1482,11 @@ private final class ArchiveModel: ObservableObject {
                              cliPath: cli,
                              cliNeedsUpdate: version.map { !versionAtLeast($0, "0.5.0-rc.2") } ?? true,
                              destinationCount: local.destinationNames.isEmpty
-                                ? local.schedule?.units?.count : local.destinationNames.count,
+                                 ? local.schedule?.units?.count : local.destinationNames.count,
                              destinationNames: local.destinationNames,
-                             destAlerts: document.destAlerts ?? [],
-                             reclaim: document.reclaim)
+                             destAlerts: local.destAlerts ?? [],
+                             reclaim: local.reclaim,
+                             mirrorRows: local.mirror?.rows ?? [])
     }
 
     /// Run the same `status --json` handshake the panel runs and return the
@@ -1413,6 +1521,17 @@ func destinationStatusRank(_ status: ArchiveStatus) -> Int {
         // W1012 / SG-1: machinery findings outrank the same-severity archive
         // findings because they mean the backups themselves have a gap —
         // the whole ladder exists to surface the worst risk first.
+        switch severity {
+        case .healthy: 0
+        case .warning: 2
+        case .error: 3
+        }
+    case .mirrorAlert(_, let severity):
+        // W1025 / LM-4: the mirror is machinery — its warnings outrank the
+        // archive facts (same-severity rank 2/1 split follows `destAlert`,
+        // not `destination`) — while the destinations above remain the
+        // deeper gaps: a degraded local copy never outranks backups that
+        // are not reaching their destination.
         switch severity {
         case .healthy: 0
         case .warning: 2
@@ -1686,6 +1805,7 @@ private struct ArchivePopover: View {
                 machineList(snapshot)
                 attention(snapshot)
                 machineryAlerts
+                mirrorRows()
             } else if model.status.explanation == nil {
                 Text("Reading archive overview…").font(.system(size: 13)).foregroundStyle(.secondary)
             } else {
@@ -1926,6 +2046,32 @@ private struct ArchivePopover: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
+                }
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    /// W1025 / LM-4 (ADR-062): the local mirror's rows — the steady row a
+    /// healthy copy keeps (size, last sync, snapshots behind, orphans) and
+    /// the first-fill progress, displayed as the CLI's own sentences, plus
+    /// a yellow row for a degraded copy. The mirror never raises a red
+    /// anywhere (C2: a first fill is progress, not failure), so a yellow
+    /// row is the only warning shape this section has. Hidden on a machine
+    /// whose CLI reports no mirror — an empty section means "nothing
+    /// declared", the same silence `machineryAlerts` keeps for no findings.
+    @ViewBuilder private func mirrorRows() -> some View {
+        let rows = model.localSnapshot?.mirrorRows ?? []
+        if !rows.isEmpty {
+            Divider()
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(rows) { row in
+                    Label(row.sentence, systemImage: row.isWarning
+                          ? "exclamationmark.circle" : "externaldrive")
+                        .foregroundStyle(row.isWarning ? Color.yellow : Color.secondary)
+                        .font(.system(size: 11))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel(row.isWarning ? "Mirror warning" : "Local mirror")
                 }
             }
             .accessibilityElement(children: .combine)

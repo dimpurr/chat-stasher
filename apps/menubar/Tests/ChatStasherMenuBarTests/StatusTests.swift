@@ -782,6 +782,57 @@ final class StatusTests: XCTestCase {
                        "a refusal's backlog is never a zero: \(payload?.body ?? "")")
     }
 
+    /// rev2 ①: the notification's "Blocked for" list may name only a
+    /// destination whose own failure holds the reclaim. A hold-back the
+    /// mirror leg recorded (`not-mirrored`) names a destination that
+    /// *proved* every session it is counted against, so a mirror-only
+    /// streak words the local mirror instead — the same redirection the
+    /// CLI's streak alert does (C2: the mirror never raises a red, and a
+    /// healthy destination is never the one the bytes are "held back
+    /// for"). A mixed record keeps the failing destination in the list
+    /// and never folds the mirroring one into it.
+    func testAMirrorHeldStreakNamesNoDestination() {
+        func mirrorHeld(streak: Int, sessions: Int? = 3) -> ReclaimState {
+            ReclaimState(kind: "known", state: "blocked", consecutiveBlocked: streak,
+                         finishedAtUnix: 1_750_100_000,
+                         heldBackSessions: sessions, heldBackBytes: 2_048,
+                         blocked: [ReclaimBlockedDestination(destination: "storagebox", kind: "not-mirrored",
+                                                             sessions: sessions, bytes: 2_048, errorKind: nil)],
+                         unitInstalled: true, why: nil, blockedStreakAlarm: 2)
+        }
+        let payload = reclaimNotificationPayload(reclaim: mirrorHeld(streak: 2), notifiedStreak: 0, blockedStreakAlarm: 2)
+        XCTAssertNotNil(payload, "the streak is still a notification-worthy fact: the stage keeps growing")
+        let body = payload?.body ?? ""
+        XCTAssertFalse(body.contains("Blocked for:"),
+                       "no destination may be named as the one the bytes are held back for: \(body)")
+        XCTAssertFalse(body.contains("storagebox"),
+                       "the mirror's destination proved every session it is counted against: \(body)")
+        XCTAssertTrue(body.contains("local mirror"),
+                      "the hold-back is worded as the copy's, not a destination's verdict: \(body)")
+        XCTAssertTrue(body.contains("3 conversation files"),
+                      "the machine's own numbers still travel: \(body)")
+
+        let mixed = ReclaimState(kind: "known", state: "blocked", consecutiveBlocked: 2,
+                                 finishedAtUnix: 1_750_100_000,
+                                 heldBackSessions: 9_872, heldBackBytes: 12_900_002_048,
+                                 blocked: [
+                                    ReclaimBlockedDestination(destination: "r2", kind: "unreachable",
+                                                              sessions: 9_869, bytes: 12_900_000_000,
+                                                              errorKind: "credentials_missing_or_invalid"),
+                                    ReclaimBlockedDestination(destination: "storagebox", kind: "not-mirrored",
+                                                              sessions: 3, bytes: 2_048, errorKind: nil),
+                                 ],
+                                 unitInstalled: true, why: nil, blockedStreakAlarm: 2)
+        let mixedPayload = reclaimNotificationPayload(reclaim: mixed, notifiedStreak: 0, blockedStreakAlarm: 2)
+        let mixedBody = mixedPayload?.body ?? ""
+        XCTAssertTrue(mixedBody.contains("Blocked for: r2."),
+                      "the destination that genuinely failed stays named: \(mixedBody)")
+        XCTAssertFalse(mixedBody.contains("Blocked for: r2, storagebox"),
+                       "the mirroring destination never joins the blame list: \(mixedBody)")
+        XCTAssertTrue(mixedBody.contains("local mirror"),
+                      "the mirror's half is worded as the copy's: \(mixedBody)")
+    }
+
     /// M2 · one identity per blocked *episode*: the attempt that first
     /// crossed the threshold names the notification. Inside an episode
     /// the marker (not the identifier) keeps the app quiet; a *later*
@@ -843,27 +894,61 @@ errorKind: "credentials_missing_or_invalid")],
         XCTAssertEqual(yellowStatus.severity, .warning)
     }
 
-    /// The decode contract: a `status --json` document carrying `dest_alerts`
-    /// and `reclaim` decodes, and one from a CLI that predates the fields
-    /// still decodes — the older CLI keeps working, with the panel simply
-    /// not showing these facts (absence is "cannot report", never "none").
+    /// The decode contract: a `status --json` document carrying `dest_alerts`,
+    /// `reclaim` and the mirror rows — **inside the local layer, where the
+    /// CLI has emitted them since the fields were introduced** (W1025's
+    /// fix: the app previously read the two W1012 fields off the document
+    /// root, a location no CLI ever wrote, so both were silently always
+    /// empty) — decodes, and one from a CLI that predates the fields still
+    /// decodes. The older CLI keeps working, with the panel simply not
+    /// showing these facts (absence is "cannot report", never "none").
     func testStatusDocumentDecodesDestAlertsAndOlderShape() throws {
         let withAlerts = """
         {"schema_version":1,"command":"status","exit_code":1,"cli_version":"1.0.0","config_source":"file",
          "local":{"schedule":{"kind":"installed","installed":true},
                   "destination_names":["r2","storagebox"],
-                  "last_run":{"kind":"known"},"stage":{"path":null}},
-         "dest_alerts":[{"severity":"red","sentence":"[reclaim] blocked 2 times in a row","fix":"reclaim-stage"},
-                        {"severity":"yellow","sentence":"[dest] r2: declared, but no installed timer pushes it","fix":null}],
-         "reclaim":{"kind":"known","state":"blocked","consecutive_blocked":2,"held_back_sessions":10,
-                    "held_back_bytes":1024,"blocked":[{"destination":"r2","kind":"unreachable","error_kind":"credentials_missing_or_invalid","sessions":10,"bytes":1024}],
-                    "unit_installed":true}}
+                  "last_run":{"kind":"known"},"stage":{"path":null},
+                  "dest_alerts":[{"severity":"red","sentence":"[reclaim] blocked 2 times in a row","fix":"reclaim-stage"},
+                                 {"severity":"yellow","sentence":"[dest] r2: declared, but no installed timer pushes it","fix":null}],
+                  "reclaim":{"kind":"known","state":"blocked","consecutive_blocked":2,"held_back_sessions":10,
+                             "held_back_bytes":1024,"blocked":[{"destination":"r2","kind":"unreachable","error_kind":"credentials_missing_or_invalid","sessions":10,"bytes":1024}],
+                             "unit_installed":true},
+                  "mirror":{"configured":true,"enabled":true,"mirror_of":"storagebox","declared":true,
+                            "size":{"kind":"known","files":47,"bytes":6442450944},
+                            "last_sync":{"kind":"known","unix":1800000000},
+                            "snapshots_behind":{"kind":"known","count":0},
+                            "orphans":{"kind":"known","files":3,"bytes":131072},
+                             "rows":[{"severity":"info","sentence":"[mirror] local copy of `storagebox`: 6.0 GiB (6442450944 B) across 47 file(s), last sync 2026-10-24 13:05 UTC (2 hours ago), 0 snapshot(s) behind, 3 orphan file(s) (128.0 KiB reclaimable)"}]}}}
         """.data(using: .utf8)!
         let document = try JSONDecoder().decode(StatusDocument.self, from: withAlerts)
-        XCTAssertEqual(document.destAlerts?.count, 2)
-        XCTAssertEqual(document.destAlerts?[0].severity, "red")
-        XCTAssertEqual(document.reclaim?.consecutiveBlocked, 2)
-        XCTAssertEqual(document.reclaim?.blocked?.first?.destination, "r2")
+        let local = try XCTUnwrap(document.local, "the machinery facts live in the local layer")
+        XCTAssertEqual(local.destAlerts?.count, 2)
+        XCTAssertEqual(local.destAlerts?[0].severity, "red")
+        XCTAssertEqual(local.reclaim?.consecutiveBlocked, 2)
+        XCTAssertEqual(local.reclaim?.blocked?.first?.destination, "r2")
+        XCTAssertEqual(local.mirror?.rows?.count, 1)
+        XCTAssertEqual(local.mirror?.rows?.first?.severity, "info")
+        XCTAssertFalse(local.mirror?.rows?.first?.isWarning ?? true)
+        XCTAssertTrue(
+            local.mirror?.rows?.first?.sentence.contains("local copy of `storagebox`") ?? false,
+            "the row is the CLI's own wording: \(local.mirror?.rows?.first?.sentence ?? "none")"
+        )
+
+        // The pre-W1012 document (the root-level `dest_alerts` the app's
+        // first draft decoded from) is also just an unknown field to the
+        // current decoder: no CLI ever emitted it, and this pins that the
+        // app no longer reads that location.
+        let legacyRootLevel = """
+        {"schema_version":1,"command":"status","exit_code":1,"cli_version":"1.0.0","config_source":"file",
+         "local":{"schedule":{"kind":"installed","installed":true},
+                  "destination_names":["r2"],"last_run":{"kind":"known"},"stage":{"path":null}},
+         "dest_alerts":[{"severity":"red","sentence":"[reclaim] blocked 2 times in a row","fix":"reclaim-stage"}],
+         "reclaim":{"kind":"known","state":"blocked","consecutive_blocked":2,"unit_installed":true}}
+        """.data(using: .utf8)!
+        let legacyDocument = try JSONDecoder().decode(StatusDocument.self, from: legacyRootLevel)
+        XCTAssertTrue((legacyDocument.local?.destAlerts?.count ?? 0) == 0,
+                      "root-level dest_alerts is no location the app reads")
+        XCTAssertNil(legacyDocument.local?.reclaim)
 
         let older = """
         {"schema_version":1,"command":"status","exit_code":1,"cli_version":"0.5.0-rc.2","config_source":"file",
@@ -876,8 +961,54 @@ errorKind: "credentials_missing_or_invalid")],
         // The older document simply has no dest_alerts — decode treats that
         // as "cannot report", and `readStatus` maps nil to an empty list, so
         // the panel shows nothing rather than a finding.
-        XCTAssertTrue((olderDocument.destAlerts?.count ?? 0) == 0)
-        XCTAssertNil(olderDocument.reclaim)
-        XCTAssertNil(reclaimNotificationPayload(reclaim: olderDocument.reclaim, notifiedStreak: 0, blockedStreakAlarm: 2))
+        XCTAssertTrue((olderDocument.local?.destAlerts?.count ?? 0) == 0)
+        XCTAssertNil(olderDocument.local?.reclaim)
+        XCTAssertNil(olderDocument.local?.mirror)
+        XCTAssertNil(reclaimNotificationPayload(reclaim: olderDocument.local?.reclaim, notifiedStreak: 0, blockedStreakAlarm: 2))
+    }
+
+    // ---- W1025 / LM-4 (ADR-062): the mirror rows in the ladder ----
+
+    /// A yellow mirror row is machinery: it outranks a merely quiet machine
+    /// and keeps the CLI's own sentence (ruling 8), the same way the
+    /// reconciliation's findings do — while a red destination alert always
+    /// outranks it, because backups still reach their destinations while
+    /// only the local copy is degraded.
+    func testMirrorWarningsOutrankASilentMachineButNotDestAlerts() {
+        var local = cleanLocal
+        local.mirrorRows = [
+            MirrorRowDoc(severity: "info", sentence: "[mirror] first sync of `storagebox` in progress: 42% (2616000000 of 6221000000) — reclaim holds sessions back until it completes; rounds end by budget, disk floor or reachability, none of which is a failure"),
+            MirrorRowDoc(severity: "yellow", sentence: "[mirror] the last mirror round failed at 68% (4233000000 of 6221000000): the destination could not be read mid-fill (a read error); the raw error is not recorded in state files — the next round resumes only after the cause is fixed; reclaim holds sessions back until a round completes"),
+        ]
+        let quietAge = snapshot(age: 9 * 86_400)
+        let status = archiveStatus(snapshot: quietAge, local: local, failure: nil, now: now)
+        XCTAssertEqual(status.severity, .warning)
+        XCTAssertTrue(status.sentence.contains("the last mirror round failed"),
+                      "the yellow mirror row is the headline, not the quiet machine: \(status.sentence)")
+        XCTAssertEqual(destinationStatusRank(status), 2)
+
+        // A red destination alert still wins over every mirror finding.
+        local.destAlerts = [DestAlertRow(
+            severity: "red", sentence: "[reclaim] the weekly stage clean-up is blocked 2 times in a row", fix: nil)]
+        let outranked = archiveStatus(snapshot: quietAge, local: local, failure: nil, now: now)
+        XCTAssertTrue(outranked.sentence.contains("blocked 2 times in a row"),
+                      "destination alerts outrank mirror findings: \(outranked.sentence)")
+    }
+
+    /// The steady row and first-fill progress are info and never alarm: a
+    /// healthy machine with a healthy mirror stays green, and a first fill
+    /// (ADR-062 C2: progress, not failure) never turns the panel yellow
+    /// either — the C2 line family is exactly what must not read as red.
+    func testMirrorInfoRowsNeverEnterTheStatusLadder() {
+        var local = cleanLocal
+        local.mirrorRows = [
+            MirrorRowDoc(severity: "info", sentence: "[mirror] local copy of `storagebox`: 6.0 GiB (6442450944 B) across 47 file(s), last sync 2026-10-24 13:05 UTC (2 hours ago), 0 snapshot(s) behind, 0 orphan file(s) (0 B reclaimable)"),
+            MirrorRowDoc(severity: "info", sentence: "[mirror] first sync of `storagebox-v2` in progress: 42% (2616000000 of 6221000000) — reclaim holds sessions back until it completes; rounds end by budget, disk floor or reachability, none of which is a failure"),
+        ]
+        let status = archiveStatus(snapshot: snapshot(), local: local, failure: nil, now: now)
+        guard case .healthy = status else {
+            XCTFail("no mirror warning means no mirror finding, got \(status)")
+            return
+        }
     }
 }

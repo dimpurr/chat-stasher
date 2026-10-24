@@ -29,9 +29,10 @@
 //! suites do (W306).
 
 use chat_stasher::config::Config;
+use chat_stasher::json_out::CountState;
 use chat_stasher::mirror::{
-    self, closure_snapshot_ids, mirror_dir, mirror_status_lines, status_json, sync_once,
-    MirrorProgressRead, MirrorSettings, RoundEnd, RoundEnds, SyncReport, SyncRequest,
+    self, closure_snapshot_ids, mirror_dir, mirror_status, mirror_status_lines, status_json,
+    sync_once, MirrorProgressRead, MirrorSettings, RoundEnd, RoundEnds, SyncReport, SyncRequest,
 };
 use chat_stasher::mirrorstate::{self, MirrorStateRead};
 use chat_stasher::store::{self, BackupStore, StageWriter, StoreConfig};
@@ -43,6 +44,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[path = "../src/test_support.rs"]
 mod test_support;
+
+/// The steady row's date spelling, for assertions about "last sync … UTC"
+/// against a pinned now. One place, so a wording change updates the
+/// assertion beside the code that words it.
+fn chrono_date(unix: u64) -> String {
+    chrono::DateTime::from_timestamp(
+        i64::try_from(unix).expect("the pinned test epoch is representable"),
+        0,
+    )
+    .expect("the pinned test epoch is representable")
+    .format("%Y-%m-%d %H:%M")
+    .to_string()
+}
 
 // ------------------------------------------------------------- fixtures
 
@@ -341,14 +355,80 @@ fn first_fill_copies_every_file_and_records_closure() {
         other => panic!("expected a present progress record, got {other:?}"),
     }
 
-    // The status surfaces stay silent on this healthy machine: complete
-    // means no lines and no findings.
+    // LM-4 / ADR-062 D3: a completed, healthy copy is no longer silent —
+    // the steady row carries the settled field family (size, last sync,
+    // snapshots behind, orphans), with every fact measured: a byte-exact
+    // copy's size is the listing's own bytes, behindness is zero, and the
+    // first fill measured its own orphans to zero.
     let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
-    assert!(mirror_status_lines(&config, &rig.state_dir).is_empty());
-    let json = status_json(&config, &rig.state_dir);
+    let now: u64 = 1_800_000_000;
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, now);
+    let rows = &status.rows;
+    assert_eq!(
+        rows.len(),
+        1,
+        "one steady row on a healthy mirror: {rows:?}"
+    );
+    let row = &rows[0].sentence;
+    assert!(row.contains("[mirror] local copy of `storagebox`"), "{row}");
+    assert!(
+        row.contains(&format!("({} B) across", report.remote_total_bytes)),
+        "{row}"
+    );
+    assert!(row.contains("file(s)"), "{row}");
+    assert!(
+        row.contains(&format!(
+            "last sync {} UTC (less than a minute ago)",
+            chrono_date(1_800_000_000)
+        )),
+        "the row words the completed sync's time and age: {row}"
+    );
+    assert!(row.contains("0 snapshot(s) behind"), "{row}");
+    assert!(row.contains("0 orphan file(s)"), "{row}");
+    assert_eq!(rows[0].severity, mirror::MirrorRowSeverity::Info);
+    assert!(matches!(
+        &status.size,
+        mirror::MirrorUsageState::Known { bytes, .. } if *bytes == report.remote_total_bytes
+    ));
+    assert!(matches!(
+        &status.orphans,
+        mirror::MirrorUsageState::Known { files: 0, bytes: 0 }
+    ));
+    assert_eq!(
+        status.snapshots_behind,
+        CountState::Known { count: 0 },
+        "a completed closure covers every listed snapshot"
+    );
+    assert!(matches!(
+        status.last_sync,
+        mirror::MirrorLastSyncState::Known {
+            unix: 1_800_000_000
+        }
+    ));
+    // `status --json` carries the same family beside the steady row, so
+    // the third surface (the menu bar) decodes what this row says.
+    let json = status_json(&config, &rig.data_root, &rig.state_dir, now);
     assert_eq!(json["first_sync"]["kind"], "known");
     assert_eq!(json["first_sync"]["complete"], true);
     assert_eq!(json["closure_record"]["covered_snapshots"], 2);
+    assert_eq!(json["size"]["kind"], "known");
+    assert_eq!(json["size"]["bytes"], report.remote_total_bytes);
+    assert_eq!(
+        json["snapshots_behind"],
+        serde_json::json!({"kind": "known", "count": 0})
+    );
+    assert_eq!(
+        json["orphans"],
+        serde_json::json!({"kind": "known", "files": 0, "bytes": 0})
+    );
+    assert_eq!(
+        json["last_sync"],
+        serde_json::json!({"kind": "known", "unix": 1_800_000_000})
+    );
+    let rows_json = json["rows"].as_array().expect("rows is an array");
+    assert_eq!(rows_json.len(), 1);
+    assert_eq!(rows_json[0]["severity"], "info");
+    assert_eq!(rows_json[0]["sentence"], serde_json::json!(row));
 }
 
 // ------------------------------------------------------- cross-round resume
@@ -410,11 +490,15 @@ fn budget_cut_resumes_across_rounds_and_states_only_on_completion() {
     }
 
     // While the fill is cut, the status surface reports progress, not red:
-    // the C2 line families ("first sync …percent…", "reclaim holds … back").
+    // the C2 line families ("first sync …percent…", "reclaim holds … back"),
+    // now with the row's severity declared for the menu bar's ladder
+    // (info — progress, never a red over a first fill).
     let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
-    let lines = mirror_status_lines(&config, &rig.state_dir);
-    assert_eq!(lines.len(), 1, "one mirror line while filling: {lines:?}");
-    let line = &lines[0];
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(status.rows.len(), 1, "one mirror row while filling");
+    let row = &status.rows[0];
+    assert_eq!(row.severity, mirror::MirrorRowSeverity::Info);
+    let line = &row.sentence;
     assert!(line.contains("first sync"), "{line}");
     assert!(line.contains('%'), "{line}");
     assert!(line.contains("reclaim holds"), "{line}");
@@ -422,7 +506,22 @@ fn budget_cut_resumes_across_rounds_and_states_only_on_completion() {
         !line.to_lowercase().contains("error"),
         "a first fill must not report as an error: {line}"
     );
-    let json = status_json(&config, &rig.state_dir);
+    // The family fields stay honest mid-fill: the size is the partial
+    // copy's real bytes, last sync and behind are unknown (no completed
+    // round exists to read), and orphans are the round's own measurement.
+    assert!(matches!(
+        status.last_sync,
+        mirror::MirrorLastSyncState::Unknown { .. }
+    ));
+    assert!(matches!(
+        status.snapshots_behind,
+        CountState::Unknown { .. }
+    ));
+    assert!(matches!(
+        &status.orphans,
+        mirror::MirrorUsageState::Known { files: 0, bytes: 0 }
+    ));
+    let json = status_json(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
     assert_eq!(json["first_sync"]["kind"], "known");
     assert_eq!(json["closure_record"]["kind"], "unknown");
 
@@ -724,7 +823,7 @@ fn space_pre_estimate_refuses_before_any_download() {
     // And status speaks it in human words, still without red.
     let config =
         mirror_config("enabled = true\nmirror_of = \"storagebox\"\nmin_free_gib = 1000000.0");
-    let lines = mirror_status_lines(&config, &rig.state_dir);
+    let lines = mirror_status_lines(&config, &rig.data_root, &rig.state_dir);
     assert!(!lines.is_empty(), "a refused mirror is worth a line");
     let line = lines.join("\n");
     assert!(line.contains("first sync"), "{line}");
@@ -828,7 +927,7 @@ fn a_twice_corrupt_source_fails_the_round_not_pauses_it() {
 
     // And `status` reads it as the failure it is, with the class sentence.
     let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
-    let lines = mirror_status_lines(&config, &rig.state_dir);
+    let lines = mirror_status_lines(&config, &rig.data_root, &rig.state_dir);
     let joined = lines.join("\n");
     assert!(
         joined.contains("the last mirror round failed"),
@@ -1040,13 +1139,323 @@ fn an_uninitialised_destination_is_a_usage_refusal_that_creates_nothing() {
 // reclaim-side read interface answers false even for a snapshot id the
 // record genuinely contains.
 
+// -------------------------------------------------------------- LM-4 rows
+// The steady row's settled field family and spellings (ADR-062 D3/D6.3,
+// ruling 8): one row, one wording, three surfaces. The record-fixture
+// tests pin the measure without a copier in the loop — the surfaces read the
+// records, so a hand-written record is the honest instrument.
+
+/// Write a completed-round progress record the way `write_progress` would
+/// (the record is the interface; LM-3's tests build it the same way).
+fn write_progress_record(state_dir: &Path, progress: &mirror::MirrorProgress) {
+    fs::create_dir_all(state_dir).unwrap();
+    fs::write(
+        mirror::mirror_progress_path(state_dir),
+        serde_json::to_vec_pretty(progress).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Write a completed-round closure record the way `mirrorstate::save`
+/// would (the record is the interface the surfaces read, so a hand-built
+/// record is the honest fixture for this state).
+fn write_state_record(state_dir: &Path, record: &mirrorstate::MirrorState) {
+    fs::create_dir_all(state_dir).unwrap();
+    fs::write(
+        mirrorstate::mirror_state_path(state_dir),
+        serde_json::to_vec_pretty(record).unwrap(),
+    )
+    .unwrap();
+}
+
+/// D6.3's behind count, verbatim the settled measure: the snapshots the record's listing
+/// held minus the closures it verified — same record, so the row's age and
+/// its behind count cannot come from two different rounds — with the
+/// orphan pair and the row spelling asserted beside them. The mirror
+/// directory is a hand-written pair of files, so the fixture keeps
+/// records-only control of the row's numbers with a real directory to
+/// walk (rev0 ③: records without a directory no longer reach the steady
+/// row — they word an absent copy instead).
+#[test]
+fn the_steady_row_words_behindness_orphans_and_age_from_the_records() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let state_dir = sb.path().join("state");
+    let data_root = sb.path().join("data");
+    fs::create_dir_all(&state_dir).unwrap();
+    let mirror_root = mirror_dir(&data_root, "storagebox");
+    fs::create_dir_all(mirror_root.join("keys")).unwrap();
+    fs::write(mirror_root.join("config"), [0_u8; 4096]).unwrap();
+    fs::write(mirror_root.join("keys").join("k"), [0_u8; 1234]).unwrap();
+
+    let mut closure = BTreeSet::new();
+    closure.insert("a".repeat(64));
+    closure.insert("b".repeat(64));
+    write_state_record(
+        &state_dir,
+        &mirrorstate::MirrorState {
+            version: mirrorstate::MIRROR_STATE_VERSION,
+            finished_at_unix: 1_800_000_000,
+            mirror_of: "storagebox".to_string(),
+            closure_complete: closure,
+            snapshots_on_remote: 5,
+            remote_total_bytes: 4096,
+        },
+    );
+    write_progress_record(
+        &state_dir,
+        &mirror::MirrorProgress {
+            version: mirror::MIRROR_PROGRESS_VERSION,
+            mirror_of: "storagebox".to_string(),
+            round_finished_at_unix: 1_800_000_000,
+            complete: true,
+            outcome: "complete".to_string(),
+            outcome_note: None,
+            remote_total_bytes: 4096,
+            mirror_bytes: 4096,
+            remote_files: 9,
+            mirror_files: 9,
+            orphan_files: Some(1),
+            orphan_bytes: Some(1_234),
+        },
+    );
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &data_root, &state_dir, 1_800_003_600);
+    assert_eq!(status.rows.len(), 1, "completed records mean one row");
+    assert_eq!(status.rows[0].severity, mirror::MirrorRowSeverity::Info);
+    let row = &status.rows[0].sentence;
+    assert_eq!(
+        status.snapshots_behind,
+        CountState::Known { count: 3 },
+        "5 listed, 2 covered: the rest are behind, from the same record"
+    );
+    assert!(matches!(
+        status.last_sync,
+        mirror::MirrorLastSyncState::Known {
+            unix: 1_800_000_000
+        }
+    ));
+    // The directory is walked: its two files are the size the row words.
+    assert!(matches!(
+        &status.size,
+        mirror::MirrorUsageState::Known { files: 2, bytes } if *bytes == 4_096 + 1_234
+    ));
+    assert!(row.contains("[mirror] local copy of `storagebox`"), "{row}");
+    assert!(row.contains("3 snapshot(s) behind"), "{row}");
+    assert!(
+        row.contains(&format!(
+            "last sync {} UTC (1 hour ago)",
+            chrono_date(1_800_000_000)
+        )),
+        "{row}"
+    );
+    assert!(
+        row.contains("1 orphan file(s) (1.2 KiB reclaimable)"),
+        "{row}"
+    );
+    assert!(row.contains("(5330 B) across 2 file(s)"), "{row}");
+
+    // The same family on the wire, tagged the way the rest of --json keeps
+    // its tri-states, so the menu bar decodes what the row says.
+    let json = status_json(&config, &data_root, &state_dir, 1_800_003_600);
+    assert_eq!(
+        json["size"],
+        serde_json::json!({"kind": "known", "files": 2, "bytes": 4_096 + 1_234})
+    );
+    assert_eq!(
+        json["last_sync"],
+        serde_json::json!({"kind": "known", "unix": 1_800_000_000})
+    );
+    assert_eq!(
+        json["snapshots_behind"],
+        serde_json::json!({"kind": "known", "count": 3})
+    );
+    assert_eq!(
+        json["orphans"],
+        serde_json::json!({"kind": "known", "files": 1, "bytes": 1_234})
+    );
+    assert_eq!(json["rows"][0]["severity"], "info");
+    assert_eq!(json["rows"][0]["sentence"], serde_json::json!(row));
+}
+
+/// A progress record written before orphan accounting existed parses (the
+/// field is additive) and reads as what it is — an unmeasured count,
+/// unknown, never a zero — while every other field stays measured. The
+/// mirror directory exists, so the steady row words it (rev0 ③: records
+/// without a directory word an absent copy instead).
+#[test]
+fn a_progress_record_from_before_orphan_accounting_reads_orphans_as_unknown() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let state_dir = sb.path().join("state");
+    let data_root = sb.path().join("data");
+    fs::create_dir_all(&state_dir).unwrap();
+    let mirror_root = mirror_dir(&data_root, "storagebox");
+    fs::create_dir_all(&mirror_root).unwrap();
+    fs::write(mirror_root.join("config"), [0_u8; 4096]).unwrap();
+
+    write_state_record(
+        &state_dir,
+        &mirrorstate::MirrorState {
+            version: mirrorstate::MIRROR_STATE_VERSION,
+            finished_at_unix: 1_800_000_000,
+            mirror_of: "storagebox".to_string(),
+            closure_complete: BTreeSet::new(),
+            snapshots_on_remote: 0,
+            remote_total_bytes: 0,
+        },
+    );
+    // The pre-LM-4 shape: no orphan fields at all.
+    fs::write(
+        mirror::mirror_progress_path(&state_dir),
+        r#"{
+  "version": 1,
+  "mirror_of": "storagebox",
+  "round_finished_at_unix": 1800000000,
+  "complete": true,
+  "outcome": "complete",
+  "remote_total_bytes": 4096,
+  "mirror_bytes": 4096,
+  "remote_files": 9,
+  "mirror_files": 9
+}"#,
+    )
+    .unwrap();
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &data_root, &state_dir, 1_800_000_000);
+    assert!(matches!(
+        &status.orphans,
+        mirror::MirrorUsageState::Unknown { why } if why.contains("did not measure")
+    ));
+    let row = &status.rows[0].sentence;
+    assert!(row.contains("orphans unknown"), "{row}");
+    assert!(row.contains("0 snapshot(s) behind"), "{row}");
+}
+
+/// Orphan files a remote cleanup leaves behind appear in the next round's
+/// own records and in the steady row's count, and the directory's size
+/// includes them: they are bytes on this machine whether or not anything
+/// references them (ADR-062 D2 / 47 §4 C).
+#[test]
+fn orphan_files_surface_in_the_records_the_row_and_the_size() {
+    let rig = build_rig(None);
+    let (report1, outcome) = run_round(&rig, &NeverStops);
+    assert!(matches!(outcome, mirror::SyncOutcome::Completed));
+    assert_eq!(
+        report1.orphan_files,
+        Some(0),
+        "the first fill copies only listed files"
+    );
+
+    // A remote cleanup happened between rounds: this file is in the mirror
+    // but no listing will name it.
+    let orphan_dir = rig.mirror_root().join("data").join("zz");
+    fs::create_dir_all(&orphan_dir).unwrap();
+    let orphan_bytes = 4096_u64;
+    fs::write(
+        orphan_dir.join("deadbeef.no-longer-remote"),
+        vec![0_u8; orphan_bytes as usize],
+    )
+    .unwrap();
+
+    let (report2, outcome) = run_round(&rig, &NeverStops);
+    assert!(matches!(outcome, mirror::SyncOutcome::Completed));
+    assert_eq!(
+        report2.orphan_files,
+        Some(1),
+        "the round's listing sees the orphan"
+    );
+    assert_eq!(report2.orphan_bytes, Some(orphan_bytes));
+    assert_eq!(
+        report2.downloaded_files, 0,
+        "an orphan is never re-downloaded or deleted"
+    );
+
+    match mirror::load_progress(&rig.state_dir) {
+        MirrorProgressRead::Present(progress) => {
+            assert_eq!(progress.orphan_files, Some(1));
+            assert_eq!(progress.orphan_bytes, Some(orphan_bytes));
+        }
+        other => panic!("the up-to-date round rewrote progress, got {other:?}"),
+    }
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert!(matches!(
+        &status.orphans,
+        mirror::MirrorUsageState::Known { files: 1, bytes } if *bytes == orphan_bytes
+    ));
+    // The size counts what deleting the directory would free: the copy
+    // plus the orphan.
+    assert!(matches!(
+        &status.size,
+        mirror::MirrorUsageState::Known { bytes, .. } if *bytes == report2.remote_total_bytes + orphan_bytes
+    ));
+    let row = &status.rows[0].sentence;
+    assert!(
+        row.contains("1 orphan file(s) (4.0 KiB reclaimable)"),
+        "{row}"
+    );
+}
+
+/// The completed-fill-with-no-state-record state the engine itself never
+/// writes: the row keeps its measured halves (size, orphans) and words the
+/// missing coverage honestly, in yellow — never info fading a state that
+/// holds every reclaim back (D6.2's direction).
+#[test]
+fn a_missing_closure_record_after_a_completed_fill_makes_a_yellow_row() {
+    let rig = build_rig(None);
+    run_round(&rig, &NeverStops);
+    fs::remove_file(mirrorstate::mirror_state_path(&rig.state_dir)).unwrap();
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(status.rows.len(), 1);
+    let row = &status.rows[0];
+    assert_eq!(row.severity, mirror::MirrorRowSeverity::Yellow);
+    assert!(
+        row.sentence
+            .contains("last sync unknown (no sync round has completed yet)"),
+        "{}",
+        row.sentence
+    );
+    assert!(
+        row.sentence
+            .contains("snapshots behind unknown (no sync round has completed yet)"),
+        "{}",
+        row.sentence
+    );
+    assert!(
+        row.sentence.contains("file(s)"),
+        "the measured halves stay: {}",
+        row.sentence
+    );
+    // The field family on the wire says the same thing.
+    let json = status_json(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(json["last_sync"]["kind"], "unknown");
+    assert_eq!(json["snapshots_behind"]["kind"], "unknown");
+    assert_eq!(json["rows"][0]["severity"], "yellow");
+}
+
+/// The reclaim-leg spellings LM-4 settles (ADR-062 D6.3, ruling 8): the
+/// `--json` value the ruling fixed and the human phrase the ADR quotes,
+/// pinned so the reclaim-side wiring cannot grow a second spelling.
+#[test]
+fn the_held_back_spellings_are_settled() {
+    assert_eq!(mirror::HELD_BACK_KIND, "not-mirrored");
+    assert_eq!(
+        mirror::HELD_BACK_SENTENCE,
+        "the mirror has not synced to this snapshot yet"
+    );
+}
+
 #[test]
 fn a_repointed_mirror_of_expires_the_old_record_not_the_new_machine() {
     let rig = build_rig(None);
     run_round(&rig, &NeverStops);
 
     let config = mirror_config("enabled = true\nmirror_of = \"storagebox-v2\"");
-    let lines = mirror_status_lines(&config, &rig.state_dir);
+    let lines = mirror_status_lines(&config, &rig.data_root, &rig.state_dir);
     let joined = lines.join("\n");
     assert!(
         joined.contains(
@@ -1059,7 +1468,7 @@ fn a_repointed_mirror_of_expires_the_old_record_not_the_new_machine() {
         joined.contains("reclaim must hold sessions back"),
         "{joined}"
     );
-    let json = status_json(&config, &rig.state_dir);
+    let json = status_json(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
     assert_eq!(json["closure_record"]["kind"], "unknown");
     let why = json["closure_record"]["why"].as_str().unwrap_or_default();
     assert!(
@@ -1086,6 +1495,632 @@ fn a_repointed_mirror_of_expires_the_old_record_not_the_new_machine() {
             &covered_id
         ),
         "a record from the old mirror_of is not coverage for the new one"
+    );
+}
+
+/// Write the weekly reclaim's durable record the way `record` would (the
+/// record is the interface the rows read, so a hand-built record is the
+/// honest fixture for this state).
+fn write_reclaim_record(state_dir: &Path, attempt: &chat_stasher::reclaimstate::ReclaimAttempt) {
+    fs::create_dir_all(state_dir).unwrap();
+    fs::write(
+        chat_stasher::reclaimstate::reclaim_state_path(state_dir),
+        serde_json::to_vec_pretty(attempt).unwrap(),
+    )
+    .unwrap();
+}
+
+fn reclaim_attempt_blocked(
+    blocked: Vec<chat_stasher::reclaimstate::ReclaimBlock>,
+) -> chat_stasher::reclaimstate::ReclaimAttempt {
+    chat_stasher::reclaimstate::ReclaimAttempt {
+        version: chat_stasher::reclaimstate::RECLAIM_STATE_VERSION,
+        finished_at_unix: 1_800_000_100,
+        apply: true,
+        outcome: chat_stasher::reclaimstate::ReclaimOutcome::Blocked,
+        blocked,
+        destination_health: None,
+        consecutive_blocked: 1,
+        candidates: Some(2),
+        candidate_bytes: Some(2_048),
+    }
+}
+
+/// rev0 ③: a deleted mirror directory reads as an absent copy, never as a
+/// healthy empty one. Records present + no directory is the one shape
+/// that used to word `0 B across 0 file(s)` beside an Info steady row —
+/// the never-pretends-completeness razor — so it is worded yellow, the
+/// size is unknown-seen-absent, and the row says what to do.
+#[test]
+fn a_gone_mirror_directory_with_records_reads_absent_not_healthy_empty() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let state_dir = sb.path().join("state");
+    let data_root = sb.path().join("data");
+    fs::create_dir_all(&state_dir).unwrap();
+
+    write_state_record(
+        &state_dir,
+        &mirrorstate::MirrorState {
+            version: mirrorstate::MIRROR_STATE_VERSION,
+            finished_at_unix: 1_800_000_000,
+            mirror_of: "storagebox".to_string(),
+            closure_complete: BTreeSet::new(),
+            snapshots_on_remote: 1,
+            remote_total_bytes: 4096,
+        },
+    );
+    write_progress_record(
+        &state_dir,
+        &mirror::MirrorProgress {
+            version: mirror::MIRROR_PROGRESS_VERSION,
+            mirror_of: "storagebox".to_string(),
+            round_finished_at_unix: 1_800_000_000,
+            complete: true,
+            outcome: "complete".to_string(),
+            outcome_note: None,
+            remote_total_bytes: 4096,
+            mirror_bytes: 4096,
+            remote_files: 9,
+            mirror_files: 9,
+            orphan_files: Some(0),
+            orphan_bytes: Some(0),
+        },
+    );
+    assert!(
+        !mirror_dir(&data_root, "storagebox").is_dir(),
+        "the fixture's copy is gone while its records stay"
+    );
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &data_root, &state_dir, 1_800_000_000);
+    assert_eq!(
+        status.rows.len(),
+        1,
+        "the gone copy is one row, not a family"
+    );
+    assert_eq!(status.rows[0].severity, mirror::MirrorRowSeverity::Yellow);
+    let row = &status.rows[0].sentence;
+    assert!(
+        row.contains("no local copy of `storagebox` is on disk"),
+        "the row words the absence: {row}"
+    );
+    assert!(row.contains("an absent copy, not an empty one"), "{row}");
+    assert!(
+        row.contains("reclaim holds sessions back"),
+        "the gone copy is the reclaim leg's own hold: {row}"
+    );
+    assert!(
+        !row.contains("0 B) across 0 file(s)"),
+        "the healthy-empty lie is gone from the row: {row}"
+    );
+    assert!(matches!(
+        &status.size,
+        mirror::MirrorUsageState::Unknown { why }
+            if why.contains("no mirror directory is on disk")
+    ));
+    let json = status_json(&config, &data_root, &state_dir, 1_800_000_000);
+    assert_eq!(json["size"]["kind"], serde_json::json!("unknown"));
+    assert_eq!(json["rows"][0]["severity"], serde_json::json!("yellow"));
+}
+
+/// rev2 ③: the gone-copy state is the one where the hold-back is total
+/// (the leg holds every candidate back with no directory to vouch for
+/// any of them), and it exited before the count row used to be read —
+/// so the gone-copy row must not have to word "reclaim holds sessions
+/// back" with no number when the reclaim's own record carries it.
+#[test]
+fn the_gone_copy_row_carries_the_hold_back_count_too() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let state_dir = sb.path().join("state");
+    let data_root = sb.path().join("data");
+    fs::create_dir_all(&state_dir).unwrap();
+
+    write_state_record(
+        &state_dir,
+        &mirrorstate::MirrorState {
+            version: mirrorstate::MIRROR_STATE_VERSION,
+            finished_at_unix: 1_800_000_000,
+            mirror_of: "storagebox".to_string(),
+            closure_complete: BTreeSet::new(),
+            snapshots_on_remote: 1,
+            remote_total_bytes: 4096,
+        },
+    );
+    write_progress_record(
+        &state_dir,
+        &mirror::MirrorProgress {
+            version: mirror::MIRROR_PROGRESS_VERSION,
+            mirror_of: "storagebox".to_string(),
+            round_finished_at_unix: 1_800_000_000,
+            complete: true,
+            outcome: "complete".to_string(),
+            outcome_note: None,
+            remote_total_bytes: 4096,
+            mirror_bytes: 4096,
+            remote_files: 9,
+            mirror_files: 9,
+            orphan_files: Some(0),
+            orphan_bytes: Some(0),
+        },
+    );
+    write_reclaim_record(
+        &state_dir,
+        &reclaim_attempt_blocked(vec![chat_stasher::reclaimstate::ReclaimBlock {
+            destination: "storagebox".to_string(),
+            kind: mirror::HELD_BACK_KIND.to_string(),
+            error_kind: None,
+            sessions: 2,
+            bytes: 2_048,
+        }]),
+    );
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &data_root, &state_dir, 1_800_000_000);
+    assert_eq!(
+        status.rows.len(),
+        2,
+        "the gone row plus the count it promised: {status:?}"
+    );
+    assert!(
+        status.rows[0]
+            .sentence
+            .contains("no local copy of `storagebox` is on disk"),
+        "the gone-copy row still words the state: {}",
+        status.rows[0].sentence
+    );
+    let count_row = &status.rows[1];
+    assert_eq!(count_row.severity, mirror::MirrorRowSeverity::Yellow);
+    assert!(
+        count_row
+            .sentence
+            .contains("reclaim holds 2 session(s) back"),
+        "the total hold-back carries its number: {}",
+        count_row.sentence
+    );
+    assert!(
+        count_row.sentence.contains(mirror::HELD_BACK_SENTENCE),
+        "{}",
+        count_row.sentence
+    );
+    let json = status_json(&config, &data_root, &state_dir, 1_800_000_000);
+    assert_eq!(
+        json["rows"][1]["sentence"].as_str(),
+        Some(count_row.sentence.as_str()),
+        "the count row travels the same rows field the menu bar decodes"
+    );
+}
+
+/// rev2 ③, the not-declared arm: the leg binds only a destination the
+/// run consulted (D3), so a count here comes from an attempt that
+/// predates the config edit — and the record, not the config, is what
+/// says it. The promised number must not vanish with the declaration.
+#[test]
+fn the_not_declared_row_carries_the_hold_back_count_too() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let state_dir = sb.path().join("state");
+    let data_root = sb.path().join("data");
+    fs::create_dir_all(&state_dir).unwrap();
+
+    write_reclaim_record(
+        &state_dir,
+        &reclaim_attempt_blocked(vec![chat_stasher::reclaimstate::ReclaimBlock {
+            destination: "storagebox".to_string(),
+            kind: mirror::HELD_BACK_KIND.to_string(),
+            error_kind: None,
+            sessions: 2,
+            bytes: 2_048,
+        }]),
+    );
+
+    let raw = "[destinations.elsewhere]\nrepo = \"/tmp/formal-repo\"\nkey_file = \
+               \"/tmp/formal-key.json\"\n\n[mirror]\nenabled = true\nmirror_of = \"storagebox\"\n";
+    let config: Config = toml::from_str(raw).expect("the fixture config must parse");
+    let status = mirror_status(&config, &data_root, &state_dir, 1_800_000_000);
+    assert_eq!(
+        status.rows.len(),
+        2,
+        "the not-declared row plus the count the record still owns: {status:?}"
+    );
+    assert!(
+        status.rows[0]
+            .sentence
+            .contains("names no declared destination"),
+        "{}",
+        status.rows[0].sentence
+    );
+    assert!(
+        status.rows[1]
+            .sentence
+            .contains("reclaim holds 2 session(s) back"),
+        "{}",
+        status.rows[1].sentence
+    );
+}
+
+/// rev0 ① / C2: the hold-back the rows promise carries its count, from the
+/// one record that cannot disagree with the run — the weekly reclaim's
+/// own durable record. Only a `not-mirrored` block against *this*
+/// destination rides the mirror rows; other kinds and other destinations
+/// keep their own surfaces.
+#[test]
+fn the_mirror_rows_carry_the_reclaim_hold_back_count_from_the_record() {
+    let rig = build_rig(None);
+    run_round(&rig, &NeverStops);
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+
+    // No reclaim record yet: the steady row alone.
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(status.rows.len(), 1, "no record, no count: {status:?}");
+    assert!(
+        !status.rows[0].sentence.contains("reclaim holds"),
+        "the steady row does not invent a count: {}",
+        status.rows[0].sentence
+    );
+
+    // A blocked weekly reclaim, held back by the mirror leg: the count and
+    // D6.3's sentence ride a row beside the facts.
+    write_reclaim_record(
+        &rig.state_dir,
+        &reclaim_attempt_blocked(vec![chat_stasher::reclaimstate::ReclaimBlock {
+            destination: "storagebox".to_string(),
+            kind: mirror::HELD_BACK_KIND.to_string(),
+            error_kind: None,
+            sessions: 2,
+            bytes: 2_048,
+        }]),
+    );
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(status.rows.len(), 2, "steady row + hold-back count row");
+    let count_row = &status.rows[1];
+    assert_eq!(count_row.severity, mirror::MirrorRowSeverity::Yellow);
+    assert!(
+        count_row
+            .sentence
+            .contains("reclaim holds 2 session(s) back"),
+        "{}",
+        count_row.sentence
+    );
+    assert!(
+        count_row.sentence.contains(mirror::HELD_BACK_SENTENCE),
+        "D6.3's one spelling: {}",
+        count_row.sentence
+    );
+    assert!(
+        count_row.sentence.contains("mirror sync"),
+        "the row says what frees them: {}",
+        count_row.sentence
+    );
+    let json = status_json(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(json["rows"][1]["severity"], serde_json::json!("yellow"));
+    assert_eq!(
+        json["rows"][1]["sentence"].as_str(),
+        Some(count_row.sentence.as_str()),
+        "the count row travels the same rows field the menu bar decodes"
+    );
+
+    // A different kind names no mirror fact: no count row.
+    write_reclaim_record(
+        &rig.state_dir,
+        &reclaim_attempt_blocked(vec![chat_stasher::reclaimstate::ReclaimBlock {
+            destination: "storagebox".to_string(),
+            kind: "unreachable".to_string(),
+            error_kind: None,
+            sessions: 2,
+            bytes: 2_048,
+        }]),
+    );
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(
+        status.rows.len(),
+        1,
+        "a network block is the destination's surface, not the mirror's"
+    );
+
+    // And a hold-back against some other destination is not this mirror's
+    // fact either.
+    write_reclaim_record(
+        &rig.state_dir,
+        &reclaim_attempt_blocked(vec![chat_stasher::reclaimstate::ReclaimBlock {
+            destination: "elsewhere".to_string(),
+            kind: mirror::HELD_BACK_KIND.to_string(),
+            error_kind: None,
+            sessions: 2,
+            bytes: 2_048,
+        }]),
+    );
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(
+        status.rows.len(),
+        1,
+        "only the mirrored destination's hold-back rides the mirror rows"
+    );
+}
+
+/// rev0 ⑤: a record whose halves disagree — more closures verified than
+/// the listing they were measured against held — words behindness
+/// unknown, never a clamped zero that reads "caught up".
+#[test]
+fn a_record_whose_halves_disagree_words_behindness_unknown_not_clamped() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let state_dir = sb.path().join("state");
+    let data_root = sb.path().join("data");
+    fs::create_dir_all(&state_dir).unwrap();
+    let mirror_root = mirror_dir(&data_root, "storagebox");
+    fs::create_dir_all(&mirror_root).unwrap();
+    fs::write(mirror_root.join("config"), [0_u8; 4096]).unwrap();
+
+    let mut closure = BTreeSet::new();
+    closure.insert("a".repeat(64));
+    closure.insert("b".repeat(64));
+    write_state_record(
+        &state_dir,
+        &mirrorstate::MirrorState {
+            version: mirrorstate::MIRROR_STATE_VERSION,
+            finished_at_unix: 1_800_000_000,
+            mirror_of: "storagebox".to_string(),
+            closure_complete: closure,
+            snapshots_on_remote: 1,
+            remote_total_bytes: 4096,
+        },
+    );
+    write_progress_record(
+        &state_dir,
+        &mirror::MirrorProgress {
+            version: mirror::MIRROR_PROGRESS_VERSION,
+            mirror_of: "storagebox".to_string(),
+            round_finished_at_unix: 1_800_000_000,
+            complete: true,
+            outcome: "complete".to_string(),
+            outcome_note: None,
+            remote_total_bytes: 4096,
+            mirror_bytes: 4096,
+            remote_files: 9,
+            mirror_files: 9,
+            orphan_files: Some(0),
+            orphan_bytes: Some(0),
+        },
+    );
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &data_root, &state_dir, 1_800_000_000);
+    assert!(matches!(
+        &status.snapshots_behind,
+        CountState::Unknown { why } if why.contains("disagrees with itself")
+    ));
+    let row = &status.rows[0].sentence;
+    assert!(
+        row.contains("snapshots behind unknown"),
+        "the disagreement is worded, not clamped: {row}"
+    );
+    assert!(
+        !row.contains("0 snapshot(s) behind"),
+        "a clamped zero would read as caught up: {row}"
+    );
+    let json = status_json(&config, &data_root, &state_dir, 1_800_000_000);
+    assert_eq!(
+        json["snapshots_behind"]["kind"],
+        serde_json::json!("unknown")
+    );
+}
+
+/// rev0 ④: an interrupted round's own torn-write temp is not cleanup
+/// residue — the orphan count and the reclaimable advice exclude it — but
+/// its bytes still occupy the disk, so the size keeps counting them.
+#[test]
+fn interrupted_round_tmp_files_are_not_orphans_but_still_occupy() {
+    let rig = build_rig(None);
+    let (report1, outcome) = run_round(&rig, &NeverStops);
+    assert!(matches!(outcome, mirror::SyncOutcome::Completed));
+    assert_eq!(report1.orphan_files, Some(0));
+
+    // Between rounds: one real orphan (remote cleanup residue) and one
+    // torn write left behind by an interrupted round — the `.<name>.tmp`
+    // shape `write_atomic` never renamed.
+    let residue_dir = rig.mirror_root().join("data").join("zz");
+    fs::create_dir_all(&residue_dir).unwrap();
+    let orphan_bytes = 4096_u64;
+    fs::write(
+        residue_dir.join("deadbeef.no-longer-remote"),
+        vec![0_u8; orphan_bytes as usize],
+    )
+    .unwrap();
+    let tmp_bytes = 512_u64;
+    fs::write(
+        residue_dir.join(".aabbcc.tmp"),
+        vec![0_u8; tmp_bytes as usize],
+    )
+    .unwrap();
+
+    let (report2, outcome) = run_round(&rig, &NeverStops);
+    assert!(matches!(outcome, mirror::SyncOutcome::Completed));
+    assert_eq!(
+        report2.orphan_files,
+        Some(1),
+        "the next round counts the residue, not its own torn write"
+    );
+    assert_eq!(report2.orphan_bytes, Some(orphan_bytes));
+    match mirror::load_progress(&rig.state_dir) {
+        MirrorProgressRead::Present(progress) => {
+            assert_eq!(progress.orphan_files, Some(1));
+            assert_eq!(progress.orphan_bytes, Some(orphan_bytes));
+        }
+        other => panic!("expected a present progress record, got {other:?}"),
+    }
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert!(matches!(
+        &status.orphans,
+        mirror::MirrorUsageState::Known { files: 1, bytes } if *bytes == orphan_bytes
+    ));
+    assert!(matches!(
+        &status.size,
+        mirror::MirrorUsageState::Known { files, bytes }
+            if *files == report2.remote_files + 2
+                && *bytes == report2.remote_total_bytes + orphan_bytes + tmp_bytes
+    ));
+    let row = &status.rows[0].sentence;
+    assert!(
+        row.contains("1 orphan file(s) (4.0 KiB reclaimable)"),
+        "the byte total that reads as reclaimable excludes the torn write: {row}"
+    );
+}
+
+/// rev0 ⑧: with the switch off, a leftover copy keeps every byte until the
+/// user deletes it — and its measured size is visible on every surface,
+/// worded by the same row family the on-state uses. No leftover, no row:
+/// the off-state keeps its not-applicable silence.
+#[test]
+fn with_the_switch_off_a_leftover_copy_stays_visible_with_its_size() {
+    let rig = build_rig(None);
+    let (report, outcome) = run_round(&rig, &NeverStops);
+    assert!(matches!(outcome, mirror::SyncOutcome::Completed));
+
+    let config = mirror_config("enabled = false\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert!(!status.enabled);
+    assert!(matches!(
+        &status.size,
+        mirror::MirrorUsageState::Known { files, bytes }
+            if *files == report.remote_files && *bytes == report.remote_total_bytes
+    ));
+    assert_eq!(status.rows.len(), 1, "the leftover copy is one row");
+    let row = &status.rows[0];
+    assert_eq!(row.severity, mirror::MirrorRowSeverity::Info);
+    assert!(
+        row.sentence.contains("the switch is off"),
+        "{}",
+        row.sentence
+    );
+    assert!(
+        row.sentence.contains("leftover copy of `storagebox`"),
+        "{}",
+        row.sentence
+    );
+    assert!(
+        row.sentence.contains(&format!(
+            "({} B) across {} file(s)",
+            report.remote_total_bytes, report.remote_files
+        )),
+        "the row carries the measured numbers: {}",
+        row.sentence
+    );
+    assert!(
+        row.sentence
+            .contains("keeps every byte until you delete it"),
+        "{}",
+        row.sentence
+    );
+    let json = status_json(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(json["size"]["kind"], serde_json::json!("known"));
+    assert_eq!(
+        json["first_sync"]["kind"],
+        serde_json::json!("not_applicable")
+    );
+    assert_eq!(
+        json["rows"][0]["sentence"].as_str(),
+        Some(row.sentence.as_str())
+    );
+
+    // No leftover: the off-state stays the silence it was.
+    let sb = tempfile::TempDir::new().unwrap();
+    let state_dir = sb.path().join("state");
+    let data_root = sb.path().join("data");
+    fs::create_dir_all(&state_dir).unwrap();
+    let status = mirror_status(&config, &data_root, &state_dir, 1_800_000_000);
+    assert!(matches!(
+        &status.size,
+        mirror::MirrorUsageState::NotApplicable { why } if why.contains("the [mirror] switch is off")
+    ));
+    assert!(
+        status.rows.is_empty(),
+        "nothing left over, nothing inventoried: {status:?}"
+    );
+}
+
+/// rev0 ②: a mirror directory that cannot be walked words its size
+/// unknown with the io failure's class — the row is a user-facing surface
+/// on all three ends (status, doctor, the menu bar), and the privacy
+/// anchor's claim is no paths, so no raw chain and no directory path
+/// reach the sentence or `--json`.
+///
+/// Unix-only because the unwalkable state is produced with a filesystem
+/// permission (`chmod 0o000`); Windows has no standard-API equivalent (its
+/// read denial lives in ACLs `std::fs::Permissions` cannot express).
+#[cfg(unix)]
+#[test]
+fn an_unwalkable_mirror_directory_words_size_unknown_without_a_path() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let state_dir = sb.path().join("state");
+    let data_root = sb.path().join("data");
+    fs::create_dir_all(&state_dir).unwrap();
+    let mirror_root = mirror_dir(&data_root, "storagebox");
+    let sealed = mirror_root.join("data").join("xx");
+    fs::create_dir_all(&sealed).unwrap();
+    fs::write(mirror_root.join("config"), [0_u8; 4096]).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    // Completed records, so the enabled walk of the size is the row's
+    // own: an unwalkable subtree has to reach it.
+    write_state_record(
+        &state_dir,
+        &mirrorstate::MirrorState {
+            version: mirrorstate::MIRROR_STATE_VERSION,
+            finished_at_unix: 1_800_000_000,
+            mirror_of: "storagebox".to_string(),
+            closure_complete: BTreeSet::new(),
+            snapshots_on_remote: 1,
+            remote_total_bytes: 4096,
+        },
+    );
+    write_progress_record(
+        &state_dir,
+        &mirror::MirrorProgress {
+            version: mirror::MIRROR_PROGRESS_VERSION,
+            mirror_of: "storagebox".to_string(),
+            round_finished_at_unix: 1_800_000_000,
+            complete: true,
+            outcome: "complete".to_string(),
+            outcome_note: None,
+            remote_total_bytes: 4096,
+            mirror_bytes: 4096,
+            remote_files: 9,
+            mirror_files: 9,
+            orphan_files: Some(0),
+            orphan_bytes: Some(0),
+        },
+    );
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &data_root, &state_dir, 1_800_000_000);
+    let json = status_json(&config, &data_root, &state_dir, 1_800_000_000);
+
+    // Restore before any assertion can panic away the temp dir's cleanup.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let why = match &status.size {
+        mirror::MirrorUsageState::Unknown { why } => why.clone(),
+        other => panic!("the unwalkable tree is unknown, got {other:?}"),
+    };
+    assert!(why.contains("permission denied"), "{why}");
+    assert!(
+        !why.contains("walk the mirror dir"),
+        "the raw chain's context stays off the surfaces: {why}"
+    );
+    assert!(!why.contains('/'), "no path reaches the why: {why}");
+    let row = &status.rows[0].sentence;
+    assert!(row.contains("size unknown"), "{row}");
+    assert!(!row.contains(&data_root.display().to_string()), "{row}");
+    assert_eq!(json["size"]["kind"], serde_json::json!("unknown"));
+    let json_why = json["size"]["why"].as_str().unwrap_or_default();
+    assert!(
+        !json_why.contains('/'),
+        "no path in --json either: {json_why}"
     );
 }
 
@@ -1906,4 +2941,107 @@ fn the_pass_warns_saying_each_round_re_checks_and_heals_once_the_source_is_fixed
         !all.contains("the source proved corrupt"),
         "the healed round reports completion, not the old failure: {all}"
     );
+}
+
+// ------------------------------------------- LM-4 / ruling 8, end to end
+// `doctor` (D13) shows the same rows `status --json` carries, from the same
+// machine state, in one isolated envelope — the three-surface wording
+// invariant ADR-062 ruling 8 states, pinned at the CLI boundary so no
+// surface can reword the other two into drift.
+
+#[test]
+fn doctor_shows_the_rows_status_words_for_the_same_mirror() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let sandbox = sb.path();
+    cli_fixture_remote(sandbox);
+    write_config(
+        sandbox,
+        "enabled = true\nmirror_of = \"storagebox\"\nmin_free_gib = 1.0",
+    );
+    fs::write(
+        sandbox.join("registry.json"),
+        r#"{"schema_version":1,"generated":"T1 synthetic","harnesses":[]}"#,
+    )
+    .unwrap();
+    let registry = sandbox.join("registry.json");
+    let with_registry = |command: &mut std::process::Command| {
+        command.env("CHAT_STASHER_REGISTRY", &registry);
+    };
+
+    // The first fill through the real CLI, so the records on disk are the
+    // product's own.
+    let mut sync = binary_command(sandbox);
+    with_registry(&mut sync);
+    let out = sync
+        .args(["mirror", "sync", "--budget-secs", "300"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "the first fill completes\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let json_of = |args: &[&str]| -> serde_json::Value {
+        let mut command = binary_command(sandbox);
+        with_registry(&mut command);
+        let out = command.args(args).output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        // `--json` prints one object on stdout; other lines (if any) are
+        // prose the command's stderr-free path never adds here.
+        let line = stdout
+            .lines()
+            .find(|line| line.starts_with('{'))
+            .unwrap_or(&stdout);
+        serde_json::from_str(line)
+            .unwrap_or_else(|error| panic!("parse {args:?} output as JSON: {error}\n{stdout}"))
+    };
+
+    let status = json_of(&["status", "--json"]);
+    let mirror = &status["local"]["mirror"];
+    assert_eq!(mirror["configured"], serde_json::json!(true));
+    assert_eq!(mirror["first_sync"]["complete"], serde_json::json!(true));
+    assert_eq!(mirror["size"]["kind"], serde_json::json!("known"));
+    assert_eq!(mirror["orphans"]["kind"], serde_json::json!("known"));
+    assert_eq!(mirror["rows"][0]["severity"], serde_json::json!("info"));
+    let sentence = mirror["rows"][0]["sentence"]
+        .as_str()
+        .expect("the row text travels as one sentence")
+        .to_string();
+    assert!(
+        sentence.contains("local copy of `storagebox`"),
+        "the steady row words the copy: {sentence}"
+    );
+    assert!(
+        sentence.contains("0 snapshot(s) behind"),
+        "a completed closure is behind by nothing: {sentence}"
+    );
+
+    // Doctor's page shows the same section, and its `--json` carries the
+    // same sentence — the wording cannot drift between the surfaces.
+    let mut doctor = binary_command(sandbox);
+    with_registry(&mut doctor);
+    let out = doctor.args(["doctor"]).output().unwrap();
+    let page = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        page.contains("D13 · Local mirror — size, last sync, snapshots behind, orphans (ADR-062)"),
+        "the doctor page names the mirror section: {page}"
+    );
+    assert!(
+        page.contains(&sentence),
+        "doctor prints the same row status words:\nstatus: {sentence}\ndoctor:\n{page}"
+    );
+
+    let doctor_json = json_of(&["doctor", "--json"]);
+    let check = &doctor_json["mirror"];
+    assert_eq!(check["checked"], serde_json::json!(true));
+    assert_eq!(
+        check["rows"][0]["sentence"].as_str(),
+        Some(sentence.as_str()),
+        "ruling 8: one sentence on every surface"
+    );
+    assert_eq!(check["orphans"], mirror["orphans"]);
+    assert_eq!(check["size"], mirror["size"]);
+    assert_eq!(check["snapshots_behind"], mirror["snapshots_behind"]);
+    assert_eq!(check["last_sync"], mirror["last_sync"]);
 }

@@ -172,10 +172,12 @@ A `[keys]` line is added for each **destination** whose key needs attention: one
 | Flag | Meaning |
 |---|---|
 | `--sessions` | Add one line per session found (tool, size, date, short id). Can be hundreds of lines. |
-| `--json` | One JSON object, including a `local` section: whether the timer is installed (`installed` needs the units present *and*, on Linux, systemd confirming each timer active — otherwise `unconfirmed`), the next run and why, and the sessions still staged and waiting to upload. The last pass is its own field, `run_state`. A `keys` section carries the full inventory — the local key and every destination's, with each file's path, whether it is on this machine, and whether you have declared a copy. The same section also carries `destinations` (the four facts per destination: installed-timer push coverage, credentials a timer can resolve, the last recorded successful push, and its share of the latest recorded reclaim), `dest_alerts` (the same findings as the `[dest]`/`[reclaim]` lines, each with `severity` and fix), and `reclaim` (the weekly clean-up's durable record: state, consecutive blocked runs, what is held back and which destination blocks it). |
+| `--json` | One JSON object, including a `local` section: whether the timer is installed (`installed` needs the units present *and*, on Linux, systemd confirming each timer active — otherwise `unconfirmed`), the next run and why, and the sessions still staged and waiting to upload. The last pass is its own field, `run_state`. A `keys` section carries the full inventory — the local key and every destination's, with each file's path, whether it is on this machine, and whether you have declared a copy. The same section also carries `destinations` (the four facts per destination: installed-timer push coverage, credentials a timer can resolve, the last recorded successful push, and its share of the latest recorded reclaim), `dest_alerts` (the same findings as the `[dest]`/`[reclaim]` lines, each with `severity` and fix), `reclaim` (the weekly clean-up's durable record: state, consecutive blocked runs, what is held back and which destination the record names per block, with the block's kind — a `not-mirrored` block names the mirroring destination the copy lags behind, and the mirrored, proven destination is never the one its bytes are worded "held back for" on any surface), and `mirror` (the local copy's field family when `[mirror]` is configured: size, last sync, snapshots behind and orphans, each measured / unknown / not applicable, plus the already-worded `rows` the menu bar app displays). |
 | `--destination <name>` | Also list the chat-stasher version each machine last archived with, and flag machines behind the newest. |
 
 `[dest]` and `[reclaim]` lines are added when a declared destination disagrees with what the machine's timers and the weekly stage clean-up actually do: a destination no installed timer pushes, one whose `env:` credentials a timer cannot resolve, one a timer covers but no push has been recorded against, one whose `push-state` record exists but cannot be read, or a reclaim blocked for several weeks running. Each line is the same sentence `doctor` reports and the menu bar app shows, with the fix command beneath it. A machine whose destinations are all covered, timer-resolvable, record-successful and currently reclaiming prints no such line — and the lines do not change the exit code, which stays the timer verdict documented above.
+
+A `[mirror]` line is added when the machine's local mirror has something to say: a first fill in progress (phrased as progress — `X% (bytes downloaded of the total)`, never as a red), a round that failed, a record that cannot be read, or the steady row once the copy is complete — its size on disk, the last sync's time and age, how many snapshots the closure record does not cover, and how many orphan files the copy carries. Those four are the mirror's settled field family: the same wording shows in this line, in `doctor`'s `D13` section and in the menu bar app, which decodes the rows from `--json` rather than rewording them. No `[mirror]` section configured prints no line at all — while a section with the switch off still prints the one line it owes when a leftover copy is on disk (the copy's measured size and file count; it keeps every byte until you delete it — see [config.md](config.md#mirror)), so turning the mirror off is silence only when no bytes are left behind. A mirror line never moves the exit code either.
 
 ### `dest-init`
 
@@ -258,7 +260,7 @@ keeps the original data in place.
 
 ### `reclaim-stage`
 
-Removes staged copies, but only for sessions that **every** declared destination proves it holds, byte for byte. An unreachable destination blocks it.
+Removes staged copies, but only for sessions that **every** declared destination proves it holds, byte for byte. An unreachable destination blocks it. On a machine whose `[mirror]` is enabled it is also hold-back gated by the copy: a session is refused — `not-mirrored` — until the mirror's completed-round record holds the proof's snapshot closure-complete, so a completed `mirror sync` round is what frees it (the mirror rows name the count it holds back).
 
 | Flag | Meaning |
 |---|---|
@@ -346,6 +348,16 @@ does not. A mirror file that is present but unreadable is never quietly
 re-fetched mid-read: a command reading over it stops with the file's name
 and points back at `mirror sync`, whose next round re-downloads a file
 that no longer hashes to its name.
+
+What the copy keeps is on every surface: `status` prints one `[mirror]`
+line, `doctor` shows a `D13` section, and the menu bar app decodes the
+same rows from `status --json` without rewording them — the size on disk,
+the last completed sync with its age, how many snapshots the closure
+record does not cover, and the orphan files a remote cleanup left behind.
+Orphans are never removed automatically: `doctor` reports their
+reclaimable bytes, and the manual act is to delete the files by hand or
+remove the whole mirror directory and re-run `mirror sync`, which rebuilds
+a copy without them.
 
 | Flag | Meaning |
 |---|---|

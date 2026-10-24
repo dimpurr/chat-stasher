@@ -1733,6 +1733,16 @@ pub struct DoctorReport {
     /// never the network, so the test-suite-visible entry point can keep
     /// producing it.
     pub dest_reconcile: Option<crate::destdiag::Reconciliation>,
+    /// D13 — the local mirror's settled field family and worded rows
+    /// (ADR-062 D3/D6.3, LM-4): size, last sync, snapshots behind,
+    /// orphans. Built by [`crate::mirror::mirror_status`], the one
+    /// function that owns the wording, so this page shows the same rows
+    /// `status` prints and the menu bar displays. `None` for the same
+    /// reason as `dest_reconcile`: `mirror_of`, the state records and
+    /// the mirror directory all derive from a config this run could not
+    /// read. Filled by the library's own [`run()`] — file reads and one
+    /// directory walk only, never a destination connection.
+    pub mirror: Option<crate::mirror::MirrorStatus>,
 }
 
 /// D10 state for one destination's disposable full-text index.
@@ -2235,7 +2245,7 @@ fn activity_index_json(freshness: &ActivityIndexFreshness) -> serde_json::Value 
 /// The checks a run cannot perform without a usable config, in the order
 /// [`print_report`] presents them. [`DoctorReport::not_checked`] returns this
 /// list only for a report whose `config_error` is set.
-const CHECKS_NEEDING_CONFIG: [&str; 11] = [
+const CHECKS_NEEDING_CONFIG: [&str; 12] = [
     "D3 harness scan, footprints and archive gaps",
     "D4 risk summary",
     "D5 repository reclaim",
@@ -2246,6 +2256,7 @@ const CHECKS_NEEDING_CONFIG: [&str; 11] = [
     "D8 native host stage",
     "D11 stage duplicate scan",
     "D12 destination reconciliation (timers, credentials, last push, reclaim)",
+    "D13 local mirror (size, last sync, snapshots behind, orphans)",
     "machine identity",
 ];
 
@@ -2313,6 +2324,11 @@ pub fn config_unreadable(error: String) -> DoctorReport {
         // W1012 / SG-1 C1: same source (the config every destination name
         // and credential reference comes from), same "not computed".
         dest_reconcile: None,
+        // LM-4 / ADR-062 D13: every mirror fact is config-derived (the
+        // mirrored destination's name, its state records' location, the
+        // mirror directory under the data root), so an unreadable config
+        // means this check did not run.
+        mirror: None,
     }
 }
 
@@ -2791,6 +2807,19 @@ pub fn run() -> DoctorReport {
             .map(std::path::Path::new),
     });
 
+    // D13 (ADR-062 D3/D6.3, LM-4): the mirror's settled field family, from
+    // the one function that owns the wording all three surfaces share —
+    // the same `now` the reconciliation used, so a printed age in the
+    // steady row agrees with every other age this report words. Reads the
+    // state records and walks the mirror directory; no destination is
+    // dialed.
+    let mirror = Some(crate::mirror::mirror_status(
+        &config,
+        &crate::config::default_data_root(),
+        &crate::collect::default_state_dir(),
+        now_unix,
+    ));
+
     DoctorReport {
         config_source: config.source,
         config_error: None,
@@ -2815,6 +2844,7 @@ pub fn run() -> DoctorReport {
         native_host: Some(native_host),
         keys: Some(key_inventory(&config)),
         dest_reconcile: Some(dest_reconcile),
+        mirror,
     }
 }
 
@@ -4040,6 +4070,28 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
             // Not the same as "there is no registration": this run did not look.
             None => serde_json::json!({"checked": false}),
         },
+        // LM-4 / ADR-062 D13: the mirror's settled field family in the same
+        // tagged-`kind` shape `status --json`'s `local.mirror` carries, so
+        // the two objects can never disagree about a mirror; `checked:
+        // false` is the did-not-look case on the config-unreadable path.
+        "mirror": match &r.mirror {
+            Some(status) => serde_json::json!({
+                "checked": true,
+                "configured": status.configured,
+                "enabled": status.enabled,
+                "mirror_of": status.mirror_of,
+                "declared": status.declared,
+                "size": status.size,
+                "last_sync": status.last_sync,
+                "snapshots_behind": status.snapshots_behind,
+                "orphans": status.orphans,
+                "rows": status.rows.iter().map(|row| serde_json::json!({
+                    "severity": row.severity,
+                    "sentence": row.sentence,
+                })).collect::<Vec<_>>(),
+            }),
+            None => serde_json::json!({"checked": false}),
+        },
     })
 }
 
@@ -4863,6 +4915,9 @@ pub fn print_report(r: &DoctorReport) {
     // reclaim actually do on this machine? (W1012 / SG-1 C1)
     print_dest_reconcile(&r.dest_reconcile);
 
+    // D13 — the local mirror's settled field family (ADR-062 D3/D6.3, LM-4)
+    print_mirror(&r.mirror);
+
     print_stage_duplicates(&r.stage_duplicate_shards);
 
     // Every archive copy has its own key, so a backup that names only the
@@ -5268,6 +5323,66 @@ fn print_dest_reconcile(reconciliation: &Option<crate::destdiag::Reconciliation>
     eprintln!("     read-only: reads the timer files and the reclaim/push state records, and never opens a destination.");
     for line in crate::destdiag::doctor_lines(reconciliation) {
         eprintln!("{line}");
+    }
+    eprintln!();
+}
+
+/// D13 printing — the local mirror's settled field family (ADR-062
+/// D3/D6.3, LM-4). The sentences are [`crate::mirror::mirror_status`]'s
+/// own — the same words `status` prints and the menu bar displays —
+/// because one vocabulary across the three surfaces is the requirement
+/// ADR-062 ruling 8 states. Silent when no `[mirror]` section exists:
+/// a machine that mirrors nothing has no mirror facts to check, the same
+/// silence `key_alerts` keeps for a machine with every key present.
+///
+/// The one doctor-only line is the orphan's handling instruction
+/// (ADR-062 D2: orphans are never deleted automatically, `doctor` reports
+/// the reclaimable bytes, the user cleans by the documented manual act):
+/// orphans are never reclaimed automatically (ADR-001), and the manual
+/// act is the one `docs/cli.md` documents.
+fn print_mirror(status: &Option<crate::mirror::MirrorStatus>) {
+    let Some(status) = status else { return };
+    if !status.configured {
+        return;
+    }
+    eprintln!("D13 · Local mirror — size, last sync, snapshots behind, orphans (ADR-062)");
+    eprintln!(
+        "     read-only: reads the sync state records and walks the mirror directory; \
+         never opens a destination, never deletes anything."
+    );
+    if !status.enabled {
+        // With a leftover copy on disk, the rows [`mirror_status`] worded
+        // already carry its measured size (rev0 ⑧: the ADR's every-byte
+        // promise shows its number, the same sentence `status` and the
+        // menu bar print); with nothing left, the off-state keeps its one
+        // doctor-only wording.
+        if status.rows.is_empty() {
+            eprintln!(
+                "  [mirror] configured but `enabled = false` — this machine mirrors nothing; \
+                 the mirror directory, if one is left from before, keeps every byte it holds \
+                 until you delete it"
+            );
+        } else {
+            for row in &status.rows {
+                eprintln!("  {}", row.sentence);
+            }
+        }
+        eprintln!();
+        return;
+    }
+    for row in &status.rows {
+        eprintln!("  {}", row.sentence);
+    }
+    if let crate::mirror::MirrorUsageState::Known { files, bytes } = &status.orphans {
+        if *files > 0 {
+            eprintln!(
+                "  orphans are never deleted automatically (ADR-001): a remote cleanup left \
+                 files this mirror no longer needs ({} reclaimable); the manual cleanup is \
+                 documented under `mirror` in the CLI docs — removing the whole directory \
+                 and re-running `mirror sync` rebuilds a copy without them",
+                crate::destdiag::fmt_bytes(*bytes)
+            );
+        }
     }
     eprintln!();
 }
@@ -5932,6 +6047,7 @@ mod json_tests {
             stage_duplicate_shards: None,
             keys: Some(Vec::new()),
             dest_reconcile: None,
+            mirror: None,
         }
     }
 
@@ -5970,6 +6086,13 @@ mod json_tests {
     /// read), reported beside `destinations` — D7's live probes and the
     /// reconciliation's file-derived facts answer different questions about
     /// the same names, so neither could live in the other.
+    ///
+    /// W1025 (LM-4 / ADR-062 D13) adds `mirror` the same way: the local
+    /// mirror's owned-words field family (size, last sync, snapshots
+    /// behind, orphans, rows) is a new check over its own records and
+    /// its own directory, in the tagged shapes `status --json`'s
+    /// `local.mirror` already carries, so the two objects cannot
+    /// disagree about one mirror.
     #[test]
     fn doctor_json_top_level_field_names_are_stable() {
         let v = report_to_json(&report());
@@ -5992,6 +6115,7 @@ mod json_tests {
                 "gemini",
                 "keys",
                 "machine_logs",
+                "mirror",
                 "native_host",
                 "not_checked",
                 "other_present",
@@ -6435,6 +6559,7 @@ mod report_to_json_shape_tests {
             native_host: None,
             keys: None,
             dest_reconcile: None,
+            mirror: None,
         }
     }
 
@@ -6453,6 +6578,7 @@ mod report_to_json_shape_tests {
             "keys",
             "native_host",
             "stage_duplicate_shards",
+            "mirror",
         ] {
             assert!(
                 v.get(key).is_some(),
@@ -7440,13 +7566,11 @@ mod w1009_doctor_desktop_tests {
             ),
             other => panic!("expected Unknown for an invalid value, got {other:?}"),
         }
-        for check in [&check] {
-            let line = check.risk_line();
-            assert!(
-                line.starts_with('🟡') && line.contains("not guessing"),
-                "an unknown state is yellow and refuses to guess; got: {line:?}"
-            );
-        }
+        let line = check.risk_line();
+        assert!(
+            line.starts_with('🟡') && line.contains("not guessing"),
+            "an unknown state is yellow and refuses to guess; got: {line:?}"
+        );
     }
 
     // The desktop key present in an unreadable file + the key's real value

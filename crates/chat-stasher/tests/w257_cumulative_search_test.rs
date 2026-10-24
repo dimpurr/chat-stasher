@@ -248,7 +248,7 @@ fn fixture_with_a_damaged_newest_snapshot(damage: bool) -> Fixture {
     // The real thing: the destination proves it holds both bodies, so the stage
     // gives them up. This is what leaves the newest snapshot body-less.
     let dests = vec![named(dir.path(), "repo")];
-    let report = stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
     assert!(!report.blocked(), "reclaim was blocked: {report:?}");
     assert_eq!(
         report.reclaimed.len(),

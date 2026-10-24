@@ -26,7 +26,7 @@ use chat_stasher::manifest;
 use chat_stasher::stagereclaim::{self, BlockedKind, NamedStore};
 use chat_stasher::store::{self, BackupStore, StageWriter, StoreConfig};
 use rustic_core::repofile::MasterKey;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -141,7 +141,7 @@ fn apply_reclaims_body_but_keeps_summary() {
     let dests = vec![named(dir.path(), "repo-a", DestinationHealth::Healthy)];
 
     // Dry run first: proves but deletes nothing.
-    let report = stagereclaim::reclaim_stage(&stage, &dests, false).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, false, None).unwrap();
     assert!(
         !report.blocked(),
         "dry run must not be blocked: {:?}",
@@ -156,7 +156,7 @@ fn apply_reclaims_body_but_keeps_summary() {
     );
 
     // Apply: body goes, summary stays, counter survives.
-    let report = stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
     assert!(
         !report.blocked(),
         "apply must not be blocked: {:?}",
@@ -191,7 +191,7 @@ fn verify_l3_still_runs_after_reclaim_on_retained_summary() {
     let cfg = store_config(dir.path(), "repo-b");
     let mk = init_and_push(&cfg, machine, &stage);
     let dests = vec![named(dir.path(), "repo-b", DestinationHealth::Healthy)];
-    let report = stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
     assert!(!report.blocked());
     assert_eq!(report.reclaimed.len(), 1);
 
@@ -224,7 +224,7 @@ fn reclaim_then_new_shards_do_not_collide_and_read_back_identical() {
     let cfg = store_config(dir.path(), "repo-c");
     let mk = init_and_push(&cfg, machine, &stage);
     let dests = vec![named(dir.path(), "repo-c", DestinationHealth::Healthy)];
-    let report = stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
     assert!(!report.blocked());
     assert_eq!(report.reclaimed.len(), 1);
 
@@ -296,7 +296,7 @@ fn never_pushed_destination_is_listed_degraded_and_not_consulted() {
     ];
 
     // Dry run first: the degraded destination does not block it.
-    let report = stagereclaim::reclaim_stage(&stage, &dests, false).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, false, None).unwrap();
     assert!(
         !report.blocked(),
         "the never-pushed destination is degraded — it must not hold the reclaim hostage: {:?}",
@@ -322,7 +322,7 @@ fn never_pushed_destination_is_listed_degraded_and_not_consulted() {
     assert_eq!(primary_row.role, "must-prove");
 
     // Apply: same proof, the body goes, the summary stays.
-    let report = stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
     assert!(
         !report.blocked(),
         "apply must not be blocked by the degraded destination: {:?}",
@@ -372,7 +372,7 @@ fn a_must_prove_destination_missing_a_candidate_blocks() {
         named(dir.path(), "repo-a", DestinationHealth::Healthy),
         named(dir.path(), "repo-b", DestinationHealth::Healthy),
     ];
-    let report = stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
     assert!(
         report.blocked(),
         "a healthy destination missing the session must block the reclaim"
@@ -412,7 +412,7 @@ fn an_empty_healthy_set_is_its_own_blocked_shape() {
         named(dir.path(), "repo-lagging", DestinationHealth::Lagging),
         named(dir.path(), "repo-never", DestinationHealth::NeverPushed),
     ];
-    let report = stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
     assert!(report.blocked(), "the ≥1 guard holds the bottom");
     assert!(
         report.blocked.is_empty(),
@@ -605,9 +605,317 @@ fn empty_stage_is_a_noop() {
     let dir = tempfile::TempDir::new().unwrap();
     let stage = dir.path().join("stage");
     let dests = vec![named(dir.path(), "repo-empty", DestinationHealth::Healthy)];
-    let report = stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
     assert!(!report.blocked());
     assert!(report.candidates.is_empty());
     assert!(report.reclaimed.is_empty());
     drop(dir);
+}
+
+// ------------------------------------------- ADR-060 D6(ii) / 47 §5.3, rev0 ①
+// The mirror leg of the proof: a configured-and-on mirror of a consulted
+// destination holds a session back — `not-mirrored`, D6.3's one spelling —
+// until the copy's completed-round record holds that session's proof
+// snapshot closure-complete. `None` (the machine before mirrors, every
+// test above) must keep running exactly as it ran.
+
+/// The newest snapshot id the consult would prove `machine`'s session
+/// bytes from — the id the leg has to find covered.
+fn newest_snapshot_of(cfg: &StoreConfig, mk: &MasterKey, machine: &str) -> String {
+    let report = BackupStore::new(cfg.clone(), machine.to_string())
+        .read_latest_per_machine(mk)
+        .unwrap();
+    match report
+        .machines
+        .iter()
+        .find(|merge| merge.hostname == machine)
+    {
+        Some(merge) => merge.snapshot_id.clone(),
+        None => panic!("machine {machine} holds a snapshot"),
+    }
+}
+
+/// A wired-on holdback: the copy's directory exists and a completed-round
+/// record exists, with `closure_complete` naming precisely what the test
+/// wants the copy to have reached.
+fn mirror_holdback(
+    dir: &Path,
+    mirror_of: &str,
+    closure_complete: BTreeSet<String>,
+) -> chat_stasher::stagereclaim::MirrorHoldback {
+    let mirror_root = dir.join("mirror-copy");
+    fs::create_dir_all(&mirror_root).unwrap();
+    chat_stasher::stagereclaim::MirrorHoldback {
+        mirror_of: mirror_of.to_string(),
+        mirror_root,
+        state: chat_stasher::mirrorstate::MirrorStateRead::Present(
+            chat_stasher::mirrorstate::MirrorState {
+                version: chat_stasher::mirrorstate::MIRROR_STATE_VERSION,
+                finished_at_unix: 1_800_000_000,
+                mirror_of: mirror_of.to_string(),
+                closure_complete,
+                snapshots_on_remote: 1,
+                remote_total_bytes: 100,
+            },
+        ),
+    }
+}
+
+/// A completed-round record that predates the proof's snapshot holds every
+/// candidate back: the reclaim is blocked, per session, with D6.3's word,
+/// the durable record carries it, and the body is untouched.
+#[test]
+fn a_mirror_lagging_behind_the_proof_holds_sessions_back() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let stage = dir.path().join("stage");
+    let machine = "m-mirror";
+    let session = "s-mir";
+    let written = write_session(&stage, machine, session, 2);
+    let cfg = store_config(dir.path(), "repo-m");
+    let mk = init_and_push(&cfg, machine, &stage);
+    let _snapshot = newest_snapshot_of(&cfg, &mk, machine);
+    let dests = vec![named(dir.path(), "repo-m", DestinationHealth::Healthy)];
+
+    let holdback = mirror_holdback(dir.path(), "repo-m", BTreeSet::new());
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, Some(&holdback)).unwrap();
+    assert!(
+        report.blocked(),
+        "the mirror leg refuses the deletion: {:?}",
+        report.blocked
+    );
+    assert!(
+        report.reclaimed.is_empty(),
+        "nothing may be deleted while held"
+    );
+    assert_eq!(
+        shard_count(&stage, machine, session),
+        2,
+        "the proven body stays until the copy reaches it"
+    );
+    assert_eq!(report.blocked.len(), 1);
+    let block = &report.blocked[0];
+    assert_eq!(block.destination, "repo-m");
+    assert_eq!(
+        block.sessions, 1,
+        "the hold-back is per session, the whole-machine shape it is not"
+    );
+    assert_eq!(block.bytes, written.len() as u64);
+    assert!(
+        matches!(block.kind, BlockedKind::NotMirrored),
+        "{:?}",
+        block.kind
+    );
+    // The word and the durable record belong to one vocabulary (D6.3):
+    // the weekly streak the menubar counts reads the same kind.
+    assert_eq!(
+        stagereclaim::block_kind_word(&BlockedKind::NotMirrored),
+        "not-mirrored"
+    );
+    assert_eq!(
+        chat_stasher::mirror::HELD_BACK_KIND,
+        "not-mirrored",
+        "the report word is the settled spelling"
+    );
+    let as_state = stagereclaim::blocks_as_state(&report.blocked);
+    assert_eq!(as_state.len(), 1);
+    assert_eq!(as_state[0].kind, "not-mirrored");
+    assert_eq!(as_state[0].sessions, 1);
+}
+
+/// Once the copy's completed-round record holds the proof's snapshot
+/// closure-complete, the same run reclaims the body it proved.
+#[test]
+fn a_covered_mirror_frees_what_it_proved() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let stage = dir.path().join("stage");
+    let machine = "m-mirror";
+    let session = "s-mir";
+    write_session(&stage, machine, session, 2);
+    let cfg = store_config(dir.path(), "repo-m");
+    let mk = init_and_push(&cfg, machine, &stage);
+    let snapshot = newest_snapshot_of(&cfg, &mk, machine);
+    let dests = vec![named(dir.path(), "repo-m", DestinationHealth::Healthy)];
+
+    let mut closure = BTreeSet::new();
+    closure.insert(snapshot);
+    let holdback = mirror_holdback(dir.path(), "repo-m", closure);
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, Some(&holdback)).unwrap();
+    assert!(
+        !report.blocked(),
+        "a covered proof snapshot is reclaimable: {:?}",
+        report.blocked
+    );
+    assert_eq!(report.reclaimed.len(), 1);
+    assert_eq!(shard_count(&stage, machine, session), 0, "the body goes");
+    let summary = stored_summary(&stage, machine, session).expect("summary retained");
+    assert_eq!(summary.shard_count, 2);
+    drop(dir);
+}
+
+/// A record no directory backs vouches for nothing: coverage is a claim
+/// about bytes on this machine's disk, so even a record that *names* the
+/// proof's snapshot holds everything back when the copy is gone — the
+/// safe direction, and the same `is_dir` honesty the read seam keeps.
+#[test]
+fn a_record_no_directory_backs_holds_everything_back() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let stage = dir.path().join("stage");
+    let machine = "m-mirror";
+    let session = "s-mir";
+    write_session(&stage, machine, session, 1);
+    let cfg = store_config(dir.path(), "repo-m");
+    let mk = init_and_push(&cfg, machine, &stage);
+    let snapshot = newest_snapshot_of(&cfg, &mk, machine);
+    let dests = vec![named(dir.path(), "repo-m", DestinationHealth::Healthy)];
+
+    let mut closure = BTreeSet::new();
+    closure.insert(snapshot);
+    let holdback = chat_stasher::stagereclaim::MirrorHoldback {
+        mirror_of: "repo-m".to_string(),
+        mirror_root: dir.path().join("mirror-copy"), // deliberately absent
+        state: chat_stasher::mirrorstate::MirrorStateRead::Present(
+            chat_stasher::mirrorstate::MirrorState {
+                version: chat_stasher::mirrorstate::MIRROR_STATE_VERSION,
+                finished_at_unix: 1_800_000_000,
+                mirror_of: "repo-m".to_string(),
+                closure_complete: closure,
+                snapshots_on_remote: 1,
+                remote_total_bytes: 100,
+            },
+        ),
+    };
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, Some(&holdback)).unwrap();
+    assert!(
+        report.blocked(),
+        "a deleted copy is not coverage: {:?}",
+        report.blocked
+    );
+    assert!(matches!(report.blocked[0].kind, BlockedKind::NotMirrored));
+    assert_eq!(shard_count(&stage, machine, session), 1, "the body stays");
+}
+
+/// The holdback binds only a destination this run actually consulted: a
+/// mirror pointed at a degraded destination is not a proof input (D3's
+/// own rule — a degraded destination may not hold the whole machine's
+/// reclaim hostage), and neither is a name no run consults.
+#[test]
+fn a_mirror_of_a_destination_this_run_does_not_consult_binds_nothing() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let stage = dir.path().join("stage");
+    let machine = "m-mirror";
+    let session = "s-mir";
+    write_session(&stage, machine, session, 1);
+    let primary = store_config(dir.path(), "repo-primary");
+    init_and_push(&primary, machine, &stage);
+    let lagging = store_config(dir.path(), "repo-lagging");
+    init_empty_repo(&lagging);
+    let dests = vec![
+        named(dir.path(), "repo-primary", DestinationHealth::Healthy),
+        named(dir.path(), "repo-lagging", DestinationHealth::Lagging),
+    ];
+
+    // A name no run consults (never declared) binds nothing.
+    let holdback = mirror_holdback(dir.path(), "nope-never-declared", BTreeSet::new());
+    let report = stagereclaim::reclaim_stage(&stage, &dests, false, Some(&holdback)).unwrap();
+    assert!(
+        !report.blocked(),
+        "an unconsulted mirror_of is not a proof input: {:?}",
+        report.blocked
+    );
+
+    // The degraded destination's own mirror binds nothing either: its
+    // protection is the alarm layer and the union backfill, never stage
+    // retention — the reclaim reclaims what the healthy destination
+    // proved.
+    let holdback = mirror_holdback(dir.path(), "repo-lagging", BTreeSet::new());
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, Some(&holdback)).unwrap();
+    assert!(
+        !report.blocked(),
+        "D3's rule: a degraded destination's mirror may not hold the reclaim hostage: {:?}",
+        report.blocked
+    );
+    assert_eq!(report.reclaimed.len(), 1, "the proven body goes");
+    assert_eq!(shard_count(&stage, machine, session), 0);
+}
+
+/// The CLI wires the leg the docs promise: on a machine with
+/// `[mirror] enabled = true`, the weekly command refuses as
+/// `not-mirrored` (here: a copy whose first fill has not completed, so no
+/// completed-round record exists), deletes nothing, and names the round
+/// that frees the body. The regression direction is the wiring itself:
+/// a CLI that left the holdback `None` would print a dry "reclaimable".
+#[test]
+fn the_cli_wires_the_mirror_leg_and_refuses_as_not_mirrored() {
+    let sandbox = tempfile::TempDir::new().unwrap();
+    let stage = sandbox.path().join("stage");
+    let machine = "m-cli";
+    let session = "s-cli";
+    write_session(&stage, machine, session, 1);
+    let cfg = store_config(sandbox.path(), "repo-cli");
+    init_and_push(&cfg, machine, &stage);
+    // The push record the machine's own `cmd_push` would have left, so
+    // the single destination classifies healthy and the proof consults
+    // it and holds the session.
+    let state_dir = sandbox.path().join("data/chat-stasher/state");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    chat_stasher::pushstate::record_success(&state_dir, "default", machine, 3, now - 60).unwrap();
+    // A configured-and-on mirror of the one destination; the copy's
+    // directory exists but no completed round ever wrote a record — the
+    // machine the D6(ii) gate exists for.
+    let config_dir = sandbox.path().join("config").join("chat-stasher");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "[mirror]\nenabled = true\nmirror_of = \"default\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(sandbox.path().join("data/chat-stasher/mirror/default")).unwrap();
+
+    let output = isolated_command(sandbox.path())
+        .args(["reclaim-stage", "--stage"])
+        .arg(&stage)
+        .args(["--repo"])
+        .arg(&cfg.repo_root)
+        .args(["--key-file"])
+        .arg(&cfg.key_file)
+        .args(["--keep-ssh-masters"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the mirror leg refuses the deletion: {stdout}"
+    );
+    assert!(
+        stdout.contains("the mirror has not synced to this snapshot yet"),
+        "D6.3's sentence words the refusal: {stdout}"
+    );
+    // rev2 ⑤: the destination's noun phrase ends with the colon, so the
+    // sentence reads as an assertion about it — never the bare
+    // juxtaposition `destination "x" the mirror has not …` that parses
+    // like nothing.
+    assert!(
+        stdout.contains(
+            "  blocked: destination \"default\": the mirror has not synced to this snapshot \
+             yet — 1 session(s) / "
+        ),
+        "the blocked line is the full sentence about the destination, with the counts: {stdout}"
+    );
+    assert!(
+        stdout.contains("nothing was deleted"),
+        "the refusal keeps the blocked shape: {stdout}"
+    );
+    assert!(
+        stdout.contains("mirror sync"),
+        "the fix names the round that frees the body: {stdout}"
+    );
+    assert_eq!(
+        shard_count(&stage, machine, session),
+        1,
+        "the body must be untouched while the copy lags"
+    );
 }
