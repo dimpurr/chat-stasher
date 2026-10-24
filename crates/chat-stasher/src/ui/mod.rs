@@ -5583,7 +5583,12 @@ mod tests {
             );
         }
         // With several destinations each sentence belongs to its copy, so
-        // the reader never has to guess whose copy is how old.
+        // the reader never has to guess whose copy is how old. And
+        // dest-two's sentence travels from a real `mirror-progress.json`
+        // record through the same builder the ui production path uses
+        // (`behindness_sentence`), not as a hand-built stand-in — the
+        // first-fill loud branch is what ships to the page (rev2 ⑥:
+        // producing it began in `mirror_read`'s own tests).
         let mut merged = UiData::from_reports(
             &[
                 DestinationRead {
@@ -5598,12 +5603,39 @@ mod tests {
             Selector::default(),
             NOW,
         );
-        merged.destinations[1].mirror = Some("local copy's first sync is in progress: 70%".into());
+        let progress_sb = tempfile::TempDir::new().unwrap();
+        let progress_home = progress_sb.path().join("state");
+        std::fs::create_dir_all(&progress_home).unwrap();
+        std::fs::write(
+            crate::mirror::mirror_progress_path(&progress_home),
+            serde_json::to_vec(&crate::mirror::MirrorProgress {
+                version: crate::mirror::MIRROR_PROGRESS_VERSION,
+                mirror_of: "dest-two".to_string(),
+                round_finished_at_unix: 4,
+                complete: false,
+                outcome: "stopped".to_string(),
+                outcome_note: None,
+                remote_total_bytes: 10_000,
+                mirror_bytes: 7_000,
+                remote_files: 90,
+                mirror_files: 63,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        merged.destinations[1].mirror = Some(crate::mirror_read::behindness_sentence(
+            &progress_home,
+            "dest-two",
+        ));
         let body = req("/sessions", &merged, &NoContent).body;
         assert!(
             // the apostrophe arrives escaped like every other interpolated
             // character — the sentence is rendered as text, never markup
-            body.contains("<b>dest-two</b> — local copy&#39;s first sync is in progress: 70%"),
+            body.contains(
+                "<b>dest-two</b> — local copy&#39;s first sync is in progress: 70% (7000 of \
+                 10000 B) — reads fall back to the remote for what has not synced; this is \
+                 not a failure"
+            ),
             "the merged view names the copy each sentence is about: {body}"
         );
     }
@@ -5656,6 +5688,44 @@ mod tests {
             body.contains("&amp; `mirror_of = &quot;box&quot;`"),
             "the ampersand and quote escape too: {body}"
         );
+    }
+
+    /// The note also rides on the payload pages (rev2 ⑦): `/session`,
+    /// `/content` and `/reader` are the routes whose bytes the copy actually
+    /// serves when a mirror is attached, so a reader who pages into one
+    /// conversation keeps seeing which copy answered and how old it is —
+    /// the note is the same sentence, not a second one, so it renders from
+    /// the same `UiData` the other pages already note from, and renders
+    /// nothing when no mirror serves the destination.
+    #[test]
+    fn the_mirror_note_renders_on_the_payload_pages() {
+        let mut data = data_of(vec![fixture::hit_for("m-1", "deepseek.s1")]);
+        for target in ["/session?i=0", "/content?i=0", "/reader?i=0"] {
+            let response = req(target, &data, &CountingContent::default());
+            assert_eq!(response.status, 200, "{target}");
+            assert!(
+                !response.body.contains("local copy"),
+                "no mirror serving, no note on the payload page {target}"
+            );
+        }
+        data.destinations[0].mirror = Some(
+            "local copy as of 02:07 UTC — the mirror serves what it holds; the remote answers \
+             what it lacks"
+                .to_string(),
+        );
+        for target in ["/session?i=0", "/content?i=0", "/reader?i=0"] {
+            let response = req(target, &data, &CountingContent::default());
+            assert_eq!(response.status, 200, "{target}");
+            assert!(
+                response.body.contains("local copy as of 02:07 UTC"),
+                "the note travels to {target}"
+            );
+            assert!(
+                response.body.contains("the remote answers what it lacks"),
+                "the whole sentence arrives, not a prefix: {}",
+                response.body
+            );
+        }
     }
 
     /// The zero-JS nav is links a browser can follow: each carries the query

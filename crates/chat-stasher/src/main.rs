@@ -5676,7 +5676,10 @@ fn cmd_search(
     // exactly the way the ssh-reap line was (W253 C1).
     let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
     if let Some(line) = mirror_decision.state_line() {
-        eprintln!("[search] mirror         : {line}");
+        // rev2 ⑤: `[search]`'s label column is 13 wide (`destination  :`,
+        // `matched      :`) — the mirror lines join that family, not
+        // `read`/`verify`'s 15-wide one.
+        eprintln!("[search] mirror       : {line}");
     }
     let store = BackupStore::for_metadata_query(cfg.clone())
         .with_mirror_reads(mirror_decision.handle())
@@ -5709,7 +5712,7 @@ fn cmd_search(
         }
     };
     if let Some(mirror) = store.mirror_reads() {
-        eprintln!("[search] mirror served  : {}", mirror.served_line());
+        eprintln!("[search] mirror served: {}", mirror.served_line());
     }
 
     if let Some(query) = text.as_deref() {

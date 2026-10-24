@@ -213,7 +213,7 @@ fn an_offline_read_serves_from_the_mirror_byte_identically() {
     assert_eq!(bytes, remote_bytes);
     assert_eq!(hashes, remote_hashes);
     assert!(
-        reads.counters().mirror_reads > 0,
+        reads.counters().mirror_files > 0,
         "the local copy served this read: {:?}",
         reads.counters()
     );
@@ -235,7 +235,7 @@ fn an_offline_read_serves_from_the_mirror_byte_identically() {
         "the open's listings fell back to the mirror: {counters:?}"
     );
     assert_eq!(
-        counters.remote_reads, 0,
+        counters.remote_files, 0,
         "nothing could have come from the removed remote: {counters:?}"
     );
 }
@@ -267,16 +267,129 @@ fn missing_mirror_files_fall_back_to_the_remote() {
     assert_eq!(bytes, remote_bytes, "the fallback changes no bytes");
     let counters = serving_counters(&store);
     assert!(
-        counters.remote_reads > 0,
+        counters.remote_files > 0,
         "the packs came from the remote: {counters:?}"
     );
     assert!(
-        counters.mirror_reads > 0,
+        counters.mirror_files > 0,
         "the immutable metadata still served from the mirror: {counters:?}"
     );
     assert_eq!(
         counters.mirror_listings, 0,
         "the remote was listable — presence stayed the remote's to say"
+    );
+}
+
+/// Every regular file under `dir`, recursively (`data` packs sit one shard
+/// deeper than the other repository directories).
+fn count_repo_files(dir: PathBuf) -> u64 {
+    match fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| {
+                let path = entry.path();
+                if path.is_dir() {
+                    count_repo_files(path)
+                } else {
+                    u64::from(path.is_file())
+                }
+            })
+            .sum(),
+        Err(_) => 0,
+    }
+}
+
+/// The served line's file counts must count **files**, not read operations
+/// (rev2 ①): the module's own standard is that a line built from the
+/// counters "can be checked against the read it describes", and over a copy
+/// that holds N repository files, a mirror leg reporting read/range
+/// operations is a number nothing can check. This read walks both machines'
+/// whole session sets — so the mirror leg's file count answers a question
+/// an independent count of the copy's own directory can ask, the remote
+/// leg's file count is the one deliberate crossing there is (the
+/// remote-first `config` read), and re-reading a session through the same
+/// handle must move more bytes without ever raising a file count.
+#[test]
+fn the_served_line_counts_files_not_read_operations() {
+    let rig = build_rig();
+    rig.run_sync();
+
+    let reads = rig.serving_reads();
+    let store = BackupStore::new(rig.remote.clone(), "machine-a".to_string())
+        .with_mirror_reads(Some(std::sync::Arc::clone(&reads)));
+    for (machine, session) in [("machine-a", "session-a1"), ("machine-b", "session-b1")] {
+        store
+            .read_session_concat(machine, session, &rig.mk)
+            .unwrap_or_else(|e| panic!("the mirrored session {session} reads: {e:#}"));
+    }
+
+    // The independent count: every repository file of the types this walk
+    // touches — packs (dir-sharded), indexes, snapshots. `keys/` is not read
+    // through the seam (the key comes from the destination's key file) and
+    // `config` is the remote-first file, so neither belongs to the
+    // mirror leg's count.
+    let root = rig.mirror_root();
+    let expected = count_repo_files(root.join("data"))
+        + count_repo_files(root.join("index"))
+        + count_repo_files(root.join("snapshots"));
+    assert!(
+        expected > 0,
+        "the fixture's sync filled the copy with repository files"
+    );
+
+    let line = reads.served_line();
+    let head = line
+        .split_once(" from the local mirror")
+        .unwrap_or_else(|| panic!("a served line names its leg: {line}"))
+        .0;
+    let (files_txt, _) = head
+        .split_once(" file(s) (")
+        .unwrap_or_else(|| panic!("the mirror leg is worded in file(s): {line}"));
+    assert_eq!(
+        files_txt.parse::<u64>().unwrap_or(u64::MAX),
+        expected,
+        "the served line counts files, not reads — the copy holds {expected} file(s) this \
+         walk touches: {line}"
+    );
+
+    let rest = line
+        .strip_prefix(&format!("{files_txt} file(s) ("))
+        .and_then(|after| after.split_once(" B) from the local mirror, "))
+        .unwrap_or_else(|| panic!("the served line's shape: {line}"))
+        .1;
+    let (remote_txt, _) = rest
+        .split_once(" file(s) (")
+        .unwrap_or_else(|| panic!("the remote leg is worded in file(s): {line}"));
+    assert_eq!(
+        remote_txt.parse::<u64>().unwrap_or(u64::MAX),
+        1,
+        "the config alone crosses to the remote: {line}"
+    );
+    // The counters behind the line agree, and in the counting that can be
+    // checked: distinct files on both legs.
+    {
+        let counters = reads.counters();
+        assert_eq!(counters.mirror_files, expected, "{counters:?}");
+        assert_eq!(counters.remote_files, 1, "{counters:?}");
+        assert!(counters.mirror_bytes > 0, "{counters:?}");
+    }
+
+    // Re-reading the same session through the same handle moves ranges
+    // again — a file re-read in more read operations is still one file.
+    store
+        .read_session_concat("machine-a", "session-a1", &rig.mk)
+        .expect("the re-read completes");
+    let line = reads.served_line();
+    let head = line
+        .split_once(" from the local mirror")
+        .unwrap_or_else(|| panic!("a served line names its leg: {line}"))
+        .0;
+    let (files_txt_two, _) = head
+        .split_once(" file(s) (")
+        .unwrap_or_else(|| panic!("the mirror leg is worded in file(s): {line}"));
+    assert_eq!(
+        files_txt_two, files_txt,
+        "a re-read moves more ranges, never more files: {line}"
     );
 }
 
@@ -310,7 +423,7 @@ fn mirror_reads_never_enter_the_body_cache_but_remote_fallbacks_do() {
     let usage = cache.usage().unwrap();
     assert_eq!(usage.entries, 0, "no entry files either: {usage:?}");
     assert!(
-        serving_counters(&store).mirror_reads > 0,
+        serving_counters(&store).mirror_files > 0,
         "the mirror really served this read"
     );
 
@@ -366,6 +479,24 @@ fn write_config(sandbox: &Path, mirror_block: &str) {
         format!(
             "[destinations.storagebox]\nrepo = \"{}\"\nkey_file = \"{}\"\nno_cache = \
              true\n\n[mirror]\n{mirror_block}",
+            repo.display(),
+            key.display()
+        ),
+    )
+    .unwrap();
+}
+
+/// The destination section with no `[mirror]` at all — the
+/// outlived-its-section shape: a copy is on disk, the config names nothing.
+fn write_config_no_mirror(sandbox: &Path) {
+    let config_dir = sandbox.join("config").join("chat-stasher");
+    fs::create_dir_all(&config_dir).unwrap();
+    let repo = sandbox.join("remote-repo");
+    let key = sandbox.join("remote.key");
+    fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "[destinations.storagebox]\nrepo = \"{}\"\nkey_file = \"{}\"\nno_cache = true\n",
             repo.display(),
             key.display()
         ),
@@ -615,5 +746,157 @@ fn verify_over_the_copy_itself_says_so() {
     assert!(
         stdout.contains("local mirror copy `storagebox`"),
         "the line says whose copy is under verification: {stdout}"
+    );
+}
+
+/// rev2 ③: the copy-itself line is owed by the on-disk layout, not by what
+/// `[mirror]` currently declares — `verify --repo <copy>` with the switch
+/// off, and with the section removed entirely, are the two states rev2
+/// measured printing the switch's line or nothing at all, letting a
+/// verdict over this machine's copy pass as the destination's own.
+#[test]
+fn verify_over_the_copy_itself_says_so_without_a_section_or_a_live_switch() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let sandbox = sb.path();
+    cli_fixture_with_mirror(sandbox);
+    let copy = mirror_root_of(sandbox);
+    let verify = |sandbox: &Path| {
+        run(binary_command(sandbox).args([
+            "verify",
+            "--level",
+            "l2",
+            "--repo",
+            copy.to_str().unwrap(),
+            "--key-file",
+            sandbox.join("remote.key").to_str().unwrap(),
+        ]))
+    };
+
+    // The switch is off: the copy's line, never the switch's.
+    write_config(
+        sandbox,
+        "enabled = false\nmirror_of = \"storagebox\"\nmin_free_gib = 1.0",
+    );
+    let (code, stdout, stderr) = verify(sandbox);
+    assert_eq!(
+        code, 0,
+        "the untouched copy is a real repository and verifies:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("[verify] mirror         :"),
+        "the copy-itself line is still on the report: {stdout}"
+    );
+    assert!(
+        stdout.contains("local mirror copy `storagebox`"),
+        "whose copy is under verification comes from the path: {stdout}"
+    );
+    assert!(
+        !stdout.contains("enabled = false"),
+        "the switch's `off` line belongs to remote stores, not to the copy: {stdout}"
+    );
+
+    // The section removed entirely: still the copy's line — never silence.
+    write_config_no_mirror(sandbox);
+    let (code, stdout, stderr) = verify(sandbox);
+    assert_eq!(
+        code, 0,
+        "the copy verifies as a repository, section or none:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("[verify] mirror         :"),
+        "a copy that outlived its section still states itself: {stdout}"
+    );
+    assert!(
+        stdout.contains("local mirror copy `storagebox`"),
+        "and names itself by the layout alone: {stdout}"
+    );
+}
+
+/// rev2 ②'s own reproduction at command level: corrupt-but-present mirror
+/// files must fail the read, never rescue it from the remote silently —
+/// over this fixture truncating every pack made `read` answer the correct
+/// 900 bytes through the silent retry (counted on the remote leg), which
+/// is precisely the shape the module header forbids. The truncated shape
+/// is the class that *errors* at the seam (unlike the same-length garbage
+/// the tampered test uses, which is served and fails above it). With every
+/// pack gone the strict control-policy walk refuses before any session
+/// dump — the fail-closed "unknown policy" family — so the surfaced
+/// message is that honest refusal; the seam's own error for a refused
+/// file (presentness, the file id, the `mirror sync` repair, and zero
+/// counters on both legs) is locked by the lib-side unit test
+/// `a_present_but_unreadable_mirror_file_is_a_hard_failure_never_a_silent_retry`.
+/// `verify` over the same sandbox stays the remote's: exit 0, verdict
+/// unchanged — the damage is the copy's, and only the copy's.
+#[test]
+fn read_over_truncated_mirror_packs_fails_loudly_not_silently() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let sandbox = sb.path();
+    cli_fixture_with_mirror(sandbox);
+    write_config(
+        sandbox,
+        "enabled = true\nmirror_of = \"storagebox\"\nmin_free_gib = 1.0",
+    );
+
+    // Truncate every pack to a 4-byte stub: present, listed, unreadable at
+    // pack ranges — disk damage, not sync progress.
+    let data = mirror_root_of(sandbox).join("data");
+    for entry in fs::read_dir(&data).unwrap() {
+        let shard_dir = entry.unwrap().path();
+        for file in fs::read_dir(&shard_dir).unwrap() {
+            let path = file.unwrap().path();
+            let mut bytes = fs::read(&path).unwrap();
+            bytes.truncate(4.min(bytes.len()));
+            fs::write(&path, &bytes).unwrap();
+        }
+    }
+
+    let (code, stdout, stderr) = run(binary_command(sandbox).args([
+        "read",
+        "--destination",
+        MIRROR_OF,
+        "--machine",
+        "machine-a",
+        "--session",
+        "session-a1",
+    ]));
+    assert_ne!(
+        code, 0,
+        "a present-but-unreadable copy must fail the read — the remote holds the intact \
+         packs, so a completed read can only have come from the silent retry:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("[read] concat len"),
+        "no completed read may be reported over corrupt bytes: {stdout}"
+    );
+    assert!(
+        !stdout.contains("[read] mirror served"),
+        "a failed read reports no half-measure counters as if a read had happened: {stdout}"
+    );
+    let said = format!("{stdout}{stderr}");
+    assert!(
+        said.contains("could not be read from any snapshot") && said.contains("fails closed"),
+        "the refusal answers in the honest unknown-state family — the read stops, it does \
+         not invent an answer:\n{said}"
+    );
+
+    // verify is none of this: over the same sandbox it is still entirely
+    // the remote's — intact packs, its own verdict — which is also the
+    // proof that the damage was the copy's and the copy's alone.
+    let (code, stdout, stderr) = run(binary_command(sandbox).args([
+        "verify",
+        "--level",
+        "l2",
+        "--destination",
+        MIRROR_OF,
+        "--machine",
+        "machine-a",
+    ]));
+    assert_eq!(
+        code, 0,
+        "verify never asked the copy, so its verdict stands:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("[verify] RESULT         : OK"),
+        "the verdict is the remote's own: {stdout}"
     );
 }

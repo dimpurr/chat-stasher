@@ -328,12 +328,24 @@ which this build never holds. Nothing is decrypted to copy it; with
 push, inside the pass's leftover budget. Declare one in
 [config.md](config.md#mirror).
 
+And the copy is not just for keeping: with the switch on, the mirror also
+**serves** that destination's reads — `read`, `search`, `export`, `index
+build` and the `ui` dashboard answer bytes from the local copy first and
+fall back to the remote per file it lacks, so a fully mirrored machine
+reads offline, and each command's report shows which side served what.
+What the reads are worth is dated — "the local copy as of HH:MM" — and
+`verify` never consults the copy. The read rules (offline, dated answers,
+what stays the remote's) are stated in [config.md](config.md#mirror).
+
 One run is one bounded round: a large first fill spans several rounds, each
 resuming where the previous stopped, and `status` reports the progress as
 progress — a round that stops early is not a failure. Before a first fill
 starts, the command estimates whether the remaining download plus the
 free-disk floor fits the free space, and refuses with both numbers when it
-does not.
+does not. A mirror file that is present but unreadable is never quietly
+re-fetched mid-read: a command reading over it stops with the file's name
+and points back at `mirror sync`, whose next round re-downloads a file
+that no longer hashes to its name.
 
 | Flag | Meaning |
 |---|---|

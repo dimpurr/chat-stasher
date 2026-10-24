@@ -843,7 +843,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:116`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:336-490,2511-2513,2553-2563`; `crates/chat-stasher/src/main.rs:9974-9979`).
+kept on your machine (`crates/chat-stasher/src/store.rs:336-490,2511-2513,2553-2563`; `crates/chat-stasher/src/main.rs:9977-9982`).
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
 
@@ -1209,7 +1209,7 @@ There is one key file per repository — `rustic_key_file` for the local archive
 that copy alone, and a copy of one does not restore another. A second machine
 reads a destination with that destination's key and does not use the local one,
 which is why every key file has to be backed up
-(`crates/chat-stasher/src/main.rs:9839-9844`).
+(`crates/chat-stasher/src/main.rs:9842-9847`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin

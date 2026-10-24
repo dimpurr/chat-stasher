@@ -14,14 +14,23 @@
 //!   never touch the mirror; only `mirror sync` does.
 //! * **Absent and corrupt are different events.** The fallback leg exists
 //!   for a file the mirror *lacks* — a sync-progress fact the seam can see,
-//!   because the read errors and the remote answers, visibly. A file that
-//!   is corrupt rather than absent defeats the copy's own premise (the bytes
-//!   an id names, held under that id) and is deliberately a **hard failure,
-//!   never a silent remote retry**: a partial read cannot re-verify a
-//!   whole-file id, so detection does not belong in this seam; the damage
-//!   surfaces where decryption and re-hashing live, above it, and the read
-//!   stops honestly rather than fetch replacement bytes without saying so.
-//!   `verify`, remote-only, keeps answering the only integrity
+//!   because the read errors while the copy's layout holds no such file, and
+//!   the remote answers, visibly. A file that is corrupt rather than absent
+//!   defeats the copy's own premise (the bytes an id names, held under that
+//!   id) and is deliberately a **hard failure, never a silent remote
+//!   retry**, enforced by classification rather than promised by wording:
+//!   a mirror read that *errors on a file the copy's disk still holds*
+//!   (truncated, unreadable — the shapes that fail at the read) returns
+//!   the refusal of [`corrupt_copy_refusal`], the remote is not asked,
+//!   and the error names the file and the repair — `mirror sync`'s next
+//!   round byte-compares the copy and re-downloads a file that no longer
+//!   hashes to its name. What a corrupt file *cannot* do is answer the
+//!   read with plausible bytes: bit-rot under a length-preserving shape
+//!   is served as answered, and the damage surfaces where decryption and
+//!   re-hashing live, above the seam — a partial read cannot re-verify a
+//!   whole-file id, so detection does not belong in this seam; the read
+//!   stops honestly rather than fetch replacement bytes without saying
+//!   so. `verify`, remote-only, keeps answering the only integrity
 //!   certification a copy may not give itself (47 §5.5) — the tampered-
 //!   mirror test locks both halves: `read` over garbage fails, `verify`
 //!   still answers the remote.
@@ -88,25 +97,34 @@ use std::sync::Arc;
 // The serving handle and its counters
 // ---------------------------------------------------------------------------
 
-/// What one command's reads did through the mirror seam. Every number is a
-/// count of events in this process, never a guess, so a line built from them
-/// can be checked against the read it describes.
+/// What one command's reads did through the mirror seam. The file counts
+/// are **distinct files**, never read operations: a pack a read asks for
+/// in N ranges is one file and N range fetches, and only the distinct
+/// count is checkable against the read it describes. The byte fields are
+/// operation sums — bytes moved, every range counted at every fetch — so
+/// one file's `mirror_bytes` can total more than its size, and the line
+/// built from these numbers never presents a byte sum as a file's size.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MirrorCounters {
-    /// Immutable repository files served from the local copy
-    /// (`read_full` + `read_partial`, every non-config file type).
-    pub mirror_reads: u64,
-    /// Bytes those reads moved off the local disk.
+    /// Distinct repository files served from the local copy
+    /// (`read_full` + `read_partial`, every non-config file type): counted
+    /// once per file per process, so a file re-read in several ranges —
+    /// or after another read already counted it — stays one file.
+    pub mirror_files: u64,
+    /// Bytes those reads moved off the local disk — every range of every
+    /// read counted, re-fetches included.
     pub mirror_bytes: u64,
-    /// Files read from the remote rather than the local copy: the 47
-    /// §3.6 fallback for a file the mirror lacks, plus the deliberate
+    /// Distinct files read from the remote rather than the local copy: the
+    /// 47 §3.6 fallback for a file the mirror lacks, plus the deliberate
     /// remote-first `config` read (the one non-content-addressed file), so
     /// a fully synced mirror online still reads one `config` from the
-    /// remote per open. Every one of these kept the remote's connection
-    /// budget in play; the number alone is never a claim that the mirror
-    /// was missing a file — the served line words it that way on purpose.
-    pub remote_reads: u64,
-    /// Bytes those reads fetched from the remote.
+    /// remote per open — one file here, however many opens asked for it.
+    /// Every one of these kept the remote's connection budget in play; the
+    /// count alone is never a claim that the mirror was missing a file —
+    /// the served line words it that way on purpose.
+    pub remote_files: u64,
+    /// Bytes those reads fetched from the remote — every fetch counted,
+    /// re-fetches included.
     pub remote_bytes: u64,
     /// Listings the mirror answered when the remote would not — the
     /// offline listing that errors, and the empty answer of a destination
@@ -116,13 +134,41 @@ pub struct MirrorCounters {
     pub mirror_listings: u64,
 }
 
+/// The identity of one repository file in the counters: the type's
+/// directory name plus the id — config's non-addressed zero id can never
+/// collide with a content-addressed file's, and the pair is all the
+/// distinctness a check of the line needs.
+type FileKey = (&'static str, rustic_core::Id);
+
 #[derive(Debug, Default)]
 struct CounterSet {
-    mirror_reads: AtomicU64,
-    mirror_bytes: AtomicU64,
-    remote_reads: AtomicU64,
-    remote_bytes: AtomicU64,
+    /// Bytes moved per distinct file served from the copy.
+    mirror: std::sync::Mutex<std::collections::BTreeMap<FileKey, u64>>,
+    /// Bytes moved per distinct file read from the remote.
+    remote: std::sync::Mutex<std::collections::BTreeMap<FileKey, u64>>,
     mirror_listings: AtomicU64,
+}
+
+impl CounterSet {
+    /// One read's contribution: `len` bytes moved for `(tpe, id)` on the
+    /// leg `from_mirror` — the file's first appearance sets its entry for
+    /// the count, every fetch adds its bytes.
+    fn note_read(&self, from_mirror: bool, tpe: FileType, id: &rustic_core::Id, len: usize) {
+        let leg = if from_mirror {
+            &self.mirror
+        } else {
+            &self.remote
+        };
+        let mut leg = leg.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *leg.entry((tpe.dirname(), *id)).or_insert(0) += len as u64;
+    }
+
+    /// (distinct files, bytes moved) for one leg — the two halves the
+    /// served line prints.
+    fn tally(leg: &std::sync::Mutex<std::collections::BTreeMap<FileKey, u64>>) -> (u64, u64) {
+        let leg = leg.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        (leg.len() as u64, leg.values().sum())
+    }
 }
 
 /// The handle a command attaches to a [`crate::store::BackupStore`] to make
@@ -142,14 +188,17 @@ pub struct MirrorReads {
 }
 
 impl MirrorReads {
-    /// A snapshot of what this process's reads did through the seam.
+    /// A snapshot of what this process's reads did through the seam:
+    /// distinct files per leg, bytes moved per leg, listings answered.
     #[must_use]
     pub fn counters(&self) -> MirrorCounters {
+        let (mirror_files, mirror_bytes) = CounterSet::tally(&self.counters.mirror);
+        let (remote_files, remote_bytes) = CounterSet::tally(&self.counters.remote);
         MirrorCounters {
-            mirror_reads: self.counters.mirror_reads.load(Ordering::Relaxed),
-            mirror_bytes: self.counters.mirror_bytes.load(Ordering::Relaxed),
-            remote_reads: self.counters.remote_reads.load(Ordering::Relaxed),
-            remote_bytes: self.counters.remote_bytes.load(Ordering::Relaxed),
+            mirror_files,
+            mirror_bytes,
+            remote_files,
+            remote_bytes,
             mirror_listings: self.counters.mirror_listings.load(Ordering::Relaxed),
         }
     }
@@ -162,16 +211,18 @@ impl MirrorReads {
     /// `config` read that never tried the mirror; wording the second as a
     /// fallback would print "1 fell back" for a fully synced mirror that
     /// was never missing a file, which is a line the read it describes
-    /// could not check out.
+    /// could not check out. The counts are distinct files — the number a
+    /// reader can check against the copy's own directory — so the same
+    /// word "file(s)" is used only where the number really is files.
     #[must_use]
     pub fn served_line(&self) -> String {
         let counters = self.counters();
         format!(
             "{} file(s) ({} B) from the local mirror, {} file(s) ({} B) read from the \
              remote, {} listing(s) answered locally",
-            counters.mirror_reads,
+            counters.mirror_files,
             counters.mirror_bytes,
-            counters.remote_reads,
+            counters.remote_files,
             counters.remote_bytes,
             counters.mirror_listings
         )
@@ -188,8 +239,11 @@ impl MirrorReads {
 #[derive(Debug)]
 pub enum MirrorReadDecision {
     /// This machine declares no `[mirror]` section: the default-off machine
-    /// (ADR-001 ⑥), reads the remote exactly as before. Silent — there is no
-    /// mirror event to report.
+    /// (ADR-001 ⑥), reads the remote exactly as before. Silent — there is
+    /// no mirror event to report. The one store that is not this state
+    /// even with no section is the copy itself: it is recognized by path
+    /// before any section is consulted ([`MirrorCopyItself`] below), so
+    /// removing a section can never silence a copy that is still on disk.
     Unconfigured,
     /// The section exists but the switch is off (ADR-062 D1: switch off
     /// means stop syncing and read from the source). A configured machine
@@ -212,10 +266,13 @@ pub enum MirrorReadDecision {
     /// reading this machine's local copy **itself**, not the mirrored
     /// destination's repository. Never serving — the copy has no copy of
     /// its own to read first — and loud, because "reads the copy" is a
-    /// fact about every answer it returns. `verify` over this store is
-    /// the spelling the ADR's absolute wording hides: the copy *is* the
-    /// mirror, so the one line says a verdict here certifies the copy,
-    /// never the destination's repository (47 §5.5).
+    /// fact about every answer it returns. Recognized by path, before the
+    /// section and switch states are consulted, so a copy that outlived
+    /// its section or outlived the switch still states itself.
+    /// `verify` over this store is the spelling the ADR's absolute wording
+    /// hides: the copy *is* the mirror, so the one line says a verdict
+    /// here certifies the copy, never the destination's repository (47
+    /// §5.5).
     MirrorCopyItself { name: String },
     /// Enabled, usable, and this store resolves to the mirrored destination:
     /// reads go mirror-first with per-file fallback (ADR-062 D3 / 47 §5.5).
@@ -270,11 +327,28 @@ impl MirrorReadDecision {
 /// `--repo` pointing anywhere else is a different archive the mirror says
 /// nothing about.
 ///
+/// One recognition is deliberately ordered **before** every other state,
+/// section and switch included: a store that resolves inside the copies
+/// directory is the copy itself, a fact the on-disk layout declares with
+/// no help from `[mirror]` — so a copy that outlived its section, or
+/// outlived the switch being thrown, still states itself rather than
+/// borrow the section's silence. For `verify` that ordering is the one
+/// line that keeps a verdict over this machine's copy from passing as the
+/// copied destination's own (47 §5.5).
+///
 /// `data_root` is passed in rather than read from the environment so tests
 /// isolate as explicitly as the LM-2 engine does — the caller's one
 /// `config::default_data_root()` call keeps production on the real root.
 #[must_use]
 pub fn decide(config: &Config, resolved: &StoreConfig, data_root: &Path) -> MirrorReadDecision {
+    // The copy itself is recognized by path, first of all: the layout —
+    // `<data root>/mirror/<name>`, one path component below the copies
+    // directory — is what the sync's own writes declare, no section
+    // required, and `mirror_copy_name` keeps the name off the path for the
+    // same reason (`mirror_read.rs`'s `MirrorCopyItself` doc).
+    if let Some(name) = mirror_copy_name(data_root, &resolved.repo_root) {
+        return MirrorReadDecision::MirrorCopyItself { name };
+    }
     let Some(settings) = MirrorSettings::for_config(config) else {
         return MirrorReadDecision::Unconfigured;
     };
@@ -316,16 +390,11 @@ pub fn decide(config: &Config, resolved: &StoreConfig, data_root: &Path) -> Mirr
         }
     };
     if Path::new(&resolved.repo_root) != repo_root {
-        // One spelling inside that arm is not "another archive": a store
-        // under the copies directory is one of this machine's local
-        // copies, and reading it is reading the copy itself. Every
-        // mirror-aware command owes that one line — for `verify` it is
-        // also the spelling where silence would let a copy's verdict pass
-        // as the destination's own (47 §5.5: a copy may not certify
-        // itself).
-        if let Some(name) = mirror_copy_name(data_root, &resolved.repo_root) {
-            return MirrorReadDecision::MirrorCopyItself { name };
-        }
+        // Every repo-root spelling inside this arm is "another archive":
+        // the only stores that are not (the copies themselves) were already
+        // recognized and answered at the top of `decide`, before the
+        // section and switch states — which is what keeps a copy that
+        // retired its section from landing here as silent.
         return MirrorReadDecision::OtherDestination;
     }
     let mirror_root = mirror::mirror_dir(data_root, &settings.mirror_of);
@@ -487,10 +556,13 @@ fn sync_hhmm(unix: u64) -> String {
 /// * `read_full` / `read_partial` — `config` remote-first with mirror
 ///   fallback (the one non-content-addressed file); every other type
 ///   mirror-first with remote fallback, and the fallback exists for a file
-///   the mirror *lacks*, never for a corrupt one — a damaged copy is a
-///   hard failure by the module rule above. A body read through a
-///   body-cache-enabled store additionally consults the cache first, and
-///   stores only what the fallback fetched from the remote.
+///   the mirror *lacks*, never for a corrupt one — a read that fails while
+///   the file is present on the copy is classified exactly so (the layout
+///   knows) and answers with the hard failure the module rule above
+///   names, and the counters stay at zero for the refused leg. A body
+///   read through a body-cache-enabled store additionally consults the
+///   cache first, and stores only what the fallback fetched from the
+///   remote.
 /// * writes, warm-ups and locations — the remote's, unchanged: this seam is
 ///   part of the *read* story and never mutates the mirror (only `mirror
 ///   sync` writes it).
@@ -539,51 +611,93 @@ impl MirrorFirstBackend {
     /// (a counter comparison could not, under rustic's read fan-out).
     ///
     /// The fallback leg exists for a file the mirror **lacks** — the read
-    /// errors, the remote answers, visibly. A file that is corrupt rather
-    /// than absent answers this read and the damage surfaces above the
-    /// seam, deliberately (the module header's absent-and-corrupt rule):
-    /// a partial read cannot re-verify a whole-file id, so the seam has no
-    /// honest way to detect bit-rot, and silently substituting the remote's
-    /// bytes for a lying disk is a repair nobody asked the read to make.
+    /// errors, the remote answers, visibly. A file that **fails** its read
+    /// while sitting on the copy's disk — truncated, unreadable, damaged
+    /// under a valid name — is a different event, and the seam classifies
+    /// it by that one fact ([`mirror_file_path`] exists ⇒ the refusal of
+    /// [`corrupt_copy_refusal`]): a hard error, never a silent remote
+    /// retry, exactly as the module header's absent-and-corrupt rule
+    /// words it. A file that *answers* this read (the same-length garbage
+    /// of the tampered fixture) is served as answered, and the damage
+    /// surfaces above the seam where decryption and re-hashing live — a
+    /// partial read cannot re-verify a whole-file id, so the seam claims
+    /// no right to judge healthy bytes, only to refuse broken ones.
     fn read_local_first(
         &self,
+        tpe: FileType,
+        id: &rustic_core::Id,
         read: impl Fn(&dyn WriteBackend) -> rustic_core::RusticResult<bytes::Bytes>,
     ) -> rustic_core::RusticResult<(bytes::Bytes, bool)> {
         match read(&self.mirror) {
             Ok(bytes) => {
-                self.count_read(true, bytes.len());
+                self.reads.counters.note_read(true, tpe, id, bytes.len());
                 Ok((bytes, true))
             }
-            Err(_) => {
+            Err(error) => {
+                let file = mirror_file_path(&self.reads.mirror_root, tpe, id);
+                if file.exists() {
+                    // Present but unreadable: the hard failure the header
+                    // promises — the remote is not asked, the counters
+                    // record nothing (no read happened, so nothing may
+                    // read as sync-progress fallback), and the error names
+                    // the file and the repair.
+                    return Err(corrupt_copy_refusal(tpe, id, *error));
+                }
                 let bytes = read(&self.remote)?;
-                self.count_read(false, bytes.len());
+                self.reads.counters.note_read(false, tpe, id, bytes.len());
                 Ok((bytes, false))
             }
         }
     }
+}
 
-    fn count_read(&self, from_mirror: bool, len: usize) {
-        let len = len as u64;
-        if from_mirror {
-            self.reads
-                .counters
-                .mirror_reads
-                .fetch_add(1, Ordering::Relaxed);
-            self.reads
-                .counters
-                .mirror_bytes
-                .fetch_add(len, Ordering::Relaxed);
-        } else {
-            self.reads
-                .counters
-                .remote_reads
-                .fetch_add(1, Ordering::Relaxed);
-            self.reads
-                .counters
-                .remote_bytes
-                .fetch_add(len, Ordering::Relaxed);
-        }
+/// The path a repository file occupies inside the copied repository — the
+/// same layout `rustic_backend`'s local backend resolves (the backend the
+/// mirror is opened as, and the exact layout LM-2's engine writes). This
+/// is how the seam classifies a failed mirror read: the file either sits
+/// on the disk the layout names or it does not — presence is the one fact
+/// that separates "corrupt but present" (the hard failure) from "the
+/// mirror lacks it" (the ordinary fallback), and no read-error text has
+/// to be parsed to learn it.
+fn mirror_file_path(mirror_root: &Path, tpe: FileType, id: &rustic_core::Id) -> PathBuf {
+    let hex = id.to_hex();
+    match tpe {
+        FileType::Pack => mirror_root.join("data").join(&hex[0..2]).join(hex),
+        FileType::Config => mirror_root.join("config"),
+        _ => mirror_root.join(tpe.dirname()).join(hex),
     }
+}
+
+/// The hard failure a present-but-unreadable mirror file earns, per the
+/// module header's absent-and-corrupt rule: a corrupt copy is never a
+/// silent remote retry, so the error states the class, names the file,
+/// and names the repair — `mirror sync` byte-compares every file it
+/// copies and re-downloads one that no longer hashes to its name, which
+/// is the repair that fixes exactly this shape — while keeping the copy's
+/// own read error attached, so the damage is reported, not summarised
+/// away.
+fn corrupt_copy_refusal(
+    tpe: FileType,
+    id: &rustic_core::Id,
+    error: rustic_core::RusticError,
+) -> Box<rustic_core::RusticError> {
+    let file = if tpe == FileType::Config {
+        "`config` file".to_string()
+    } else {
+        format!("`{}` file `{}`", tpe.dirname(), id.to_hex().as_str())
+    };
+    rustic_core::RusticError::with_source(
+        rustic_core::ErrorKind::Backend,
+        format!(
+            "The local mirror's {file} is present but cannot be read — this is disk damage \
+             under a name the copy still declares, a hard failure and never a silent remote \
+             retry, so the read stops here rather than substitute the remote's bytes for \
+             the damaged copy. Run `chat-stasher mirror sync` to re-download the file \
+             (each round byte-compares the copy and replaces a file that no longer hashes \
+             to its name), or delete the mirror directory to re-fill it from scratch.",
+        ),
+        error,
+    )
 }
 
 impl ReadBackend for MirrorFirstBackend {
@@ -637,18 +751,31 @@ impl ReadBackend for MirrorFirstBackend {
             return match self.remote.read_full(tpe, id) {
                 Ok(bytes) => {
                     let len = bytes.len();
-                    self.count_read(false, len);
+                    self.reads.counters.note_read(false, tpe, id, len);
                     Ok(bytes)
                 }
-                Err(_) => {
-                    let bytes = self.mirror.read_full(tpe, id)?;
-                    let len = bytes.len();
-                    self.count_read(true, len);
-                    Ok(bytes)
-                }
+                Err(_) => match self.mirror.read_full(tpe, id) {
+                    Ok(bytes) => {
+                        let len = bytes.len();
+                        self.reads.counters.note_read(true, tpe, id, len);
+                        Ok(bytes)
+                    }
+                    // Two honest failures, not one: a config present on the
+                    // copy but unreadable is the same corruption the
+                    // mirror-first legs refuse (a hard failure, never a
+                    // second retry — there is no third leg); absent, the
+                    // mirror's own short answer is the news: the remote
+                    // was unreachable and no copy holds the layout.
+                    Err(error) => {
+                        if mirror_file_path(&self.reads.mirror_root, tpe, id).exists() {
+                            return Err(corrupt_copy_refusal(tpe, id, *error));
+                        }
+                        Err(error)
+                    }
+                },
             };
         }
-        self.read_local_first(|backend| backend.read_full(tpe, id))
+        self.read_local_first(tpe, id, |backend| backend.read_full(tpe, id))
             .map(|(bytes, _from_mirror)| bytes)
     }
 
@@ -671,7 +798,7 @@ impl ReadBackend for MirrorFirstBackend {
                 if let Some(bytes) = cache.get(&key) {
                     return Ok(bytes);
                 }
-                let (bytes, from_mirror) = self.read_local_first(|backend| {
+                let (bytes, from_mirror) = self.read_local_first(tpe, id, |backend| {
                     backend.read_partial(tpe, id, cacheable, offset, length)
                 })?;
                 if !from_mirror {
@@ -683,8 +810,10 @@ impl ReadBackend for MirrorFirstBackend {
                 return Ok(bytes);
             }
         }
-        self.read_local_first(|backend| backend.read_partial(tpe, id, cacheable, offset, length))
-            .map(|(bytes, _from_mirror)| bytes)
+        self.read_local_first(tpe, id, |backend| {
+            backend.read_partial(tpe, id, cacheable, offset, length)
+        })
+        .map(|(bytes, _from_mirror)| bytes)
     }
 
     fn warmup_path(&self, tpe: FileType, id: &rustic_core::Id) -> String {
@@ -953,48 +1082,214 @@ mod tests {
         assert!(sentence.contains("does not mirror"), "{sentence}");
     }
 
-    /// `served_line`'s numbers are the counters the seam moved — the line a
-    /// command prints after its reads must be checkable against the same
-    /// handle, so the visibility never drifts from the facts. That
-    /// standard covers the words as well as the counts: the remote-first
-    /// `config` read is one of `remote_reads`, so a line that called every
-    /// one of them a fallback would misdescribe a fully synced mirror.
+    /// The behindness sentence's two loudest branches, produced from the
+    /// real records LM-2 writes (`mirror-progress.json`, the same shape
+    /// `write_progress` lays down) rather than from hand-built strings:
+    /// a failed round — with its note, and without one, where nothing may
+    /// be invented after the colon — the first fill in progress, and the
+    /// precedence rule that a failed round outranks a completed time
+    /// earned before it, so a reader never mistakes a dated-but-broken
+    /// copy for a current one.
+    #[test]
+    fn the_failed_round_and_first_fill_sentences_come_from_real_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let record =
+            |outcome: &str, complete: bool, note: Option<&str>| crate::mirror::MirrorProgress {
+                version: crate::mirror::MIRROR_PROGRESS_VERSION,
+                mirror_of: "storagebox".to_string(),
+                round_finished_at_unix: 1_800_000_300,
+                complete,
+                outcome: outcome.to_string(),
+                outcome_note: note.map(str::to_string),
+                remote_total_bytes: 4096,
+                mirror_bytes: 1024,
+                remote_files: 4,
+                mirror_files: 1,
+            };
+        let write = |progress: &crate::mirror::MirrorProgress| {
+            std::fs::write(
+                crate::mirror::mirror_progress_path(&state_dir),
+                serde_json::to_vec(progress).unwrap(),
+            )
+            .unwrap();
+        };
+
+        // A failed round that carries a note: the failure, the numbers and
+        // the note — reads continue from what the copy holds.
+        write(&record(
+            "failed",
+            false,
+            Some("the destination could not be read mid-fill (a read error); the raw error is not recorded in state files"),
+        ));
+        let sentence = behindness_sentence(&state_dir, "storagebox");
+        assert!(
+            sentence.starts_with("local copy's last sync round failed at 25% (1024 of 4096 B): "),
+            "the loudest sentence leads with the failure and its numbers: {sentence}"
+        );
+        assert!(
+            sentence.contains("the destination could not be read mid-fill"),
+            "the record's own note is the sentence's cause: {sentence}"
+        );
+        assert!(
+            sentence.contains(
+                "reads continue from what the mirror already holds and fall back to the remote"
+            ),
+            "and it says where reads go on from there: {sentence}"
+        );
+
+        // The same record with no note: the numbers stand, and nothing is
+        // invented after the colon — an incomplete sentence, never a
+        // fabricated cause (the comment this test defends in code).
+        write(&record("failed", false, None));
+        let sentence = behindness_sentence(&state_dir, "storagebox");
+        assert!(
+            sentence.contains("failed at 25% (1024 of 4096 B)"),
+            "{sentence}"
+        );
+        let after_colon = sentence
+            .split_once("(1024 of 4096 B): ")
+            .unwrap_or_else(|| panic!("the sentence carries its numbers: {sentence}"))
+            .1;
+        assert!(
+            after_colon.trim_start().starts_with("— reads continue"),
+            "an empty note invents nothing after the colon, only whitespace before the \
+             continuation: {sentence}"
+        );
+
+        // A completed sync earned before the failure must not read as the
+        // copy's age: the fill states speak first, and a failed round
+        // says itself even when a dated record exists.
+        let state = crate::mirrorstate::MirrorState {
+            version: crate::mirrorstate::MIRROR_STATE_VERSION,
+            finished_at_unix: 1_800_000_000,
+            mirror_of: "storagebox".to_string(),
+            closure_complete: std::collections::BTreeSet::new(),
+            snapshots_on_remote: 1,
+            remote_total_bytes: 4096,
+        };
+        crate::mirrorstate::save(&state_dir, &state).unwrap();
+        let sentence = behindness_sentence(&state_dir, "storagebox");
+        assert!(
+            sentence.contains("last sync round failed"),
+            "the failure outranks an earlier completed time: {sentence}"
+        );
+        assert!(
+            !sentence.contains("as of"),
+            "no dated copy while the last round failed reads as current: {sentence}"
+        );
+
+        // First fill in progress: its percentage, its fallback wording, and
+        // its own "not a failure" honesty.
+        write(&record(
+            "stopped",
+            false,
+            Some("round budget spent mid-fill; the next round resumes"),
+        ));
+        let sentence = behindness_sentence(&state_dir, "storagebox");
+        assert!(
+            sentence.starts_with(
+                "local copy's first sync is in progress: 25% (1024 of 4096 B) — reads fall back \
+                 to the remote for what has not synced; this is not a failure"
+            ),
+            "first-fill is its own loud sentence: {sentence}"
+        );
+    }
+
+    /// `served_line` quotes the counters, and both count **files** —
+    /// rev2 ①: hand-set counters had once proven only that the line echoes
+    /// them, never that they count files, so this drives real reads
+    /// through real backends and checks both standards at once. The
+    /// counts: one file served from the copy in three range reads is one
+    /// file, every range's bytes moved; one absent file read from the
+    /// remote is the other leg's one file. And the words: the remote
+    /// crossings are worded as reads, never as fallbacks — a fully synced
+    /// mirror is never "missing" the config it never tried to keep.
+    /// The whole-repository form of the same lock, against an independent
+    /// count of the copy's directory, is in `tests/mirror_read_test.rs`.
     #[test]
     fn the_served_line_quotes_the_counters() {
+        use rustic_core::Id;
+
         let (_dir, root) = temp_mirror("storagebox");
+        let remote_dir = tempfile::tempdir().unwrap();
+        let options =
+            BackendOptions::default().repository(remote_dir.path().to_string_lossy().into_owned());
+        let remote: Arc<dyn WriteBackend> = options.to_backends().unwrap().repository();
+
+        // The copy holds one pack; the remote holds nothing (any byte that
+        // answered came from the copy) and one index file the copy lacks —
+        // the ordinary absent-file fallback, on the remote's side for once.
+        let pack_id: Id = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+            .parse()
+            .unwrap();
+        let pack = vec![0x5au8; 100];
+        let shard = root.join("data").join("00");
+        std::fs::create_dir_all(&shard).unwrap();
+        std::fs::write(shard.join(pack_id.to_hex()), &pack).unwrap();
+        let index_id: Id = "010102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+            .parse()
+            .unwrap();
+        let index = vec![0x77u8; 30];
+        let remote_index = remote_dir.path().join("index");
+        std::fs::create_dir_all(&remote_index).unwrap();
+        std::fs::write(remote_index.join(index_id.to_hex()), &index).unwrap();
+
         let reads = MirrorReads {
             mirror_of: "storagebox".to_string(),
             mirror_root: root,
             counters: CounterSet::default(),
         };
-        reads.counters.mirror_reads.store(7, Ordering::Relaxed);
-        reads.counters.mirror_bytes.store(700, Ordering::Relaxed);
-        reads.counters.remote_reads.store(2, Ordering::Relaxed);
-        reads.counters.remote_bytes.store(40, Ordering::Relaxed);
-        reads.counters.mirror_listings.store(1, Ordering::Relaxed);
+        let reads = Arc::new(reads);
+        let backend = MirrorFirstBackend::wrap(remote, Arc::clone(&reads), None).unwrap();
+
+        // One pack, three ranged reads — one file, 110 bytes moved.
+        for (offset, length) in [(0, 40), (40, 50), (10, 20)] {
+            let bytes = backend
+                .read_partial(FileType::Pack, &pack_id, false, offset, length)
+                .expect("the copy answers this range");
+            assert_eq!(
+                bytes.to_vec(),
+                &pack[offset as usize..(offset + length) as usize]
+            );
+        }
+        // One absent file, one remote read.
+        let bytes = backend
+            .read_full(FileType::Index, &index_id)
+            .expect("the absent file reads from the remote");
+        assert_eq!(bytes.to_vec(), index);
+
+        let counters = reads.counters();
+        assert_eq!(
+            counters,
+            MirrorCounters {
+                mirror_files: 1,
+                mirror_bytes: 110,
+                remote_files: 1,
+                remote_bytes: 30,
+                mirror_listings: 0,
+            },
+            "one file per leg no matter how many reads moved it"
+        );
         let line = reads.served_line();
-        assert!(line.contains("7 file(s)"), "{line}");
-        assert!(line.contains("2 file(s)"), "{line}");
-        assert!(line.contains("listing(s)"), "{line}");
         assert!(
-            line.contains("read from the remote"),
-            "remote crossings are worded as reads, not fallbacks: {line}"
+            line.contains("1 file(s) (110 B) from the local mirror"),
+            "the line quotes the mirror leg's files and bytes: {line}"
+        );
+        assert!(
+            line.contains("1 file(s) (30 B) read from the remote"),
+            "and the remote leg's: {line}"
+        );
+        assert!(
+            line.contains("listing(s) answered locally"),
+            "the listing count is a visible family member: {line}"
         );
         assert!(
             !line.contains("fell back"),
             "the config read is a deliberate crossing, and this line never claims which \
              crossing was a fallback: {line}"
-        );
-        assert_eq!(
-            reads.counters(),
-            MirrorCounters {
-                mirror_reads: 7,
-                mirror_bytes: 700,
-                remote_reads: 2,
-                remote_bytes: 40,
-                mirror_listings: 1,
-            },
-            "the line above was built from exactly these counters"
         );
     }
 
@@ -1064,6 +1359,70 @@ mod tests {
         assert!(matches!(decision, MirrorReadDecision::OtherDestination));
     }
 
+    /// The copy-itself warning is a fact about the path, so it must not
+    /// depend on what `[mirror]` declares: a copy that outlived its section
+    /// (the section removed entirely) or outlived the switch being thrown
+    /// (`enabled = false`) still states itself — for `verify --repo <data
+    /// root>/mirror/<name>` that is the one line keeping a copy's verdict
+    /// from passing as the destination's own. The layout speaks before the
+    /// section states do.
+    #[test]
+    fn a_copy_states_itself_without_a_section_or_a_live_switch() {
+        let enabled = false;
+        let (dir, _root) = temp_mirror("storagebox");
+        let data_root = dir.path();
+
+        // The section is gone entirely: the retired copy still states itself
+        // — loudly, which is exactly what Unconfigured's silence hides.
+        let config = config_with(&[("storagebox", "/remote/repo")], None);
+        let retired = crate::mirror::mirror_dir(data_root, "retired-name");
+        let decision = decide(&config, &resolved(&retired.to_string_lossy()), data_root);
+        match &decision {
+            MirrorReadDecision::MirrorCopyItself { name } => {
+                assert_eq!(
+                    name, "retired-name",
+                    "a copy that outlived its section states itself under its own name"
+                );
+            }
+            other => panic!("a copy that outlived its section still states itself, got {other:?}"),
+        }
+        assert!(
+            decision.state_line().is_some(),
+            "and the copy is not silent about being read"
+        );
+        assert!(
+            decision.handle().is_none(),
+            "the copy never reads through a seam"
+        );
+
+        // The switch is off: the same fact, the same line — never the
+        // `off` line the switch state prints for a remote store.
+        let config = config_with(
+            &[("storagebox", "/remote/repo")],
+            Some((&enabled, "storagebox")),
+        );
+        let copy = crate::mirror::mirror_dir(data_root, "storagebox");
+        let decision = decide(&config, &resolved(&copy.to_string_lossy()), data_root);
+        match &decision {
+            MirrorReadDecision::MirrorCopyItself { name } => {
+                assert_ne!(name, "retired-name");
+                assert_eq!(name, "storagebox");
+            }
+            other => {
+                panic!("a disabled switch must not silence the copy-itself line, got {other:?}")
+            }
+        }
+        let line = decision.state_line().unwrap_or_default();
+        assert!(
+            line.contains("local mirror copy"),
+            "the copy's own line, not the switch's: {line}"
+        );
+        assert!(
+            !line.contains("enabled = false"),
+            "the switch's line belongs to remote stores, not to the copy: {line}"
+        );
+    }
+
     /// A corrupt mirror file is served as answered, never secretly
     /// repaired: the fallback exists for absence (the read errors), and
     /// bit-rot is deliberately a hard failure above the seam — a partial
@@ -1092,7 +1451,7 @@ mod tests {
         let garbage = vec![0xaau8; 17];
         let shard = root.join("data").join("00");
         std::fs::create_dir_all(&shard).unwrap();
-        std::fs::write(shard.join(id.to_hex().to_string()), &garbage).unwrap();
+        std::fs::write(shard.join(id.to_hex()), &garbage).unwrap();
 
         let reads = Arc::new(MirrorReads {
             mirror_of: "storagebox".to_string(),
@@ -1111,13 +1470,98 @@ mod tests {
         assert_eq!(
             reads.counters(),
             MirrorCounters {
-                mirror_reads: 1,
+                mirror_files: 1,
                 mirror_bytes: 17,
-                remote_reads: 0,
+                remote_files: 0,
                 remote_bytes: 0,
                 mirror_listings: 0,
             },
-            "the crossing never happened: one mirror read, nothing from the remote"
+            "the crossing never happened: one mirror file, nothing from the remote"
+        );
+    }
+
+    /// rev2 ② at seam level: a mirror file that is **present but fails its
+    /// read** — the truncated shape, a file too short for the ranges a
+    /// pack read asks for — is a hard failure, never a silent remote
+    /// retry. The remote here deliberately holds the intact bytes, so the
+    /// forbidden fallback would *succeed* and look like the ordinary
+    /// absence retry: only the refusal, with nothing counted on either
+    /// leg, keeps this green. The path's own arc is the control: delete
+    /// the stub file and the same read is the ordinary fallback again —
+    /// presence is the whole difference between refusal and retry.
+    #[test]
+    fn a_present_but_unreadable_mirror_file_is_a_hard_failure_never_a_silent_retry() {
+        use rustic_core::Id;
+
+        let (_dir, root) = temp_mirror("storagebox");
+        let remote_dir = tempfile::tempdir().unwrap();
+        let options =
+            BackendOptions::default().repository(remote_dir.path().to_string_lossy().into_owned());
+        let remote: Arc<dyn WriteBackend> = options.to_backends().unwrap().repository();
+
+        let id: Id = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+            .parse()
+            .unwrap();
+        let intact = vec![0x33u8; 17];
+        let remote_shard = remote_dir.path().join("data").join("00");
+        std::fs::create_dir_all(&remote_shard).unwrap();
+        std::fs::write(remote_shard.join(id.to_hex()), &intact).unwrap();
+        // The copy holds a truncated stub under the same valid id: present,
+        // size-listed, unreadable at the range the read asks for.
+        let shard = root.join("data").join("00");
+        std::fs::create_dir_all(&shard).unwrap();
+        std::fs::write(shard.join(id.to_hex()), vec![0x44u8; 5]).unwrap();
+
+        let reads = MirrorReads {
+            mirror_of: "storagebox".to_string(),
+            mirror_root: root,
+            counters: CounterSet::default(),
+        };
+        let reads = Arc::new(reads);
+        let backend = MirrorFirstBackend::wrap(remote, Arc::clone(&reads), None).unwrap();
+
+        let error = backend
+            .read_partial(FileType::Pack, &id, false, 0, 17)
+            .expect_err(
+                "the truncated copy must refuse this read — the intact remote must not rescue it",
+            );
+        let said = error.to_string();
+        assert!(
+            said.contains("present but cannot be read"),
+            "the refusal states the class of event: {said}"
+        );
+        assert!(
+            said.contains("mirror sync"),
+            "the refusal names the repair: {said}"
+        );
+        assert_eq!(
+            reads.counters(),
+            MirrorCounters::default(),
+            "the read stopped at the damage: nothing served, nothing fell back, no \
+             counter may read disk damage as sync progress"
+        );
+
+        // Presence is the whole difference: the same file absent is the
+        // fallback's own shape — the remote answers, visibly, counted.
+        std::fs::remove_file(shard.join(id.to_hex())).unwrap();
+        let bytes = backend
+            .read_partial(FileType::Pack, &id, false, 0, 17)
+            .expect("an absent file reads from the remote — the ordinary retry");
+        assert_eq!(
+            bytes.to_vec(),
+            intact,
+            "the absent-file read serves the remote's intact bytes"
+        );
+        assert_eq!(
+            reads.counters(),
+            MirrorCounters {
+                mirror_files: 0,
+                mirror_bytes: 0,
+                remote_files: 1,
+                remote_bytes: 17,
+                mirror_listings: 0,
+            },
+            "counted as the one remote crossing it was"
         );
     }
 }
