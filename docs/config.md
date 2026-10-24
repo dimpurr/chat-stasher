@@ -221,6 +221,21 @@ it is never quietly replaced from the remote mid-read.
   fill of a large repository spans several rounds and `status` shows its
   progress — a round that stops early (budget, disk floor, remote
   readability) is a pause, not a failure, and the next round resumes.
+- What the copy keeps is visible without running anything: `status`
+  prints one `[mirror]` line and `doctor` a whole `D13` section — the
+  copy's size on disk, when the last sync completed (with its age), how
+  many snapshots the last completed round's record does not hold
+  closure-complete, and how many orphan files the mirror still carries.
+  These are the settled four: the same sentence family, with one
+  wording, appears in `status`, in `doctor` and in the menu bar app. A
+  first sync reads as exactly that (`first sync … in progress: X% (bytes
+  downloaded of the total)`), never as a red, while `reclaim` holds the
+  sessions it would cover.
+- Orphan files — what a deliberate remote cleanup left behind in the
+  mirror — are never deleted automatically. `doctor` reports their count
+  and the reclaimable bytes; remove the files by hand, or delete the
+  whole mirror directory and re-run `mirror sync` to rebuild a copy
+  without them.
 - A round that *checked and failed* is the exception: a file that hashes
   against its own name twice and fails both times is source corruption
   and exits `1`, recorded `failed`. The exception is that verdict, not

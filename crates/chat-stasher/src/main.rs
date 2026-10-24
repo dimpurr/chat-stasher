@@ -20292,13 +20292,15 @@ fn cmd_status(
             eprintln!("    fix: {fix}");
         }
     }
-    // ADR-062 (LM-2) / C2: the mirror's advisory lines — first-fill progress
-    // phrased as progress, never as red. Same family as the key alerts:
-    // silent when no mirror is configured or the fill is complete, never
-    // moving the exit code, and readable after every round because each
-    // round leaves a progress record behind.
+    // ADR-062 (LM-2/LM-4) / C2: the mirror's rows — first-fill progress
+    // phrased as progress, never as red, and the steady row (size, last
+    // sync, snapshots behind, orphans) once the fill is complete. Same
+    // family as the key alerts: empty when no mirror is configured,
+    // never moving the exit code, and readable after every round because
+    // each round leaves a progress record behind.
     for line in chat_stasher::mirror::mirror_status_lines(
         &config,
+        &chat_stasher::config::default_data_root(),
         &chat_stasher::collect::default_state_dir(),
     ) {
         eprintln!("{line}");
@@ -20583,14 +20585,20 @@ fn local_layer_json(config: &Config, info: &RunStateInfo) -> serde_json::Value {
         // needs to show the alarm the surfaces print, and an unknown
         // stays an unknown here too, never a zero.
         object.insert("stage_cap".to_string(), reconciled["stage_cap"].clone());
-        // ADR-062 (LM-2): the mirror rides the same local layer for the same
-        // reason the reconciliation does — every fact is machinery on this
-        // machine, and an unconfigured or complete mirror must be an
-        // explicit `not_applicable` shape, not a zero that reads as
-        // measured.
+        // ADR-062 (LM-2/LM-4): the mirror rides the same local layer for the
+        // same reason the reconciliation does — every fact is machinery on
+        // this machine (its records and its directory), an unconfigured or
+        // complete mirror must be an explicit `not_applicable` shape, never
+        // a zero that reads as measured, and the rows carry the already
+        // worded sentences so the menu bar prints what `status` prints.
         object.insert(
             "mirror".to_string(),
-            chat_stasher::mirror::status_json(config, &chat_stasher::collect::default_state_dir()),
+            chat_stasher::mirror::status_json(
+                config,
+                &chat_stasher::config::default_data_root(),
+                &chat_stasher::collect::default_state_dir(),
+                info.now_unix,
+            ),
         );
     }
     value

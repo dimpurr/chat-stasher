@@ -1108,6 +1108,8 @@ mod tests {
                 mirror_bytes: 1024,
                 remote_files: 4,
                 mirror_files: 1,
+                orphan_files: None,
+                orphan_bytes: None,
             };
         let write = |progress: &crate::mirror::MirrorProgress| {
             std::fs::write(

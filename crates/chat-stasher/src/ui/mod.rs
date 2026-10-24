@@ -5619,6 +5619,8 @@ mod tests {
                 mirror_bytes: 7_000,
                 remote_files: 90,
                 mirror_files: 63,
+                orphan_files: None,
+                orphan_bytes: None,
             })
             .unwrap(),
         )

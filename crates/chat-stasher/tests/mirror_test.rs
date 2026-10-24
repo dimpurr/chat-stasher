@@ -29,9 +29,10 @@
 //! suites do (W306).
 
 use chat_stasher::config::Config;
+use chat_stasher::json_out::CountState;
 use chat_stasher::mirror::{
-    self, closure_snapshot_ids, mirror_dir, mirror_status_lines, status_json, sync_once,
-    MirrorProgressRead, MirrorSettings, RoundEnd, RoundEnds, SyncReport, SyncRequest,
+    self, closure_snapshot_ids, mirror_dir, mirror_status, mirror_status_lines, status_json,
+    sync_once, MirrorProgressRead, MirrorSettings, RoundEnd, RoundEnds, SyncReport, SyncRequest,
 };
 use chat_stasher::mirrorstate::{self, MirrorStateRead};
 use chat_stasher::store::{self, BackupStore, StageWriter, StoreConfig};
@@ -43,6 +44,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[path = "../src/test_support.rs"]
 mod test_support;
+
+/// The steady row's date spelling, for assertions about "last sync … UTC"
+/// against a pinned now. One place, so a wording change updates the
+/// assertion beside the code that words it.
+fn chrono_date(unix: u64) -> String {
+    chrono::DateTime::from_timestamp(
+        i64::try_from(unix).expect("the pinned test epoch is representable"),
+        0,
+    )
+    .expect("the pinned test epoch is representable")
+    .format("%Y-%m-%d %H:%M")
+    .to_string()
+}
 
 // ------------------------------------------------------------- fixtures
 
@@ -341,14 +355,80 @@ fn first_fill_copies_every_file_and_records_closure() {
         other => panic!("expected a present progress record, got {other:?}"),
     }
 
-    // The status surfaces stay silent on this healthy machine: complete
-    // means no lines and no findings.
+    // LM-4 / ADR-062 D3: a completed, healthy copy is no longer silent —
+    // the steady row carries the settled field family (size, last sync,
+    // snapshots behind, orphans), with every fact measured: a byte-exact
+    // copy's size is the listing's own bytes, behindness is zero, and the
+    // first fill measured its own orphans to zero.
     let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
-    assert!(mirror_status_lines(&config, &rig.state_dir).is_empty());
-    let json = status_json(&config, &rig.state_dir);
+    let now: u64 = 1_800_000_000;
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, now);
+    let rows = &status.rows;
+    assert_eq!(
+        rows.len(),
+        1,
+        "one steady row on a healthy mirror: {rows:?}"
+    );
+    let row = &rows[0].sentence;
+    assert!(row.contains("[mirror] local copy of `storagebox`"), "{row}");
+    assert!(
+        row.contains(&format!("({} B) across", report.remote_total_bytes)),
+        "{row}"
+    );
+    assert!(row.contains("file(s)"), "{row}");
+    assert!(
+        row.contains(&format!(
+            "last sync {} UTC (less than a minute ago)",
+            chrono_date(1_800_000_000)
+        )),
+        "the row words the completed sync's time and age: {row}"
+    );
+    assert!(row.contains("0 snapshot(s) behind"), "{row}");
+    assert!(row.contains("0 orphan file(s)"), "{row}");
+    assert_eq!(rows[0].severity, mirror::MirrorRowSeverity::Info);
+    assert!(matches!(
+        &status.size,
+        mirror::MirrorUsageState::Known { bytes, .. } if *bytes == report.remote_total_bytes
+    ));
+    assert!(matches!(
+        &status.orphans,
+        mirror::MirrorUsageState::Known { files: 0, bytes: 0 }
+    ));
+    assert_eq!(
+        status.snapshots_behind,
+        CountState::Known { count: 0 },
+        "a completed closure covers every listed snapshot"
+    );
+    assert!(matches!(
+        status.last_sync,
+        mirror::MirrorLastSyncState::Known {
+            unix: 1_800_000_000
+        }
+    ));
+    // `status --json` carries the same family beside the steady row, so
+    // the third surface (the menu bar) decodes what this row says.
+    let json = status_json(&config, &rig.data_root, &rig.state_dir, now);
     assert_eq!(json["first_sync"]["kind"], "known");
     assert_eq!(json["first_sync"]["complete"], true);
     assert_eq!(json["closure_record"]["covered_snapshots"], 2);
+    assert_eq!(json["size"]["kind"], "known");
+    assert_eq!(json["size"]["bytes"], report.remote_total_bytes);
+    assert_eq!(
+        json["snapshots_behind"],
+        serde_json::json!({"kind": "known", "count": 0})
+    );
+    assert_eq!(
+        json["orphans"],
+        serde_json::json!({"kind": "known", "files": 0, "bytes": 0})
+    );
+    assert_eq!(
+        json["last_sync"],
+        serde_json::json!({"kind": "known", "unix": 1_800_000_000})
+    );
+    let rows_json = json["rows"].as_array().expect("rows is an array");
+    assert_eq!(rows_json.len(), 1);
+    assert_eq!(rows_json[0]["severity"], "info");
+    assert_eq!(rows_json[0]["sentence"], serde_json::json!(row));
 }
 
 // ------------------------------------------------------- cross-round resume
@@ -410,11 +490,15 @@ fn budget_cut_resumes_across_rounds_and_states_only_on_completion() {
     }
 
     // While the fill is cut, the status surface reports progress, not red:
-    // the C2 line families ("first sync …percent…", "reclaim holds … back").
+    // the C2 line families ("first sync …percent…", "reclaim holds … back"),
+    // now with the row's severity declared for the menu bar's ladder
+    // (info — progress, never a red over a first fill).
     let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
-    let lines = mirror_status_lines(&config, &rig.state_dir);
-    assert_eq!(lines.len(), 1, "one mirror line while filling: {lines:?}");
-    let line = &lines[0];
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(status.rows.len(), 1, "one mirror row while filling");
+    let row = &status.rows[0];
+    assert_eq!(row.severity, mirror::MirrorRowSeverity::Info);
+    let line = &row.sentence;
     assert!(line.contains("first sync"), "{line}");
     assert!(line.contains('%'), "{line}");
     assert!(line.contains("reclaim holds"), "{line}");
@@ -422,7 +506,22 @@ fn budget_cut_resumes_across_rounds_and_states_only_on_completion() {
         !line.to_lowercase().contains("error"),
         "a first fill must not report as an error: {line}"
     );
-    let json = status_json(&config, &rig.state_dir);
+    // The family fields stay honest mid-fill: the size is the partial
+    // copy's real bytes, last sync and behind are unknown (no completed
+    // round exists to read), and orphans are the round's own measurement.
+    assert!(matches!(
+        status.last_sync,
+        mirror::MirrorLastSyncState::Unknown { .. }
+    ));
+    assert!(matches!(
+        status.snapshots_behind,
+        CountState::Unknown { .. }
+    ));
+    assert!(matches!(
+        &status.orphans,
+        mirror::MirrorUsageState::Known { files: 0, bytes: 0 }
+    ));
+    let json = status_json(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
     assert_eq!(json["first_sync"]["kind"], "known");
     assert_eq!(json["closure_record"]["kind"], "unknown");
 
@@ -724,7 +823,7 @@ fn space_pre_estimate_refuses_before_any_download() {
     // And status speaks it in human words, still without red.
     let config =
         mirror_config("enabled = true\nmirror_of = \"storagebox\"\nmin_free_gib = 1000000.0");
-    let lines = mirror_status_lines(&config, &rig.state_dir);
+    let lines = mirror_status_lines(&config, &rig.data_root, &rig.state_dir);
     assert!(!lines.is_empty(), "a refused mirror is worth a line");
     let line = lines.join("\n");
     assert!(line.contains("first sync"), "{line}");
@@ -828,7 +927,7 @@ fn a_twice_corrupt_source_fails_the_round_not_pauses_it() {
 
     // And `status` reads it as the failure it is, with the class sentence.
     let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
-    let lines = mirror_status_lines(&config, &rig.state_dir);
+    let lines = mirror_status_lines(&config, &rig.data_root, &rig.state_dir);
     let joined = lines.join("\n");
     assert!(
         joined.contains("the last mirror round failed"),
@@ -1040,13 +1139,310 @@ fn an_uninitialised_destination_is_a_usage_refusal_that_creates_nothing() {
 // reclaim-side read interface answers false even for a snapshot id the
 // record genuinely contains.
 
+// -------------------------------------------------------------- LM-4 rows
+// The steady row's settled field family and spellings (ADR-062 D3/D6.3,
+// ruling 8): one row, one wording, three surfaces. The record-fixture
+// tests pin the measure without a copier in the loop — the surfaces read the
+// records, so a hand-written record is the honest instrument.
+
+/// Write a completed-round progress record the way `write_progress` would
+/// (the record is the interface; LM-3's tests build it the same way).
+fn write_progress_record(state_dir: &Path, progress: &mirror::MirrorProgress) {
+    fs::create_dir_all(state_dir).unwrap();
+    fs::write(
+        mirror::mirror_progress_path(state_dir),
+        serde_json::to_vec_pretty(progress).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Write a completed-round closure record the way `mirrorstate::save`
+/// would (the record is the interface the surfaces read, so a hand-built
+/// record is the honest fixture for this state).
+fn write_state_record(state_dir: &Path, record: &mirrorstate::MirrorState) {
+    fs::create_dir_all(state_dir).unwrap();
+    fs::write(
+        mirrorstate::mirror_state_path(state_dir),
+        serde_json::to_vec_pretty(record).unwrap(),
+    )
+    .unwrap();
+}
+
+/// D6.3's behind count, verbatim the settled measure: the snapshots the record's listing
+/// held minus the closures it verified — same record, so the row's age and
+/// its behind count cannot come from two different rounds — with the
+/// orphan pair and the row spelling asserted beside them.
+#[test]
+fn the_steady_row_words_behindness_orphans_and_age_from_the_records() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let state_dir = sb.path().join("state");
+    let data_root = sb.path().join("data");
+    fs::create_dir_all(&state_dir).unwrap();
+
+    let mut closure = BTreeSet::new();
+    closure.insert("a".repeat(64));
+    closure.insert("b".repeat(64));
+    write_state_record(
+        &state_dir,
+        &mirrorstate::MirrorState {
+            version: mirrorstate::MIRROR_STATE_VERSION,
+            finished_at_unix: 1_800_000_000,
+            mirror_of: "storagebox".to_string(),
+            closure_complete: closure,
+            snapshots_on_remote: 5,
+            remote_total_bytes: 4096,
+        },
+    );
+    write_progress_record(
+        &state_dir,
+        &mirror::MirrorProgress {
+            version: mirror::MIRROR_PROGRESS_VERSION,
+            mirror_of: "storagebox".to_string(),
+            round_finished_at_unix: 1_800_000_000,
+            complete: true,
+            outcome: "complete".to_string(),
+            outcome_note: None,
+            remote_total_bytes: 4096,
+            mirror_bytes: 4096,
+            remote_files: 9,
+            mirror_files: 9,
+            orphan_files: Some(1),
+            orphan_bytes: Some(1_234),
+        },
+    );
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &data_root, &state_dir, 1_800_003_600);
+    assert_eq!(status.rows.len(), 1, "completed records mean one row");
+    assert_eq!(status.rows[0].severity, mirror::MirrorRowSeverity::Info);
+    let row = &status.rows[0].sentence;
+    assert_eq!(
+        status.snapshots_behind,
+        CountState::Known { count: 3 },
+        "5 listed, 2 covered: the rest are behind, from the same record"
+    );
+    assert!(matches!(
+        status.last_sync,
+        mirror::MirrorLastSyncState::Known {
+            unix: 1_800_000_000
+        }
+    ));
+    // The directory does not exist: a measured empty, not an unknown.
+    assert!(matches!(
+        status.size,
+        mirror::MirrorUsageState::Known { files: 0, bytes: 0 }
+    ));
+    assert!(row.contains("[mirror] local copy of `storagebox`"), "{row}");
+    assert!(row.contains("3 snapshot(s) behind"), "{row}");
+    assert!(
+        row.contains(&format!(
+            "last sync {} UTC (1 hour ago)",
+            chrono_date(1_800_000_000)
+        )),
+        "{row}"
+    );
+    assert!(
+        row.contains("1 orphan file(s) (1.2 KiB reclaimable)"),
+        "{row}"
+    );
+    assert!(row.contains("0 B) across 0 file(s)"), "{row}");
+
+    // The same family on the wire, tagged the way the rest of --json keeps
+    // its tri-states, so the menu bar decodes what the row says.
+    let json = status_json(&config, &data_root, &state_dir, 1_800_003_600);
+    assert_eq!(
+        json["size"],
+        serde_json::json!({"kind": "known", "files": 0, "bytes": 0})
+    );
+    assert_eq!(
+        json["last_sync"],
+        serde_json::json!({"kind": "known", "unix": 1_800_000_000})
+    );
+    assert_eq!(
+        json["snapshots_behind"],
+        serde_json::json!({"kind": "known", "count": 3})
+    );
+    assert_eq!(
+        json["orphans"],
+        serde_json::json!({"kind": "known", "files": 1, "bytes": 1_234})
+    );
+    assert_eq!(json["rows"][0]["severity"], "info");
+    assert_eq!(json["rows"][0]["sentence"], serde_json::json!(row));
+}
+
+/// A progress record written before orphan accounting existed parses (the
+/// field is additive) and reads as what it is — an unmeasured count,
+/// unknown, never a zero — while every other field stays measured.
+#[test]
+fn a_progress_record_from_before_orphan_accounting_reads_orphans_as_unknown() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let state_dir = sb.path().join("state");
+    let data_root = sb.path().join("data");
+    fs::create_dir_all(&state_dir).unwrap();
+
+    write_state_record(
+        &state_dir,
+        &mirrorstate::MirrorState {
+            version: mirrorstate::MIRROR_STATE_VERSION,
+            finished_at_unix: 1_800_000_000,
+            mirror_of: "storagebox".to_string(),
+            closure_complete: BTreeSet::new(),
+            snapshots_on_remote: 0,
+            remote_total_bytes: 0,
+        },
+    );
+    // The pre-LM-4 shape: no orphan fields at all.
+    fs::write(
+        mirror::mirror_progress_path(&state_dir),
+        r#"{
+  "version": 1,
+  "mirror_of": "storagebox",
+  "round_finished_at_unix": 1800000000,
+  "complete": true,
+  "outcome": "complete",
+  "remote_total_bytes": 4096,
+  "mirror_bytes": 4096,
+  "remote_files": 9,
+  "mirror_files": 9
+}"#,
+    )
+    .unwrap();
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &data_root, &state_dir, 1_800_000_000);
+    assert!(matches!(
+        &status.orphans,
+        mirror::MirrorUsageState::Unknown { why } if why.contains("did not measure")
+    ));
+    let row = &status.rows[0].sentence;
+    assert!(row.contains("orphans unknown"), "{row}");
+    assert!(row.contains("0 snapshot(s) behind"), "{row}");
+}
+
+/// Orphan files a remote cleanup leaves behind appear in the next round's
+/// own records and in the steady row's count, and the directory's size
+/// includes them: they are bytes on this machine whether or not anything
+/// references them (ADR-062 D2 / 47 §4 C).
+#[test]
+fn orphan_files_surface_in_the_records_the_row_and_the_size() {
+    let rig = build_rig(None);
+    let (report1, outcome) = run_round(&rig, &NeverStops);
+    assert!(matches!(outcome, mirror::SyncOutcome::Completed));
+    assert_eq!(
+        report1.orphan_files,
+        Some(0),
+        "the first fill copies only listed files"
+    );
+
+    // A remote cleanup happened between rounds: this file is in the mirror
+    // but no listing will name it.
+    let orphan_dir = rig.mirror_root().join("data").join("zz");
+    fs::create_dir_all(&orphan_dir).unwrap();
+    let orphan_bytes = 4096_u64;
+    fs::write(
+        orphan_dir.join("deadbeef.no-longer-remote"),
+        vec![0_u8; orphan_bytes as usize],
+    )
+    .unwrap();
+
+    let (report2, outcome) = run_round(&rig, &NeverStops);
+    assert!(matches!(outcome, mirror::SyncOutcome::Completed));
+    assert_eq!(
+        report2.orphan_files,
+        Some(1),
+        "the round's listing sees the orphan"
+    );
+    assert_eq!(report2.orphan_bytes, Some(orphan_bytes));
+    assert_eq!(
+        report2.downloaded_files, 0,
+        "an orphan is never re-downloaded or deleted"
+    );
+
+    match mirror::load_progress(&rig.state_dir) {
+        MirrorProgressRead::Present(progress) => {
+            assert_eq!(progress.orphan_files, Some(1));
+            assert_eq!(progress.orphan_bytes, Some(orphan_bytes));
+        }
+        other => panic!("the up-to-date round rewrote progress, got {other:?}"),
+    }
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert!(matches!(
+        &status.orphans,
+        mirror::MirrorUsageState::Known { files: 1, bytes } if *bytes == orphan_bytes
+    ));
+    // The size counts what deleting the directory would free: the copy
+    // plus the orphan.
+    assert!(matches!(
+        &status.size,
+        mirror::MirrorUsageState::Known { bytes, .. } if *bytes == report2.remote_total_bytes + orphan_bytes
+    ));
+    let row = &status.rows[0].sentence;
+    assert!(
+        row.contains("1 orphan file(s) (4.0 KiB reclaimable)"),
+        "{row}"
+    );
+}
+
+/// The completed-fill-with-no-state-record state the engine itself never
+/// writes: the row keeps its measured halves (size, orphans) and words the
+/// missing coverage honestly, in yellow — never info fading a state that
+/// holds every reclaim back (D6.2's direction).
+#[test]
+fn a_missing_closure_record_after_a_completed_fill_makes_a_yellow_row() {
+    let rig = build_rig(None);
+    run_round(&rig, &NeverStops);
+    fs::remove_file(mirrorstate::mirror_state_path(&rig.state_dir)).unwrap();
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(status.rows.len(), 1);
+    let row = &status.rows[0];
+    assert_eq!(row.severity, mirror::MirrorRowSeverity::Yellow);
+    assert!(
+        row.sentence
+            .contains("last sync unknown (no sync round has completed yet)"),
+        "{}",
+        row.sentence
+    );
+    assert!(
+        row.sentence
+            .contains("snapshots behind unknown (no sync round has completed yet)"),
+        "{}",
+        row.sentence
+    );
+    assert!(
+        row.sentence.contains("file(s)"),
+        "the measured halves stay: {}",
+        row.sentence
+    );
+    // The field family on the wire says the same thing.
+    let json = status_json(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(json["last_sync"]["kind"], "unknown");
+    assert_eq!(json["snapshots_behind"]["kind"], "unknown");
+    assert_eq!(json["rows"][0]["severity"], "yellow");
+}
+
+/// The reclaim-leg spellings LM-4 settles (ADR-062 D6.3, ruling 8): the
+/// `--json` value the ruling fixed and the human phrase the ADR quotes,
+/// pinned so the reclaim-side wiring cannot grow a second spelling.
+#[test]
+fn the_held_back_spellings_are_settled() {
+    assert_eq!(mirror::HELD_BACK_KIND, "not-mirrored");
+    assert_eq!(
+        mirror::HELD_BACK_SENTENCE,
+        "the mirror has not synced to this snapshot yet"
+    );
+}
+
 #[test]
 fn a_repointed_mirror_of_expires_the_old_record_not_the_new_machine() {
     let rig = build_rig(None);
     run_round(&rig, &NeverStops);
 
     let config = mirror_config("enabled = true\nmirror_of = \"storagebox-v2\"");
-    let lines = mirror_status_lines(&config, &rig.state_dir);
+    let lines = mirror_status_lines(&config, &rig.data_root, &rig.state_dir);
     let joined = lines.join("\n");
     assert!(
         joined.contains(
@@ -1059,7 +1455,7 @@ fn a_repointed_mirror_of_expires_the_old_record_not_the_new_machine() {
         joined.contains("reclaim must hold sessions back"),
         "{joined}"
     );
-    let json = status_json(&config, &rig.state_dir);
+    let json = status_json(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
     assert_eq!(json["closure_record"]["kind"], "unknown");
     let why = json["closure_record"]["why"].as_str().unwrap_or_default();
     assert!(
@@ -1906,4 +2302,107 @@ fn the_pass_warns_saying_each_round_re_checks_and_heals_once_the_source_is_fixed
         !all.contains("the source proved corrupt"),
         "the healed round reports completion, not the old failure: {all}"
     );
+}
+
+// ------------------------------------------- LM-4 / ruling 8, end to end
+// `doctor` (D13) shows the same rows `status --json` carries, from the same
+// machine state, in one isolated envelope — the three-surface wording
+// invariant ADR-062 ruling 8 states, pinned at the CLI boundary so no
+// surface can reword the other two into drift.
+
+#[test]
+fn doctor_shows_the_rows_status_words_for_the_same_mirror() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let sandbox = sb.path();
+    cli_fixture_remote(sandbox);
+    write_config(
+        sandbox,
+        "enabled = true\nmirror_of = \"storagebox\"\nmin_free_gib = 1.0",
+    );
+    fs::write(
+        sandbox.join("registry.json"),
+        r#"{"schema_version":1,"generated":"T1 synthetic","harnesses":[]}"#,
+    )
+    .unwrap();
+    let registry = sandbox.join("registry.json");
+    let with_registry = |command: &mut std::process::Command| {
+        command.env("CHAT_STASHER_REGISTRY", &registry);
+    };
+
+    // The first fill through the real CLI, so the records on disk are the
+    // product's own.
+    let mut sync = binary_command(sandbox);
+    with_registry(&mut sync);
+    let out = sync
+        .args(["mirror", "sync", "--budget-secs", "300"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "the first fill completes\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let json_of = |args: &[&str]| -> serde_json::Value {
+        let mut command = binary_command(sandbox);
+        with_registry(&mut command);
+        let out = command.args(args).output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        // `--json` prints one object on stdout; other lines (if any) are
+        // prose the command's stderr-free path never adds here.
+        let line = stdout
+            .lines()
+            .find(|line| line.starts_with('{'))
+            .unwrap_or(&stdout);
+        serde_json::from_str(line)
+            .unwrap_or_else(|error| panic!("parse {args:?} output as JSON: {error}\n{stdout}"))
+    };
+
+    let status = json_of(&["status", "--json"]);
+    let mirror = &status["local"]["mirror"];
+    assert_eq!(mirror["configured"], serde_json::json!(true));
+    assert_eq!(mirror["first_sync"]["complete"], serde_json::json!(true));
+    assert_eq!(mirror["size"]["kind"], serde_json::json!("known"));
+    assert_eq!(mirror["orphans"]["kind"], serde_json::json!("known"));
+    assert_eq!(mirror["rows"][0]["severity"], serde_json::json!("info"));
+    let sentence = mirror["rows"][0]["sentence"]
+        .as_str()
+        .expect("the row text travels as one sentence")
+        .to_string();
+    assert!(
+        sentence.contains("local copy of `storagebox`"),
+        "the steady row words the copy: {sentence}"
+    );
+    assert!(
+        sentence.contains("0 snapshot(s) behind"),
+        "a completed closure is behind by nothing: {sentence}"
+    );
+
+    // Doctor's page shows the same section, and its `--json` carries the
+    // same sentence — the wording cannot drift between the surfaces.
+    let mut doctor = binary_command(sandbox);
+    with_registry(&mut doctor);
+    let out = doctor.args(["doctor"]).output().unwrap();
+    let page = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        page.contains("D13 · Local mirror — size, last sync, snapshots behind, orphans (ADR-062)"),
+        "the doctor page names the mirror section: {page}"
+    );
+    assert!(
+        page.contains(&sentence),
+        "doctor prints the same row status words:\nstatus: {sentence}\ndoctor:\n{page}"
+    );
+
+    let doctor_json = json_of(&["doctor", "--json"]);
+    let check = &doctor_json["mirror"];
+    assert_eq!(check["checked"], serde_json::json!(true));
+    assert_eq!(
+        check["rows"][0]["sentence"].as_str(),
+        Some(sentence.as_str()),
+        "ruling 8: one sentence on every surface"
+    );
+    assert_eq!(check["orphans"], mirror["orphans"]);
+    assert_eq!(check["size"], mirror["size"]);
+    assert_eq!(check["snapshots_behind"], mirror["snapshots_behind"]);
+    assert_eq!(check["last_sync"], mirror["last_sync"]);
 }

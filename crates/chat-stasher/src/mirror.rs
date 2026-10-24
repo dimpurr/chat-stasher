@@ -32,10 +32,11 @@
 //!   over-bound listing) is the one class outside this pause family — a
 //!   checked-and-failed fact is the exit `1` class and is worded as the
 //!   failure it is, never as "did not finish" (invariant 2, `CLAUDE.md`).
-//! * [`mirror_status_lines`] reports the first fill as progress, never as an
-//!   alarm, so a multi-day first fill does not paint `status` red while it
-//!   is merely large (commit C2) — and a *failed* round is the exception
-//!   that does read as the failure it is.
+//! * [`mirror_status`] words every row the three surfaces share (LM-4): the
+//!   first fill is progress, never an alarm (C2) — a *failed* round is the
+//!   exception that reads as the failure it is — and a completed, healthy
+//!   mirror gets its one steady row (size, last sync, snapshots behind,
+//!   orphans, ADR-062 D3) instead of silence.
 //!
 //! Connections: the same account a push draws from carries a ceiling shared
 //! with every other reader (ADR-062 D2) — so the copy stage never holds more than
@@ -615,6 +616,17 @@ pub struct SyncReport {
     pub snapshots_remote: u64,
     /// Snapshots whose closure the completed round could claim.
     pub covered_snapshots: u64,
+    /// Files the mirror holds that this round's listing does not name —
+    /// the residue of a deliberate remote cleanup (ADR-062 D2 / 47 §4 C):
+    /// never deleted automatically, reported by `doctor` as reclaimable,
+    /// cleaned by the documented manual act. Measured whenever the
+    /// listing is in hand, so every progress record this round writes
+    /// carries the same verdict. `None` only when the mirror directory
+    /// could not be walked — an unmeasured count, never a zero.
+    pub orphan_files: Option<u64>,
+    /// Their bytes — the `X` of `doctor`'s reclaimable line. `None`
+    /// exactly when [`Self::orphan_files`] is.
+    pub orphan_bytes: Option<u64>,
 }
 
 /// Everything one sync round needs. `master_key` is the destination's own
@@ -785,6 +797,25 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
         .map(|(_, file)| file.size)
         .sum();
 
+    // ---- Orphan accounting (ADR-062 D2 / 47 §4 C; LM-4's status and
+    // `doctor` read it from the progress record) ----
+    // Files the mirror holds that this listing does not name: the residue
+    // of a deliberate remote cleanup, plus any torn-write temp file a
+    // crashed round left behind — all equally reclaimable, none ever
+    // deleted automatically (ADR-001). Counted before the pre-estimate
+    // so every progress record this round can leave (refused, stopped,
+    // failed, completed) carries the same verdict. A walk that cannot
+    // finish records `None` — an unmeasured count, never a zero — and
+    // never fails the round: the copy does not depend on it.
+    let listed_paths: BTreeSet<PathBuf> = planned
+        .iter()
+        .map(|file| local_path(&mirror_root, file))
+        .collect();
+    let (orphan_files, orphan_bytes) = match count_unlisted(&mirror_root, &listed_paths) {
+        Ok((files, bytes)) => (Some(files), Some(bytes)),
+        Err(_) => (None, None),
+    };
+
     // ---- C3 pre-estimate: refuse before the first byte moves ----
     // The caller computed this floor before the round, on the same volume
     // (min_free_bytes measures the nearest existing ancestor while the
@@ -804,6 +835,8 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
             present_bytes,
             missing_bytes_remaining: missing_bytes,
             snapshots_remote: snapshot_ids.len() as u64,
+            orphan_files,
+            orphan_bytes,
             ..SyncReport::default()
         };
         write_progress(
@@ -873,6 +906,8 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
         downloaded_bytes,
         missing_bytes_remaining: missing_bytes.saturating_sub(downloaded_bytes),
         snapshots_remote: snapshot_ids.len() as u64,
+        orphan_files,
+        orphan_bytes,
         ..SyncReport::default()
     };
     match ended {
@@ -944,6 +979,8 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
         missing_bytes_remaining: 0,
         snapshots_remote: snapshot_ids.len() as u64,
         covered_snapshots,
+        orphan_files,
+        orphan_bytes,
     };
     write_progress(req, &report, Ok(ProgressOutcome::Complete))?;
     Ok((report, SyncOutcome::Completed))
@@ -970,6 +1007,51 @@ fn sha256_file(path: &Path) -> anyhow::Result<String> {
         reader.consume(len);
     }
     Ok(hex_string(&hasher.finalize()))
+}
+
+/// Count the mirror-directory files this round's listing does not name,
+/// with their bytes (ADR-062 D2 / 47 §4 C). The directories the backend
+/// layout uses are bounded (`config`, `keys/`, `index/`, `snapshots/`,
+/// `data/xx/`), so the walk is a plain recursion; anything regular it
+/// meets that the listing does not claim is counted — including a
+/// torn-write `.tmp` a crashed round left behind, which is equally
+/// reclaimable and equally never deleted automatically.
+///
+/// A tree that cannot be walked is an error, not a partial count: a lower
+/// bound worded as a measurement is the exact lie the tri-state rule
+/// exists against, so the caller records `None` and rounds that follow
+/// re-measure.
+fn count_unlisted(mirror_root: &Path, listed: &BTreeSet<PathBuf>) -> anyhow::Result<(u64, u64)> {
+    let mut files = 0_u64;
+    let mut bytes = 0_u64;
+    let mut stack = vec![mirror_root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries =
+            fs::read_dir(&dir).with_context(|| format!("walk the mirror dir {}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.with_context(|| format!("walk the mirror dir {}", dir.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("classify {}", path.display()))?;
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file() {
+                if listed.contains(&path) {
+                    continue;
+                }
+                files += 1;
+                bytes += entry
+                    .metadata()
+                    .with_context(|| format!("size {}", path.display()))?
+                    .len();
+            }
+            // Symlinks and anything else a mirror never writes are not
+            // counted at all: the number stays about bytes this tool put
+            // on the disk and can speak for.
+        }
+    }
+    Ok((files, bytes))
 }
 
 #[derive(Default)]
@@ -1356,6 +1438,20 @@ pub struct MirrorProgress {
     pub remote_files: u64,
     /// Files present and hash-verified at the end of the round.
     pub mirror_files: u64,
+    /// Files the mirror holds that the round's listing did not name
+    /// (ADR-062 D2 / 47 §4 C), with their bytes in
+    /// [`Self::orphan_bytes`]. `None` means the round that wrote this
+    /// record measured none — its directory walk failed, or it predates
+    /// orphan accounting — which is unknown, never zero; a measured
+    /// empty is `Some(0)`. Carried here because only a sync round sees
+    /// the listing that decides orphanhood, and the status surfaces read
+    /// this record (`serde(default)`: the field is additive, so records
+    /// written before it existed still parse).
+    #[serde(default)]
+    pub orphan_files: Option<u64>,
+    /// [`Self::orphan_files`]'s bytes; `None` exactly when that is.
+    #[serde(default)]
+    pub orphan_bytes: Option<u64>,
 }
 
 impl MirrorProgress {
@@ -1449,6 +1545,8 @@ fn write_progress(
         mirror_bytes: report.present_bytes + report.downloaded_bytes,
         remote_files: report.remote_files,
         mirror_files: report.present_files + report.downloaded_files,
+        orphan_files: report.orphan_files,
+        orphan_bytes: report.orphan_bytes,
     };
     fs::create_dir_all(req.state_dir)?;
     let path = mirror_progress_path(req.state_dir);
@@ -1493,30 +1591,269 @@ pub fn load_progress(state_dir: &Path) -> MirrorProgressRead {
 // Status surfaces
 // ---------------------------------------------------------------------------
 
-/// The mirror's advisory lines for `status` (same family as
-/// [`crate::doctor::key_alert_lines`]: a bounded handful of sentences, silent
-/// when the machine has no mirror or the mirror is healthy and filled, and
-/// never a red over a first fill that is merely large — progress, not
-/// failure (ADR-062 C2).
+/// The `--json` value the reclaim report writes for a session the mirror
+/// leg held back: **fixed by ADR-062 D6.3 (ruling 4), spelled here by LM-4**
+/// so the reclaim-side wiring (the documented hook in `stagereclaim` /
+/// `mirrorstate::snapshot_covered`), `status`, `doctor` and the menu bar
+/// cannot drift into three spellings.
+pub const HELD_BACK_KIND: &str = "not-mirrored";
+
+/// The human phrase for the same held-back session — D6.3's own human
+/// wording ("the mirror has not synced to this snapshot yet" is the
+/// review ruling's settled translation), one spelling across the three
+/// surfaces (ruling 8).
+/// The hold-back facts are a snapshot's closure, so the snapshot is what
+/// the sentence names.
+pub const HELD_BACK_SENTENCE: &str = "the mirror has not synced to this snapshot yet";
+
+/// Whether one mirror row is a fact or a finding. The mirror never raises
+/// a red on any surface: a first fill is progress, not failure (ADR-062
+/// C2), and even a failed round leaves the archive and the remote
+/// untouched — so `status`'s exit code and the menu bar's error tier are
+/// never moved by a mirror row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MirrorRowSeverity {
+    /// The steady row and the progress family: true facts a reader wants,
+    /// not findings.
+    Info,
+    /// A degraded mirror: a round that failed, a record that cannot be
+    /// read, a declaration that names no destination — the copy is not
+    /// doing what `[mirror]` promises, while the archive itself is fine.
+    Yellow,
+}
+
+/// One worded mirror row, the unit all three surfaces share (ADR-062
+/// ruling 8): `status` prints it, `doctor` shows it, the menu bar displays
+/// it verbatim — one sentence per mirror state, produced by the one
+/// function that owns the wording.
+#[derive(Debug, Clone)]
+pub struct MirrorRow {
+    pub severity: MirrorRowSeverity,
+    pub sentence: String,
+}
+
+/// A measured file count with its bytes — the states `size` and `orphans`
+/// share (LM-4 settles both spellings; one shape so the two fields can
+/// never drift apart), in the tagged-`kind` vocabulary the rest of
+/// `--json` keeps: `known` (a measured pair, `0/0` a measured empty),
+/// `unknown` (never a zero), or `not_applicable` (no mirror enabled).
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MirrorUsageState {
+    Known { files: u64, bytes: u64 },
+    Unknown { why: String },
+    NotApplicable { why: String },
+}
+
+/// The last *completed* sync's wall-clock time — the same record the
+/// behindness sentence and the closure count read (`mirror-state.json`,
+/// written only by a completed round, ruling 2), so "last sync" and
+/// "behind" can never disagree: both are as of the last completed round.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MirrorLastSyncState {
+    Known { unix: i64 },
+    Unknown { why: String },
+    NotApplicable { why: String },
+}
+
+/// The settled field family ADR-062 D3/D6.3 hang on LM-4, with the row
+/// family beside it: one computation, consumed by `status` (prose +
+/// `--json`), `doctor` (D13, same rows) and the menu bar (decodes
+/// `local.mirror.rows`) — so the three surfaces cannot disagree behind
+/// one printed sentence and one set of `--json` fields.
+#[derive(Debug, Clone)]
+pub struct MirrorStatus {
+    pub configured: bool,
+    pub enabled: bool,
+    pub mirror_of: String,
+    pub declared: bool,
+    /// The mirror directory's occupancy, walked when the status runs —
+    /// the number deleting the directory would free.
+    pub size: MirrorUsageState,
+    /// The last completed sync's time, from the closure record.
+    pub last_sync: MirrorLastSyncState,
+    /// D6.3's exact measure, verbatim: the snapshots of the remote listing
+    /// that the
+    /// same record does not hold closure-complete —
+    /// `snapshots_on_remote - closure_complete.len()`, both fields of one
+    /// completed round, never a live listing.
+    pub snapshots_behind: crate::json_out::CountState,
+    /// Mirror files the last round's listing did not name (ADR-062 D2 /
+    /// 47 §4 C): counted during the round, read from the progress record,
+    /// never deleted automatically.
+    pub orphans: MirrorUsageState,
+    /// The worded rows, in the order the surfaces print them.
+    pub rows: Vec<MirrorRow>,
+}
+
+/// The mirror's whole status, one computation for all three surfaces
+/// (ADR-062 D3/D6.3, LM-4). `now_unix` is supplied by the caller — the
+/// same wall clock `status` stamps its own run state with — so the age
+/// in the steady row is testable and never a hidden second clock.
+///
+/// Every sentence the rows carry is also the sentence `mirror_status_lines`
+/// prints for `status` and `doctor` shows: the family of first-fill
+/// progress, pause and failure wordings LM-2 shipped (pinned by its tests,
+/// unchanged here), plus the steady row LM-4 adds for the completed,
+/// healthy mirror that used to be silent.
 #[must_use]
-pub fn mirror_status_lines(config: &Config, state_dir: &Path) -> Vec<String> {
-    let Some(settings) = MirrorSettings::for_config(config) else {
-        return Vec::new();
+pub fn mirror_status(
+    config: &Config,
+    data_root: &Path,
+    state_dir: &Path,
+    now_unix: u64,
+) -> MirrorStatus {
+    const NO_SECTION: &str = "this machine declares no [mirror] section";
+    const SWITCH_OFF: &str = "the [mirror] switch is off";
+    let not_applicable = |why: &str| MirrorUsageState::NotApplicable {
+        why: why.to_string(),
     };
+    let not_applicable_time = |why: &str| MirrorLastSyncState::NotApplicable {
+        why: why.to_string(),
+    };
+    let Some(settings) = MirrorSettings::for_config(config) else {
+        return MirrorStatus {
+            configured: false,
+            enabled: false,
+            mirror_of: String::new(),
+            declared: false,
+            size: not_applicable(NO_SECTION),
+            last_sync: not_applicable_time(NO_SECTION),
+            snapshots_behind: crate::json_out::CountState::not_applicable(NO_SECTION),
+            orphans: not_applicable(NO_SECTION),
+            rows: Vec::new(),
+        };
+    };
+    let declared = config.destinations.contains_key(&settings.mirror_of);
+    let mut rows = Vec::new();
     if !settings.enabled {
-        return Vec::new();
+        return MirrorStatus {
+            configured: true,
+            enabled: false,
+            mirror_of: settings.mirror_of.clone(),
+            declared,
+            size: not_applicable(SWITCH_OFF),
+            last_sync: not_applicable_time(SWITCH_OFF),
+            snapshots_behind: crate::json_out::CountState::not_applicable(SWITCH_OFF),
+            orphans: not_applicable(SWITCH_OFF),
+            rows,
+        };
     }
-    let mut lines = Vec::new();
-    if !config.destinations.contains_key(&settings.mirror_of) {
-        lines.push(format!(
-            "[mirror] enabled, but `[mirror] mirror_of = \"{}\"` names no declared destination; \
-             declare it under `[destinations.{0}]` or repoint the mirror",
-            settings.mirror_of
-        ));
-        return lines;
-    }
+
+    // The field family, each from its own record with the tri-state kept.
+    // The size is the directory's occupancy whoever declared it — bytes on
+    // this machine's disk are a fact even when the copy is not operational,
+    // and every surface reads the same walk (the sync refuses before
+    // creating the directory when the declaration names no destination, so
+    // a wrong `mirror_of` measures whatever a previous mirror left behind).
+    let size = mirror_size(&mirror_dir(data_root, &settings.mirror_of));
     let progress = load_progress(state_dir);
     let state = mirrorstate::load(state_dir);
+
+    // Last sync and behindness read the same record (D6.3: one record is
+    // the source for both),
+    // so a printed age and a behind count can never come from two
+    // different rounds — one match hands both their state.
+    let (last_sync, snapshots_behind) = match &state {
+        mirrorstate::MirrorStateRead::Present(record) if record.mirror_of == settings.mirror_of => {
+            (
+                MirrorLastSyncState::Known {
+                    // reason: `finished_at_unix` is a u64 the record's own
+                    // writer took from the epoch clock; i64::MAX is reached
+                    // only by a hand-crafted record, and the display converts
+                    // an unrepresentable time back into an unknown further
+                    // down, so no fabricated timestamp reaches a surface.
+                    unix: i64::try_from(record.finished_at_unix).unwrap_or(i64::MAX),
+                },
+                crate::json_out::CountState::known(
+                    record
+                        .snapshots_on_remote
+                        .saturating_sub(record.closure_complete.len() as u64),
+                ),
+            )
+        }
+        mirrorstate::MirrorStateRead::Present(record) => (
+            MirrorLastSyncState::Unknown {
+                why: format!(
+                    "the record names `{}`, which this machine does not mirror",
+                    record.mirror_of
+                ),
+            },
+            crate::json_out::CountState::unknown(format!(
+                "the record names `{}`, which this machine does not mirror",
+                record.mirror_of
+            )),
+        ),
+        mirrorstate::MirrorStateRead::Unreadable(why) => (
+            MirrorLastSyncState::Unknown {
+                why: format!("mirror-state.json is unreadable: {why}"),
+            },
+            crate::json_out::CountState::unknown(format!("mirror-state.json is unreadable: {why}")),
+        ),
+        mirrorstate::MirrorStateRead::Missing => (
+            MirrorLastSyncState::Unknown {
+                why: "no sync round has completed yet".to_string(),
+            },
+            crate::json_out::CountState::unknown("no sync round has completed yet"),
+        ),
+    };
+    let orphans = match &progress {
+        MirrorProgressRead::Present(record) if record.mirror_of != settings.mirror_of => {
+            MirrorUsageState::Unknown {
+                why: format!(
+                    "the progress record names `{}`, which this machine does not mirror",
+                    record.mirror_of
+                ),
+            }
+        }
+        MirrorProgressRead::Present(record) => {
+            match (record.orphan_files, record.orphan_bytes) {
+                (Some(files), Some(bytes)) => MirrorUsageState::Known { files, bytes },
+                // reason: the round that wrote this record measured no
+                // orphan count — its walk failed, or it predates orphan
+                // accounting — and "not measured" is unknown, never a
+                // zero that reads as a clean mirror.
+                _ => MirrorUsageState::Unknown {
+                    why: "the round that wrote the progress record did not measure them"
+                        .to_string(),
+                },
+            }
+        }
+        MirrorProgressRead::Unreadable(why) => MirrorUsageState::Unknown {
+            why: format!("the progress record is unreadable: {why}"),
+        },
+        MirrorProgressRead::Missing => MirrorUsageState::Unknown {
+            why: "no sync round has run yet".to_string(),
+        },
+    };
+
+    // The rows: the ladder of wordings LM-2 shipped (kept sentence for
+    // sentence — its tests pin them), with the one change LM-4 owns: the
+    // completed, current state that used to be silent now gets the
+    // steady row.
+    if !declared {
+        rows.push(MirrorRow {
+            severity: MirrorRowSeverity::Yellow,
+            sentence: format!(
+                "[mirror] enabled, but `[mirror] mirror_of = \"{}\"` names no declared destination; \
+                 declare it under `[destinations.{0}]` or repoint the mirror",
+                settings.mirror_of
+            ),
+        });
+        return MirrorStatus {
+            configured: true,
+            enabled: true,
+            mirror_of: settings.mirror_of.clone(),
+            declared,
+            size,
+            last_sync,
+            snapshots_behind,
+            orphans,
+            rows,
+        };
+    }
     // A record that names some other destination is not coverage for this
     // one (mirrorstate.rs's own doc for `mirror_of`): repoint `[mirror]
     // mirror_of` and the old record's closure set answers about a directory
@@ -1531,43 +1868,86 @@ pub fn mirror_status_lines(config: &Config, state_dir: &Path) -> Vec<String> {
             mirrorstate::MirrorStateRead::Present(record) => record.mirror_of.clone(),
             _ => String::new(),
         };
-        lines.push(format!(
-            "[mirror] mirror-state.json names `{other}`, but this machine mirrors `{}`; \
-             the record is stale, so coverage is unknown — reclaim must hold sessions \
-             back until a completed round rewrites it",
-            settings.mirror_of
-        ));
+        rows.push(MirrorRow {
+            severity: MirrorRowSeverity::Yellow,
+            sentence: format!(
+                "[mirror] mirror-state.json names `{other}`, but this machine mirrors `{}`; \
+                 the record is stale, so coverage is unknown — reclaim must hold sessions \
+                 back until a completed round rewrites it",
+                settings.mirror_of
+            ),
+        });
     }
+    let steady_row_for_current_state = |state_missing_degraded: bool| {
+        // The steady row (LM-4): one line, the four settled fields, the
+        // same wording on every surface. Yellow — never info — when the
+        // coverage facts are unknown, because that is the state reclaim
+        // holds sessions back in, and a row that read as healthy while
+        // it worded "last sync unknown" would understate it.
+        let severity = if state_missing_degraded {
+            MirrorRowSeverity::Yellow
+        } else {
+            matches!(
+                last_sync,
+                MirrorLastSyncState::Unknown { .. } | MirrorLastSyncState::NotApplicable { .. }
+            )
+            .then_some(MirrorRowSeverity::Yellow)
+            .unwrap_or(MirrorRowSeverity::Info)
+        };
+        MirrorRow {
+            severity,
+            sentence: format!(
+                "[mirror] local copy of `{}`: {}, {}, {}, {}",
+                settings.mirror_of,
+                size_fragment(&size),
+                last_sync_fragment(&last_sync, now_unix),
+                behind_fragment(&snapshots_behind),
+                orphans_fragment(&orphans)
+            ),
+        }
+    };
     match (&progress, &state) {
         (MirrorProgressRead::Missing, mirrorstate::MirrorStateRead::Missing) => {
-            lines.push(format!(
-                "[mirror] enabled for `{}` but has never run; start the first fill with \
-                 `chat-stasher mirror sync` — it spans several rounds (ADR-062 D2)",
-                settings.mirror_of
-            ));
+            rows.push(MirrorRow {
+                severity: MirrorRowSeverity::Yellow,
+                sentence: format!(
+                    "[mirror] enabled for `{}` but has never run; start the first fill with \
+                     `chat-stasher mirror sync` — it spans several rounds (ADR-062 D2)",
+                    settings.mirror_of
+                ),
+            });
         }
         (MirrorProgressRead::Unreadable(why), _) => {
-            lines.push(format!(
-                "[mirror] the progress record is unreadable ({why}); whether the first \
-                 fill is progressing is unknown, not zero — the next round rewrites it"
-            ));
+            rows.push(MirrorRow {
+                severity: MirrorRowSeverity::Yellow,
+                sentence: format!(
+                    "[mirror] the progress record is unreadable ({why}); whether the first \
+                     fill is progressing is unknown, not zero — the next round rewrites it"
+                ),
+            });
         }
         (MirrorProgressRead::Present(progress), mirrorstate::MirrorStateRead::Unreadable(why)) => {
             if progress.complete {
-                lines.push(format!(
-                    "[mirror] the last round completed but mirror-state.json is unreadable \
-                     ({why}); mirror coverage is unknown, so reclaim must hold sessions back \
-                     until a completed round rewrites it"
-                ));
+                rows.push(MirrorRow {
+                    severity: MirrorRowSeverity::Yellow,
+                    sentence: format!(
+                        "[mirror] the last round completed but mirror-state.json is unreadable \
+                         ({why}); mirror coverage is unknown, so reclaim must hold sessions back \
+                         until a completed round rewrites it"
+                    ),
+                });
             } else {
-                lines.push(format!(
-                    "[mirror] first sync of `{}` in progress: {}% ({} of {}) — reclaim holds \
-                     sessions back until it completes; the state record is also unreadable ({why})",
-                    progress.mirror_of,
-                    progress.percent(),
-                    progress.mirror_bytes,
-                    progress.remote_total_bytes
-                ));
+                rows.push(MirrorRow {
+                    severity: MirrorRowSeverity::Info,
+                    sentence: format!(
+                        "[mirror] first sync of `{}` in progress: {}% ({} of {}) — reclaim holds \
+                         sessions back until it completes; the state record is also unreadable ({why})",
+                        progress.mirror_of,
+                        progress.percent(),
+                        progress.mirror_bytes,
+                        progress.remote_total_bytes
+                    ),
+                });
             }
         }
         (MirrorProgressRead::Present(progress), _) => {
@@ -1583,74 +1963,258 @@ pub fn mirror_status_lines(config: &Config, state_dir: &Path) -> Vec<String> {
                 // failure with its percentages and no class sentence — an
                 // incomplete sentence, never a fabricated cause.
                 let note = progress.outcome_note.clone().unwrap_or_default();
-                lines.push(format!(
-                    "[mirror] the last mirror round failed at {}% ({} of {}): {note} — the \
-                     next round resumes only after the cause is fixed; reclaim holds \
-                     sessions back until a round completes",
-                    progress.percent(),
-                    progress.mirror_bytes,
-                    progress.remote_total_bytes
-                ));
+                rows.push(MirrorRow {
+                    severity: MirrorRowSeverity::Yellow,
+                    sentence: format!(
+                        "[mirror] the last mirror round failed at {}% ({} of {}): {note} — the \
+                         next round resumes only after the cause is fixed; reclaim holds \
+                         sessions back until a round completes",
+                        progress.percent(),
+                        progress.mirror_bytes,
+                        progress.remote_total_bytes
+                    ),
+                });
             } else if !progress.complete {
-                lines.push(format!(
-                    "[mirror] first sync of `{}` in progress: {}% ({} of {}) — reclaim holds \
-                     sessions back until it completes; rounds end by budget, disk floor or \
-                     reachability, none of which is a failure",
-                    progress.mirror_of,
-                    progress.percent(),
-                    progress.mirror_bytes,
-                    progress.remote_total_bytes
-                ));
+                rows.push(MirrorRow {
+                    severity: MirrorRowSeverity::Info,
+                    sentence: format!(
+                        "[mirror] first sync of `{}` in progress: {}% ({} of {}) — reclaim holds \
+                         sessions back until it completes; rounds end by budget, disk floor or \
+                         reachability, none of which is a failure",
+                        progress.mirror_of,
+                        progress.percent(),
+                        progress.mirror_bytes,
+                        progress.remote_total_bytes
+                    ),
+                });
+            } else if state_names_other {
+                // The stale-record row above is the finding; a steady row
+                // beside it would word this directory's size as if it were
+                // coverage for the re-pointed mirror.
+            } else if matches!(state, mirrorstate::MirrorStateRead::Missing) {
+                // Completed fill, missing closure record: the one state the
+                // sync engine itself never writes (a completed round writes
+                // both), so the record was removed after the fact — and
+                // reclaim holds everything back in it. The steady row shows
+                // the facts that are still measures (size, orphans) and
+                // words the missing half honestly, in yellow.
+                rows.push(steady_row_for_current_state(true));
+            } else {
+                // Steady state (ADR-062 D3, LM-4): completed fill, readable
+                // record naming this destination — the row that was silent
+                // before LM-4.
+                rows.push(steady_row_for_current_state(false));
             }
-            // Complete and present: silent, like every healthy surface in
-            // this command — [`Self`] exists to make gaps visible, not to
-            // narrate health. LM-4 owns the steady-state fields (size, last
-            // sync time, behindness) across the three surfaces.
         }
         (MirrorProgressRead::Missing, mirrorstate::MirrorStateRead::Unreadable(why)) => {
-            lines.push(format!(
-                "[mirror] mirror-state.json is unreadable ({why}), and no progress record \
-                 exists; mirror coverage is unknown, so reclaim must hold sessions back"
-            ));
+            rows.push(MirrorRow {
+                severity: MirrorRowSeverity::Yellow,
+                sentence: format!(
+                    "[mirror] mirror-state.json is unreadable ({why}), and no progress record \
+                     exists; mirror coverage is unknown, so reclaim must hold sessions back"
+                ),
+            });
         }
         (MirrorProgressRead::Missing, mirrorstate::MirrorStateRead::Present(_)) => {
             // A completed record with no progress record: re-created by the
             // next round; not a state worth alarming on, but worth stating.
-            lines.push(
-                "[mirror] the progress record is missing while the state record exists; \
-                       the next round rewrites both"
+            rows.push(MirrorRow {
+                severity: MirrorRowSeverity::Info,
+                sentence: "[mirror] the progress record is missing while the state record exists; \
+                           the next round rewrites both"
                     .to_string(),
-            );
+            });
         }
     }
-    lines
+    MirrorStatus {
+        configured: true,
+        enabled: true,
+        mirror_of: settings.mirror_of.clone(),
+        declared,
+        size,
+        last_sync,
+        snapshots_behind,
+        orphans,
+        rows,
+    }
 }
 
-/// The `status --json` mirror object (ADR-062 C2): the same facts the prose
-/// lines say, in the tagged-`kind` vocabulary the rest of `--json` keeps —
-/// an unknown or not-yet-started fill is `unknown`/`not_applicable` with its
-/// reason, never a zero percent that reads as measured.
-///
-/// LM-4 owns the settled field names across the three surfaces; the names
-/// here exist so the honest states are on the wire from the first day.
+/// The mirror's advisory lines for `status` — the rows
+/// [`mirror_status`] words, unwrapped, in the same family as
+/// [`crate::doctor::key_alert_lines`]: empty when the machine has no
+/// mirror or the switch is off, a first fill phrased as progress and
+/// never as red (ADR-062 C2), and the LM-4 steady row for the completed,
+/// healthy copy.
 #[must_use]
-pub fn status_json(config: &Config, state_dir: &Path) -> serde_json::Value {
-    let Some(settings) = MirrorSettings::for_config(config) else {
+pub fn mirror_status_lines(config: &Config, data_root: &Path, state_dir: &Path) -> Vec<String> {
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|delta| delta.as_secs())
+        // reason: the clock-before-1970 branch every other now-stamp in
+        // this crate documents — reachable only there, and it shows up as
+        // an ancient age next to the sync time, which is also how the
+        // other stamps degrade.
+        .unwrap_or(0);
+    mirror_status(config, data_root, state_dir, now_unix)
+        .rows
+        .into_iter()
+        .map(|row| row.sentence)
+        .collect()
+}
+
+/// The mirror directory's occupancy: every regular file and its content
+/// bytes, through the same walker the orphan count uses (an orphan count
+/// *is* a usage count minus the listing's claimed paths), so one walk
+/// implementation owns both measures. An unwalkable tree is unknown, never a
+/// zero — and a directory that does not exist is a measured empty: the
+/// mirror occupies nothing.
+fn mirror_size(mirror_root: &Path) -> MirrorUsageState {
+    if !mirror_root.exists() {
+        return MirrorUsageState::Known { files: 0, bytes: 0 };
+    }
+    match count_unlisted(mirror_root, &BTreeSet::new()) {
+        Ok((files, bytes)) => MirrorUsageState::Known { files, bytes },
+        Err(error) => MirrorUsageState::Unknown {
+            why: format!("the mirror directory could not be walked: {error}"),
+        },
+    }
+}
+
+/// The steady row's size fragment.
+fn size_fragment(state: &MirrorUsageState) -> String {
+    match state {
+        MirrorUsageState::Known { files, bytes } => format!(
+            "{} ({bytes} B) across {files} file(s)",
+            crate::destdiag::fmt_bytes(*bytes)
+        ),
+        MirrorUsageState::Unknown { why } => format!("size unknown ({why})"),
+        MirrorUsageState::NotApplicable { why } => format!("size not applicable ({why})"),
+    }
+}
+
+/// The steady row's last-sync fragment, with the age the ADR's
+/// visibility list asks for (D3: last sync; the reads' own "as of
+/// HH:MM UTC" hangs the same fact where reads happen). An unrepresentable
+/// time is unknown, never 00:00-midnight.
+fn last_sync_fragment(state: &MirrorLastSyncState, now_unix: u64) -> String {
+    match state {
+        MirrorLastSyncState::Known { unix } => {
+            match (
+                u64::try_from(*unix).ok(),
+                chrono::DateTime::from_timestamp(*unix, 0),
+            ) {
+                (Some(then), Some(time)) => {
+                    let date = time.format("%Y-%m-%d %H:%M").to_string();
+                    let age = now_unix.saturating_sub(then);
+                    format!("last sync {date} UTC ({})", age_words(age))
+                }
+                _ => "last sync unknown (the recorded time is unrepresentable)".to_string(),
+            }
+        }
+        MirrorLastSyncState::Unknown { why } => format!("last sync unknown ({why})"),
+        MirrorLastSyncState::NotApplicable { why } => {
+            format!("last sync not applicable ({why})")
+        }
+    }
+}
+
+/// The steady row's behind fragment.
+fn behind_fragment(count: &crate::json_out::CountState) -> String {
+    match count {
+        crate::json_out::CountState::Known { count } => format!("{count} snapshot(s) behind"),
+        crate::json_out::CountState::Unknown { why } => format!("snapshots behind unknown ({why})"),
+        crate::json_out::CountState::NotApplicable { why } => {
+            format!("snapshots behind not applicable ({why})")
+        }
+    }
+}
+
+/// The steady row's orphans fragment — the `doctor`-visible half of
+/// ADR-062 D2's orphan report (the "reclaimable X" the review ruling
+/// names): the same bytes the
+/// doctor line words as reclaimable.
+fn orphans_fragment(state: &MirrorUsageState) -> String {
+    match state {
+        MirrorUsageState::Known { files, bytes } => format!(
+            "{files} orphan file(s) ({} reclaimable)",
+            crate::destdiag::fmt_bytes(*bytes)
+        ),
+        MirrorUsageState::Unknown { why } => format!("orphans unknown ({why})"),
+        MirrorUsageState::NotApplicable { why } => format!("orphans not applicable ({why})"),
+    }
+}
+
+/// The age family the last-sync fragment words (`"1 hour ago"`,
+/// `"3 days ago"`), coarse on purpose: the exact minute is in the
+/// timestamp before it, and the hour-or-day granularity is what tells a
+/// reader whether the copy is keeping up with its hourly round or not.
+fn age_words(delta_secs: u64) -> String {
+    fn plural(count: u64, unit: &str) -> String {
+        format!(
+            "{count} {unit}{} ago",
+            // reason: "1 hours ago" reads like a template nobody read; the
+            // singular is not a cosmetic choice — this sentence is the one
+            // row three surfaces show a user about their copy's freshness.
+            if count == 1 { "" } else { "s" }
+        )
+    }
+    if delta_secs < 60 {
+        "less than a minute ago".to_string()
+    } else if delta_secs < 3_600 {
+        plural(delta_secs / 60, "minute")
+    } else if delta_secs < 86_400 {
+        plural(delta_secs / 3_600, "hour")
+    } else {
+        plural(delta_secs / 86_400, "day")
+    }
+}
+
+/// The `status --json` mirror object (ADR-062 C2, LM-4): the same facts the
+/// prose rows say, in the tagged-`kind` vocabulary the rest of `--json`
+/// keeps — an unknown or not-yet-started fill is `unknown`/`not_applicable`
+/// with its reason, never a zero percent that reads as measured.
+///
+/// LM-4's settled family rides the same object the menu bar decodes:
+/// `size`, `last_sync`, `snapshots_behind`, `orphans` (the tri-states) and
+/// `rows` (the already-worded sentences the panel prints verbatim — the
+/// same words `status` prints and `doctor` shows, per ruling 8).
+#[must_use]
+pub fn status_json(
+    config: &Config,
+    data_root: &Path,
+    state_dir: &Path,
+    now_unix: u64,
+) -> serde_json::Value {
+    let status = mirror_status(config, data_root, state_dir, now_unix);
+    let rows: Vec<serde_json::Value> = status
+        .rows
+        .iter()
+        .map(|row| serde_json::json!({"severity": row.severity, "sentence": row.sentence}))
+        .collect();
+    // The first-sync and closure-record halves keep the shapes LM-2
+    // shipped — they are the reclaim leg's and the read seam's fields; the
+    // four LM-4 fields below are the display family and derive from the
+    // same records through [`mirror_status`].
+    if !status.configured {
         return serde_json::json!({
             "configured": false,
             "first_sync": {"kind": "not_applicable", "why": "this machine declares no [mirror] section"},
+            "size": status.size,
+            "last_sync": status.last_sync,
+            "snapshots_behind": status.snapshots_behind,
+            "orphans": status.orphans,
+            "rows": rows,
         });
-    };
-    let declared = config.destinations.contains_key(&settings.mirror_of);
-    let first_sync = if !settings.enabled {
+    }
+    let first_sync = if !status.enabled {
         serde_json::json!({
             "kind": "not_applicable",
             "why": "the [mirror] switch is off",
         })
-    } else if !declared {
+    } else if !status.declared {
         serde_json::json!({
             "kind": "not_applicable",
-            "why": format!("`mirror_of = \"{}\"` names no declared destination", settings.mirror_of),
+            "why": format!("`mirror_of = \"{}\"` names no declared destination", status.mirror_of),
         })
     } else {
         match load_progress(state_dir) {
@@ -1673,7 +2237,7 @@ pub fn status_json(config: &Config, state_dir: &Path) -> serde_json::Value {
         }
     };
     let closure_record = match mirrorstate::load(state_dir) {
-        mirrorstate::MirrorStateRead::Present(state) if state.mirror_of == settings.mirror_of => {
+        mirrorstate::MirrorStateRead::Present(state) if state.mirror_of == status.mirror_of => {
             serde_json::json!({
                 "kind": "known",
                 "covered_snapshots": state.closure_complete.len(),
@@ -1689,7 +2253,7 @@ pub fn status_json(config: &Config, state_dir: &Path) -> serde_json::Value {
             "why": format!(
                 "mirror-state.json names `{}`, but this machine mirrors `{}`; the record \
                  is stale, so no snapshot's closure can be claimed for this destination",
-                state.mirror_of, settings.mirror_of
+                state.mirror_of, status.mirror_of
             ),
         }),
         mirrorstate::MirrorStateRead::Unreadable(why) => serde_json::json!({
@@ -1703,11 +2267,16 @@ pub fn status_json(config: &Config, state_dir: &Path) -> serde_json::Value {
     };
     serde_json::json!({
         "configured": true,
-        "enabled": settings.enabled,
-        "mirror_of": settings.mirror_of,
-        "declared": declared,
+        "enabled": status.enabled,
+        "mirror_of": status.mirror_of,
+        "declared": status.declared,
         "first_sync": first_sync,
         "closure_record": closure_record,
+        "size": status.size,
+        "last_sync": status.last_sync,
+        "snapshots_behind": status.snapshots_behind,
+        "orphans": status.orphans,
+        "rows": rows,
     })
 }
 
@@ -1853,6 +2422,8 @@ mod tests {
             mirror_bytes: 0,
             remote_files: 0,
             mirror_files: 0,
+            orphan_files: None,
+            orphan_bytes: None,
         };
         assert_eq!(progress.percent(), 100);
         let partial = MirrorProgress {
@@ -1891,6 +2462,8 @@ mod tests {
             mirror_bytes: 100,
             remote_files: 3,
             mirror_files: 3,
+            orphan_files: Some(0),
+            orphan_bytes: Some(0),
         };
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(
