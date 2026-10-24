@@ -22999,7 +22999,7 @@ mod run_once_letta_tests {
             chat_stasher::runstate::RunOutcome::Completed,
             "the hand-off is kept out of the failure column by the local duty's own result"
         );
-        assert_eq!(state.pull_letta_unread, false, "nothing was left unread");
+        assert!(!state.pull_letta_unread, "nothing was left unread");
         assert!(
             state.pull_letta_deferred,
             "the deferral is the record's own fact"

@@ -7566,13 +7566,11 @@ mod w1009_doctor_desktop_tests {
             ),
             other => panic!("expected Unknown for an invalid value, got {other:?}"),
         }
-        for check in [&check] {
-            let line = check.risk_line();
-            assert!(
-                line.starts_with('🟡') && line.contains("not guessing"),
-                "an unknown state is yellow and refuses to guess; got: {line:?}"
-            );
-        }
+        let line = check.risk_line();
+        assert!(
+            line.starts_with('🟡') && line.contains("not guessing"),
+            "an unknown state is yellow and refuses to guess; got: {line:?}"
+        );
     }
 
     // The desktop key present in an unreadable file + the key's real value

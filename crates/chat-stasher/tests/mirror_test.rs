@@ -2043,6 +2043,11 @@ fn with_the_switch_off_a_leftover_copy_stays_visible_with_its_size() {
 /// on all three ends (status, doctor, the menu bar), and the privacy
 /// anchor's claim is no paths, so no raw chain and no directory path
 /// reach the sentence or `--json`.
+///
+/// Unix-only because the unwalkable state is produced with a filesystem
+/// permission (`chmod 0o000`); Windows has no standard-API equivalent (its
+/// read denial lives in ACLs `std::fs::Permissions` cannot express).
+#[cfg(unix)]
 #[test]
 fn an_unwalkable_mirror_directory_words_size_unknown_without_a_path() {
     let sb = tempfile::TempDir::new().unwrap();

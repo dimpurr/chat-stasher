@@ -1033,22 +1033,12 @@ fn sha256_file(path: &Path) -> anyhow::Result<String> {
 /// bound worded as a measurement is the exact lie the tri-state rule
 /// exists against, so the caller records `None` and rounds that follow
 /// re-measure.
+#[derive(Default)]
 struct Unlisted {
     files: u64,
     bytes: u64,
     tmp_files: u64,
     tmp_bytes: u64,
-}
-
-impl Default for Unlisted {
-    fn default() -> Self {
-        Self {
-            files: 0,
-            bytes: 0,
-            tmp_files: 0,
-            tmp_bytes: 0,
-        }
-    }
 }
 
 /// [`Unlisted`]'s own temp name: [`write_atomic`]'s `.<name>.tmp` shape,

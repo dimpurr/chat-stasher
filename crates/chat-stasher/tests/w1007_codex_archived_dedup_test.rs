@@ -490,7 +490,10 @@ fn codex_home_metadata_outside_the_roots_is_never_a_session() {
     );
     // The recognised-file set — what the probe says the scan saw — holds
     // only the rollout.
-    assert_eq!(probe.recognized_files.as_slice(), [fx.active.clone()]);
+    assert_eq!(
+        probe.recognized_files.as_slice(),
+        std::slice::from_ref(&fx.active)
+    );
 
     fx.collect();
     assert_eq!(fx.staged_session_dirs(), [session_id()]);

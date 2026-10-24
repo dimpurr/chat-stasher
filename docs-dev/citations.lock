@@ -863,8 +863,8 @@ crates/chat-stasher/src/mirror.rs:1-16  fe152090ebb3  lines=16
   <- docs-dev/privacy.md:1155  :: //! The local mirror (ADR-062, LM-2): one declared remote d…
 crates/chat-stasher/src/mirror.rs:48-50  f48b2aff1d75  lines=3
   <- docs-dev/privacy.md:1155  :: //! Privacy: ids, byte counts, times and the declared desti…
-crates/chat-stasher/src/mirror.rs:1474-1477  bc5fe3305d28  lines=4
-  <- docs-dev/privacy.md:1155  :: pub outcome: String,
+crates/chat-stasher/src/mirror.rs:1474-1477  3a13a0bc6bb2  lines=4
+  <- docs-dev/privacy.md:1155  :: pub remote_files: u64,
 crates/chat-stasher/src/mirrorstate.rs:30-31  3f1c0e8f18cc  lines=2
   <- docs-dev/privacy.md:1155  :: //! Privacy: a destination name, a unix time, byte counts a…
 crates/chat-stasher/src/nativehost.rs:155-168  b160255bd493  lines=14

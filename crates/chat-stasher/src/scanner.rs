@@ -6238,7 +6238,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             scan_ids(&before),
-            [expected_id.clone()],
+            std::slice::from_ref(&expected_id),
             "the active rollout is scanned before the archive move"
         );
         assert_eq!(before.probes[0].record_count, Some(1));
@@ -6251,7 +6251,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             scan_ids(&archived_report),
-            [expected_id.clone()],
+            std::slice::from_ref(&expected_id),
             "the archived root re-scans the same session: the move must not fork the id"
         );
         assert_eq!(

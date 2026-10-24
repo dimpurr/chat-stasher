@@ -382,11 +382,12 @@ pub fn reclaim_stage(
     // must-prove set blocks the whole reclaim: nothing at all can be proven
     // against it (an unconsultable destination is *unproven*, never "does
     // not have it" nor "has it").
-    let mut ready: Vec<(
-        &NamedStore,
+    type Consulted<'a> = (
+        &'a NamedStore,
         BTreeMap<(String, String), Candidate>,
         BTreeMap<String, String>,
-    )> = Vec::new();
+    );
+    let mut ready: Vec<Consulted> = Vec::new();
     for dest in must_prove {
         let mk = match store::load_key_file(&dest.cfg) {
             Ok(mk) => mk,
