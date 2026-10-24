@@ -529,7 +529,7 @@ fn read_states_the_mirror_it_reads_through() {
     ]));
     assert_eq!(code, 0, "a mirrored read succeeds:\n{stdout}\n{stderr}");
     assert!(
-        stdout.contains("[read] mirror        : first `storagebox`"),
+        stdout.contains("[read] mirror         : first `storagebox`"),
         "the serving line names the seam: {stdout}"
     );
     assert!(
@@ -575,5 +575,45 @@ fn read_states_the_mirror_it_reads_through() {
     assert!(
         line.contains("reads the remote"),
         "the sentence says where the read went: {line}"
+    );
+}
+
+/// `verify --repo <data root>/mirror/<name>` certifies the copy itself —
+/// legal reading (the copy is a real repository), but a verdict over it is
+/// a verdict about this machine's copy, so the run owes the one line that
+/// says so. Without the classification this spelling printed nothing at
+/// all and a copy's OK read as the archive's own answer: the ADR words
+/// "verify never reads the mirror" absolutely, so the one store whose
+/// every byte is the mirror's is exactly the one that has to be named.
+#[test]
+fn verify_over_the_copy_itself_says_so() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let sandbox = sb.path();
+    cli_fixture_with_mirror(sandbox);
+    write_config(
+        sandbox,
+        "enabled = true\nmirror_of = \"storagebox\"\nmin_free_gib = 1.0",
+    );
+    let copy = mirror_root_of(sandbox);
+    let (code, stdout, stderr) = run(binary_command(sandbox).args([
+        "verify",
+        "--level",
+        "l2",
+        "--repo",
+        copy.to_str().unwrap(),
+        "--key-file",
+        sandbox.join("remote.key").to_str().unwrap(),
+    ]));
+    assert_eq!(
+        code, 0,
+        "the untouched copy is a real repository and verifies:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("[verify] mirror         :"),
+        "the copy-itself spelling is named with its own line: {stdout}"
+    );
+    assert!(
+        stdout.contains("local mirror copy `storagebox`"),
+        "the line says whose copy is under verification: {stdout}"
     );
 }

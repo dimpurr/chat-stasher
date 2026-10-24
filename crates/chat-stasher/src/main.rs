@@ -5676,7 +5676,7 @@ fn cmd_search(
     // exactly the way the ssh-reap line was (W253 C1).
     let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
     if let Some(line) = mirror_decision.state_line() {
-        eprintln!("[search] mirror        : {line}");
+        eprintln!("[search] mirror         : {line}");
     }
     let store = BackupStore::for_metadata_query(cfg.clone())
         .with_mirror_reads(mirror_decision.handle())
@@ -6251,7 +6251,7 @@ fn cmd_export(
     // The lines go to stderr: `export`'s stdout carries the plan and report.
     let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
     if let Some(line) = mirror_decision.state_line() {
-        eprintln!("[export] mirror        : {line}");
+        eprintln!("[export] mirror         : {line}");
     }
     let store = BackupStore::for_metadata_query(cfg.clone())
         .with_shard_policy(shard_policy)
@@ -11396,7 +11396,7 @@ fn cmd_read(
         body_cache_state_line(&body_cache)
     );
     if let Some(line) = mirror_decision.state_line() {
-        println!("[read] mirror        : {line}");
+        println!("[read] mirror         : {line}");
     }
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
@@ -11835,7 +11835,7 @@ fn cmd_index(action: IndexAction) -> ExitCode {
             // plaintext (the per-destination SQLite topology is untouched).
             let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
             if let Some(line) = mirror_decision.state_line() {
-                eprintln!("[index] mirror        : {line}");
+                eprintln!("[index] mirror         : {line}");
             }
             let backup = BackupStore::for_metadata_query(cfg.clone())
                 .with_mirror_reads(mirror_decision.handle());
@@ -12405,6 +12405,24 @@ fn cmd_verify(
             "ON"
         }
     );
+    // ADR-062 D3 keeps `verify` off the mirror seam entirely, so no other
+    // mirror state prints here: a serving machine's copy is not in this
+    // read's way, and the lines above describe the store being verified.
+    // The one spelling that must state itself is the copy —
+    // `verify --repo <data root>/mirror/<name>` certifies this machine's
+    // copy, never the copied destination, and silence would let a copy's
+    // verdict pass as the archive's own (47 §5.5: a copy may not certify
+    // itself).
+    let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
+    let copy_line = match &mirror_decision {
+        chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { .. } => {
+            mirror_decision.state_line()
+        }
+        _ => None,
+    };
+    if let Some(line) = copy_line {
+        println!("[verify] mirror         : {line}");
+    }
 
     let mut failed = 0usize;
     let mut unreadable = 0usize;

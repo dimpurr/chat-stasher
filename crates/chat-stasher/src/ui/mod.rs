@@ -5601,8 +5601,60 @@ mod tests {
         merged.destinations[1].mirror = Some("local copy's first sync is in progress: 70%".into());
         let body = req("/sessions", &merged, &NoContent).body;
         assert!(
-            body.contains("<b>dest-two</b> — local copy's first sync is in progress: 70%"),
+            // the apostrophe arrives escaped like every other interpolated
+            // character — the sentence is rendered as text, never markup
+            body.contains("<b>dest-two</b> — local copy&#39;s first sync is in progress: 70%"),
             "the merged view names the copy each sentence is about: {body}"
+        );
+    }
+
+    /// The behindness sentence reaches the page as text, not markup: it
+    /// carries a configured destination name and LM-2's free-form
+    /// `outcome_note`, and every sibling helper escapes what it
+    /// interpolates — a `<` or an `&` inside either must render escaped,
+    /// which is the difference between a note and injected markup.
+    #[test]
+    fn the_mirror_note_escapes_its_sentence() {
+        let mut data = data_of(vec![fixture::hit_for("m-1", "deepseek.s1")]);
+        data.destinations[0].mirror =
+            Some("local copy unreadable — `<b>`root &amp; branch`</b>` did not load".into());
+        let body = req("/sessions", &data, &NoContent).body;
+        assert!(
+            body.contains(
+                "local copy unreadable — `&lt;b&gt;`root &amp;amp; branch`&lt;/b&gt;` did not load"
+            ),
+            "the single-destination sentence renders escaped: {body}"
+        );
+        assert!(
+            !body.contains("`<b>`"),
+            "raw markup from the sentence must not reach the page: {body}"
+        );
+        // Several destinations: the sentence behind the bold label escapes
+        // the same way (the label always was escaped).
+        let mut merged = UiData::from_reports(
+            &[
+                DestinationRead {
+                    label: "dest-one".into(),
+                    outcome: Ok(&fixture::report()),
+                },
+                DestinationRead {
+                    label: "dest-two".into(),
+                    outcome: Ok(&fixture::report()),
+                },
+            ],
+            Selector::default(),
+            NOW,
+        );
+        merged.destinations[1].mirror =
+            Some("local copy unreadable — `<i>`notes</i>` & `mirror_of = \"box\"`".into());
+        let body = req("/sessions", &merged, &NoContent).body;
+        assert!(
+            body.contains("`&lt;i&gt;`notes&lt;/i&gt;`"),
+            "the merged sentence renders escaped: {body}"
+        );
+        assert!(
+            body.contains("&amp; `mirror_of = &quot;box&quot;`"),
+            "the ampersand and quote escape too: {body}"
         );
     }
 

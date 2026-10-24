@@ -323,6 +323,11 @@ pub(super) fn completeness_banner(data: &UiData) -> String {
 /// its age — a fully-synced mirror and a two-day-old one render the same
 /// colour and differ only in the sentence, and neither may read as a
 /// failure, because the reads still answer from a copy the machine holds.
+///
+/// The sentence escapes like every other interpolation here does: it is
+/// built from a configured destination name and LM-2's free-form
+/// `outcome_note`, so markup inside either must render as text — the same
+/// rule [`read_from_note`] and [`launch_banner`] already follow.
 pub(super) fn mirror_note(data: &UiData) -> String {
     let mut lines = Vec::new();
     for destination in &data.destinations {
@@ -331,11 +336,12 @@ pub(super) fn mirror_note(data: &UiData) -> String {
         };
         if data.destinations.len() > 1 {
             lines.push(format!(
-                "<p class=sub><b>{}</b> — {sentence}.</p>\n",
-                esc(&destination.label)
+                "<p class=sub><b>{}</b> — {}.</p>\n",
+                esc(&destination.label),
+                esc(sentence)
             ));
         } else {
-            lines.push(format!("<p class=sub>{sentence}.</p>\n"));
+            lines.push(format!("<p class=sub>{}</p>\n", esc(sentence)));
         }
     }
     lines.join("")

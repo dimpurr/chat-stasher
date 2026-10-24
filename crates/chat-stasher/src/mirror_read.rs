@@ -12,16 +12,36 @@
 //!   minutes ago) is an ordinary read from the remote (47 §3.6: the fallback
 //!   fetches from the source, and the result is correct either way). Writes
 //!   never touch the mirror; only `mirror sync` does.
+//! * **Absent and corrupt are different events.** The fallback leg exists
+//!   for a file the mirror *lacks* — a sync-progress fact the seam can see,
+//!   because the read errors and the remote answers, visibly. A file that
+//!   is corrupt rather than absent defeats the copy's own premise (the bytes
+//!   an id names, held under that id) and is deliberately a **hard failure,
+//!   never a silent remote retry**: a partial read cannot re-verify a
+//!   whole-file id, so detection does not belong in this seam; the damage
+//!   surfaces where decryption and re-hashing live, above it, and the read
+//!   stops honestly rather than fetch replacement bytes without saying so.
+//!   `verify`, remote-only, keeps answering the only integrity
+//!   certification a copy may not give itself (47 §5.5) — the tampered-
+//!   mirror test locks both halves: `read` over garbage fails, `verify`
+//!   still answers the remote.
 //! * **Listings answer remote-first.** "Which files exist" is the one question
 //!   a behind mirror must not answer for the remote: a snapshot the sync has
 //!   not pulled yet exists remotely, and a `search` that could not see it
 //!   would be *wrong*, not merely behind — the honesty razor cuts both ways
 //!   (behindness is surfaced, never guessed as completeness, and never
 //!   silently *shrinking* the truth either). So presence comes from the
-//!   remote while it can be asked, and falls back to the mirror only when the
-//!   listing *errors* — the offline read — which is counted and visible in
-//!   [`MirrorCounters`]. An empty successful listing is the remote's answer,
-//!   not an error, and is never overridden here.
+//!   remote while it can be asked, and falls back to the mirror when the
+//!   remote cannot answer at all — the offline listing that *errors* — or
+//!   answers a listing with **nothing in it**, both counted and visible in
+//!   [`MirrorCounters`]. The empty-answer leg is the degraded-source shape
+//!   ADR-062 D2 names: a destination wiped and made again at the same path
+//!   lists empty while the copy still holds the last synced set, and the
+//!   copy goes on serving it. A repository only ever lists empty for a
+//!   *reason* — the remote can be a brand-new repository with nothing
+//!   archived yet — and that is why the fallback concedes when the mirror
+//!   holds nothing of that type either: the remote's own answer, including
+//!   a genuine empty one, is what the caller gets.
 //! * **`config` is the one non-content-addressed file**, so it is read
 //!   remote-first with mirror fallback: a mid-fill mirror could hold yesterday's
 //!   `config` bytes, and one extra metadata read per open is the price of
@@ -78,16 +98,21 @@ pub struct MirrorCounters {
     pub mirror_reads: u64,
     /// Bytes those reads moved off the local disk.
     pub mirror_bytes: u64,
-    /// Files the mirror lacked, fetched from the remote (the 47 §3.6
-    /// fallback; every one of these kept the remote's connection budget in
-    /// play, so the count is the number that says "the mirror is behind in
-    /// exactly this many places right now").
+    /// Files read from the remote rather than the local copy: the 47
+    /// §3.6 fallback for a file the mirror lacks, plus the deliberate
+    /// remote-first `config` read (the one non-content-addressed file), so
+    /// a fully synced mirror online still reads one `config` from the
+    /// remote per open. Every one of these kept the remote's connection
+    /// budget in play; the number alone is never a claim that the mirror
+    /// was missing a file — the served line words it that way on purpose.
     pub remote_reads: u64,
-    /// Bytes the fallbacks fetched.
+    /// Bytes those reads fetched from the remote.
     pub remote_bytes: u64,
-    /// Listings the remote could not answer (offline, unreachable) that the
-    /// mirror answered instead — the read that still worked because of the
-    /// copy, and the reason its snapshot set is only as new as the last sync.
+    /// Listings the mirror answered when the remote would not — the
+    /// offline listing that errors, and the empty answer of a destination
+    /// wiped and recreated at the same path — the read that still worked
+    /// because of the copy, and the reason its snapshot set is only as
+    /// new as the last sync.
     pub mirror_listings: u64,
 }
 
@@ -131,12 +156,18 @@ impl MirrorReads {
 
     /// The one-line report of what served: the visible-status half of the
     /// fallback rule — a read that went around the mirror says so with the
-    /// numbers that describe it, never silently.
+    /// numbers that describe it, never silently. "read from the remote"
+    /// covers both kinds of crossing deliberately: a file the mirror lacks
+    /// (the 47 §3.6 fallback — counted, visible) and the remote-first
+    /// `config` read that never tried the mirror; wording the second as a
+    /// fallback would print "1 fell back" for a fully synced mirror that
+    /// was never missing a file, which is a line the read it describes
+    /// could not check out.
     #[must_use]
     pub fn served_line(&self) -> String {
         let counters = self.counters();
         format!(
-            "{} file(s) ({} B) from the local mirror, {} file(s) ({} B) fell back to the \
+            "{} file(s) ({} B) from the local mirror, {} file(s) ({} B) read from the \
              remote, {} listing(s) answered locally",
             counters.mirror_reads,
             counters.mirror_bytes,
@@ -172,9 +203,20 @@ pub enum MirrorReadDecision {
     /// human sentence that names what to change).
     Unusable { mirror_of: String, why: String },
     /// The mirror is on and usable, but this store is a different declared
-    /// destination (or an explicit `--repo` elsewhere): reading another copy
-    /// is not a mirror event, so this state is silent like `Unconfigured`.
+    /// destination (or an explicit `--repo` elsewhere): reading another
+    /// archive is not a mirror event, so this state is silent like
+    /// `Unconfigured`.
     OtherDestination,
+    /// The store resolves inside the copies directory
+    /// (`<data root>/mirror/<name>`, name in `name`): the command is
+    /// reading this machine's local copy **itself**, not the mirrored
+    /// destination's repository. Never serving — the copy has no copy of
+    /// its own to read first — and loud, because "reads the copy" is a
+    /// fact about every answer it returns. `verify` over this store is
+    /// the spelling the ADR's absolute wording hides: the copy *is* the
+    /// mirror, so the one line says a verdict here certifies the copy,
+    /// never the destination's repository (47 §5.5).
+    MirrorCopyItself { name: String },
     /// Enabled, usable, and this store resolves to the mirrored destination:
     /// reads go mirror-first with per-file fallback (ADR-062 D3 / 47 §5.5).
     Serving(Arc<MirrorReads>),
@@ -194,7 +236,7 @@ impl MirrorReadDecision {
     /// two states that are nobody's business (no section; another
     /// destination) — a machine that never configured a mirror must see no
     /// mirror noise on every read, and one that reads a second, un-mirrored
-    /// copy has not had a mirror event either.
+    /// archive has not had a mirror event either.
     #[must_use]
     pub fn state_line(&self) -> Option<String> {
         match self {
@@ -204,6 +246,11 @@ impl MirrorReadDecision {
             }
             Self::Unusable { why, .. } => Some(format!(
                 "unavailable ({why}); this command reads the remote"
+            )),
+            Self::MirrorCopyItself { name } => Some(format!(
+                "this store is the local mirror copy `{name}` itself — reads serve the copy, \
+                 and only the copy: `verify` here certifies `{name}`'s copy, never the \
+                 mirrored destination's repository"
             )),
             Self::Serving(reads) => Some(format!(
                 "first `{}` — the local copy serves what it holds; the remote answers what \
@@ -269,6 +316,16 @@ pub fn decide(config: &Config, resolved: &StoreConfig, data_root: &Path) -> Mirr
         }
     };
     if Path::new(&resolved.repo_root) != repo_root {
+        // One spelling inside that arm is not "another archive": a store
+        // under the copies directory is one of this machine's local
+        // copies, and reading it is reading the copy itself. Every
+        // mirror-aware command owes that one line — for `verify` it is
+        // also the spelling where silence would let a copy's verdict pass
+        // as the destination's own (47 §5.5: a copy may not certify
+        // itself).
+        if let Some(name) = mirror_copy_name(data_root, &resolved.repo_root) {
+            return MirrorReadDecision::MirrorCopyItself { name };
+        }
         return MirrorReadDecision::OtherDestination;
     }
     let mirror_root = mirror::mirror_dir(data_root, &settings.mirror_of);
@@ -284,6 +341,27 @@ pub fn decide(config: &Config, resolved: &StoreConfig, data_root: &Path) -> Mirr
         mirror_root,
         counters: CounterSet::default(),
     }))
+}
+
+/// The copy a resolved store names, when it is one of this data root's
+/// copies: the single path component below [`mirror::copies_dir`]. That
+/// component is the mirrored destination's name when the `[mirror]`
+/// section still names it — and stays the copy's own name when it does
+/// not, which is why the answer comes off the path and not the config: a
+/// copy that outlived its section still states itself. `None` for
+/// everything else, including a repository merely nested inside the
+/// copies directory, which the sync's layout never wrote.
+fn mirror_copy_name(data_root: &Path, repo_root: &str) -> Option<String> {
+    let relative = Path::new(repo_root)
+        .strip_prefix(mirror::copies_dir(data_root))
+        .ok()?;
+    // The layout is exactly `<copies dir>/<destination>`: deeper than one
+    // component is not a copy, so it reads as any other repository would.
+    if relative.components().count() != 1 {
+        return None;
+    }
+    let name = relative.components().next()?.as_os_str().to_str()?;
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -397,21 +475,22 @@ fn sync_hhmm(unix: u64) -> String {
 /// * `list_with_size` — remote first, mirror fallback on **error or an
 ///   empty answer** (both counted). A successful non-empty listing is the
 ///   remote's word about what exists, and a behind mirror must never
-///   shrink it (the honesty razor cuts both ways); but no file type this
-///   repository holds ever lists empty on a healthy source — a repository
-///   that can be opened has a config, keys, snapshots, an index — so an
-///   empty answer *is* the broken-source shape, and the mirror serving its
-///   last synced state there is exactly ADR-062 D2's degraded-source rule:
-///   the ADR-062 D2 degraded-source rule: when the mirrored destination
-///   breaks, the mirror stays at its last synced state and keeps serving
-///   reads. Online and healthy, the fallback never fires; the counter
+///   shrink it (the honesty razor cuts both ways). The empty-answer leg
+///   is the degraded-source shape ADR-062 D2 names: a destination wiped
+///   and recreated at the same path answers a listing with nothing while
+///   the copy still holds the last synced set, and the copy keeps serving
+///   it — which is also why the fallback concedes when the mirror holds
+///   nothing of that type either (see `list_with_size` below): the
+///   remote's own answer, including the genuine empty a brand-new
+///   repository owes its reader, is what the caller gets. The counter
 ///   makes every firing visible where the command reports itself.
 /// * `read_full` / `read_partial` — `config` remote-first with mirror
 ///   fallback (the one non-content-addressed file); every other type
-///   mirror-first with remote fallback (content-addressed files are the same
-///   bytes under the same name wherever they are read from). A body read
-///   through a body-cache-enabled store additionally consults the cache
-///   first, and stores only what the fallback fetched from the remote.
+///   mirror-first with remote fallback, and the fallback exists for a file
+///   the mirror *lacks*, never for a corrupt one — a damaged copy is a
+///   hard failure by the module rule above. A body read through a
+///   body-cache-enabled store additionally consults the cache first, and
+///   stores only what the fallback fetched from the remote.
 /// * writes, warm-ups and locations — the remote's, unchanged: this seam is
 ///   part of the *read* story and never mutates the mirror (only `mirror
 ///   sync` writes it).
@@ -458,6 +537,14 @@ impl MirrorFirstBackend {
     /// bytes and whether they came from the mirror, because ruling 7 keys on
     /// provenance and only the read itself can say where its bytes came from
     /// (a counter comparison could not, under rustic's read fan-out).
+    ///
+    /// The fallback leg exists for a file the mirror **lacks** — the read
+    /// errors, the remote answers, visibly. A file that is corrupt rather
+    /// than absent answers this read and the damage surfaces above the
+    /// seam, deliberately (the module header's absent-and-corrupt rule):
+    /// a partial read cannot re-verify a whole-file id, so the seam has no
+    /// honest way to detect bit-rot, and silently substituting the remote's
+    /// bytes for a lying disk is a repair nobody asked the read to make.
     fn read_local_first(
         &self,
         read: impl Fn(&dyn WriteBackend) -> rustic_core::RusticResult<bytes::Bytes>,
@@ -517,13 +604,14 @@ impl ReadBackend for MirrorFirstBackend {
             // while it can say it, and a behind mirror must never shrink it.
             return remote_answer;
         }
-        // An empty or erroneous answer is the broken-source shape: no file
-        // type this repository holds lists empty on a healthy source, so
-        // the mirror's last synced state is what reads run on here
-        // (ADR-062 D2's degraded-source rule), counted so the command's
-        // report says so. When the mirror holds nothing of this type either,
-        // the remote's own answer is what the caller gets — including the
-        // genuine "no repository" an empty remote owes its reader.
+        // The empty or erroneous answer is the degraded-source shape: a
+        // destination wiped and recreated at the same path lists nothing
+        // while the copy still holds the last synced set, so the mirror's
+        // answer is what reads run on here (ADR-062 D2), counted so the
+        // command's report says so. When the mirror holds nothing of this
+        // type either, the remote's own answer is what the caller gets —
+        // including the genuine "no repository" (or the brand-new, empty
+        // one) an empty remote owes its reader.
         match self.mirror.list_with_size(tpe) {
             Ok(mirror) if !mirror.is_empty() => {
                 self.reads
@@ -867,7 +955,10 @@ mod tests {
 
     /// `served_line`'s numbers are the counters the seam moved — the line a
     /// command prints after its reads must be checkable against the same
-    /// handle, so the visibility never drifts from the facts.
+    /// handle, so the visibility never drifts from the facts. That
+    /// standard covers the words as well as the counts: the remote-first
+    /// `config` read is one of `remote_reads`, so a line that called every
+    /// one of them a fallback would misdescribe a fully synced mirror.
     #[test]
     fn the_served_line_quotes_the_counters() {
         let (_dir, root) = temp_mirror("storagebox");
@@ -885,5 +976,148 @@ mod tests {
         assert!(line.contains("7 file(s)"), "{line}");
         assert!(line.contains("2 file(s)"), "{line}");
         assert!(line.contains("listing(s)"), "{line}");
+        assert!(
+            line.contains("read from the remote"),
+            "remote crossings are worded as reads, not fallbacks: {line}"
+        );
+        assert!(
+            !line.contains("fell back"),
+            "the config read is a deliberate crossing, and this line never claims which \
+             crossing was a fallback: {line}"
+        );
+        assert_eq!(
+            reads.counters(),
+            MirrorCounters {
+                mirror_reads: 7,
+                mirror_bytes: 700,
+                remote_reads: 2,
+                remote_bytes: 40,
+                mirror_listings: 1,
+            },
+            "the line above was built from exactly these counters"
+        );
+    }
+
+    /// A store that resolves inside the copies directory is the copy
+    /// itself, not "another destination": it is the one `--repo` spelling
+    /// that reads this machine's mirror, so it gets a line (for `verify`,
+    /// the line that keeps a verdict over the copy from passing as a
+    /// verdict over the destination) and never a seam handle — the copy
+    /// has no copy of its own. The name comes off the path, so a copy
+    /// that outlived its config section still states itself, and a
+    /// repository merely nested deeper in the directory is not a copy.
+    #[test]
+    fn a_store_inside_the_copies_dir_is_the_copy_itself() {
+        let enabled = true;
+        let (dir, _root) = temp_mirror("storagebox");
+        let data_root = dir.path();
+        let config = config_with(
+            &[("storagebox", "/remote/repo")],
+            Some((&enabled, "storagebox")),
+        );
+
+        let copy = crate::mirror::mirror_dir(data_root, "storagebox");
+        let decision = decide(&config, &resolved(&copy.to_string_lossy()), data_root);
+        match &decision {
+            MirrorReadDecision::MirrorCopyItself { name } => {
+                assert_eq!(name, "storagebox");
+                assert!(
+                    decision.handle().is_none(),
+                    "the copy never reads through a seam"
+                );
+            }
+            other => panic!("the copy's own path classifies as the copy, got {other:?}"),
+        }
+        let line = decision.state_line().unwrap_or_default();
+        assert!(
+            line.contains("local mirror copy `storagebox` itself"),
+            "the line names the copy under read: {line}"
+        );
+        assert!(
+            line.contains("verify"),
+            "the line states what a verdict over the copy certifies: {line}"
+        );
+
+        // A different copy in the same directory — a name the section does
+        // not declare — states itself too; the layout is what recognized
+        // it, not the section.
+        let retired = crate::mirror::mirror_dir(data_root, "retired-name");
+        let decision = decide(&config, &resolved(&retired.to_string_lossy()), data_root);
+        assert!(matches!(
+            decision,
+            MirrorReadDecision::MirrorCopyItself { name } if name == "retired-name"
+        ));
+
+        // Nested deeper than the layout: an ordinary other-destination
+        // read, silent as before.
+        let nested = retired.join("inner-repo");
+        let decision = decide(&config, &resolved(&nested.to_string_lossy()), data_root);
+        assert!(matches!(decision, MirrorReadDecision::OtherDestination));
+
+        // Just the copies directory itself is no repository the sync wrote;
+        // it stays the ordinary silent spelling.
+        let decision = decide(
+            &config,
+            &resolved(&crate::mirror::copies_dir(data_root).to_string_lossy()),
+            data_root,
+        );
+        assert!(matches!(decision, MirrorReadDecision::OtherDestination));
+    }
+
+    /// A corrupt mirror file is served as answered, never secretly
+    /// repaired: the fallback exists for absence (the read errors), and
+    /// bit-rot is deliberately a hard failure above the seam — a partial
+    /// read cannot re-verify a whole-file id, and substituting the
+    /// remote's bytes for a lying disk would read as healthy. This locks
+    /// the seam's half (garbage under a valid id is the mirror's answer,
+    /// counted as one); the tampered-mirror test in
+    /// `tests/mirror_read_test.rs` locks the command's half (the read
+    /// fails, `verify` still answers the remote).
+    #[test]
+    fn a_corrupt_mirror_file_is_served_as_answered_never_secretly_repaired() {
+        use rustic_core::Id;
+
+        let (_dir, root) = temp_mirror("storagebox");
+        // A real local backend over an empty directory plays the remote:
+        // it holds nothing, so any bytes this read returns can only have
+        // come from the copy.
+        let remote_dir = tempfile::tempdir().unwrap();
+        let options =
+            BackendOptions::default().repository(remote_dir.path().to_string_lossy().into_owned());
+        let remote: Arc<dyn WriteBackend> = options.to_backends().unwrap().repository();
+
+        let id: Id = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+            .parse()
+            .unwrap();
+        let garbage = vec![0xaau8; 17];
+        let shard = root.join("data").join("00");
+        std::fs::create_dir_all(&shard).unwrap();
+        std::fs::write(shard.join(id.to_hex().to_string()), &garbage).unwrap();
+
+        let reads = Arc::new(MirrorReads {
+            mirror_of: "storagebox".to_string(),
+            mirror_root: root,
+            counters: CounterSet::default(),
+        });
+        let backend = MirrorFirstBackend::wrap(remote, Arc::clone(&reads), None).unwrap();
+        let bytes = backend
+            .read_full(FileType::Pack, &id)
+            .expect("the copy answers this read, garbage and all");
+        assert_eq!(
+            bytes.to_vec(),
+            garbage,
+            "the seam returns the copy's bytes untouched — detection is not its job"
+        );
+        assert_eq!(
+            reads.counters(),
+            MirrorCounters {
+                mirror_reads: 1,
+                mirror_bytes: 17,
+                remote_reads: 0,
+                remote_bytes: 0,
+                mirror_listings: 0,
+            },
+            "the crossing never happened: one mirror read, nothing from the remote"
+        );
     }
 }
