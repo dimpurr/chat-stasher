@@ -1262,6 +1262,20 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
         // it, which is the ADR's own unification of the finding.
         match &facts.reclaim_share {
             ReclaimShare::NotBlocking => {}
+            // rev2 ①: a `not-mirrored` share names the destination that
+            // *answered* — it proved every session the record counts
+            // against it; the copy, not the destination, is why nothing
+            // was reclaimed — so it stays quiet at the alert level for the
+            // DegradedNotConsulted arm's reason (a second sentence for the
+            // same finding is how alarms stop being read, and the generic
+            // `why` ladder below would state a checksum disagreement
+            // nobody measured). The arm that words this hold-back is the
+            // mirror's own: the `[mirror]` count row the same reclaim
+            // record feeds, with the settled sentence, the `mirror sync`
+            // fix and a severity C2 already fixed — one wording, one
+            // blame. The fact stays visible where facts live: `doctor`'s
+            // table and `--json`, which carry the recorded kind verbatim.
+            ReclaimShare::Blocking { kind, .. } if kind == crate::mirror::HELD_BACK_KIND => {}
             ReclaimShare::Blocking {
                 kind,
                 error_kind,
@@ -1327,12 +1341,35 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
     {
         if attempt.outcome != crate::reclaimstate::ReclaimOutcome::Ok {
             let streak = attempt.consecutive_blocked;
-            let severity = if streak >= BLOCKED_STREAK_ALARM {
+            // rev2 ① / ADR-062 C2, applied to the streak the wired
+            // hold-back can grow: split the blocks by kind first. A
+            // `not-mirrored` block names a destination that *proved* every
+            // session it is counted against, so wording the streak's
+            // hold-back as "held back for {destination}" blames the one
+            // party that answered — and a first fill the weekly job keeps
+            // catching up with (or a copy the disk floor permanently
+            // refuses) must not be able to make the panel red either
+            // (C2: the mirror never raises a red on any surface). Only a
+            // block that is not the mirror's own earns the streak's red
+            // escalation; the mirror's half is worded by the settled
+            // sentence whichever shape the attempt has.
+            let mirror_blocks: Vec<&crate::reclaimstate::ReclaimBlock> = attempt
+                .blocked
+                .iter()
+                .filter(|block| block.kind == crate::mirror::HELD_BACK_KIND)
+                .collect();
+            let destination_blocks: Vec<&crate::reclaimstate::ReclaimBlock> = attempt
+                .blocked
+                .iter()
+                .filter(|block| block.kind != crate::mirror::HELD_BACK_KIND)
+                .collect();
+            let mirror_only = !mirror_blocks.is_empty() && destination_blocks.is_empty();
+            let severity = if streak >= BLOCKED_STREAK_ALARM && !mirror_only {
                 Severity::Red
             } else {
                 Severity::Yellow
             };
-            // The two empty-`blocked` shapes a non-Ok attempt can have,
+            // The three shapes a non-Ok attempt's `blocked` list can have,
             // which the record must keep apart (an unknown-never-empty
             // rule of its own):
             //
@@ -1350,6 +1387,16 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
             //   makes the shape checkable; the wording names the guard
             //   rather than a count nobody measured session-by-session.
             //
+            // * `Blocked` with only `not-mirrored` rows — the hold-back is
+            //   the mirror leg's own: the counts print like every blocked
+            //   run's, but the sentence after them is D6.3's settled one,
+            //   no destination is named as the one the bytes are "held
+            //   back for", and the fix is the round that frees the bytes
+            //   rather than the dry run, whose own recorded attempt would
+            //   advance this same streak. A mixed attempt keeps the
+            //   destination-blaming wording for its destination blocks and
+            //   appends the mirror's half worded by the same sentence.
+            //
             // Counts print only for the outcome that measured them, and
             // the refusal reason lives in this one line rather than in a
             // second, milder alert that would contradict its own severity.
@@ -1359,19 +1406,46 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                      were consulted"
                         .to_string()
                 }
+                (_, false) if mirror_only => {
+                    let held: usize = mirror_blocks.iter().map(|b| b.sessions).sum();
+                    let bytes: u64 = mirror_blocks.iter().map(|b| b.bytes).sum();
+                    format!(
+                        "{held} session(s) / {} held back — {}; the destination proved every \
+                         one of them, the `[mirror]` rows carry the count, and a completed \
+                         `mirror sync` round frees them",
+                        fmt_bytes(bytes),
+                        crate::mirror::HELD_BACK_SENTENCE,
+                    )
+                }
                 (_, false) => {
-                    let held: usize = attempt.blocked.iter().map(|b| b.sessions).sum();
-                    let bytes: u64 = attempt.blocked.iter().map(|b| b.bytes).sum();
-                    let destinations_held: Vec<&str> = attempt
-                        .blocked
+                    let held: usize = destination_blocks.iter().map(|b| b.sessions).sum();
+                    let bytes: u64 = destination_blocks.iter().map(|b| b.bytes).sum();
+                    let destinations_held: Vec<&str> = destination_blocks
                         .iter()
                         .map(|b| b.destination.as_str())
                         .collect();
-                    format!(
+                    let words = format!(
                         "{held} session(s) / {} held back for {}",
                         fmt_bytes(bytes),
                         destinations_held.join(", ")
-                    )
+                    );
+                    if mirror_blocks.is_empty() {
+                        words
+                    } else {
+                        // The mirroring destination is not folded into the
+                        // blame list above: its blocks are the mirror's
+                        // hold, worded by the settled sentence so the red
+                        // headline never states a destination's verdict a
+                        // record never measured.
+                        let mirror_held: usize = mirror_blocks.iter().map(|b| b.sessions).sum();
+                        let mirror_bytes: u64 = mirror_blocks.iter().map(|b| b.bytes).sum();
+                        format!(
+                            "{words}; {mirror_held} session(s) / {} held back — {} (the \
+                             `[mirror]` rows carry the count)",
+                            fmt_bytes(mirror_bytes),
+                            crate::mirror::HELD_BACK_SENTENCE,
+                        )
+                    }
                 }
                 (_, true) => {
                     // A `Blocked` attempt whose per-destination list is
@@ -1408,17 +1482,26 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
             } else {
                 format!("blocked {streak} times in a row")
             };
+            // Symptom and cure have to agree: the generic fix sends the
+            // user to the dry run, whose own recorded attempt advances
+            // this same streak — the loop the dry run exists to break for
+            // a destination's failure is one it feeds when the mirror is
+            // the whole finding. The mirror-only streak points at the
+            // round that frees the bytes instead.
+            let fix = if mirror_only {
+                "chat-stasher mirror sync   # one more round; a completed round takes the copy \
+                 over the proof's snapshots, then the next weekly clean-up frees the body"
+            } else {
+                "chat-stasher reclaim-stage --stage <stage>   # dry run: names the destination \
+                 and the reason in its output"
+            };
             reconciliation.job_alerts.push(Alert {
                 severity,
                 sentence: format!(
                     "[reclaim] the weekly stage clean-up is {noun} — {held_back}; nothing was \
                      deleted and the stage keeps every byte it archives"
                 ),
-                fix: Some(
-                    "chat-stasher reclaim-stage --stage <stage>   # dry run: names the \
-                     destination and the reason in its output"
-                        .to_string(),
-                ),
+                fix: Some(fix.to_string()),
             });
         }
     }
@@ -2152,6 +2235,20 @@ pub fn doctor_lines(r: &Reconciliation) -> Vec<String> {
             "    reclaim share  : {}",
             match &facts.reclaim_share {
                 ReclaimShare::NotBlocking => "not blocking the weekly reclaim".to_string(),
+                // rev2 ①: `not-mirrored` is the mirror leg's hold on the
+                // bytes, not this destination's verdict — the table says
+                // so rather than reading "blocking" against a destination
+                // that proved every session.
+                ReclaimShare::Blocking {
+                    kind,
+                    sessions,
+                    bytes,
+                    ..
+                } if kind == crate::mirror::HELD_BACK_KIND => format!(
+                    "held back by the local copy ({kind}) — {sessions} session(s) / {} held \
+                     back",
+                    fmt_bytes(*bytes)
+                ),
                 ReclaimShare::Blocking {
                     kind,
                     sessions,
@@ -2507,6 +2604,183 @@ mod tests {
             .cloned()
             .expect("a first blocked week carries the streak alert");
         assert_eq!(streak.severity, Severity::Yellow);
+    }
+
+    /// rev2 ① (the High): a streak the mirror leg alone keeps alive is
+    /// direction, never destination blame. A `not-mirrored` block names a
+    /// destination that *proved* every session it is counted against —
+    /// the copy, not the destination, is why nothing was reclaimed — so
+    /// the streak alert must word the mirror (C2's "never a red", plus no
+    /// "held back for <destination>" about a healthy destination) and
+    /// must not send the user to the dry run whose own recorded attempt
+    /// would advance this same streak.
+    #[test]
+    fn a_mirror_only_streak_words_the_mirror_and_stays_yellow() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        plant_units(home.path(), None);
+        let config = config_with_two("storagebox", "r2");
+        let mirrored_back = |finished_at: u64| crate::reclaimstate::ReclaimAttempt {
+            version: crate::reclaimstate::RECLAIM_STATE_VERSION,
+            finished_at_unix: finished_at,
+            apply: true,
+            outcome: crate::reclaimstate::ReclaimOutcome::Blocked,
+            blocked: vec![crate::reclaimstate::ReclaimBlock {
+                destination: "storagebox".to_string(),
+                kind: crate::mirror::HELD_BACK_KIND.to_string(),
+                error_kind: None,
+                sessions: 3,
+                bytes: 2_048,
+            }],
+            destination_health: None,
+            consecutive_blocked: 0,
+            candidates: Some(3),
+            candidate_bytes: Some(2_048),
+        };
+        let state_dir = state.path();
+        crate::reclaimstate::record(state_dir, &mirrored_back(1_750_000_000)).unwrap();
+        crate::reclaimstate::record(state_dir, &mirrored_back(1_750_100_000)).unwrap();
+
+        let out = reconcile(&Inputs {
+            config: &config,
+            format: Format::Launchd,
+            home: home.path(),
+            state_dir,
+            now_unix: 1_750_100_200,
+            scheduler_readable: true,
+            stage: None,
+        });
+        let all_alerts = out.all_alerts();
+        let messages = all_alerts
+            .iter()
+            .map(|a| (a.severity, a.sentence.as_str()))
+            .collect::<Vec<_>>();
+        let streak = all_alerts
+            .iter()
+            .find(|a| a.sentence.contains("[reclaim] the weekly stage clean-up"))
+            .cloned()
+            .expect("the mirror-held streak still carries the job alert");
+        assert_eq!(
+            streak.severity,
+            Severity::Yellow,
+            "a first fill — or a copy the disk floor refuses — must not make the panel \
+             red (ADR-062 C2), whatever the streak: {messages:?}"
+        );
+        assert!(
+            streak.sentence.contains("blocked 2 times in a row"),
+            "the streak itself stays a fact: {}",
+            streak.sentence
+        );
+        assert!(
+            streak.sentence.contains(crate::mirror::HELD_BACK_SENTENCE),
+            "the hold-back is worded with the one spelling (D6.3), never namelessly: {}",
+            streak.sentence
+        );
+        assert!(
+            streak.sentence.contains("3 session(s)"),
+            "the count the mirror rows promise rides the streak too: {}",
+            streak.sentence
+        );
+        assert!(
+            !streak.sentence.contains("storagebox"),
+            "the mirroring destination proved every session; no sentence about it may \
+             word the block as its verdict: {}",
+            streak.sentence
+        );
+        let fix = streak.fix.as_deref().unwrap_or_default();
+        assert!(
+            fix.contains("mirror sync") && !fix.contains("reclaim-stage"),
+            "diagnosing with the dry run would record another blocked attempt and \
+             advance this same streak; the fix must be the round that frees the bytes: {fix}"
+        );
+        assert!(
+            !all_alerts
+                .iter()
+                .any(|a| a.sentence.contains("[reclaim] blocked by `storagebox`")),
+            "the healthy destination must not carry a per-destination block alert either: \
+             {messages:?}"
+        );
+    }
+
+    /// rev2 ①, the mixed shape: when some blocks are the mirror's and some
+    /// are a destination's own failure, C2's escalation keeps answering the
+    /// genuine failure — the red is exactly what a `not-mirrored` block
+    /// never earned — and the mirrored destination stays out of the "held
+    /// back for" blame list, worded by the mirror's own spelling instead.
+    #[test]
+    fn a_mixed_streak_blames_only_the_destination_that_failed() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        plant_units(home.path(), None);
+        let config = config_with_two("storagebox", "r2");
+        let mixed = |finished_at: u64| crate::reclaimstate::ReclaimAttempt {
+            version: crate::reclaimstate::RECLAIM_STATE_VERSION,
+            finished_at_unix: finished_at,
+            apply: true,
+            outcome: crate::reclaimstate::ReclaimOutcome::Blocked,
+            blocked: vec![
+                crate::reclaimstate::ReclaimBlock {
+                    destination: "r2".to_string(),
+                    kind: "unreachable".to_string(),
+                    error_kind: Some("credentials_missing_or_invalid".to_string()),
+                    sessions: 9_869,
+                    bytes: 12_900_000_000,
+                },
+                crate::reclaimstate::ReclaimBlock {
+                    destination: "storagebox".to_string(),
+                    kind: crate::mirror::HELD_BACK_KIND.to_string(),
+                    error_kind: None,
+                    sessions: 3,
+                    bytes: 2_048,
+                },
+            ],
+            destination_health: None,
+            consecutive_blocked: 0,
+            candidates: Some(9_872),
+            candidate_bytes: Some(12_900_002_048),
+        };
+        let state_dir = state.path();
+        crate::reclaimstate::record(state_dir, &mixed(1_750_000_000)).unwrap();
+        crate::reclaimstate::record(state_dir, &mixed(1_750_100_000)).unwrap();
+
+        let out = reconcile(&Inputs {
+            config: &config,
+            format: Format::Launchd,
+            home: home.path(),
+            state_dir,
+            now_unix: 1_750_100_200,
+            scheduler_readable: true,
+            stage: None,
+        });
+        let streak = out
+            .all_alerts()
+            .iter()
+            .find(|a| a.sentence.contains("[reclaim] the weekly stage clean-up"))
+            .cloned()
+            .expect("streak alert");
+        assert_eq!(
+            streak.severity,
+            Severity::Red,
+            "a destination that genuinely cannot be read keeps C2's red escalation: {}",
+            streak.sentence
+        );
+        assert!(
+            streak.sentence.contains("held back for r2"),
+            "the failing destination is named as the one that holds the bytes: {}",
+            streak.sentence
+        );
+        assert!(
+            !streak.sentence.contains("held back for r2, storagebox"),
+            "the mirrored, proven destination is not folded into the blame list: {}",
+            streak.sentence
+        );
+        assert!(
+            streak.sentence.contains(crate::mirror::HELD_BACK_SENTENCE),
+            "the mirror's half of the hold-back is worded by the mirror's spelling: {}",
+            streak.sentence
+        );
     }
 
     /// A config declaring two destinations, for the install-warning tests

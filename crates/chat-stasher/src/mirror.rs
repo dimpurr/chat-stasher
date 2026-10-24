@@ -1734,6 +1734,38 @@ pub struct MirrorStatus {
     pub rows: Vec<MirrorRow>,
 }
 
+/// The hold-back count row the rows family promises, read from the
+/// reclaim's own durable record — shared by every state that words a
+/// hold-back: the main ladder, the gone-copy return and the
+/// not-declared return (rev2 ③: those two exits before this read used
+/// to leave "reclaim holds sessions back" with no number in exactly the
+/// states where the hold-back is total — a deleted copy holds every
+/// candidate back, which is why the worst case was the one the sentence
+/// could not quantify). Only a `not-mirrored` block against this
+/// destination counts; the row is yellow and never red (ADR-062 C2),
+/// and the sentence is [`HELD_BACK_SENTENCE`], the one spelling every
+/// surface repeats (ruling 8).
+fn held_back_count_row(state_dir: &Path, mirror_of: &str) -> Option<MirrorRow> {
+    let crate::reclaimstate::ReclaimStateRead::Present(attempt) =
+        crate::reclaimstate::load(state_dir)
+    else {
+        return None;
+    };
+    let held_back: usize = attempt
+        .blocked
+        .iter()
+        .filter(|block| block.kind == HELD_BACK_KIND && block.destination == mirror_of)
+        .map(|block| block.sessions)
+        .sum();
+    (held_back > 0).then(|| MirrorRow {
+        severity: MirrorRowSeverity::Yellow,
+        sentence: format!(
+            "[mirror] reclaim holds {held_back} session(s) back — {HELD_BACK_SENTENCE}; \
+             a completed `mirror sync` round frees them",
+        ),
+    })
+}
+
 /// The mirror's whole status, one computation for all three surfaces
 /// (ADR-062 D3/D6.3, LM-4). `now_unix` is supplied by the caller — the
 /// same wall clock `status` stamps its own run state with — so the age
@@ -1939,6 +1971,13 @@ pub fn mirror_status(
                 settings.mirror_of
             ),
         });
+        // rev2 ③: the count promise holds here too — the leg only binds a
+        // destination the run consulted (D3), so a count in this state
+        // comes from an attempt that predates the config edit, and the
+        // record — not the config — is what says it.
+        if let Some(row) = held_back_count_row(state_dir, &settings.mirror_of) {
+            rows.push(row);
+        }
         return MirrorStatus {
             configured: true,
             enabled: true,
@@ -1983,6 +2022,13 @@ pub fn mirror_status(
                 settings.mirror_of
             ),
         });
+        // rev2 ③: the row above words the hold-back, so the count it
+        // promises rides it here too — the leg holds everything back in
+        // this state, and the reclaim's own record is where the number
+        // comes from, not the absent directory.
+        if let Some(row) = held_back_count_row(state_dir, &settings.mirror_of) {
+            rows.push(row);
+        }
         return MirrorStatus {
             configured: true,
             enabled: true,
@@ -2171,33 +2217,25 @@ pub fn mirror_status(
         }
     }
     // rev0 ① / ADR-062 C2's other half: "reclaim holds sessions back"
-    // carries its count. The one data source that cannot disagree with the
-    // run is the reclaim's own durable record (reclaimstate, written after
-    // every attempt); when its latest attempt holds sessions back against
-    // this destination as `not-mirrored`, that count and
-    // [`HELD_BACK_SENTENCE`] ride the rows beside the facts — the same
-    // sentence `status`, `doctor` and the menu bar print, so the promise's
-    // number is one computation like every other row. Only the wired kind
-    // counts: a network block names its own surfaces and is not a mirror
-    // fact.
-    if let crate::reclaimstate::ReclaimStateRead::Present(attempt) =
-        crate::reclaimstate::load(state_dir)
-    {
-        let held_back: usize = attempt
-            .blocked
-            .iter()
-            .filter(|block| block.kind == HELD_BACK_KIND && block.destination == settings.mirror_of)
-            .map(|block| block.sessions)
-            .sum();
-        if held_back > 0 {
-            rows.push(MirrorRow {
-                severity: MirrorRowSeverity::Yellow,
-                sentence: format!(
-                    "[mirror] reclaim holds {held_back} session(s) back — {HELD_BACK_SENTENCE}; \
-                     a completed `mirror sync` round frees them",
-                ),
-            });
-        }
+    // carries its count, read in *every* state that words a hold-back
+    // (rev2 ③: the gone-copy and not-declared returns exit before the
+    // count used to be computed, and the gone copy — the state where the
+    // hold-back is total, because the leg holds everything back — was
+    // the one the sentence could not quantify). The one data source that
+    // cannot disagree with the run is the reclaim's own durable record
+    // (reclaimstate, written after every attempt); when its latest
+    // attempt holds sessions back against this destination as
+    // `not-mirrored`, that count and [`HELD_BACK_SENTENCE`] ride the rows
+    // beside the facts — the same sentence `status`, `doctor` and the
+    // menu bar print, so the promise's number is one computation like
+    // every other row. Only the wired kind counts: a network block names
+    // its own surfaces and is not a mirror fact, and the leg binds only a
+    // destination the run consulted (D3) — though a record can still name
+    // this destination from a consult that predates a config edit, which
+    // is one more reason the count is read from the record rather than
+    // inferred from the config.
+    if let Some(row) = held_back_count_row(state_dir, &settings.mirror_of) {
+        rows.push(row);
     }
     MirrorStatus {
         configured: true,
@@ -2214,10 +2252,13 @@ pub fn mirror_status(
 
 /// The mirror's advisory lines for `status` — the rows
 /// [`mirror_status`] words, unwrapped, in the same family as
-/// [`crate::doctor::key_alert_lines`]: empty when the machine has no
-/// mirror or the switch is off, a first fill phrased as progress and
-/// never as red (ADR-062 C2), and the LM-4 steady row for the completed,
-/// healthy copy.
+/// [`crate::doctor::key_alert_lines`]: empty when the machine declares
+/// no `[mirror]` section; with the section present but the switch off,
+/// the one row it can yield is the leftover copy's inventory fact
+/// (rev0 ⑧ — bytes on this machine's disk stay a fact whoever syncs),
+/// so "off" is not silence when a leftover copy exists. A first fill is
+/// phrased as progress and never as red (ADR-062 C2), and the LM-4
+/// steady row for the completed, healthy copy.
 #[must_use]
 pub fn mirror_status_lines(config: &Config, data_root: &Path, state_dir: &Path) -> Vec<String> {
     let now_unix = std::time::SystemTime::now()

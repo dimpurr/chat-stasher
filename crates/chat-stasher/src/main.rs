@@ -13091,8 +13091,14 @@ fn cmd_reclaim_stage(
                 // grow a second wording for the same hold-back.
                 BlockedKind::NotMirrored => chat_stasher::mirror::HELD_BACK_SENTENCE.to_string(),
             };
+            // rev2 ⑤: the colon ends the destination's noun phrase, so
+            // each kind's word reads as an assertion about it —
+            // predicate ("does not hold the archived session(s)") or
+            // whole sentence (`HELD_BACK_SENTENCE`, whose own subject is
+            // the mirror, which is why it cannot follow the bare
+            // juxtaposition the sibling words can).
             println!(
-                "  blocked: destination \"{}\" {word} — {} session(s) / {} held back",
+                "  blocked: destination \"{}\": {word} — {} session(s) / {} held back",
                 block.destination,
                 block.sessions,
                 fmt_bytes(block.bytes)

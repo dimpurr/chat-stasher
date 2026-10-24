@@ -782,6 +782,57 @@ final class StatusTests: XCTestCase {
                        "a refusal's backlog is never a zero: \(payload?.body ?? "")")
     }
 
+    /// rev2 ①: the notification's "Blocked for" list may name only a
+    /// destination whose own failure holds the reclaim. A hold-back the
+    /// mirror leg recorded (`not-mirrored`) names a destination that
+    /// *proved* every session it is counted against, so a mirror-only
+    /// streak words the local mirror instead — the same redirection the
+    /// CLI's streak alert does (C2: the mirror never raises a red, and a
+    /// healthy destination is never the one the bytes are "held back
+    /// for"). A mixed record keeps the failing destination in the list
+    /// and never folds the mirroring one into it.
+    func testAMirrorHeldStreakNamesNoDestination() {
+        func mirrorHeld(streak: Int, sessions: Int? = 3) -> ReclaimState {
+            ReclaimState(kind: "known", state: "blocked", consecutiveBlocked: streak,
+                         finishedAtUnix: 1_750_100_000,
+                         heldBackSessions: sessions, heldBackBytes: 2_048,
+                         blocked: [ReclaimBlockedDestination(destination: "storagebox", kind: "not-mirrored",
+                                                             sessions: sessions, bytes: 2_048, errorKind: nil)],
+                         unitInstalled: true, why: nil, blockedStreakAlarm: 2)
+        }
+        let payload = reclaimNotificationPayload(reclaim: mirrorHeld(streak: 2), notifiedStreak: 0, blockedStreakAlarm: 2)
+        XCTAssertNotNil(payload, "the streak is still a notification-worthy fact: the stage keeps growing")
+        let body = payload?.body ?? ""
+        XCTAssertFalse(body.contains("Blocked for:"),
+                       "no destination may be named as the one the bytes are held back for: \(body)")
+        XCTAssertFalse(body.contains("storagebox"),
+                       "the mirror's destination proved every session it is counted against: \(body)")
+        XCTAssertTrue(body.contains("local mirror"),
+                      "the hold-back is worded as the copy's, not a destination's verdict: \(body)")
+        XCTAssertTrue(body.contains("3 conversation files"),
+                      "the machine's own numbers still travel: \(body)")
+
+        let mixed = ReclaimState(kind: "known", state: "blocked", consecutiveBlocked: 2,
+                                 finishedAtUnix: 1_750_100_000,
+                                 heldBackSessions: 9_872, heldBackBytes: 12_900_002_048,
+                                 blocked: [
+                                    ReclaimBlockedDestination(destination: "r2", kind: "unreachable",
+                                                              sessions: 9_869, bytes: 12_900_000_000,
+                                                              errorKind: "credentials_missing_or_invalid"),
+                                    ReclaimBlockedDestination(destination: "storagebox", kind: "not-mirrored",
+                                                              sessions: 3, bytes: 2_048, errorKind: nil),
+                                 ],
+                                 unitInstalled: true, why: nil, blockedStreakAlarm: 2)
+        let mixedPayload = reclaimNotificationPayload(reclaim: mixed, notifiedStreak: 0, blockedStreakAlarm: 2)
+        let mixedBody = mixedPayload?.body ?? ""
+        XCTAssertTrue(mixedBody.contains("Blocked for: r2."),
+                      "the destination that genuinely failed stays named: \(mixedBody)")
+        XCTAssertFalse(mixedBody.contains("Blocked for: r2, storagebox"),
+                       "the mirroring destination never joins the blame list: \(mixedBody)")
+        XCTAssertTrue(mixedBody.contains("local mirror"),
+                      "the mirror's half is worded as the copy's: \(mixedBody)")
+    }
+
     /// M2 · one identity per blocked *episode*: the attempt that first
     /// crossed the threshold names the notification. Inside an episode
     /// the marker (not the identifier) keeps the app quiet; a *later*
@@ -867,7 +918,7 @@ errorKind: "credentials_missing_or_invalid")],
                             "last_sync":{"kind":"known","unix":1800000000},
                             "snapshots_behind":{"kind":"known","count":0},
                             "orphans":{"kind":"known","files":3,"bytes":131072},
-                            "rows":[{"severity":"info","sentence":"[mirror] local copy of `storagebox`: 6.0 GiB (6,442,450,944 B) across 47 file(s), last sync 2026-10-24 13:05 UTC (2 hours ago), 0 snapshot(s) behind, 3 orphan file(s) (128.0 KiB reclaimable)"}]}}}
+                             "rows":[{"severity":"info","sentence":"[mirror] local copy of `storagebox`: 6.0 GiB (6442450944 B) across 47 file(s), last sync 2026-10-24 13:05 UTC (2 hours ago), 0 snapshot(s) behind, 3 orphan file(s) (128.0 KiB reclaimable)"}]}}}
         """.data(using: .utf8)!
         let document = try JSONDecoder().decode(StatusDocument.self, from: withAlerts)
         let local = try XCTUnwrap(document.local, "the machinery facts live in the local layer")
@@ -926,8 +977,8 @@ errorKind: "credentials_missing_or_invalid")],
     func testMirrorWarningsOutrankASilentMachineButNotDestAlerts() {
         var local = cleanLocal
         local.mirrorRows = [
-            MirrorRowDoc(severity: "info", sentence: "[mirror] first sync of `storagebox` in progress: 42% (2,616,000,000 of 6,221,000,000) — reclaim holds sessions back until it completes; rounds end by budget, disk floor or reachability, none of which is a failure"),
-            MirrorRowDoc(severity: "yellow", sentence: "[mirror] the last mirror round failed at 68% (4,233,000,000 of 6,221,000,000): the destination could not be read mid-fill (a read error) — the next round resumes only after the cause is fixed"),
+            MirrorRowDoc(severity: "info", sentence: "[mirror] first sync of `storagebox` in progress: 42% (2616000000 of 6221000000) — reclaim holds sessions back until it completes; rounds end by budget, disk floor or reachability, none of which is a failure"),
+            MirrorRowDoc(severity: "yellow", sentence: "[mirror] the last mirror round failed at 68% (4233000000 of 6221000000): the destination could not be read mid-fill (a read error); the raw error is not recorded in state files — the next round resumes only after the cause is fixed; reclaim holds sessions back until a round completes"),
         ]
         let quietAge = snapshot(age: 9 * 86_400)
         let status = archiveStatus(snapshot: quietAge, local: local, failure: nil, now: now)
@@ -951,8 +1002,8 @@ errorKind: "credentials_missing_or_invalid")],
     func testMirrorInfoRowsNeverEnterTheStatusLadder() {
         var local = cleanLocal
         local.mirrorRows = [
-            MirrorRowDoc(severity: "info", sentence: "[mirror] local copy of `storagebox`: 6.0 GiB (6,442,450,944 B) across 47 file(s), last sync 2026-10-24 13:05 UTC (2 hours ago), 0 snapshot(s) behind, 0 orphan file(s) (0 B reclaimable)"),
-            MirrorRowDoc(severity: "info", sentence: "[mirror] first sync of `storagebox-v2` in progress: 42% (2,616,000,000 of 6,221,000,000) — reclaim holds sessions back until it completes; rounds end by budget, disk floor or reachability, none of which is a failure"),
+            MirrorRowDoc(severity: "info", sentence: "[mirror] local copy of `storagebox`: 6.0 GiB (6442450944 B) across 47 file(s), last sync 2026-10-24 13:05 UTC (2 hours ago), 0 snapshot(s) behind, 0 orphan file(s) (0 B reclaimable)"),
+            MirrorRowDoc(severity: "info", sentence: "[mirror] first sync of `storagebox-v2` in progress: 42% (2616000000 of 6221000000) — reclaim holds sessions back until it completes; rounds end by budget, disk floor or reachability, none of which is a failure"),
         ]
         let status = archiveStatus(snapshot: snapshot(), local: local, failure: nil, now: now)
         guard case .healthy = status else {

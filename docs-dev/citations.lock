@@ -841,22 +841,22 @@ crates/chat-stasher/src/main.rs:10805-10810  13896e8d543a  lines=6
   <- SECURITY.md:70, docs-dev/threat-model.md:869  :: eprintln!("push: cannot check stage metadata: {e:#}");
 crates/chat-stasher/src/main.rs:11243-11429  b256db959826  lines=187
   <- docs-dev/threat-model.md:933  :: let destination = destination.or_else(|| {
-crates/chat-stasher/src/main.rs:15987-16038  948cc713bff0  lines=52
-  <- docs-dev/install.md:306  :: "index mtime must advance on rebuild"
-crates/chat-stasher/src/main.rs:15987-15998  9bad804ce7fe  lines=12
-  <- docs-dev/install.md:1037  :: "index mtime must advance on rebuild"
-crates/chat-stasher/src/main.rs:16767-16781  4627ca5d8ff0  lines=15
-  <- docs-dev/install.md:630  :: // same way WIZ-1 names `stage`: only when the step was act…
-crates/chat-stasher/src/main.rs:17204-17211  a123a5eae3c6  lines=8
-  <- docs-dev/install.md:629  :: ///
-crates/chat-stasher/src/main.rs:20078-20085  0374a8563040  lines=8
-  <- docs-dev/install.md:1027  :: value.clear();
-crates/chat-stasher/src/main.rs:20103-20104  7c67e8ddf6c6  lines=2
-  <- docs-dev/install.md:998  :: Ok(config) => config,
-crates/chat-stasher/src/main.rs:20611-20612  4251c1672d4c  lines=2
-  <- docs-dev/install.md:993  :: "destinations".to_string(),
-crates/chat-stasher/src/main.rs:20703-20710  a43d687c3ef0  lines=8
-  <- docs-dev/install.md:1014  :: if let Some(scanner_object) = scanner_value.as_object_mut()…
+crates/chat-stasher/src/main.rs:15987-16038  eb6db4f4050d  lines=52
+  <- docs-dev/install.md:306  :: "a stale index must be replaced, not kept: {content}"
+crates/chat-stasher/src/main.rs:15987-15998  8f911ffc9cf6  lines=12
+  <- docs-dev/install.md:1037  :: "a stale index must be replaced, not kept: {content}"
+crates/chat-stasher/src/main.rs:16767-16781  da484ba556b2  lines=15
+  <- docs-dev/install.md:630  :: `dest-init`) — the destination block itself does not have t…
+crates/chat-stasher/src/main.rs:17204-17211  c5ec574f3326  lines=8
+  <- docs-dev/install.md:629  :: )
+crates/chat-stasher/src/main.rs:20078-20085  9cd8be148a6b  lines=8
+  <- docs-dev/install.md:1027  :: render_status(report, false)
+crates/chat-stasher/src/main.rs:20103-20104  d745898fe057  lines=2
+  <- docs-dev/install.md:998  :: // would answer "is my timer healthy?" from a machine the t…
+crates/chat-stasher/src/main.rs:20611-20612  f5217dab38af  lines=2
+  <- docs-dev/install.md:993  :: // them. `destinations` and `reclaim` are the machine-reada…
+crates/chat-stasher/src/main.rs:20703-20710  7df1b5962a59  lines=8
+  <- docs-dev/install.md:1014  :: };
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:440, docs-dev/threat-model.md:722  :: //! ADR-022: content-addressed hash tracking for stage meta…
 crates/chat-stasher/src/mirror.rs:1-16  fe152090ebb3  lines=16

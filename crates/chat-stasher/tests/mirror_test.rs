@@ -1603,6 +1603,140 @@ fn a_gone_mirror_directory_with_records_reads_absent_not_healthy_empty() {
     assert_eq!(json["rows"][0]["severity"], serde_json::json!("yellow"));
 }
 
+/// rev2 ③: the gone-copy state is the one where the hold-back is total
+/// (the leg holds every candidate back with no directory to vouch for
+/// any of them), and it exited before the count row used to be read —
+/// so the gone-copy row must not have to word "reclaim holds sessions
+/// back" with no number when the reclaim's own record carries it.
+#[test]
+fn the_gone_copy_row_carries_the_hold_back_count_too() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let state_dir = sb.path().join("state");
+    let data_root = sb.path().join("data");
+    fs::create_dir_all(&state_dir).unwrap();
+
+    write_state_record(
+        &state_dir,
+        &mirrorstate::MirrorState {
+            version: mirrorstate::MIRROR_STATE_VERSION,
+            finished_at_unix: 1_800_000_000,
+            mirror_of: "storagebox".to_string(),
+            closure_complete: BTreeSet::new(),
+            snapshots_on_remote: 1,
+            remote_total_bytes: 4096,
+        },
+    );
+    write_progress_record(
+        &state_dir,
+        &mirror::MirrorProgress {
+            version: mirror::MIRROR_PROGRESS_VERSION,
+            mirror_of: "storagebox".to_string(),
+            round_finished_at_unix: 1_800_000_000,
+            complete: true,
+            outcome: "complete".to_string(),
+            outcome_note: None,
+            remote_total_bytes: 4096,
+            mirror_bytes: 4096,
+            remote_files: 9,
+            mirror_files: 9,
+            orphan_files: Some(0),
+            orphan_bytes: Some(0),
+        },
+    );
+    write_reclaim_record(
+        &state_dir,
+        &reclaim_attempt_blocked(vec![chat_stasher::reclaimstate::ReclaimBlock {
+            destination: "storagebox".to_string(),
+            kind: mirror::HELD_BACK_KIND.to_string(),
+            error_kind: None,
+            sessions: 2,
+            bytes: 2_048,
+        }]),
+    );
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &data_root, &state_dir, 1_800_000_000);
+    assert_eq!(
+        status.rows.len(),
+        2,
+        "the gone row plus the count it promised: {status:?}"
+    );
+    assert!(
+        status.rows[0]
+            .sentence
+            .contains("no local copy of `storagebox` is on disk"),
+        "the gone-copy row still words the state: {}",
+        status.rows[0].sentence
+    );
+    let count_row = &status.rows[1];
+    assert_eq!(count_row.severity, mirror::MirrorRowSeverity::Yellow);
+    assert!(
+        count_row
+            .sentence
+            .contains("reclaim holds 2 session(s) back"),
+        "the total hold-back carries its number: {}",
+        count_row.sentence
+    );
+    assert!(
+        count_row.sentence.contains(mirror::HELD_BACK_SENTENCE),
+        "{}",
+        count_row.sentence
+    );
+    let json = status_json(&config, &data_root, &state_dir, 1_800_000_000);
+    assert_eq!(
+        json["rows"][1]["sentence"].as_str(),
+        Some(count_row.sentence.as_str()),
+        "the count row travels the same rows field the menu bar decodes"
+    );
+}
+
+/// rev2 ③, the not-declared arm: the leg binds only a destination the
+/// run consulted (D3), so a count here comes from an attempt that
+/// predates the config edit — and the record, not the config, is what
+/// says it. The promised number must not vanish with the declaration.
+#[test]
+fn the_not_declared_row_carries_the_hold_back_count_too() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let state_dir = sb.path().join("state");
+    let data_root = sb.path().join("data");
+    fs::create_dir_all(&state_dir).unwrap();
+
+    write_reclaim_record(
+        &state_dir,
+        &reclaim_attempt_blocked(vec![chat_stasher::reclaimstate::ReclaimBlock {
+            destination: "storagebox".to_string(),
+            kind: mirror::HELD_BACK_KIND.to_string(),
+            error_kind: None,
+            sessions: 2,
+            bytes: 2_048,
+        }]),
+    );
+
+    let raw = "[destinations.elsewhere]\nrepo = \"/tmp/formal-repo\"\nkey_file = \
+               \"/tmp/formal-key.json\"\n\n[mirror]\nenabled = true\nmirror_of = \"storagebox\"\n";
+    let config: Config = toml::from_str(raw).expect("the fixture config must parse");
+    let status = mirror_status(&config, &data_root, &state_dir, 1_800_000_000);
+    assert_eq!(
+        status.rows.len(),
+        2,
+        "the not-declared row plus the count the record still owns: {status:?}"
+    );
+    assert!(
+        status.rows[0]
+            .sentence
+            .contains("names no declared destination"),
+        "{}",
+        status.rows[0].sentence
+    );
+    assert!(
+        status.rows[1]
+            .sentence
+            .contains("reclaim holds 2 session(s) back"),
+        "{}",
+        status.rows[1].sentence
+    );
+}
+
 /// rev0 ① / C2: the hold-back the rows promise carries its count, from the
 /// one record that cannot disagree with the run — the weekly reclaim's
 /// own durable record. Only a `not-mirrored` block against *this*

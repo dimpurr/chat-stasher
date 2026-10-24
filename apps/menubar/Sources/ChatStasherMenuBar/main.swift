@@ -906,6 +906,17 @@ struct ReclaimNotification {
 /// threshold is two because one blocked week can be a bad weekend, and the
 /// payload carries the machine's own numbers rather than a paraphrase —
 /// the same discipline the panel's sentences come from.
+///
+/// This payload was unreachable from any real document until W1025 fixed
+/// the W1012 decode: the app previously read `reclaim` (and `dest_alerts`)
+/// off the `status --json` document root — a location no CLI ever wrote —
+/// so every real document decoded an empty record and no blocked streak
+/// could ever notify. The decode-contract test pins the current location
+/// (`local`), and that fix is what re-activated the C2 machinery this
+/// delivery step is. rev2 ① adds its own rule: a hold-back whose blocks
+/// are all `not-mirrored` names a destination that *proved* every session,
+/// so the body words the local mirror — never "Blocked for: <destination>"
+/// about a destination that is healthy.
 func reclaimNotificationPayload(reclaim: ReclaimState?, notifiedStreak: Int?, blockedStreakAlarm: Int?) -> ReclaimNotification? {
     guard let reclaim, reclaim.kind == "known", reclaim.state != "ok",
           let consecutive = reclaim.consecutiveBlocked,
@@ -913,7 +924,18 @@ func reclaimNotificationPayload(reclaim: ReclaimState?, notifiedStreak: Int?, bl
     // Re-notifying while the same streak grows keeps the user's attention
     // on a fact they have seen; the streak crossing is the moment to speak.
     guard (notifiedStreak ?? 0) < threshold else { return nil }
-    let names = (reclaim.blocked ?? []).map(\.destination)
+    // rev2 ①: split the held-back list by kind before naming anyone. A
+    // `not-mirrored` block is the mirror leg's own hold-back — the
+    // destination it names proved every session it is counted against — so
+    // it must not drive the "Blocked for" blame sentence, in a mirror-only
+    // streak any more than in a mixed one. The kind literal is the record's
+    // settled spelling (`HELD_BACK_KIND` on the CLI side); the app reads
+    // it here rather than rewording it.
+    let blocks = reclaim.blocked ?? []
+    let failingNames = blocks.filter { $0.kind != "not-mirrored" }.map(\.destination)
+    let mirrorHeld = blocks.filter { $0.kind == "not-mirrored" }
+        .map { $0.sessions ?? 0 }
+        .reduce(0, +)
     var body = "The weekly stage clean-up has been blocked \(consecutive) times in a row"
     if let sessions = reclaim.heldBackSessions, sessions > 0 {
         body += "; \(sessions.formatted()) conversation file\(sessions == 1 ? "" : "s") still held on this machine"
@@ -922,8 +944,11 @@ func reclaimNotificationPayload(reclaim: ReclaimState?, notifiedStreak: Int?, bl
         body += " (\(reclaimHeldBackBytes(bytes)))"
     }
     body += ". Nothing has been reclaimed and the stage keeps growing."
-    if !names.isEmpty {
-        body += " Blocked for: \(names.joined(separator: ", "))."
+    if !failingNames.isEmpty {
+        body += " Blocked for: \(failingNames.joined(separator: ", "))."
+    }
+    if mirrorHeld > 0 {
+        body += " The local mirror holds \(mirrorHeld.formatted()) conversation file\(mirrorHeld == 1 ? "" : "s") back — the copy, not a destination, is why; the [mirror] rows carry the count."
     }
     body += " Open the panel for the reason and the fix."
     return ReclaimNotification(

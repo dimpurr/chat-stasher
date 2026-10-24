@@ -894,6 +894,17 @@ fn the_cli_wires_the_mirror_leg_and_refuses_as_not_mirrored() {
         stdout.contains("the mirror has not synced to this snapshot yet"),
         "D6.3's sentence words the refusal: {stdout}"
     );
+    // rev2 ⑤: the destination's noun phrase ends with the colon, so the
+    // sentence reads as an assertion about it — never the bare
+    // juxtaposition `destination "x" the mirror has not …` that parses
+    // like nothing.
+    assert!(
+        stdout.contains(
+            "  blocked: destination \"default\": the mirror has not synced to this snapshot \
+             yet — 1 session(s) / "
+        ),
+        "the blocked line is the full sentence about the destination, with the counts: {stdout}"
+    );
     assert!(
         stdout.contains("nothing was deleted"),
         "the refusal keeps the blocked shape: {stdout}"
