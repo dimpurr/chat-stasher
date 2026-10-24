@@ -190,9 +190,29 @@ it — the copy is the destination's own ciphertext, and `keys/` is copied
 verbatim, which is the same encrypted master key the destination already
 uses, not a new one. For the command itself see [cli.md](cli.md#mirror).
 
+Enabling this section is what moves **reads**, not just copying: `read`,
+`search`, `export`, `index build` and the `ui` dashboard answer the
+mirrored destination's bytes from this local copy first, falling back to
+the remote for each file the copy does not hold yet (a mid-fill mirror is
+an ordinary partial copy, and the fallback is quiet per-file progress —
+the report's `mirror served` line counts which files each side served).
+A machine with the mirror enabled can read sessions **offline**: with the
+remote gone, listings fall back to the copy too. Two things stay the
+remote's own while it can be asked: file *presence* (which files exist is
+the remote's word, so a behind copy never silently shrinks what a search
+sees), and `verify`, which never certifies anything from the copy — a
+copy may not grade itself. Where reads happened, the answer is dated by
+the copy: the ui and report lines show "the local copy as of HH:MM" (the
+last completed sync), and a copy that outlived its section or its switch
+still says so when read directly. One corruption rule keeps the copy
+honest: a file that is present but unreadable on the copy (disk damage)
+is a hard failure that stops the read with the file's name and the repair
+(`mirror sync` re-downloads a file that no longer hashes to its name) —
+it is never quietly replaced from the remote mid-read.
+
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `false` | The switch. A machine that declares no section, or sets this false, mirrors nothing and changes no behaviour. |
+| `enabled` | `false` | The switch. A machine that declares no section, or sets this false, mirrors nothing and reads only the remote — the read behaviour above is the switch's, not a separate one. |
 | `mirror_of` | (required) | The declared destination to mirror, by name. One mirror per machine: repointing this key is safe — the old record is expired rather than inherited (the state file names the destination it was built for, and coverage answers only for that name). |
 | `min_free_gib` | `max(10, 5% of the volume's capacity)` | The free-space floor for the mirror's volume. Before a first fill starts, the remaining download plus this floor must fit in the free space, or the round refuses rather than write toward a full disk; mid-fill, free space falling below it pauses the copy. |
 
@@ -206,7 +226,10 @@ uses, not a new one. For the command itself see [cli.md](cli.md#mirror).
   and exits `1`, recorded `failed`. The exception is that verdict, not
   any hold: the mirror re-checks the source every round until it is
   fixed, and a retry alone does not heal it.
-- Turning the mirror off stops the copying and deletes nothing.
+- Turning the mirror off stops the copying and deletes nothing, and puts
+  reads back on the remote — the copy stays on disk, and reading it
+  directly (or verifying it, `--repo` over its directory) still says it
+  is the copy being read.
 
 ## Files chat-stasher keeps outside the config
 

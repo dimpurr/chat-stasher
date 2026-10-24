@@ -5670,13 +5670,22 @@ fn cmd_search(
     // cache. The cache changes no answer: it stands in for a tree walk whose
     // result a snapshot's own id proves cannot have changed, and a miss (cold,
     // damaged, or a snapshot whose tree cannot be read) walks as before.
-    let store = BackupStore::for_metadata_query(cfg.clone()).with_snapshot_cache(
-        chat_stasher::snapshot_cache::SnapshotCache::for_identity(&index_identity(
-            destination.as_deref(),
-            repo.as_deref(),
-            &cfg.repo_root,
-        )),
-    );
+    // ADR-062 D3 (LM-3): `search` reads mirror-first when this destination is
+    // mirrored. Announced on stderr — `search --text`'s stdout is the parsed
+    // mode/JSON surface, and a status line inside it would be pollution
+    // exactly the way the ssh-reap line was (W253 C1).
+    let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
+    if let Some(line) = mirror_decision.state_line() {
+        // rev2 ⑤: `[search]`'s label column is 13 wide (`destination  :`,
+        // `matched      :`) — the mirror lines join that family, not
+        // `read`/`verify`'s 15-wide one.
+        eprintln!("[search] mirror       : {line}");
+    }
+    let store = BackupStore::for_metadata_query(cfg.clone())
+        .with_mirror_reads(mirror_decision.handle())
+        .with_snapshot_cache(chat_stasher::snapshot_cache::SnapshotCache::for_identity(
+            &index_identity(destination.as_deref(), repo.as_deref(), &cfg.repo_root),
+        ));
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -5702,6 +5711,9 @@ fn cmd_search(
             return ExitCode::from(3);
         }
     };
+    if let Some(mirror) = store.mirror_reads() {
+        eprintln!("[search] mirror served: {}", mirror.served_line());
+    }
 
     if let Some(query) = text.as_deref() {
         let code = cmd_search_text(
@@ -6236,7 +6248,17 @@ fn cmd_export(
     } else {
         store::DuplicateShardPolicy::Collapse
     };
-    let store = BackupStore::for_metadata_query(cfg.clone()).with_shard_policy(shard_policy);
+    // ADR-062 D3 (LM-3, ruling 7): `export` reads the mirror — it is a body
+    // tier, not a cache — and what it reads there never enters the body cache
+    // (this store keeps none anyway: ADR-034 holds bulk readers out of it).
+    // The lines go to stderr: `export`'s stdout carries the plan and report.
+    let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
+    if let Some(line) = mirror_decision.state_line() {
+        eprintln!("[export] mirror         : {line}");
+    }
+    let store = BackupStore::for_metadata_query(cfg.clone())
+        .with_shard_policy(shard_policy)
+        .with_mirror_reads(mirror_decision.handle());
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -6304,6 +6326,9 @@ fn cmd_export(
 
     for line in chat_stasher::export::print_report(&report) {
         println!("{line}");
+    }
+    if let Some(mirror) = store.mirror_reads() {
+        eprintln!("[export] mirror served  : {}", mirror.served_line());
     }
     reap_remote(&cfg, keep_ssh_masters);
     ExitCode::from(report.exit_status())
@@ -6611,6 +6636,24 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
                     &index_identity(name.as_deref(), repo_override.as_deref(), &cfg.repo_root),
                 )
             });
+        // ADR-062 D3 (LM-3): the dashboard reads mirror-first when this
+        // destination is mirrored — every route except the payload tier is
+        // metadata, and `/content` reopens the store per request, so it rides
+        // the same seam. `verify` is not here because no verify store ever
+        // carries a seam (47 §5.5).
+        let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
+        if let Some(line) = mirror_decision.state_line() {
+            eprintln!("[ui] destination `{label}` mirror: {line}");
+        }
+        let mirror_behindness = match &mirror_decision {
+            chat_stasher::mirror_read::MirrorReadDecision::Serving(reads) => {
+                Some(chat_stasher::mirror_read::behindness_sentence(
+                    &chat_stasher::collect::default_state_dir(),
+                    &reads.mirror_of,
+                ))
+            }
+            _ => None,
+        };
         // ADR-034: the dashboard is the other single-session body reader. Every
         // route except `load` is metadata-tier, and only `load` reaches this cache.
         //
@@ -6618,6 +6661,7 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         // every refresh, which is precisely the repeat over the same snapshots
         // the snapshot cache exists for. Same identity as the text index above.
         let store = BackupStore::for_metadata_query(cfg.clone())
+            .with_mirror_reads(mirror_decision.handle())
             .with_body_cache(
                 chat_stasher::body_cache::for_operation(
                     &config,
@@ -6683,6 +6727,7 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
             unread_at_all: false,
             extension_installs,
             extension_status_read,
+            mirror_behindness,
         });
     }
     // ssh masters are reaped before the server starts, not after: the serve loop
@@ -6780,6 +6825,12 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         .collect();
     let mut data =
         chat_stasher::ui::UiData::from_reports(&reads, resolved.selector.clone(), now_unix);
+    // ADR-062 D3: the behindness sentence rides the destination states the
+    // merge built — same order as `parts` (the merge keeps destination
+    // order), set here so the merge stays a pure function of the reads.
+    for (state, part) in data.destinations.iter_mut().zip(&parts) {
+        state.mirror = part.mirror_behindness.clone();
+    }
     data.remote_inboxes = chat_stasher::inbox_status::inspect_default();
     data.local_machine_id = query_machine(&config, None);
     data.extension_status_read = parts.iter().all(|part| part.extension_status_read);
@@ -6983,6 +7034,10 @@ struct UiDestination {
     unread_at_all: bool,
     extension_installs: Vec<serde_json::Value>,
     extension_status_read: bool,
+    /// ADR-062 D3: this destination's mirror behindness sentence, carried onto
+    /// the page's per-destination state after the merge. `None` while no
+    /// mirror serves this destination.
+    mirror_behindness: Option<String>,
 }
 
 impl UiDestination {
@@ -7001,6 +7056,7 @@ impl UiDestination {
             unread_at_all: true,
             extension_installs: Vec::new(),
             extension_status_read: false,
+            mirror_behindness: None,
         }
     }
 }
@@ -11326,16 +11382,25 @@ fn cmd_read(
     } else {
         store::DuplicateShardPolicy::Collapse
     };
+    // ADR-062 D3 (LM-3): `read` is a mirror-first reader. `verify` is the one
+    // reader that never attaches one (47 §5.5: a copy may not certify itself),
+    // which is also why the seam is an opt-in per store, not a property of
+    // [`resolve_store_config`].
+    let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
     let store = match machine.as_deref() {
         Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
         None => BackupStore::for_metadata_query(cfg.clone()),
     }
     .with_body_cache(body_cache.handle())
-    .with_shard_policy(shard_policy);
+    .with_shard_policy(shard_policy)
+    .with_mirror_reads(mirror_decision.handle());
     println!(
         "[read] body cache     : {}",
         body_cache_state_line(&body_cache)
     );
+    if let Some(line) = mirror_decision.state_line() {
+        println!("[read] mirror         : {line}");
+    }
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -11465,6 +11530,13 @@ fn cmd_read(
         }
         ExitCode::SUCCESS
     };
+    // The visible-status half of the fallback rule: what served says so, with the
+    // numbers this run moved. Unreachable on the `did not finish` paths —
+    // their exit already says the read did not happen, and a half-answer's
+    // counters would read as a measurement.
+    if let Some(mirror) = store.mirror_reads() {
+        println!("[read] mirror served  : {}", mirror.served_line());
+    }
     reap_remote(&cfg, keep_ssh_masters);
     code
 }
@@ -11761,7 +11833,15 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                     return ExitCode::from(3);
                 }
             };
-            let backup = BackupStore::for_metadata_query(cfg.clone());
+            // ADR-062 D3 / 47 §5.6: with the mirror on, the FTS build reads the
+            // copy — fast, no remote connections for the body reads, no new
+            // plaintext (the per-destination SQLite topology is untouched).
+            let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
+            if let Some(line) = mirror_decision.state_line() {
+                eprintln!("[index] mirror         : {line}");
+            }
+            let backup = BackupStore::for_metadata_query(cfg.clone())
+                .with_mirror_reads(mirror_decision.handle());
             let backends = match backup.backends() {
                 Ok(backends) => backends,
                 Err(error) => {
@@ -11975,6 +12055,9 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                     );
                     for (id, reason) in &stats.not_indexable {
                         println!("[index] not indexable `{id}`: {reason}");
+                    }
+                    if let Some(mirror) = backup.mirror_reads() {
+                        eprintln!("[index] mirror served  : {}", mirror.served_line());
                     }
                     reap_remote(&cfg, args.keep_ssh_masters);
                     ExitCode::SUCCESS
@@ -12325,6 +12408,24 @@ fn cmd_verify(
             "ON"
         }
     );
+    // ADR-062 D3 keeps `verify` off the mirror seam entirely, so no other
+    // mirror state prints here: a serving machine's copy is not in this
+    // read's way, and the lines above describe the store being verified.
+    // The one spelling that must state itself is the copy —
+    // `verify --repo <data root>/mirror/<name>` certifies this machine's
+    // copy, never the copied destination, and silence would let a copy's
+    // verdict pass as the archive's own (47 §5.5: a copy may not certify
+    // itself).
+    let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
+    let copy_line = match &mirror_decision {
+        chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { .. } => {
+            mirror_decision.state_line()
+        }
+        _ => None,
+    };
+    if let Some(line) = copy_line {
+        println!("[verify] mirror         : {line}");
+    }
 
     let mut failed = 0usize;
     let mut unreadable = 0usize;

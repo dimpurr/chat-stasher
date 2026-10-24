@@ -17,7 +17,7 @@ use crate::selector::{Resolved, UnplacedBy};
 use super::facets;
 use super::html::{
     completeness_banner, conjoined_flags, describe_selector, destinations_block, esc, fmt_bytes,
-    fmt_unix, footer, head, merged_counts, read_from_note,
+    fmt_unix, footer, head, merged_counts, mirror_note, read_from_note,
 };
 use super::{
     bad_index_response, index_param, page_from_query, page_href, page_window, paging_nav,
@@ -108,6 +108,7 @@ fn page_sessions(
         out.push_str(&format!("<div class=warn>{}</div>\n", esc(w)));
     }
     out.push_str(&completeness_banner(data));
+    out.push_str(&mirror_note(data));
     out.push_str(&destinations_block(data));
     out.push_str(&label_coverage_note(sel, data));
     // The facet bar (29-UI-DESIGN §2.3) renders for every state the page can
@@ -913,6 +914,10 @@ fn page_session(s: &UiSession, token: &str, data: &UiData) -> String {
         d = esc(&data.destination_label),
     ));
     out.push_str(&read_from_note(s, data));
+    // rev2 ⑦: the payload pages are the pages whose bytes the copy serves
+    // (when a mirror serves this destination), so the behindness note rides
+    // here too — the same sentence the list and overview already carry.
+    out.push_str(&mirror_note(data));
     // The label rows (29-UI-DESIGN §4.3): the label itself, and its source —
     // the provenance row only exists for a known label, because there is
     // nothing to attribute for the honest non-labels.
@@ -1086,7 +1091,7 @@ fn page_content(s: &UiSession, token: &str, c: &Content, data: &UiData) -> Strin
     }
     format!(
         "{head}\n<h1>Session <span class=mono>{sid}</span> · content</h1>\n\
-         <p class=sub>machine <span class=mono>{m}</span> · source {h}</p>\n{note}\
+         <p class=sub>machine <span class=mono>{m}</span> · source {h}</p>\n{note}{mnote}\
          <p>Loaded <b>{b}</b> of shard data across {n} shard(s). Concatenation sha256 \
          <span class=mono>{sha}</span>.</p>\n\
          <ul>{shards}</ul>\n\
@@ -1099,6 +1104,9 @@ fn page_content(s: &UiSession, token: &str, c: &Content, data: &UiData) -> Strin
         m = esc(&s.machine),
         h = esc(&s.source_label()),
         note = read_from_note(s, data),
+        // rev2 ⑦: the content page is the payload tier itself — the
+        // behindness note rides on it like its metadata sibling.
+        mnote = mirror_note(data),
         b = esc(&fmt_bytes(c.bytes as u64)),
         n = c.shards.len(),
         sha = esc(&c.concat_sha256),

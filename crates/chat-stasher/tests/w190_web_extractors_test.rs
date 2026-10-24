@@ -315,6 +315,7 @@ fn data_for(harness: &str) -> UiData {
         // one — a row always came from somewhere.
         destinations: vec![DestinationState {
             label: "w190-destination".into(),
+            mirror: None,
             snapshots_scanned: 1,
             snapshots_in_repo: 1,
             sessions: 1,

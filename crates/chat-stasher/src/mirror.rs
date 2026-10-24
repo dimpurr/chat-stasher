@@ -204,11 +204,20 @@ fn capacity_of_volume(path: &Path) -> anyhow::Result<u64> {
     }
 }
 
+/// The directory every local copy lives under on this data root:
+/// `~/.local/share/chat-stasher/mirror/` (ADR-062 D1). [`mirror_dir`]
+/// names one destination's copy inside it, and the read seam recognizes
+/// a store that resolves under this directory as the copy itself.
+#[must_use]
+pub fn copies_dir(data_root: &Path) -> PathBuf {
+    data_root.join("mirror")
+}
+
 /// Where the mirror of `destination` lives under a data root: the shape
 /// `~/.local/share/chat-stasher/mirror/<destination>` (ADR-062 D1).
 #[must_use]
 pub fn mirror_dir(data_root: &Path, destination: &str) -> PathBuf {
-    data_root.join("mirror").join(destination)
+    copies_dir(data_root).join(destination)
 }
 
 // ---------------------------------------------------------------------------
