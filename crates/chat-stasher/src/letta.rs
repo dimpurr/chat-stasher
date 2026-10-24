@@ -1728,7 +1728,7 @@ mod tests {
                             if after {
                                 json!([])
                             } else {
-                                let conversations: Vec<Value> = (1..=90)
+                                let conversations: Vec<Value> = (1..=64)
                                     .map(|n| {
                                         json!({"id":format!("conv-{n:02}"),
                                                "agent_id":"agent-big",
@@ -2373,22 +2373,32 @@ mod tests {
         let root = sandbox.root();
         let server = Server::start();
         server.mode.store(13, Ordering::SeqCst);
-        // The fixture: one agent, ninety conversations, two paced requests
-        // each plus the durable per-conversation commits — a whole first
-        // pull costs about three of one round's 3200 ms budget at this
-        // 50 ms pace, so the account provably spans several rounds. The
-        // budget leaves the steady rounds half of their request budget
-        // for the slice (a quarter of 64 request quanta = 16 conversations)
-        // and the other half for jitter and the fixed route fetches, so a
-        // steady round completes under ordinary load instead of tripping
-        // its own deadline by construction.
+        // The fixture: one agent, sixty-four conversations, two paced
+        // requests each plus the durable per-conversation commits — and,
+        // riding every round after the first, the proof of the previous
+        // round's receipts. The pace and the budget keep the pass's request
+        // quanta at 64 (9,600 ms of 150 ms intervals — the arithmetic the
+        // slice and steady-count assertions below derive from), while the
+        // interval itself is sized against the per-request wall cost the
+        // slowest supported environment measures: the first cut of this
+        // fixture paced at 50 ms, an interval a quiet dev machine honors
+        // with ~10–15 ms of overhead per request, but the CI runner that
+        // broke it spends ~100 ms of overhead per request (loopback
+        // latency, timer quantization, durable commits and receipt
+        // sealing), so a backfill round admitted about twenty of its 64
+        // quanta before the wall deadline and the sweep blew past the
+        // twelve allowed rounds (run 40069931562). At 150 ms the
+        // overhead is a third of the interval, so a round's wall cost
+        // stays close to its declared quanta everywhere, and the sweep
+        // converges in a handful of rounds on quiet and loaded machines
+        // alike.
         let pull = || {
             run(
                 &mut Api::new(
                     &server.base,
                     None,
-                    Duration::from_millis(50),
-                    Duration::from_millis(3200),
+                    Duration::from_millis(150),
+                    Duration::from_millis(9600),
                     DEFAULT_PAGE_SIZE,
                 )
                 .unwrap(),
@@ -2425,7 +2435,7 @@ mod tests {
                          {pulled_so_far} -> {}",
                         backfill.pulled
                     );
-                    assert_eq!(backfill.estimated_total, 90);
+                    assert_eq!(backfill.estimated_total, 64);
                     assert_eq!(
                         report.incomplete, 1,
                         "a mid-backfill round did not finish reading"
@@ -2435,6 +2445,12 @@ mod tests {
                 None => break,
             }
         }
+        // Sixty-four conversations is more than two rounds can ever walk —
+        // each round spends six of its 64 quanta on the agent-level routes
+        // before the first conversation, so two rounds cover at most 2×29
+        // of them — which hands the property "the backfill spans rounds"
+        // to the quanta arithmetic instead of to whatever the clock did
+        // this run: a third round is owed on any machine, fast or slow.
         assert!(
             rounds >= 3,
             "the fixture is budgeted to span rounds, completed in {rounds}"
@@ -2444,7 +2460,7 @@ mod tests {
         let published = fs::read_dir(root.join("inbox")).unwrap().count();
         assert_eq!(
             published,
-            90 * 2 + 5,
+            64 * 2 + 5,
             "each conversation archived exactly once"
         );
         // The steady rounds are no-ops that re-verify one bounded slice each:
