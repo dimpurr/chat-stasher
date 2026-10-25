@@ -39,7 +39,7 @@ anyhow       crates/chat-stasher/src/audit_store.rs:275  "audit sealed body is u
 context      crates/chat-stasher/src/audit_store.rs:279  "sealed shard has no parent"
 anyhow       crates/chat-stasher/src/audit_store.rs:321  "audit migration source is unreadable or missing"
 anyhow       crates/chat-stasher/src/audit_store.rs:331  "invalid audit session identity"
-anyhow       crates/chat-stasher/src/audit_store.rs:334  "audit migration body is unreadable"
+anyhow       crates/chat-stasher/src/audit_store.rs:343  "audit migration body is unreadable"
 write        crates/chat-stasher/src/backfill.rs:249  "app layout changed: {what}"
 write        crates/chat-stasher/src/backfill.rs:250  "{error:#}"
 write        crates/chat-stasher/src/backfill.rs:359  "skipped-not-fully-loaded"
