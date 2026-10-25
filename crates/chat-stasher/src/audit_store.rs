@@ -329,7 +329,16 @@ pub fn backfill_stage(stage: &Path, machine: &str, key: &JoinPolicy) -> Result<B
             .file_name()
             .into_string()
             .map_err(|_| anyhow::anyhow!("invalid audit session identity"))?;
-        for (_, path) in crate::store::sealed_shard_entries(&entry.path())? {
+        // Shards are visited in sealed-sequence order, never directory order:
+        // the rebuild has to append the same rows in the same order the
+        // incremental collection path already wrote them, or a rebuilt
+        // sidecar holds the same facts in different bytes. `read_dir` does
+        // not promise an order, and a multi-bucket session arrives as one
+        // interleaved list, so the sequence number is the only ordering that
+        // matches how the shard set was built.
+        let mut shards = crate::store::sealed_shard_entries(&entry.path())?;
+        shards.sort_by_key(|(seq, _)| *seq);
+        for (_, path) in shards {
             let bytes = fs::read(path)
                 .map_err(|_| anyhow::anyhow!("audit migration body is unreadable"))?;
             backfill_shard(stage, machine, &session, &bytes, key, &mut report)?;
