@@ -36,6 +36,21 @@ state at the time of the result and does not promise continued absence. Deleting
 a conversation at its source does not request or cause archive deletion.
 Source-side deletion and archive purge are separate user actions.
 
+## Derived rows follow the purge
+
+The per-message audit sidecar (`meta/<machine>/message-audit-v1.jsonl`, see
+[`message-audit.md`](message-audit.md)) is a derived projection of the bodies,
+so a purge that removes a session's archived bodies changes what its derived
+rows can be re-derived from. A future purge interaction must carry the derived
+rows with the same explicitness as the occurrences they summarize, never leave
+them to shrink only at some later rebuild: the preview names the derived rows
+the target session contributed, the confirmed purge states whether it retires
+those rows in the destinations it acts on, and the result distinguishes
+destinations whose derived rows were retired from ones it could not act on. The
+staged sidecar behaves like the staged bodies above — a push after a purge can
+carry a purged session's derived rows back — so the purge result says that too
+instead of letting the derived file diverge from the bodies in silence.
+
 ## Preview before confirmation
 
 The first step is read-only. It resolves the exact target independently at each

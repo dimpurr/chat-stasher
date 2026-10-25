@@ -18,6 +18,15 @@ for rebuilds. A missing setting means the sidecar is **not built**, not empty.
 A configured but unreadable or incorrectly sized key is an error. Rotation
 requires a separate sidecar lineage: mixing scopes in an existing file refuses.
 
+The per-row lineage joins are deliberately **not** the collection-time
+session-provenance file's rows. That file is plaintext stage bookkeeping: it
+keeps a source-path layout class and a native parent-session reference so the
+scanner can answer "where did this session come from". This sidecar holds the
+same family of facts keyed, and must never persist a raw native id, so
+carrying that file's rows would carry their raw ids: the audit re-derives its
+keyed joins from the bodies instead of reusing them. The two systems share
+facts, not storage, and converging them is not an intended follow-up.
+
 With that setting, collect and the shared inbox sealing sink derive audit rows
 only after the body is durably sealed. Local inbox ingestion, native delivery
 and future transports that call that sink share the same behavior. No remote
@@ -69,5 +78,17 @@ A completed scan reports counts only, including incomplete extraction outcomes;
 completion of a scan does not imply every format was recognized. Identical body
 and event coordinates with conflicting capture metadata are refused rather than
 overwriting prior facts. A sidecar can be rebuilt from the bodies with the
-retained secret. On Unix directory fsync proves rename durability; Windows uses
-the same directory-durability convention as the inbox shard writer.
+retained secret. A rebuild is deterministic: sessions are visited in
+session-directory name order and each session's shards in sealed-sequence
+order. For a stage that holds one session, the rebuilt file is byte-identical
+to what incremental collection wrote; across several sessions the rebuilt file
+holds the same rows and body outcomes in that canonical order. The interleaved
+temporal order of several collects is not reproduced — and is not claimed —
+because the bodies record no cross-session collection times, so only the
+canonical order is a property of the bodies alone. The sidecar stays a
+summary, never a second archive: per-record sidecar cost is near-fixed, so on
+multi-KB records it is a small fraction of the body bytes described, and the
+regression suite holds a synthetic multi-session corpus under a 15% ceiling of
+body bytes so per-record cost growth is red rather than silent. On Unix
+directory fsync proves rename durability; Windows uses the same
+directory-durability convention as the inbox shard writer.

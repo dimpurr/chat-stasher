@@ -611,6 +611,13 @@ fn extract_event(
             .as_deref()
             .map(|p| ("native-session", p))
     };
+    // The per-row lineage keyed here is deliberately not the collection-time
+    // session-provenance store (activity.rs): that file keeps plaintext
+    // source-path layout and native parent ids as stage bookkeeping, while
+    // this surface must never persist a raw native id — carrying those rows
+    // would carry their raw ids. Both record the same family of facts; only
+    // the keyed form is allowed to live beside the bodies (docs-dev/
+    // message-audit.md, "not the collection-time session-provenance file").
     let mut join_keys = BTreeMap::new();
     for (class, id) in [(id_class, id), ("uuid", v["uuid"].as_str())] {
         if let Some(id) = id {
