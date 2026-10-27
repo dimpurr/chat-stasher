@@ -379,9 +379,9 @@ record "no HOME refuses" 1
 contains "refusing"
 
 # The shell's reserved-token list is the Rust one, read back out of the source.
-rust_tokens=$(grep -oE 'FIXTURE_IDENTITY_TOKENS: &\[&str\] = &\[[^]]*\]' \
+rust_tokens=$(sed -n '/FIXTURE_IDENTITY_TOKENS/,/;/p' \
   "$ROOT/crates/chat-stasher/src/test_identity_guard.rs" |
-  grep -oE '"[a-z]+"' | tr -d '"' | LC_ALL=C sort | tr '\n' ' ')
+  grep -oE '"[a-z-]+"' | tr -d '"' | LC_ALL=C sort | tr '\n' ' ')
 shell_tokens=$(grep -E '^FIXTURE_TOKENS=' "$GUARD" | sed 's/^[^"]*"//; s/"$//' |
   tr ' ' '\n' | LC_ALL=C sort | tr '\n' ' ')
 PROBES=$(( PROBES + 1 ))

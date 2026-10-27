@@ -208,7 +208,7 @@ trap cleanup EXIT
 # `test_identity_guard::FIXTURE_IDENTITY_TOKENS`. The selftest reads that
 # constant out of the Rust source and fails if the two ever disagree, so the
 # copy cannot drift silently.
-FIXTURE_TOKENS="synthetic fixture probe dummy gate"
+FIXTURE_TOKENS="synthetic fixture probe dummy gate-mbp"
 # A file larger than this is not read for fingerprints. The marker is a random
 # token and the token scan is confined to `<data root>/state`, so a cap only
 # bounds the cost of a pathological write; it is not a correctness boundary.
@@ -402,11 +402,13 @@ lower() { printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]'; }
 
 # Does the basename carry a reserved fixture token as a whole token?
 name_is_fixture() {
-  local lowered token
+  local lowered token token_padded padded
   lowered="$(lower "$1")"
-  for token in $(printf '%s' "$lowered" | LC_ALL=C tr -c 'a-z0-9' ' '); do
-    case " $FIXTURE_TOKENS " in
-      *" $token "*) return 0 ;;
+  padded=" $(printf '%s' "$lowered" | LC_ALL=C tr -c 'a-z0-9' ' ') "
+  for token in $FIXTURE_TOKENS; do
+    token_padded=" $(printf '%s' "$token" | LC_ALL=C tr -c 'a-z0-9' ' ') "
+    case "$padded" in
+      *"$token_padded"*) return 0 ;;
     esac
   done
   return 1
@@ -484,15 +486,22 @@ snapshot_names "$SNAP_DIR/scan.before" "$SNAP_DIR/scan.roots"
 # `test_identity_guard.rs`.
 : >"$SNAP_DIR/baseline.fixture_paths"
 LC_ALL=C awk -v list="$FIXTURE_TOKENS" '
-  BEGIN { split(list, T, " "); for (i in T) token[T[i]] = 1 }
+  BEGIN {
+    split(list, T, " ")
+    for (i in T) {
+      t = T[i]
+      gsub(/[^a-z0-9]/, " ", t)
+      token[" " t " "] = 1
+    }
+  }
   {
     name = $0
     sub(/.*\//, "", name)          # basename, as `name_is_fixture` reads it
     name = tolower(name)
     gsub(/[^a-z0-9]/, " ", name)   # split into whole alphanumeric tokens
-    count = split(name, parts, " ")
-    for (i = 1; i <= count; i++)
-      if (parts[i] in token) { print $0; next }
+    padded = " " name " "
+    for (tok in token)
+      if (index(padded, tok) > 0) { print $0; next }
   }
 ' "$SNAP_DIR/scan.before" >"$SNAP_DIR/baseline.fixture_paths"
 
