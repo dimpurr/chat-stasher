@@ -68,11 +68,11 @@ pub const SCHEDULER_RANDOMIZED_DELAY_SECS: u64 = 5 * 60;
 /// interval keeps `StartInterval`.
 const HOURLY_INTERVAL_SECS: u64 = 3600;
 
-/// Cap for the launchd stdout/stderr logs, in bytes. Beyond this the log is
-/// truncated to empty in place at the start of the next run (see
-/// [`render_launchd`]). macOS launchd has no rotation key of its own, so the
-/// cap is enforced by the shell preamble we render into `ProgramArguments`.
-pub const LAUNCHD_LOG_CAP_BYTES: usize = 5 * 1024 * 1024;
+// Scheduler log handling across formats:
+// launchd opens its stdout and stderr files in append mode; preserve prior
+// rounds by leaving those files alone in the job preamble.
+// systemd sends both streams to the journal.
+// Existing installations need the new templates installed.
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum Format {
@@ -2161,7 +2161,7 @@ fn render_launchd(
 }
 
 /// One launchd agent for one one-shot command: every job shares the same
-/// log-capped, jittered shell preamble, `RunAtLoad=false` and the same schedule
+/// jittered shell preamble, `RunAtLoad=false` and the same schedule
 /// rule — an hourly job (`interval` is [`HOURLY_INTERVAL_SECS`]) fires on
 /// `StartCalendarInterval` at the fixed minute [`hourly_minute_for_machine`]
 /// picks, every other interval keeps `StartInterval`. `machine` is the caller's
@@ -2184,20 +2184,11 @@ fn render_launchd_job(
     let stdout_log = log_dir.join(format!("{log_name}.log"));
     let stderr_log = log_dir.join(format!("{log_name}.err.log"));
 
-    // launchd opens StandardOutPath/StandardErrorPath with O_APPEND *before*
-    // our process starts, and its fd follows the inode, not the path. Renaming
-    // either log at startup would therefore strand this run's output in the
-    // renamed file. So we cap by truncating *in place* — the one mutation that
-    // keeps launchd's fd valid — instead of rotating: if a log exceeds the cap
-    // we truncate it to empty, then `exec` the real binary. Truncation never
-    // changes the inode and O_APPEND resumes writing at the new end; `exec`
-    // keeps launchd's view of our exit status intact (the tracked process *is*
-    // chat-stasher, so SuccessExitStatus=0 semantics are preserved).
-    let cap = LAUNCHD_LOG_CAP_BYTES;
+    // launchd opens both logs in append mode before starting the process.
+    // Leave those file descriptors and existing rounds intact; exec preserves
+    // launchd's view of the command's exit status.
     let command = format!(
-        "{}\n{}\njitter=$(( $(od -An -N2 -tu2 /dev/urandom) % {} ))\nsleep \"$jitter\"\nexec {}",
-        cap_line(&stdout_log, cap),
-        cap_line(&stderr_log, cap),
+        "jitter=$(( $(od -An -N2 -tu2 /dev/urandom) % {} ))\nsleep \"$jitter\"\nexec {}",
         SCHEDULER_RANDOMIZED_DELAY_SECS + 1,
         argv.iter()
             .map(|arg| sh_single_quote(arg))
@@ -2262,15 +2253,9 @@ fn render_launchd_reclaim_stage(
     let stdout_log = log_dir.join("reclaim-stage.log");
     let stderr_log = log_dir.join("reclaim-stage.err.log");
 
-    // Same in-place-truncate cap as run-once: launchd opens the log fds before
-    // our process starts and its fds follow the inode, so truncating *in place*
-    // is the one mutation that keeps this run's output attached. `exec` keeps
-    // launchd's view of the exit status intact.
-    let cap = LAUNCHD_LOG_CAP_BYTES;
+    // launchd opens both logs in append mode; exec preserves the exit status.
     let command = format!(
-        "{}\n{}\nexec {}",
-        cap_line(&stdout_log, cap),
-        cap_line(&stderr_log, cap),
+        "exec {}",
         argv.iter()
             .map(|arg| sh_single_quote(arg))
             .collect::<Vec<_>>()
@@ -2315,16 +2300,6 @@ fn render_launchd_reclaim_stage(
 "#,
         stdout = xml_escape(&stdout_log.to_string_lossy()),
         stderr = xml_escape(&stderr_log.to_string_lossy()),
-    )
-}
-
-/// One line of the launchd shell preamble: truncate `path` to empty if it
-/// exceeds `cap`. Written as a POSIX `sh` test-and-truncate so a missing or
-/// otherwise odd file can never abort the run before `exec`.
-fn cap_line(path: &Path, cap: usize) -> String {
-    format!(
-        "f={path}; [ -f \"$f\" ] && [ \"$(stat -f%z \"$f\")\" -gt {cap} ] && : > \"$f\"",
-        path = sh_single_quote(&path.to_string_lossy())
     )
 }
 
@@ -2503,82 +2478,47 @@ mod tests {
     }
 
     #[test]
-    fn launchd_plist_caps_logs_via_in_place_truncate_and_exec() {
-        let args = RunOnceArgs {
-            verify: false,
-            ..RunOnceArgs::default()
-        };
-        let launchd = render(
-            Unit::RunOnce,
-            Format::Launchd,
-            Path::new("/opt/chat-stasher"),
-            Path::new("/var/lib/chat-stasher/stage"),
-            3600,
-            &args,
-            &ReclaimStageArgs::default(),
-            Path::new("/home/tester"),
-        );
-        let plist = &launchd[0].content;
-        // The binary is wrapped so the cap runs before the real process, and
-        // `exec` keeps launchd's view of the exit status intact.
-        assert!(plist.contains("<string>/bin/sh</string>"));
-        assert!(plist.contains("<string>-c</string>"));
-        // `exec` keeps launchd's view of the exit status intact (single quotes
-        // appear XML-escaped inside the plist string element).
-        assert!(plist.contains(
-            "exec &apos;/opt/chat-stasher&apos; &apos;run-once&apos; &apos;--stage&apos; &apos;/var/lib/chat-stasher/stage&apos;"
-        ));
-        // Both logs are capped, using the documented byte cap.
-        let cap = format!("{LAUNCHD_LOG_CAP_BYTES}");
-        assert!(plist.contains(&format!("-gt {cap} ]")));
-        assert!(plist.contains("run-once.log"));
-        assert!(plist.contains("run-once.err.log"));
-        // Capping must truncate in place — never rotate/rename (which would
-        // strand this run's output in the renamed inode).
-        assert!(!plist.contains("mv "));
-        assert!(!plist.contains(".1\""));
-    }
-
-    /// Executes the launchd preamble for real, so it can only run where that
-    /// preamble's shell is the one launchd would use. The cap check is
-    /// `stat -f%z` — BSD syntax; GNU coreutils spells it `stat -c%s` and fails
-    /// the flag outright, so on Linux the guard silently never fires and the
-    /// assertion below fails for a reason that has nothing to do with the code
-    /// under test. launchd itself is macOS-only, so gating here loses no
-    /// coverage: the systemd path has its own tests.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn launchd_preamble_truncates_only_when_over_cap() {
-        let tmp = std::env::temp_dir().join(format!("cs-cap-test-{}", std::process::id()));
-        fs::create_dir_all(&tmp).expect("create temp log dir");
-        let log = tmp.join("run-once.log");
-        fs::write(&log, vec![b'x'; LAUNCHD_LOG_CAP_BYTES + 10]).unwrap();
-
-        let preamble = cap_line(&log, LAUNCHD_LOG_CAP_BYTES);
-        let status = std::process::Command::new("/bin/sh")
-            .args(["-c", &format!("{preamble}\nexec true")])
-            .status()
-            .expect("run sh preamble");
-        assert!(status.success());
-        assert_eq!(
-            fs::metadata(&log).unwrap().len(),
-            0,
-            "over-cap log truncated"
-        );
-
-        fs::write(&log, vec![b'y'; 64]).unwrap();
-        let status = std::process::Command::new("/bin/sh")
-            .args(["-c", &format!("{preamble}\nexec true")])
-            .status()
-            .expect("run sh preamble");
-        assert!(status.success());
-        assert_eq!(
-            fs::metadata(&log).unwrap().len(),
-            64,
-            "under-cap log left intact"
-        );
-
-        fs::remove_dir_all(&tmp).ok();
+    fn scheduled_logs_preserve_previous_rounds() {
+        for unit in [Unit::RunOnce, Unit::ReclaimStage] {
+            for format in [Format::Launchd, Format::Systemd] {
+                let rendered = render(
+                    unit,
+                    format,
+                    Path::new("/opt/chat-stasher"),
+                    Path::new("/var/lib/chat-stasher/stage"),
+                    3600,
+                    &RunOnceArgs::default(),
+                    &ReclaimStageArgs::default(),
+                    Path::new("/home/tester"),
+                );
+                let service = &rendered[0].content;
+                match format {
+                    Format::Launchd => {
+                        let name = match unit {
+                            Unit::RunOnce => "run-once",
+                            Unit::ReclaimStage => "reclaim-stage",
+                        };
+                        assert!(service.contains(&format!(
+                            "<key>StandardOutPath</key>\n  <string>/home/tester/Library/Logs/chat-stasher/{name}.log</string>"
+                        )));
+                        assert!(service.contains(&format!(
+                            "<key>StandardErrorPath</key>\n  <string>/home/tester/Library/Logs/chat-stasher/{name}.err.log</string>"
+                        )));
+                        assert!(service.contains("<string>/bin/sh</string>"));
+                        assert!(service.contains("<string>-c</string>"));
+                        assert!(service.contains(&format!(
+                            "exec &apos;/opt/chat-stasher&apos; &apos;{name}&apos; &apos;--stage&apos; &apos;/var/lib/chat-stasher/stage&apos;"
+                        )));
+                        assert!(!service.contains(": &gt;"), "must not truncate logs");
+                        assert!(!service.contains("stat -f%z"), "must not cap logs");
+                    }
+                    Format::Systemd => {
+                        assert!(service.contains("StandardOutput=journal"));
+                        assert!(service.contains("StandardError=journal"));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
