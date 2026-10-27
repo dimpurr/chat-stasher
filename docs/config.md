@@ -214,7 +214,7 @@ it is never quietly replaced from the remote mid-read.
 |---|---|---|
 | `enabled` | `false` | The switch. A machine that declares no section, or sets this false, mirrors nothing and reads only the remote — the read behaviour above is the switch's, not a separate one. |
 | `mirror_of` | (required) | The declared destination to mirror, by name. One mirror per machine: repointing this key is safe — the old record is expired rather than inherited (the state file names the destination it was built for, and coverage answers only for that name). |
-| `min_free_gib` | `max(10, 5% of the volume's capacity)` | The free-space floor for the mirror's volume. Before a first fill starts, the remaining download plus this floor must fit in the free space, or the round refuses rather than write toward a full disk; mid-fill, free space falling below it pauses the copy. |
+| `min_free_gib` | `max(10, 5% of the volume's capacity)` | The free-space floor for the mirror's volume. Before each round copies files, the remaining download plus this floor must fit in the free space, or the round refuses; during copying, the floor is checked before each file. If volume capacity cannot be measured, the default floor is 10 GiB. |
 
 - The scheduled pass runs the copy after its push, inside the round's
   leftover budget; `mirror sync` runs the same round on demand. A first
@@ -231,10 +231,10 @@ it is never quietly replaced from the remote mid-read.
   first sync reads as exactly that (`first sync … in progress: X% (bytes
   downloaded of the total)`), never as a red, while `reclaim` holds the
   sessions it would cover — and that hold-back is a code gate, not a
-  promise: `reclaim-stage` refuses a session — `not-mirrored` — until the
-  copy's completed-round record holds that session's proof snapshot
-  closure-complete, and the mirror rows name how many sessions it is
-  currently holding back, so the count comes from the reclaim's own
+  promise: `reclaim-stage` reports `not-mirrored` for a proven session when the
+  enabled mirror copies a destination consulted by that run and the copy's
+  completed-round record does not hold its proof snapshot closure-complete.
+  The mirror rows name how many sessions it is currently holding back, so the count comes from the reclaim's own
   record and never a guess.
 - Orphan files — what a deliberate remote cleanup left behind in the
   mirror — are never deleted automatically. `doctor` reports their count
