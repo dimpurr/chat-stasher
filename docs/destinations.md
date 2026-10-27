@@ -29,6 +29,18 @@ Read this once. It applies to every kind.
 - **Unknown is not empty.** A destination that cannot be read makes a command exit `3`, meaning "did not finish". It never reports the destination as empty.
 - **A destination outlives the machine that wrote to it.** Everything in it is readable from any other computer that has its key file, which is what makes a sold or wiped machine a recovery task rather than a loss: [Recover a lost machine's conversations](use-cases/lost-machine.md).
 
+### A local mirror of a destination
+
+An optional local mirror copies one named destination's repository onto this
+machine. It is a copy of that destination, using the same key, rather than a
+separate destination with a new key. Enable it with `[mirror]` and choose the
+destination with `mirror_of`; [config.md](config.md#mirror) describes the
+switch, disk floor, read behaviour and sync progress. Run
+`chat-stasher mirror sync` to start a round on demand and check
+`chat-stasher status` for progress.
+The mirror can serve reads while the destination is unavailable, subject to
+what the copy already holds.
+
 To check an archive's integrity at any time:
 
 ```sh
