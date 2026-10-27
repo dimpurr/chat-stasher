@@ -12941,12 +12941,21 @@ fn cmd_reclaim_stage(
                 // Prose keeps the absence rule (D2): "no push on record",
                 // never "never pushed" — the slug in the durable record is
                 // `never-pushed`, and the human line does not repeat it.
-                println!(
-                    "[reclaim-stage]   health: {} — degraded; no push on record; not consulted \
-                     this run",
-                    dest.name
-                );
-                print_degraded_two_roads(&dest.name);
+                let upgrade_window = chat_stasher::store::destination_has_snapshots(&dest.cfg);
+                if upgrade_window {
+                    let msg = "升级后还没有推送记录，下一次定时推送后恢复"; // t5-allow:
+                    println!(
+                        "[reclaim-stage]   health: {} — degraded; {msg}; not consulted this run",
+                        dest.name
+                    );
+                } else {
+                    println!(
+                        "[reclaim-stage]   health: {} — degraded; no push on record; not consulted \
+                         this run",
+                        dest.name
+                    );
+                    print_degraded_two_roads(&dest.name);
+                }
             }
             chat_stasher::destdiag::DestinationHealth::Unknown { why } => {
                 println!(

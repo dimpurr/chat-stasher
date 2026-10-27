@@ -2704,6 +2704,26 @@ impl StoreConfig {
     }
 }
 
+/// Whether the repository `cfg` points to exists and contains at least one snapshot.
+///
+/// Returns `false` on any error, missing repo, or empty snapshot list.
+pub fn destination_has_snapshots(cfg: &StoreConfig) -> bool {
+    let store = BackupStore::for_metadata_query(cfg.clone());
+    let Ok(backends) = store.backends() else {
+        return false;
+    };
+    let Ok(repo_exists) = store.repo_exists(&backends) else {
+        return false;
+    };
+    if !repo_exists {
+        return false;
+    }
+    match backends.repository().list(FileType::Snapshot) {
+        Ok(list) => !list.is_empty(),
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
 

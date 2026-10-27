@@ -485,6 +485,95 @@ fn a_never_pushed_destination_does_not_hold_the_reclaim_hostage() {
         .clone();
     assert_eq!(good_row["health"]["kind"], "healthy");
     assert_eq!(good_row["reclaim_share"]["kind"], "not_blocking");
+
+    let status_human = machine.run(&["status"]);
+    let status_text = combined(&status_human);
+    assert!(
+        status_text.contains("[dest] r2: degraded — no push to `r2` is on record"),
+        "truly never-pushed destination keeps original no push on record wording in status: {status_text}"
+    );
+    assert!(
+        !status_text.contains("升级后还没有推送记录，下一次定时推送后恢复"), // t5-allow:
+        "truly never-pushed destination does not use upgrade window wording: {status_text}"
+    );
+}
+
+/// Upgrade window: destination has snapshots in repository (pushed by old binary),
+/// but no push-state record yet.
+/// Both status and reclaim-stage must say the upgrade window wording,
+/// while --json keeps "never-pushed", and truly never-pushed continues to say "no push on record".
+#[test]
+fn upgrade_window_destination_wording_in_status_and_reclaim_stage() {
+    let machine = Machine::new();
+    let machine_name = "m-upgrade";
+    let stage = machine.stage();
+    write_session(&stage, machine_name, "s-upg", 2);
+
+    // `storagebox`: has snapshots in repo (pushed by old binary that did not write push-state)
+    let storagebox = store_config(machine.root(), "storagebox");
+    init_and_push(&storagebox, machine_name, &stage);
+
+    // `r2`: truly never pushed (empty repo, no snapshots)
+    let r2 = store_config(machine.root(), "r2");
+    init_empty_repo(&r2);
+
+    machine.write_config(&destinations_config(
+        machine.root(),
+        "storagebox",
+        "",
+        Some("r2"),
+        "[reclaim]\ndegrade_after_days = 7",
+        None,
+    ));
+
+    // state_dir has NO push-state record for storagebox or r2
+    let state_dir = machine.state_dir();
+    fs::create_dir_all(&state_dir).unwrap();
+
+    // 1. reclaim-stage test
+    let output = machine.run(&["reclaim-stage", "--stage", stage.to_str().unwrap()]);
+    let stdout = stdout_of(&output);
+    assert!(
+        stdout.contains("health: storagebox — degraded; 升级后还没有推送记录，下一次定时推送后恢复; not consulted this run"), // t5-allow:
+        "upgrade window destination says upgrade wording in reclaim-stage: {stdout}"
+    );
+    assert!(
+        stdout.contains("health: r2 — degraded; no push on record; not consulted this run"),
+        "truly never pushed destination keeps no push on record in reclaim-stage: {stdout}"
+    );
+
+    // 2. status human-readable test
+    let status_human = machine.run(&["status"]);
+    let status_text = combined(&status_human);
+    assert!(
+        status_text
+            .contains("[dest] storagebox: degraded — 升级后还没有推送记录，下一次定时推送后恢复"), // t5-allow:
+        "upgrade window destination says upgrade wording in status: {status_text}"
+    );
+    assert!(
+        status_text.contains("[dest] r2: degraded — no push to `r2` is on record"),
+        "truly never pushed destination keeps original wording in status: {status_text}"
+    );
+    assert!(
+        !status_text.contains("[dest] r2: degraded — 升级后还没有推送记录，下一次定时推送后恢复"), // t5-allow:
+        "r2 does not get upgrade window wording: {status_text}"
+    );
+
+    // 3. status --json keeps never-pushed
+    let output_json = machine.run(&["status", "--json"]);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout_of(&output_json).lines().next().unwrap()).unwrap();
+    let rows = value["local"]["destinations"].as_array().unwrap();
+    let storagebox_row = rows.iter().find(|row| row["name"] == "storagebox").unwrap();
+    assert_eq!(
+        storagebox_row["health"]["kind"], "never-pushed",
+        "--json slug is preserved"
+    );
+    let r2_row = rows.iter().find(|row| row["name"] == "r2").unwrap();
+    assert_eq!(
+        r2_row["health"]["kind"], "never-pushed",
+        "--json slug is preserved"
+    );
 }
 
 /// **Unknown version ⇒ unreadable ⇒ must-prove + alarm** (the brief's

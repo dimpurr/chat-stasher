@@ -2107,7 +2107,7 @@ pub fn key_inventory(config: &Config) -> Vec<KeyInventoryRow> {
 /// A local copy of what `resolve_store_config` does in the CLI, minus its
 /// `exit(2)` calls: `doctor` must be able to report a half-configured
 /// destination instead of dying on it.
-fn destination_store_config(
+pub fn destination_store_config(
     config: &Config,
     name: &str,
     entry: &crate::config::DestinationConfig,

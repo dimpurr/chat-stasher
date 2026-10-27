@@ -431,6 +431,7 @@ pub struct DestinationFacts {
     /// same way the reclaim judged it.
     pub degrade_after_days: u64,
     pub reclaim_share: ReclaimShare,
+    pub upgrade_window: bool,
 }
 
 /// The machine-level half of the reconciliation: the weekly reclaim job
@@ -708,6 +709,14 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
             per_destination_degrade_after_days,
         );
         let health = classify_destination_health(&last_push, degrade_after_days, inputs.now_unix);
+        let upgrade_window = if matches!(last_push, LastPush::NoRecord) {
+            destination_store_config_by_name(inputs.config, name)
+                .map(|cfg| crate::store::destination_has_snapshots(&cfg))
+                // reason: failure to load config or check repo means no verifiable snapshots
+                .unwrap_or(false)
+        } else {
+            false
+        };
         // ④ from the latest recorded reclaim attempt, with ADR-060 D7's
         // distinct arm for the destination the run classified degraded: it
         // was not asked anything, which is neither "did not block" (a
@@ -760,6 +769,7 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
             health,
             degrade_after_days,
             reclaim_share,
+            upgrade_window,
         });
     }
 
@@ -1194,27 +1204,36 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                     });
                 }
                 DestinationHealth::NeverPushed => {
-                    reconciliation.alerts.push(Alert {
-                        severity: Severity::Yellow,
-                        sentence: format!(
-                            "[dest] {name}: degraded — {no_record}. It has not received this \
-                             machine's increments on this record, the weekly stage clean-up does \
-                             not consult it, and if no healthy destination remains nothing is \
-                             reclaimed at all. Two roads: give it its first successful push \
-                             (health heals automatically from there), or remove \
-                             `[destinations.{name}]` from the config if this destination is no \
-                             longer needed",
-                            name = facts.name,
-                            no_record = no_record_why(&facts.name),
-                        ),
-                        fix: Some(format!(
-                            "chat-stasher push --destination {name} --stage <stage>   # the \
-                                 first successful push ends the degraded state; also install \
-                                 its hourly timer: chat-stasher schedule install --destination \
-                                 {name} --stage <stage>",
-                            name = facts.name
-                        )),
-                    });
+                    if facts.upgrade_window {
+                        let msg = "升级后还没有推送记录，下一次定时推送后恢复"; // t5-allow:
+                        reconciliation.alerts.push(Alert {
+                            severity: Severity::Yellow,
+                            sentence: format!("[dest] {}: degraded — {msg}", facts.name),
+                            fix: None,
+                        });
+                    } else {
+                        reconciliation.alerts.push(Alert {
+                            severity: Severity::Yellow,
+                            sentence: format!(
+                                "[dest] {name}: degraded — {no_record}. It has not received this \
+                                 machine's increments on this record, the weekly stage clean-up does \
+                                 not consult it, and if no healthy destination remains nothing is \
+                                 reclaimed at all. Two roads: give it its first successful push \
+                                 (health heals automatically from there), or remove \
+                                 `[destinations.{name}]` from the config if this destination is no \
+                                 longer needed",
+                                name = facts.name,
+                                no_record = no_record_why(&facts.name),
+                            ),
+                            fix: Some(format!(
+                                "chat-stasher push --destination {name} --stage <stage>   # the \
+                                     first successful push ends the degraded state; also install \
+                                     its hourly timer: chat-stasher schedule install --destination \
+                                     {name} --stage <stage>",
+                                name = facts.name
+                            )),
+                        });
+                    }
                 }
                 DestinationHealth::Healthy | DestinationHealth::Unknown { .. } => {}
             }
@@ -2106,6 +2125,44 @@ fn reclaim_json(r: &Reconciliation) -> serde_json::Value {
     out
 }
 
+fn destination_store_config_by_name(
+    config: &Config,
+    name: &str,
+) -> Option<crate::store::StoreConfig> {
+    if let Some(entry) = config.destinations.get(name) {
+        crate::doctor::destination_store_config(config, name, entry)
+    } else if config.destinations.is_empty() {
+        let data_root = crate::config::default_data_root();
+        let repo_root = config
+            .rustic_repo
+            .clone()
+            .unwrap_or_else(|| data_root.join("repo").to_string_lossy().into_owned());
+        let key_file = config
+            .rustic_key_file
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| data_root.join("masterkey.json"));
+        let cache_dir = config
+            .rustic_cache_dir
+            .as_deref()
+            .map(std::path::PathBuf::from);
+        Some(
+            crate::store::StoreConfig {
+                repo_root,
+                key_file,
+                connections: 0,
+                options: std::collections::BTreeMap::new(),
+                cache_dir,
+                // reason: config default when unset
+                no_cache: config.rustic_no_cache.unwrap_or(false),
+            }
+            .with_capped_connections(config.rustic_connections),
+        )
+    } else {
+        None
+    }
+}
+
 /// The absent-record wording, shared by the JSON and `doctor`'s table: the
 /// absence names itself, the version that started keeping the record names
 /// itself, and "never" is nowhere in the sentence.
@@ -2217,7 +2274,12 @@ pub fn doctor_lines(r: &Reconciliation) -> Vec<String> {
                 // is `never-pushed`; the human table says "no push on
                 // record" and never "never pushed".
                 DestinationHealth::NeverPushed => {
-                    "degraded — no push on record".to_string()
+                    if facts.upgrade_window {
+                        let msg = "升级后还没有推送记录，下一次定时推送后恢复"; // t5-allow:
+                        format!("degraded — {msg}")
+                    } else {
+                        "degraded — no push on record".to_string()
+                    }
                 }
                 DestinationHealth::Unknown { why } => format!("unknown — {why}"),
             },
@@ -4179,5 +4241,133 @@ mod tests {
         );
         let json = destinations_json(&out);
         assert_eq!(json["stage_cap"]["kind"], "unknown");
+    }
+
+    #[test]
+    fn doctor_lines_and_alerts_distinguish_upgrade_window_from_never_pushed() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let empty_repo_dir = tempfile::tempdir().unwrap();
+        let stage_dir = tempfile::tempdir().unwrap();
+        let lines: Vec<String> = vec!["{\"seq\":1,\"i\":0,\"s\":\"synthetic\"}".to_string()];
+        crate::store::write_sealed_shard(
+            crate::store::StageWriter::Collect,
+            stage_dir.path(),
+            "m-old",
+            "s-old",
+            &lines,
+        )
+        .unwrap();
+
+        let storagebox_cfg = crate::store::StoreConfig {
+            repo_root: repo_dir.path().to_string_lossy().into_owned(),
+            key_file: repo_dir.path().join("masterkey.json"),
+            connections: 1,
+            options: BTreeMap::new(),
+            cache_dir: None,
+            no_cache: true,
+        };
+        let mk = rustic_core::repofile::MasterKey::new();
+        crate::store::persist_key_file(&storagebox_cfg, &mk).unwrap();
+        crate::store::BackupStore::new(storagebox_cfg.clone(), "m-old".to_string())
+            .push(stage_dir.path(), &mk)
+            .unwrap();
+
+        let r2_cfg = crate::store::StoreConfig {
+            repo_root: empty_repo_dir.path().to_string_lossy().into_owned(),
+            key_file: empty_repo_dir.path().join("masterkey.json"),
+            connections: 1,
+            options: BTreeMap::new(),
+            cache_dir: None,
+            no_cache: true,
+        };
+        crate::store::persist_key_file(&r2_cfg, &mk).unwrap();
+        crate::store::BackupStore::new(r2_cfg.clone(), "unused".to_string())
+            .open_or_init(&mk)
+            .unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.destinations.insert(
+            "storagebox".to_string(),
+            crate::config::DestinationConfig {
+                repo: Some(storagebox_cfg.repo_root.clone()),
+                key_file: Some(storagebox_cfg.key_file.to_string_lossy().into_owned()),
+                options: BTreeMap::new(),
+                connections: None,
+                cache_dir: None,
+                no_cache: Some(true),
+                degrade_after_days: Some(7),
+            },
+        );
+        config.destinations.insert(
+            "r2".to_string(),
+            crate::config::DestinationConfig {
+                repo: Some(r2_cfg.repo_root.clone()),
+                key_file: Some(r2_cfg.key_file.to_string_lossy().into_owned()),
+                options: BTreeMap::new(),
+                connections: None,
+                cache_dir: None,
+                no_cache: Some(true),
+                degrade_after_days: Some(7),
+            },
+        );
+
+        let out = reconcile(&Inputs {
+            config: &config,
+            format: Format::Launchd,
+            home: home.path(),
+            state_dir: state.path(),
+            now_unix: 1_750_100_200,
+            scheduler_readable: false,
+            stage: None,
+        });
+
+        let storagebox_facts = out
+            .destinations
+            .iter()
+            .find(|d| d.name == "storagebox")
+            .unwrap();
+        assert!(
+            storagebox_facts.upgrade_window,
+            "storagebox has snapshots -> upgrade window"
+        );
+
+        let r2_facts = out.destinations.iter().find(|d| d.name == "r2").unwrap();
+        assert!(
+            !r2_facts.upgrade_window,
+            "r2 has no snapshots -> not upgrade window"
+        );
+
+        let alerts = out.all_alerts();
+        let storagebox_alert = alerts
+            .iter()
+            .find(|a| a.sentence.contains("storagebox"))
+            .unwrap();
+        assert!(
+            storagebox_alert
+                .sentence
+                .contains("升级后还没有推送记录，下一次定时推送后恢复"), // t5-allow:
+            "storagebox alert uses upgrade window wording: {}",
+            storagebox_alert.sentence
+        );
+
+        let r2_alert = alerts.iter().find(|a| a.sentence.contains("r2")).unwrap();
+        assert!(
+            r2_alert.sentence.contains("no push to `r2` is on record"),
+            "r2 alert uses no push on record wording: {}",
+            r2_alert.sentence
+        );
+
+        let lines = doctor_lines(&out);
+        let text = lines.join("\n");
+        assert!(
+            text.contains("degraded — 升级后还没有推送记录，下一次定时推送后恢复"), // t5-allow:
+            "doctor lines contains upgrade window wording for storagebox: {text}"
+        );
+        assert!(
+            text.contains("degraded — no push on record"),
+            "doctor lines contains no push on record for r2: {text}"
+        );
     }
 }
