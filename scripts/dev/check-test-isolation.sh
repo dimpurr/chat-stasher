@@ -208,7 +208,7 @@ trap cleanup EXIT
 # `test_identity_guard::FIXTURE_IDENTITY_TOKENS`. The selftest reads that
 # constant out of the Rust source and fails if the two ever disagree, so the
 # copy cannot drift silently.
-FIXTURE_TOKENS="synthetic fixture probe dummy"
+FIXTURE_TOKENS="synthetic fixture probe dummy gate"
 # A file larger than this is not read for fingerprints. The marker is a random
 # token and the token scan is confined to `<data root>/state`, so a cap only
 # bounds the cost of a pathological write; it is not a correctness boundary.
