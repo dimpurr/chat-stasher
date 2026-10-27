@@ -404,9 +404,9 @@ lower() { printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]'; }
 name_is_fixture() {
   local lowered token token_padded padded
   lowered="$(lower "$1")"
-  padded=" $(printf '%s' "$lowered" | LC_ALL=C tr -c 'a-z0-9' ' ') "
+  padded=" $(printf '%s' "$lowered" | LC_ALL=C tr -s -c 'a-z0-9' ' ') "
   for token in $FIXTURE_TOKENS; do
-    token_padded=" $(printf '%s' "$token" | LC_ALL=C tr -c 'a-z0-9' ' ') "
+    token_padded=" $(printf '%s' "$token" | LC_ALL=C tr -s -c 'a-z0-9' ' ') "
     case "$padded" in
       *"$token_padded"*) return 0 ;;
     esac
@@ -490,7 +490,7 @@ LC_ALL=C awk -v list="$FIXTURE_TOKENS" '
     split(list, T, " ")
     for (i in T) {
       t = T[i]
-      gsub(/[^a-z0-9]/, " ", t)
+      gsub(/[^a-z0-9]+/, " ", t)
       token[" " t " "] = 1
     }
   }
@@ -498,7 +498,7 @@ LC_ALL=C awk -v list="$FIXTURE_TOKENS" '
     name = $0
     sub(/.*\//, "", name)          # basename, as `name_is_fixture` reads it
     name = tolower(name)
-    gsub(/[^a-z0-9]/, " ", name)   # split into whole alphanumeric tokens
+    gsub(/[^a-z0-9]+/, " ", name)   # split into whole alphanumeric tokens
     padded = " " name " "
     for (tok in token)
       if (index(padded, tok) > 0) { print $0; next }
