@@ -1199,6 +1199,365 @@ fn the_cli_reaches_the_deleted_view() {
     assert_eq!(deleted_rows[0]["id"], format!("{SESSION}-m2"));
 }
 
+/// SG-2b required fixture: reclaim, then one collect.
+/// Unchanged sessions export 0.
+/// A session whose source gained one record writes only that increment.
+/// The assembled view equals the pre-reclaim bytes.
+#[test]
+fn sg2b_post_reclaim_unchanged_exports_zero_and_changed_writes_increment_only() {
+    let fx = Fixture::new();
+
+    // Add a second session to fx.db which will remain unchanged
+    let unchanged_sid = "ses_w1020_unchanged";
+    {
+        let conn = connect(&fx.db);
+        conn.execute(
+            "INSERT INTO session (id, time_created, time_updated, title) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![unchanged_sid, 1000, 1000, "unchanged fixture"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![format!("{unchanged_sid}-m1"), unchanged_sid, 1100, 1100, json!({"role":"user"}).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part (id, session_id, message_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![format!("{unchanged_sid}-p1"), unchanged_sid, format!("{unchanged_sid}-m1"), 1200, 1200, r#"{"type":"text","text":"unchanged one"}"#],
+        )
+        .unwrap();
+    }
+
+    // First collect: both sessions are sealed as one shard each
+    let first = fx.collect();
+    assert_eq!(first.shards_written, 2);
+
+    let session_growing_id = fx.session_id();
+    let session_unchanged_id = fx
+        .scan()
+        .records
+        .iter()
+        .map(|r| r.id.clone())
+        .find(|id| id.ends_with(&format!(".{unchanged_sid}")))
+        .unwrap();
+
+    // Push to repo and verify pre-reclaim readback
+    let (mk, cfg) = pushed(&fx, "repo-sg2b");
+    let (pre_reclaim_bytes_unchanged, _) = BackupStore::new(cfg.clone(), MACHINE.to_string())
+        .read_session_concat(MACHINE, &session_unchanged_id, &mk)
+        .unwrap();
+    let (_pre_reclaim_bytes_growing, _) = BackupStore::new(cfg.clone(), MACHINE.to_string())
+        .read_session_concat(MACHINE, &session_growing_id, &mk)
+        .unwrap();
+
+    // Reclaim: write manifest and delete shard bodies from stage
+    let fresh = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
+    chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
+    let removed_u =
+        chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session_unchanged_id)
+            .unwrap();
+    assert_eq!(removed_u, 1);
+    let removed_g =
+        chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session_growing_id)
+            .unwrap();
+    assert_eq!(removed_g, 1);
+    assert_eq!(fx.shard_count(&session_unchanged_id), 0);
+    assert_eq!(fx.shard_count(&session_growing_id), 0);
+
+    // Source mutation: unchanged session is untouched, growing session gains one message + part
+    {
+        let conn = connect(&fx.db);
+        conn.execute(
+            "UPDATE session SET time_updated = 3000 WHERE id = ?1",
+            [SESSION],
+        )
+        .unwrap();
+        add_message(&conn, 2600, "user", "m3");
+        add_part(
+            &conn,
+            "m3",
+            "p4",
+            2700,
+            r#"{"type":"text","text":"synthetic four"}"#,
+        );
+    }
+
+    // Collect again: one collect pass
+    let second = fx.collect();
+
+    // 1. Unchanged session exports 0:
+    assert_eq!(
+        fx.shard_count(&session_unchanged_id),
+        0,
+        "unchanged session must write zero shards to stage"
+    );
+    let unchanged_outcome = second
+        .outcomes
+        .iter()
+        .find(|o| o.session_prefix == chat_stasher::id::short_session_id(&session_unchanged_id))
+        .expect("unchanged session must be in outcomes");
+    assert_eq!(
+        unchanged_outcome.lines_written, 0,
+        "unchanged session must write zero lines"
+    );
+    assert!(
+        unchanged_outcome.shard.is_none(),
+        "unchanged session must write no shard"
+    );
+
+    // 2. Changed session writes only that increment:
+    assert_eq!(
+        fx.shard_count(&session_growing_id),
+        1,
+        "changed session must write exactly one increment shard"
+    );
+    let growing_outcome = second
+        .outcomes
+        .iter()
+        .find(|o| o.session_prefix == chat_stasher::id::short_session_id(&session_growing_id))
+        .expect("growing session must be in outcomes");
+    assert!(growing_outcome.shard.is_some());
+    let bodies = fx.stage_shard_bodies(&session_growing_id);
+    assert_eq!(bodies.len(), 1);
+    let lines = shard_lines(&bodies[0]);
+    assert_eq!(
+        lines.len(),
+        3,
+        "increment shard contains session row + 1 message + 1 part"
+    );
+    assert!(lines
+        .iter()
+        .any(|l| l["record_id"] == format!("{SESSION}-m3")));
+    assert!(lines
+        .iter()
+        .any(|l| l["record_id"] == format!("{SESSION}-p4")));
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l["record_id"] == format!("{SESSION}-m1")),
+        "pre-reclaim message m1 must not be restaged"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l["record_id"] == format!("{SESSION}-m2")),
+        "pre-reclaim message m2 must not be restaged"
+    );
+
+    // 3. Push and verify assembled views
+    BackupStore::new(cfg.clone(), MACHINE.to_string())
+        .push(&fx.stage, &mk)
+        .unwrap();
+
+    let (post_reclaim_bytes_unchanged, _) = BackupStore::new(cfg.clone(), MACHINE.to_string())
+        .read_session_concat(MACHINE, &session_unchanged_id, &mk)
+        .unwrap();
+    assert_eq!(
+        post_reclaim_bytes_unchanged, pre_reclaim_bytes_unchanged,
+        "assembled view of unchanged session equals pre-reclaim bytes"
+    );
+
+    let (post_reclaim_bytes_growing, _) = BackupStore::new(cfg.clone(), MACHINE.to_string())
+        .read_session_concat(MACHINE, &session_growing_id, &mk)
+        .unwrap();
+    assert_eq!(
+        post_reclaim_bytes_growing,
+        fresh_export_framed(&fx),
+        "assembled view of changed session equals fresh export of source's final state"
+    );
+}
+
+/// Self-attack 1: a test where a changed session is treated as unchanged must fail.
+#[test]
+fn self_attack_changed_session_treated_as_unchanged_must_fail() {
+    let fx = Fixture::new();
+    fx.collect();
+    let session = fx.session_id();
+
+    // Reclaim
+    let fresh = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
+    chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
+    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session).unwrap();
+
+    // Mutate source: session gained a message
+    {
+        let conn = connect(&fx.db);
+        conn.execute(
+            "UPDATE session SET time_updated = 3000 WHERE id = ?1",
+            [SESSION],
+        )
+        .unwrap();
+        add_message(&conn, 2600, "user", "m3");
+    }
+
+    let report = fx.collect();
+    let outcome = report
+        .outcomes
+        .iter()
+        .find(|o| o.session_prefix == chat_stasher::id::short_session_id(&session))
+        .unwrap();
+
+    // A changed session must NOT have 0 lines written or None shard.
+    assert!(
+        outcome.shard.is_some(),
+        "changed session must emit a shard (if treated as unchanged, this fails)"
+    );
+    assert!(
+        outcome.lines_written > 0,
+        "changed session must write increment lines (if treated as unchanged, this fails)"
+    );
+    assert_eq!(report.changed_records, 1);
+    assert_eq!(report.unchanged_records, 0);
+}
+
+/// Self-attack 2: a test where an unchanged session is fully rewritten must fail.
+#[test]
+fn self_attack_unchanged_session_fully_rewritten_must_fail() {
+    let fx = Fixture::new();
+    fx.collect();
+    let session = fx.session_id();
+
+    // Reclaim
+    let fresh = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
+    chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
+    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session).unwrap();
+
+    // Touch opencode.db by creating another unrelated table so store_fingerprint changes,
+    // but the session itself is UNCHANGED.
+    {
+        let conn = connect(&fx.db);
+        conn.execute("CREATE TABLE dummy_unrelated (id TEXT)", [])
+            .unwrap();
+    }
+
+    let report = fx.collect();
+    let outcome = report
+        .outcomes
+        .iter()
+        .find(|o| o.session_prefix == chat_stasher::id::short_session_id(&session))
+        .unwrap();
+
+    // An unchanged session must NOT be rewritten.
+    assert!(
+        outcome.shard.is_none(),
+        "unchanged session must not emit a shard (if fully rewritten, this fails)"
+    );
+    assert_eq!(
+        outcome.lines_written, 0,
+        "unchanged session must write 0 lines (if fully rewritten, this fails)"
+    );
+    assert_eq!(
+        report.shards_written, 0,
+        "unchanged session must write 0 shards (if fully rewritten, this fails)"
+    );
+    assert_eq!(report.changed_records, 0);
+    assert_eq!(report.unchanged_records, 1);
+}
+
+/// SG-2b fresh destination test: after reclaim, collect against a fresh destination
+/// (where debts has no entry, so old is None) still exports 0 for unchanged sessions
+/// and writes only the increment for changed sessions.
+#[test]
+fn sg2b_post_reclaim_with_no_stored_debts_exports_zero_and_writes_increment_only() {
+    let fx = Fixture::new();
+
+    let unchanged_sid = "ses_fresh_dest_unchanged";
+    {
+        let conn = connect(&fx.db);
+        conn.execute(
+            "INSERT INTO session (id, time_created, time_updated, title) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![unchanged_sid, 1000, 1000, "unchanged fixture"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![format!("{unchanged_sid}-m1"), unchanged_sid, 1100, 1100, json!({"role":"user"}).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part (id, session_id, message_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![format!("{unchanged_sid}-p1"), unchanged_sid, format!("{unchanged_sid}-m1"), 1200, 1200, r#"{"type":"text","text":"unchanged one"}"#],
+        )
+        .unwrap();
+    }
+
+    // Collect on dest-a
+    let first = fx.collect();
+    assert_eq!(first.shards_written, 2);
+
+    let session_growing_id = fx.session_id();
+    let session_unchanged_id = fx
+        .scan()
+        .records
+        .iter()
+        .map(|r| r.id.clone())
+        .find(|id| id.ends_with(&format!(".{unchanged_sid}")))
+        .unwrap();
+
+    // Reclaim: write manifest and remove bodies from stage
+    let fresh = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
+    chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
+    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session_unchanged_id)
+        .unwrap();
+    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session_growing_id)
+        .unwrap();
+    assert_eq!(fx.shard_count(&session_unchanged_id), 0);
+    assert_eq!(fx.shard_count(&session_growing_id), 0);
+
+    // Mutate source: growing session gains m3
+    {
+        let conn = connect(&fx.db);
+        conn.execute(
+            "UPDATE session SET time_updated = 3000 WHERE id = ?1",
+            [SESSION],
+        )
+        .unwrap();
+        add_message(&conn, 2600, "user", "m3");
+    }
+
+    // Collect on a fresh destination "dest-b" with NO cursor debts stored
+    let fresh_dest = DestinationView::unreachable("dest-b-fresh");
+    let second =
+        collect::collect_scan_report(&fx.scan(), &fx.stage, MACHINE, &fx.state, 20, &fresh_dest)
+            .unwrap();
+
+    // 1. Unchanged session must write 0 shards
+    assert_eq!(
+        fx.shard_count(&session_unchanged_id),
+        0,
+        "fresh destination must write zero shards for unchanged session"
+    );
+    let unchanged_outcome = second
+        .outcomes
+        .iter()
+        .find(|o| o.session_prefix == chat_stasher::id::short_session_id(&session_unchanged_id))
+        .unwrap();
+    assert_eq!(unchanged_outcome.lines_written, 0);
+    assert!(unchanged_outcome.shard.is_none());
+
+    // 2. Changed session must write only the increment
+    assert_eq!(
+        fx.shard_count(&session_growing_id),
+        1,
+        "fresh destination must write exactly one increment shard for changed session"
+    );
+    let growing_outcome = second
+        .outcomes
+        .iter()
+        .find(|o| o.session_prefix == chat_stasher::id::short_session_id(&session_growing_id))
+        .unwrap();
+    assert!(growing_outcome.shard.is_some());
+    let bodies = fx.stage_shard_bodies(&session_growing_id);
+    let lines = shard_lines(&bodies[0]);
+    assert_eq!(lines.len(), 2, "only session row + m3 written");
+    assert!(lines
+        .iter()
+        .any(|l| l["record_id"] == format!("{SESSION}-m3")));
+    assert!(!lines
+        .iter()
+        .any(|l| l["record_id"] == format!("{SESSION}-m1")));
+}
+
 /// A `chat-stasher` binary run with fully isolated XDG/home env (the same
 /// pattern the archive tests use).
 fn isolated_command(sandbox: &Path) -> std::process::Command {

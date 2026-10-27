@@ -546,6 +546,22 @@ pub fn reclaim_stage(
             .with_context(|| format!("generate manifest for machine {machine}"))?;
         refresh_manifest(stage, machine, &fresh)?;
         for cand in cands {
+            if cand.session_id.starts_with("opencode.") {
+                let meta_path =
+                    crate::collect::opencode_record_map_meta_path(stage, machine, &cand.session_id);
+                if !meta_path.exists() {
+                    if let Some(records) =
+                        crate::collect::fold_opencode_staged_map(stage, machine, &cand.session_id)
+                    {
+                        crate::collect::save_opencode_record_map(
+                            &meta_path,
+                            &cand.session_id,
+                            &records,
+                        )
+                        .ok();
+                    }
+                }
+            }
             let removed = reclaim_session_body(stage, &cand.machine, &cand.session_id)
                 .with_context(|| {
                     format!(
