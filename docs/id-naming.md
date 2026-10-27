@@ -39,6 +39,7 @@ New sources are named by the rule above, and the existing ones converge on it by
 | `perplexity` (web) | `perplexity-web` |
 | `aider` | `aider-cli` |
 | `crush` | `crush-cli` |
+| `codebuff` | `codebuff-cli` |
 | `cursor` | `cursor-ide` |
 | `zed` | `zed-ide` |
 | `continue` | `continue-ide` |
