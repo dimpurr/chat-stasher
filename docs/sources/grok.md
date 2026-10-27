@@ -52,3 +52,4 @@ The registry's standing caveat for this harness is the summary's lossiness: the 
 2026-10-11 — the native `chat_history.jsonl` transcripts are archived for every session directory, and the derived reading prefers their typed turns over the summary when they render.
 2026-10-12 — the native collect's interleavings and its per-session id census were pinned by tests.
 2026-10-13 — `status --json` gained a per-harness `found_staged` count: distinct staged session ids, the unit collect stages, separate from the store's row count and the total record count.
+2026-10-27 — post-reclaim summary baseline (SG-2c): when stage shard bodies are deleted by reclaim, the retained per-session manifest summary (ADR-020 role C) acts as the baseline for file sources so unchanged sessions write zero bytes and changed sessions write only the increment.
