@@ -334,6 +334,8 @@ def run_collect(collect_cmd: str | None, root: str) -> dict:
     env = dict(os.environ)
     env.update(
         {
+            "HOME": os.path.join(root, "home"),
+            "USERPROFILE": os.path.join(root, "home"),
             "XDG_DATA_HOME": root,
             "XDG_CONFIG_HOME": os.path.join(root, "config"),
             "XDG_STATE_HOME": os.path.join(root, "state-home"),

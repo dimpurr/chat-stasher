@@ -295,6 +295,7 @@ pub fn record_pushed_meta_hash(
     machine: &str,
     hash: Option<&str>,
 ) -> anyhow::Result<()> {
+    crate::test_identity_guard::refuse_fixture_write(&[machine], state_dir)?;
     fs::create_dir_all(state_dir)
         .with_context(|| format!("create state dir {}", state_dir.display()))?;
     let path = pushed_meta_record_path(state_dir, machine);

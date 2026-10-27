@@ -29,7 +29,15 @@ set -euo pipefail
 
 # --------------------------------------------------------------------- config
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$ROOT/target/debug/chat-stasher"
+if [ -n "${CHAT_STASHER_BIN:-}" ]; then
+  BIN="$CHAT_STASHER_BIN"
+elif [ -n "${CARGO_TARGET_DIR:-}" ] && [ -x "$CARGO_TARGET_DIR/debug/chat-stasher" ]; then
+  BIN="$CARGO_TARGET_DIR/debug/chat-stasher"
+elif [ -n "${CARGO_TARGET_DIR:-}" ]; then
+  BIN="$CARGO_TARGET_DIR/debug/chat-stasher"
+else
+  BIN="$ROOT/target/debug/chat-stasher"
+fi
 MACHINE="gate-mbp"        # fixed path partition + snapshot host
 N_SESSIONS=3              # sessions to archive in either fixture mode
 SHARDS=4                  # sealed shards per session
@@ -58,16 +66,61 @@ STAGE="$TMP/stage"        # sealed staging tree (fed to push)
 REPO="$TMP/repo"          # brand-new local rustic repository
 KEY="$TMP/masterkey.json" # fresh masterkey (persisted on repo init)
 
-# Pin the rustic metadata cache of every `$BIN` run under $TMP (W289). The runs
-# below that touch a repository — push into $REPO, read, verify — each make a
-# default-option open create `<cache root>/rustic/<repository id>/…` on the
-# machine that ran it, and `doctor` loads the config even when it opens nothing.
-# rustic resolves that root with `dirs::cache_dir()` — `%LOCALAPPDATA%` on
-# Windows — which `HOME` and `XDG_CACHE_HOME` do not move, so the product-level
-# knob is the only pin that holds on every platform. It is exported (not passed
-# per call) so the `--selftest` re-push and the isolated-HOME `doctor` step
-# inherit it too; $TMP is removed by the cleanup trap.
+# Isolate HOME, XDG directories and rustic cache under $TMP (W1033 / W289).
+# Every CLI invocation in this gate — push, read, verify, doctor, and selftest
+# re-push — must resolve its state, config, cache, and repository data within
+# $TMP, never touching the user's real ~/.local/share/chat-stasher or ~/.config.
+REAL_HOME="${HOME:-}"
+REAL_XDG_DATA_HOME="${XDG_DATA_HOME:-}"
+REAL_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}"
+REAL_XDG_STATE_HOME="${XDG_STATE_HOME:-}"
+REAL_XDG_CACHE_HOME="${XDG_CACHE_HOME:-}"
+
+GATE_HOME="$TMP/home"
+mkdir -p "$GATE_HOME"
+export HOME="$GATE_HOME"
+export USERPROFILE="$GATE_HOME"
+export XDG_DATA_HOME="$GATE_HOME/.local/share"
+export XDG_CONFIG_HOME="$GATE_HOME/.config"
+export XDG_STATE_HOME="$GATE_HOME/.local/state"
+export XDG_CACHE_HOME="$GATE_HOME/.cache"
 export CHAT_STASHER_RUSTIC_CACHE_DIR="$TMP/rustic-cache"
+
+# Ensure cargo build (if debug binary is missing) can find toolchain/cargo home:
+if [ -n "$REAL_HOME" ]; then
+  export CARGO_HOME="${CARGO_HOME:-$REAL_HOME/.cargo}"
+  export RUSTUP_HOME="${RUSTUP_HOME:-$REAL_HOME/.rustup}"
+fi
+
+# Guard baseline (W1033): record real push-state hash before any gate steps run.
+REAL_PUSH_STATE=""
+REAL_PUSH_STATE_HASH_BEFORE="ABSENT"
+if [ -n "$REAL_XDG_DATA_HOME" ]; then
+  REAL_PUSH_STATE="$REAL_XDG_DATA_HOME/chat-stasher/state/push-state.json"
+elif [ -n "$REAL_HOME" ]; then
+  REAL_PUSH_STATE="$REAL_HOME/.local/share/chat-stasher/state/push-state.json"
+fi
+if [ -n "$REAL_PUSH_STATE" ] && [ -f "$REAL_PUSH_STATE" ]; then
+  REAL_PUSH_STATE_HASH_BEFORE="$(sha256_of "$REAL_PUSH_STATE")"
+fi
+
+assert_real_home_untouched() {
+  if [ -n "$REAL_PUSH_STATE" ]; then
+    if [ "$REAL_PUSH_STATE_HASH_BEFORE" = "ABSENT" ]; then
+      if [ -f "$REAL_PUSH_STATE" ]; then
+        echo "[gate] GUARD FAILURE (W1033): real push-state.json was created during gate run: $REAL_PUSH_STATE"
+        fail_gate
+      fi
+    else
+      local current_hash
+      current_hash="$(sha256_of "$REAL_PUSH_STATE" 2>/dev/null || echo ABSENT)"
+      if [ "$current_hash" != "$REAL_PUSH_STATE_HASH_BEFORE" ]; then
+        echo "[gate] GUARD FAILURE (W1033): real push-state.json was modified during gate run: $REAL_PUSH_STATE"
+        fail_gate
+      fi
+    fi
+  fi
+}
 
 gate()   { echo "[gate] $*"; }
 elapsed(){ echo "$(( $(date +%s) - START ))s"; }
@@ -138,11 +191,11 @@ collect_sources() {
 }
 
 if [ "$REAL_DATA" -eq 1 ]; then
-  SRC_ROOT="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+  SRC_ROOT="${CLAUDE_PROJECTS_DIR:-${REAL_HOME:-$HOME}/.claude/projects}"
   if [ -n "${CLAUDE_PROJECTS_DIR:-}" ]; then
     SRC_LABEL="CLAUDE_PROJECTS_DIR override"
   else
-    SRC_LABEL='$HOME/.claude/projects'
+    SRC_LABEL='${REAL_HOME:-$HOME}/.claude/projects'
   fi
   collect_sources "$SRC_ROOT"
   if [ "${#sources[@]}" -lt "$N_SESSIONS" ]; then
@@ -313,12 +366,24 @@ if [ "$REAL_DATA" -eq 0 ]; then
   DOCTOR_HOME="$TMP/doctor-home"
   mkdir -p "$DOCTOR_HOME"
   gate "step 7/8 · doctor (synthetic mode, isolated HOME)"
-  if ! out=$(HOME="$DOCTOR_HOME" "$BIN" doctor 2>&1); then
+  if ! out=$(HOME="$DOCTOR_HOME" \
+             USERPROFILE="$DOCTOR_HOME" \
+             XDG_DATA_HOME="$DOCTOR_HOME/.local/share" \
+             XDG_CONFIG_HOME="$DOCTOR_HOME/.config" \
+             XDG_STATE_HOME="$DOCTOR_HOME/.local/state" \
+             XDG_CACHE_HOME="$DOCTOR_HOME/.cache" \
+             "$BIN" doctor 2>&1); then
     echo "$out"; echo "[gate] doctor errored"; fail_gate
   fi
 else
   gate "step 7/8 · doctor (real-data opt-in)"
-  if ! out=$("$BIN" doctor 2>&1); then
+  if ! out=$(HOME="$REAL_HOME" \
+             USERPROFILE="$REAL_HOME" \
+             XDG_DATA_HOME="${REAL_XDG_DATA_HOME:-$REAL_HOME/.local/share}" \
+             XDG_CONFIG_HOME="${REAL_XDG_CONFIG_HOME:-$REAL_HOME/.config}" \
+             XDG_STATE_HOME="${REAL_XDG_STATE_HOME:-$REAL_HOME/.local/state}" \
+             XDG_CACHE_HOME="${REAL_XDG_CACHE_HOME:-$REAL_HOME/.cache}" \
+             "$BIN" doctor 2>&1); then
     echo "$out"; echo "[gate] doctor errored"; fail_gate
   fi
 fi
@@ -402,12 +467,14 @@ if [ "$SELFTEST" -eq 1 ]; then
     fail_gate
   fi
   gate "SELFTEST OK · corruption detected, verify l3 failed as required"
+  assert_real_home_untouched
   echo "[gate] elapsed $(elapsed)"
   echo "GATE: FAIL"
   exit 1
 fi
 
 # --------------------------------------------------------------------- pass
+assert_real_home_untouched
 echo "[gate] elapsed $(elapsed)"
 echo "GATE: PASS"
 exit 0

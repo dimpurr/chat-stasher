@@ -48,12 +48,13 @@ use std::path::Path;
 /// `synthetic-session`, whose tokens are `synthetic` and `session`.
 ///
 /// `probe` and `dummy` are here because the suite uses them for the same
-/// purpose (`w306-probe-machine`, `dummy-install`), and case-folding is here
+/// purpose (`w306-probe-machine`, `dummy-install`), `gate` is here because gate
+/// fixtures use it (`gate-mbp`), and case-folding is here
 /// because nothing stops a fixture from being spelled `Synthetic-session` —
 /// the namespace is a contract, not a spelling. This list is restated in
 /// `scripts/dev/check-test-isolation.sh`, whose selftest reads this constant
 /// back out of the source so the two cannot drift apart.
-pub const FIXTURE_IDENTITY_TOKENS: &[&str] = &["synthetic", "fixture", "probe", "dummy"];
+pub const FIXTURE_IDENTITY_TOKENS: &[&str] = &["synthetic", "fixture", "probe", "dummy", "gate"];
 
 /// Is `id` a reserved test fixture identity?
 ///
@@ -125,6 +126,8 @@ mod tests {
             "fixture-install",
             "w306-probe-machine",
             "dummy-install",
+            "gate-mbp",
+            "gate-1",
         ] {
             assert!(is_fixture_identity(id), "`{id}` must be reserved");
         }
@@ -154,6 +157,8 @@ mod tests {
             "claude.28bca09c-196b-4521-8c29-b8de23343d00",
             "reprobe-session",
             "dummyish-install",
+            "aggregate-machine",
+            "surrogate",
             "",
         ] {
             assert!(!is_fixture_identity(id), "`{id}` must not be reserved");

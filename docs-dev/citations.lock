@@ -837,25 +837,25 @@ crates/chat-stasher/src/main.rs:10460-10463  b98db7ea7e0d  lines=4
   <- docs-dev/install.md:611  :: }
 crates/chat-stasher/src/main.rs:10677-10693  66f4a2e262d2  lines=17
   <- SECURITY.md:70, docs-dev/threat-model.md:871  :: /// host of this run. No-op when `--keep-ssh-masters` is se…
-crates/chat-stasher/src/main.rs:10805-10810  13896e8d543a  lines=6
+crates/chat-stasher/src/main.rs:10815-10820  13896e8d543a  lines=6
   <- SECURITY.md:70, docs-dev/threat-model.md:869  :: eprintln!("push: cannot check stage metadata: {e:#}");
-crates/chat-stasher/src/main.rs:11243-11429  b256db959826  lines=187
+crates/chat-stasher/src/main.rs:11250-11436  b256db959826  lines=187
   <- docs-dev/threat-model.md:933  :: let destination = destination.or_else(|| {
-crates/chat-stasher/src/main.rs:15987-16038  eb6db4f4050d  lines=52
+crates/chat-stasher/src/main.rs:15994-16045  eb6db4f4050d  lines=52
   <- docs-dev/install.md:306  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:15987-15998  8f911ffc9cf6  lines=12
+crates/chat-stasher/src/main.rs:15994-16005  8f911ffc9cf6  lines=12
   <- docs-dev/install.md:1037  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:16767-16781  da484ba556b2  lines=15
+crates/chat-stasher/src/main.rs:16774-16788  da484ba556b2  lines=15
   <- docs-dev/install.md:630  :: `dest-init`) — the destination block itself does not have t…
-crates/chat-stasher/src/main.rs:17204-17211  c5ec574f3326  lines=8
+crates/chat-stasher/src/main.rs:17211-17218  c5ec574f3326  lines=8
   <- docs-dev/install.md:629  :: )
-crates/chat-stasher/src/main.rs:20078-20085  9cd8be148a6b  lines=8
+crates/chat-stasher/src/main.rs:20085-20092  9cd8be148a6b  lines=8
   <- docs-dev/install.md:1027  :: render_status(report, false)
-crates/chat-stasher/src/main.rs:20103-20104  d745898fe057  lines=2
+crates/chat-stasher/src/main.rs:20110-20111  d745898fe057  lines=2
   <- docs-dev/install.md:998  :: // would answer "is my timer healthy?" from a machine the t…
-crates/chat-stasher/src/main.rs:20611-20612  f5217dab38af  lines=2
+crates/chat-stasher/src/main.rs:20618-20619  f5217dab38af  lines=2
   <- docs-dev/install.md:993  :: // them. `destinations` and `reclaim` are the machine-reada…
-crates/chat-stasher/src/main.rs:20703-20710  7df1b5962a59  lines=8
+crates/chat-stasher/src/main.rs:20710-20717  7df1b5962a59  lines=8
   <- docs-dev/install.md:1014  :: };
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:440, docs-dev/threat-model.md:722  :: //! ADR-022: content-addressed hash tracking for stage meta…

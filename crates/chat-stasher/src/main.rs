@@ -10759,6 +10759,16 @@ fn cmd_push(
         Err(code) => return code,
     };
     let state_dir = chat_stasher::collect::default_state_dir();
+    let pushed_destination = destination
+        .clone()
+        .unwrap_or_else(|| chat_stasher::pushstate::DEFAULT_DESTINATION.to_string());
+    if let Err(e) = chat_stasher::test_identity_guard::refuse_fixture_write(
+        &[&machine, &pushed_destination],
+        &state_dir,
+    ) {
+        eprintln!("push: refusing write to state directory: {e:#}");
+        return ExitCode::FAILURE;
+    }
     let cfg = resolve_store_config(
         &config,
         destination.as_deref(),
@@ -11053,9 +11063,6 @@ fn cmd_push(
         // branch `runstate::now_unix` documents; a wrong stamp here can only
         // make the reconciler report the push as ancient, not as fresh.
         .unwrap_or(0);
-    let pushed_destination = destination
-        .clone()
-        .unwrap_or_else(|| chat_stasher::pushstate::DEFAULT_DESTINATION.to_string());
     if let Err(e) = chat_stasher::pushstate::record_success(
         &state_dir,
         &pushed_destination,

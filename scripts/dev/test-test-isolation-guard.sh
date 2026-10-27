@@ -125,7 +125,8 @@ run_host() { # runs the guard against the sandbox HOME; sets OUT and RC
 }
 
 run_win() { # runs the guard's Windows branch; sets OUT and RC
-  OUT=$(env PATH="$SHIM:$PATH" HOME="$WIN_HOME" USERPROFILE="$WIN_HOME" \
+  OUT=$(env -u XDG_DATA_HOME -u XDG_CONFIG_HOME -u XDG_STATE_HOME -u XDG_CACHE_HOME \
+    PATH="$SHIM:$PATH" HOME="$WIN_HOME" USERPROFILE="$WIN_HOME" \
     LOCALAPPDATA="$WIN_LOCAL" bash "$GUARD" "$@" 2>&1)
   RC=$?
 }
@@ -197,6 +198,16 @@ run_host -- bash -c 'mkdir -p "$HOME/.local/share/chat-stasher/state"
   printf "SQLite format 3\000\022\007chatgptsynthetic-install" \
     > "$HOME/.local/share/chat-stasher/state/extension-coordination.sqlite3"'
 record "sqlite-adjacent fixture row is red" 1
+contains "carrying a fixture identity"
+
+# The W1033 incident shape: a gate fixture machine in push-state.json under the
+# real state store is red.
+reset_host
+seed_data_root
+run_host -- bash -c 'mkdir -p "$HOME/.local/share/chat-stasher/state"
+  echo "{\"version\":1,\"pushes\":{\"default\":{\"machine\":\"gate-mbp\",\"snapshots_in_repo\":2}}}" \
+    > "$HOME/.local/share/chat-stasher/state/push-state.json"'
+record "gate fixture in push-state.json is red" 1
 contains "carrying a fixture identity"
 
 # The per-run baseline (W306c): an identity that was already in the store
@@ -402,8 +413,8 @@ run_win -- bash -c 'd="$LOCALAPPDATA/chat-stasher/body/02930116e96fa33c690441f52
   echo body > "$d/0-879"'
 record "windows realistic cache write is not red" 0
 
-OUT=$(env -u HOME -u USERPROFILE -u LOCALAPPDATA PATH="$SHIM:$PATH" \
-  bash "$GUARD" -- true 2>&1)
+OUT=$(env -u HOME -u USERPROFILE -u LOCALAPPDATA -u XDG_DATA_HOME -u XDG_CONFIG_HOME -u XDG_STATE_HOME -u XDG_CACHE_HOME \
+  PATH="$SHIM:$PATH" bash "$GUARD" -- true 2>&1)
 RC=$?
 record "windows with no root variables refuses" 1
 contains "neither \$HOME nor"
