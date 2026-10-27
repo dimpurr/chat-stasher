@@ -31,8 +31,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ -n "${CHAT_STASHER_BIN:-}" ]; then
   BIN="$CHAT_STASHER_BIN"
-elif [ -n "${CARGO_TARGET_DIR:-}" ] && [ -x "$CARGO_TARGET_DIR/debug/chat-stasher" ]; then
-  BIN="$CARGO_TARGET_DIR/debug/chat-stasher"
 elif [ -n "${CARGO_TARGET_DIR:-}" ]; then
   BIN="$CARGO_TARGET_DIR/debug/chat-stasher"
 else
@@ -55,7 +53,32 @@ for arg in "$@"; do
 done
 
 START=$(date +%s)
-TMP="$(mktemp -d)"
+gate()   { echo "[gate] $*"; }
+elapsed(){ echo "$(( $(date +%s) - START ))s"; }
+
+# ------------------------------------------------------------------ helpers
+# sha256 of stdin. Linux ships sha256sum (coreutils); macOS ships shasum
+# (Perl) and, on current releases, sha256sum too. Both print "<hex>  -" for
+# stdin, so the awk extraction is identical on every platform.
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256_of() { cat "$@" | sha256sum | awk '{print $1}'; }
+else
+  sha256_of() { cat "$@" | shasum -a 256 | awk '{print $1}'; }
+fi
+
+# Portable file size in bytes. BSD stat formats with `-f %z`; GNU stat uses
+# `-c %s` (`stat -f %z` is exactly the macOS-only flag that broke the ubuntu
+# CI cell for two days on 2026-08-28). Probe once and reuse — never branch
+# per call site.
+if stat -c %s / >/dev/null 2>&1; then
+  file_size() { stat -c %s "$1"; }
+elif stat -f %z / >/dev/null 2>&1; then
+  file_size() { stat -f %z "$1"; }
+else
+  file_size() { wc -c < "$1"; }
+fi
+
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/cs-gate.XXXXXX")"
 # The self-built fixture lives under $TMP, so removing $TMP on exit also
 # removes it. A caller-supplied CLAUDE_PROJECTS_DIR lives OUTSIDE $TMP and is
 # only ever read (cp), never removed — even on failure/interrupt.
@@ -76,6 +99,17 @@ REAL_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}"
 REAL_XDG_STATE_HOME="${XDG_STATE_HOME:-}"
 REAL_XDG_CACHE_HOME="${XDG_CACHE_HOME:-}"
 
+# Fail closed (W1033): cannot establish baseline if neither is available.
+REAL_DATA_ROOT=""
+if [ -n "$REAL_XDG_DATA_HOME" ]; then
+  REAL_DATA_ROOT="$REAL_XDG_DATA_HOME/chat-stasher"
+elif [ -n "$REAL_HOME" ]; then
+  REAL_DATA_ROOT="$REAL_HOME/.local/share/chat-stasher"
+else
+  echo "[gate] GUARD FAILURE (W1033): neither HOME nor XDG_DATA_HOME is set; refusing to run unguarded"
+  exit 1
+fi
+
 GATE_HOME="$TMP/home"
 mkdir -p "$GATE_HOME"
 export HOME="$GATE_HOME"
@@ -92,40 +126,57 @@ if [ -n "$REAL_HOME" ]; then
   export RUSTUP_HOME="${RUSTUP_HOME:-$REAL_HOME/.rustup}"
 fi
 
-# Guard baseline (W1033): record real push-state hash before any gate steps run.
-REAL_PUSH_STATE=""
-REAL_PUSH_STATE_HASH_BEFORE="ABSENT"
-if [ -n "$REAL_XDG_DATA_HOME" ]; then
-  REAL_PUSH_STATE="$REAL_XDG_DATA_HOME/chat-stasher/state/push-state.json"
-elif [ -n "$REAL_HOME" ]; then
-  REAL_PUSH_STATE="$REAL_HOME/.local/share/chat-stasher/state/push-state.json"
-fi
-if [ -n "$REAL_PUSH_STATE" ] && [ -f "$REAL_PUSH_STATE" ]; then
-  REAL_PUSH_STATE_HASH_BEFORE="$(sha256_of "$REAL_PUSH_STATE")"
-fi
+# Guard baseline (W1033): snapshot real data-root listing and state files before any steps run.
+REAL_DATA_BASELINE="$TMP/real-data-baseline.txt"
+REAL_DATA_CURRENT="$TMP/real-data-current.txt"
 
-assert_real_home_untouched() {
-  if [ -n "$REAL_PUSH_STATE" ]; then
-    if [ "$REAL_PUSH_STATE_HASH_BEFORE" = "ABSENT" ]; then
-      if [ -f "$REAL_PUSH_STATE" ]; then
-        echo "[gate] GUARD FAILURE (W1033): real push-state.json was created during gate run: $REAL_PUSH_STATE"
-        fail_gate
-      fi
-    else
-      local current_hash
-      current_hash="$(sha256_of "$REAL_PUSH_STATE" 2>/dev/null || echo ABSENT)"
-      if [ "$current_hash" != "$REAL_PUSH_STATE_HASH_BEFORE" ]; then
-        echo "[gate] GUARD FAILURE (W1033): real push-state.json was modified during gate run: $REAL_PUSH_STATE"
-        fail_gate
-      fi
-    fi
+snapshot_real_data_root() {
+  local target_file="$1"
+  if [ -d "$REAL_DATA_ROOT" ]; then
+    (
+      cd "$REAL_DATA_ROOT"
+      find . 2>/dev/null | LC_ALL=C sort
+      find state \( -name 'push-state.json' -o -name 'pushed-meta-*.sha256' \) -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
+        printf '%s %s\n' "$f" "$(sha256_of "$f" 2>/dev/null || echo ABSENT)"
+      done
+    ) > "$target_file"
+  else
+    echo "DATA_ROOT_ABSENT" > "$target_file"
   fi
 }
 
-gate()   { echo "[gate] $*"; }
-elapsed(){ echo "$(( $(date +%s) - START ))s"; }
+snapshot_real_data_root "$REAL_DATA_BASELINE"
+
+if [ ! -f "$REAL_DATA_BASELINE" ]; then
+  echo "[gate] GUARD FAILURE (W1033): could not capture real data root baseline"
+  exit 1
+fi
+
+IN_FAIL_GATE=0
+assert_real_home_untouched() {
+  if [ -z "${REAL_DATA_BASELINE:-}" ] || [ ! -f "$REAL_DATA_BASELINE" ]; then
+    echo "[gate] GUARD FAILURE (W1033): baseline file missing; failing closed"
+    if [ "$IN_FAIL_GATE" -eq 0 ]; then
+      fail_gate
+    fi
+    return 1
+  fi
+  snapshot_real_data_root "$REAL_DATA_CURRENT"
+  if ! cmp -s "$REAL_DATA_BASELINE" "$REAL_DATA_CURRENT"; then
+    echo "[gate] GUARD FAILURE (W1033): real data root modified during gate run: $REAL_DATA_ROOT"
+    diff -u "$REAL_DATA_BASELINE" "$REAL_DATA_CURRENT" 2>/dev/null | sed 's/^/  /' || true
+    if [ "$IN_FAIL_GATE" -eq 0 ]; then
+      fail_gate
+    fi
+    return 1
+  fi
+}
 
 fail_gate() {
+  if [ "$IN_FAIL_GATE" -eq 0 ]; then
+    IN_FAIL_GATE=1
+    assert_real_home_untouched || true
+  fi
   echo "[gate] elapsed $(elapsed)"
   echo "GATE: FAIL"
   exit 1
@@ -137,16 +188,6 @@ if [ ! -x "$BIN" ]; then
   echo "[gate] debug binary not found: $BIN — building (cargo build)"
   ( cd "$ROOT" && cargo build ) || { echo "[gate] cargo build failed"; fail_gate; }
   [ -x "$BIN" ] || { echo "[gate] binary still missing after cargo build: $BIN"; fail_gate; }
-fi
-
-# ------------------------------------------------------------------ helpers
-# sha256 of stdin. Linux ships sha256sum (coreutils); macOS ships shasum
-# (Perl) and, on current releases, sha256sum too. Both print "<hex>  -" for
-# stdin, so the awk extraction is identical on every platform.
-if command -v sha256sum >/dev/null 2>&1; then
-  sha256_of() { cat "$@" | sha256sum | awk '{print $1}'; }
-else
-  sha256_of() { cat "$@" | shasum -a 256 | awk '{print $1}'; }
 fi
 
 # sha256 of a session's concatenated shards (seq order = lexicographic, 6-pad).
@@ -161,18 +202,6 @@ session_bytes() {
 shard_count() {
   ls "$1"/[0-9]*.jsonl 2>/dev/null | wc -l | tr -d ' '
 }
-
-# Portable file size in bytes. BSD stat formats with `-f %z`; GNU stat uses
-# `-c %s` (`stat -f %z` is exactly the macOS-only flag that broke the ubuntu
-# CI cell for two days on 2026-08-28). Probe once and reuse — never branch
-# per call site.
-if stat -c %s / >/dev/null 2>&1; then
-  file_size() { stat -c %s "$1"; }
-elif stat -f %z / >/dev/null 2>&1; then
-  file_size() { stat -f %z "$1"; }
-else
-  file_size() { wc -c < "$1"; }
-fi
 
 # ------------------------------------------------------------------- step 1
 gate "step 1/8 · build fixtures (JSONL -> sealed shards)"

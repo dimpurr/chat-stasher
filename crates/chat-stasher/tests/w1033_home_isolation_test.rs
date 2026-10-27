@@ -28,20 +28,45 @@ mod test_support;
 /// `CARGO_TARGET_TMPDIR` is `<target>/tmp`, created by cargo for integration
 /// tests. It is not under the process temp directory, and it is disposable —
 /// never a user data or home directory.
-fn non_temp_dir(name: &str) -> (tempfile::TempDir, PathBuf) {
+struct NonTempDir {
+    path: PathBuf,
+}
+
+impl Drop for NonTempDir {
+    fn drop(&mut self) {
+        drop(fs::remove_dir_all(&self.path));
+    }
+}
+
+impl std::ops::Deref for NonTempDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::path::Path> for NonTempDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+fn non_temp_dir(name: &str) -> NonTempDir {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     drop(fs::remove_dir_all(&root));
     fs::create_dir_all(&root).expect("create non-temp test dir");
-    let holder = tempfile::tempdir().expect("temp holder");
-    (holder, root)
+    NonTempDir { path: root }
 }
 
 #[test]
 fn gate_fixture_identity_is_reserved() {
     assert!(test_identity_guard::is_fixture_identity("gate-mbp"));
-    assert!(test_identity_guard::is_fixture_identity("gate-1"));
-    assert!(test_identity_guard::is_fixture_identity("gate"));
+    assert!(test_identity_guard::is_fixture_identity("gate_mbp"));
     assert!(test_identity_guard::is_fixture_identity("GATE-MBP"));
+    // Real hostnames containing "gate" as a whole token must NOT be reserved:
+    assert!(!test_identity_guard::is_fixture_identity("gate"));
+    assert!(!test_identity_guard::is_fixture_identity("mbp-gate"));
+    assert!(!test_identity_guard::is_fixture_identity("data-gate"));
     // Ordinary words containing "gate" as a substring without whole token match must NOT be reserved:
     assert!(!test_identity_guard::is_fixture_identity(
         "aggregate-machine"
@@ -51,7 +76,7 @@ fn gate_fixture_identity_is_reserved() {
 
 #[test]
 fn push_state_refuses_gate_fixture_outside_temp_dir() {
-    let (_holder, non_temp) = non_temp_dir("w1033-pushstate-refused");
+    let non_temp = non_temp_dir("w1033-pushstate-refused");
     let state_dir = non_temp.join("state");
     assert!(
         !test_identity_guard::is_under_temp_dir(&state_dir),
@@ -73,7 +98,7 @@ fn push_state_refuses_gate_fixture_outside_temp_dir() {
 
 #[test]
 fn metahash_refuses_gate_fixture_outside_temp_dir() {
-    let (_holder, non_temp) = non_temp_dir("w1033-metahash-refused");
+    let non_temp = non_temp_dir("w1033-metahash-refused");
     let state_dir = non_temp.join("state");
     assert!(
         !test_identity_guard::is_under_temp_dir(&state_dir),
@@ -100,7 +125,7 @@ fn metahash_refuses_gate_fixture_outside_temp_dir() {
 
 #[test]
 fn push_command_refuses_gate_machine_outside_temp_dir() {
-    let (_holder, non_temp) = non_temp_dir("w1033-cli-push-refused");
+    let non_temp = non_temp_dir("w1033-cli-push-refused");
     let fake_home = non_temp.join("fake-real-home");
     let stage = non_temp.join("stage");
     let repo = non_temp.join("repo");
@@ -162,11 +187,13 @@ fn push_state_allows_gate_machine_inside_temp_dir() {
 
 #[test]
 fn push_state_allows_ordinary_machine_outside_temp_dir() {
-    let (_holder, non_temp) = non_temp_dir("w1033-ordinary-allowed");
+    let non_temp = non_temp_dir("w1033-ordinary-allowed");
     let state_dir = non_temp.join("state");
-    // Production machine name (not containing fixture tokens) must succeed even outside temp dir
-    pushstate::record_success(&state_dir, "default", "production-host-1", 1, 1_800_000_000)
-        .expect("ordinary production machine outside temp dir must be allowed");
+    // Real hostnames containing the token "gate" must not be refused:
+    for name in ["production-host-1", "gate", "mbp-gate", "data-gate"] {
+        pushstate::record_success(&state_dir, "default", name, 1, 1_800_000_000).unwrap_or_else(
+            |e| panic!("ordinary host {name} outside temp dir must be allowed: {e}"),
+        );
+    }
     assert!(state_dir.join("push-state.json").exists());
-    drop(fs::remove_dir_all(&non_temp));
 }

@@ -23,8 +23,8 @@
 //!
 //!  · It is keyed on a **reserved namespace**. A fixture identity is one whose
 //!    dot/dash/underscore-separated components include `synthetic`, `fixture`,
-//!    `probe` or `dummy` as a whole token, compared case-insensitively. Real
-//!    users do not name their conversations that; the namespace is documented
+//!    `probe`, `dummy` or `gate-mbp` as a whole token, compared case-insensitively.
+//!    Real users do not name their conversations that; the namespace is documented
 //!    here as reserved.
 //!  · It is keyed on the **destination**, not on `cfg(test)`. A fixture written
 //!    under a temp root — every correct test — passes. Only a fixture headed
@@ -48,26 +48,47 @@ use std::path::Path;
 /// `synthetic-session`, whose tokens are `synthetic` and `session`.
 ///
 /// `probe` and `dummy` are here because the suite uses them for the same
-/// purpose (`w306-probe-machine`, `dummy-install`), `gate` is here because gate
-/// fixtures use it (`gate-mbp`), and case-folding is here
+/// purpose (`w306-probe-machine`, `dummy-install`), `gate-mbp` is here because
+/// the release gate fixture uses it (`gate-mbp`), and case-folding is here
 /// because nothing stops a fixture from being spelled `Synthetic-session` —
 /// the namespace is a contract, not a spelling. This list is restated in
 /// `scripts/dev/check-test-isolation.sh`, whose selftest reads this constant
 /// back out of the source so the two cannot drift apart.
-pub const FIXTURE_IDENTITY_TOKENS: &[&str] = &["synthetic", "fixture", "probe", "dummy", "gate"];
+pub const FIXTURE_IDENTITY_TOKENS: &[&str] =
+    &["synthetic", "fixture", "probe", "dummy", "gate-mbp"];
 
 /// Is `id` a reserved test fixture identity?
 ///
-/// The split is on every non-alphanumeric ASCII character, so `chatgpt.synthetic-session`,
-/// `synthetic-install`, `b83.synthetic-session`, `w292.synthetic-session-one`,
-/// `Synthetic-session` and `b83-fixture` all answer `true`, while an ordinary
-/// id that merely contains the letters (`photosynthetic-blend`,
-/// `reprobe-session`) answers `false` because no whole token matches.
+/// An identity matches when its non-alphanumeric delimited tokens contain one of
+/// the reserved whole tokens or multi-token sequences (compared case-insensitively).
+/// For example, `chatgpt.synthetic-session`, `synthetic-install`, `b83.synthetic-session`,
+/// `w292.synthetic-session-one`, `Synthetic-session`, `b83-fixture`, and `gate-mbp` all
+/// answer `true`, while ordinary ids (`photosynthetic-blend`, `reprobe-session`,
+/// `gate`, `mbp-gate`, `data-gate`) answer `false`.
 pub fn is_fixture_identity(id: &str) -> bool {
-    id.split(|c: char| !c.is_ascii_alphanumeric()).any(|token| {
-        FIXTURE_IDENTITY_TOKENS
-            .iter()
-            .any(|reserved| token.eq_ignore_ascii_case(reserved))
+    let id_tokens: Vec<&str> = id
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if id_tokens.is_empty() {
+        return false;
+    }
+
+    FIXTURE_IDENTITY_TOKENS.iter().any(|reserved| {
+        let reserved_tokens: Vec<&str> = reserved
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if reserved_tokens.is_empty() {
+            return false;
+        }
+        id_tokens.windows(reserved_tokens.len()).any(|window| {
+            window
+                .iter()
+                .zip(&reserved_tokens)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        })
     })
 }
 
@@ -127,7 +148,7 @@ mod tests {
             "w306-probe-machine",
             "dummy-install",
             "gate-mbp",
-            "gate-1",
+            "gate_mbp",
         ] {
             assert!(is_fixture_identity(id), "`{id}` must be reserved");
         }
@@ -142,6 +163,7 @@ mod tests {
             "PROBE-install",
             "Dummy.session",
             "Fixture.Install",
+            "GATE-MBP",
         ] {
             assert!(is_fixture_identity(id), "`{id}` must be reserved");
         }
@@ -159,6 +181,9 @@ mod tests {
             "dummyish-install",
             "aggregate-machine",
             "surrogate",
+            "gate",
+            "mbp-gate",
+            "data-gate",
             "",
         ] {
             assert!(!is_fixture_identity(id), "`{id}` must not be reserved");

@@ -3209,7 +3209,7 @@ with_context crates/chat-stasher/src/store.rs:2635  "fsync masterkey directory {
 anyhow       crates/chat-stasher/src/store.rs:2644  "cannot read masterkey file {} (lost key?)"
 context      crates/chat-stasher/src/store.rs:2661  "cannot read masterkey file {}"
 context      crates/chat-stasher/src/store.rs:2668  "cannot parse masterkey file {}"
-bail         crates/chat-stasher/src/test_identity_guard.rs:104  "refusing to write fixture identity `{id}` outside a temporary directory: destination {} is not under the process temp directory {}"
+bail         crates/chat-stasher/src/test_identity_guard.rs:125  "refusing to write fixture identity `{id}` outside a temporary directory: destination {} is not under the process temp directory {}"
 panic        crates/chat-stasher/src/test_support.rs:156  "create sandbox dir {}: {e}"
 context      crates/chat-stasher/src/verify.rs:334  "build repository"
 context      crates/chat-stasher/src/verify.rs:336  "open repository for verify"

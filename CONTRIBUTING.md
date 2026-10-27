@@ -98,7 +98,7 @@ this check also runs the live product, which writes the real
 the data root does not survive contact with its own purpose. Instead, after the
 run, every entry the run created or modified under the real data, config,
 cache and state-home roots is inspected, and is a leak when its name carries a
-reserved fixture token (`synthetic`, `fixture`, `probe`, `dummy`,
+reserved fixture token (`synthetic`, `fixture`, `probe`, `dummy`, `gate-mbp`,
 case-insensitive, as a whole token) or a per-run marker, when a small file's
 bytes carry the marker, or when a small file under `<data root>/state` carries
 a fixture token — the coordination store is where the incident's row landed,
@@ -130,7 +130,7 @@ native-messaging half is covered by tests passing an explicit `--target-root`,
 because Windows resolves those directories through the Known Folder API and no
 environment variable moves them. The guard is the check; a second, code-level
 fail-safe (`src/test_identity_guard.rs`) refuses to write a reserved fixture
-identity (`synthetic-…`, `fixture-…`, `probe-…`, `dummy-…`) to a destination
+identity (`synthetic-…`, `fixture-…`, `probe-…`, `dummy-…`, `gate-mbp`) to a destination
 outside the process temp directory at all, so a test that loses its sandbox is
 stopped at the write even if the guard is not the thing running it.
 
