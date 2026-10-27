@@ -919,3 +919,137 @@ fn the_cli_wires_the_mirror_leg_and_refuses_as_not_mirrored() {
         "the body must be untouched while the copy lags"
     );
 }
+
+/// M2 test: `reclaim_stage` synthesizes and persists the opencode increment map under
+/// `<stage>/meta/<machine>/opencode-session-maps/` before deleting shard bodies,
+/// respects an existing meta map (staleness branch), and reports persist failure.
+#[test]
+fn reclaim_stage_synthesizes_opencode_increment_map_before_deleting_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine = "m";
+    let session = "opencode.m.ses_m2_test";
+    let stage = dir.path().join("stage");
+    let cfg = store_config(dir.path(), "repo-a");
+
+    // Stage an opencode session with 1 shard
+    let body_bytes = chat_stasher::opencode_records::record_line(
+        "ses_m2_test",
+        chat_stasher::opencode_records::RecordKind::Message,
+        "ses_m2_test-m1",
+        &serde_json::json!({"role": "user", "text": "hello"}),
+    );
+    let body_line = String::from_utf8(body_bytes).unwrap();
+    store::write_sealed_shard(
+        StageWriter::Collect,
+        &stage,
+        machine,
+        session,
+        &[body_line.clone()],
+    )
+    .unwrap();
+
+    let mk = init_and_push(&cfg, machine, &stage);
+    let dests = vec![named(dir.path(), "repo-a", DestinationHealth::Healthy)];
+
+    let meta_path = chat_stasher::collect::opencode_record_map_meta_path(&stage, machine, session);
+    assert!(
+        !meta_path.exists(),
+        "meta map must not exist before reclaim"
+    );
+
+    // 1. Synthesize-then-delete: reclaim synthesizes map and deletes shard body
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
+    assert!(
+        !report.blocked(),
+        "reclaim must not be blocked: {:?}",
+        report.blocked
+    );
+    assert_eq!(report.reclaimed.len(), 1);
+    assert_eq!(
+        shard_count(&stage, machine, session),
+        0,
+        "body must be deleted"
+    );
+    assert!(
+        meta_path.exists(),
+        "meta map must have been synthesized and persisted"
+    );
+
+    let loaded = chat_stasher::collect::load_opencode_record_map(&meta_path, session);
+    assert!(loaded.is_some(), "persisted map must be readable");
+    let records = loaded.unwrap();
+    assert_eq!(
+        records.get("message:ses_m2_test-m1"),
+        Some(&"09a32d6caf7737200a34ee38c65c82446831be896aa5d5aa6b858729ee13beb1".to_string())
+    );
+
+    // 2. Staleness branch: if meta_path already exists, it is untouched / not re-synthesized
+    let custom_map = std::collections::BTreeMap::from([(
+        "message:existing_pre_reclaim".to_string(),
+        "custom_hash".to_string(),
+    )]);
+    chat_stasher::collect::save_opencode_record_map(&meta_path, session, &custom_map).unwrap();
+
+    // Stage another shard and push again using existing mk
+    store::write_sealed_shard(
+        StageWriter::Collect,
+        &stage,
+        machine,
+        session,
+        &[body_line.clone()],
+    )
+    .unwrap();
+    BackupStore::new(cfg.clone(), machine.to_string())
+        .push(&stage, &mk)
+        .unwrap();
+    let report2 = stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
+    assert!(!report2.blocked());
+    assert_eq!(shard_count(&stage, machine, session), 0);
+
+    let re_loaded = chat_stasher::collect::load_opencode_record_map(&meta_path, session).unwrap();
+    assert_eq!(
+        re_loaded.get("message:existing_pre_reclaim"),
+        Some(&"custom_hash".to_string()),
+        "existing meta map was not overwritten"
+    );
+
+    // 3. Persist failure is reported: make meta_path parent a read-only directory or file
+    let session_fail = "opencode.m.ses_m2_fail";
+    // Stage an opencode session with 1 shard
+    let body_bytes_fail = chat_stasher::opencode_records::record_line(
+        "ses_m2_fail",
+        chat_stasher::opencode_records::RecordKind::Message,
+        "ses_m2_fail-m1",
+        &serde_json::json!({"role": "user", "text": "fail"}),
+    );
+    let body_line_fail = String::from_utf8(body_bytes_fail).unwrap();
+    store::write_sealed_shard(
+        StageWriter::Collect,
+        &stage,
+        machine,
+        session_fail,
+        std::slice::from_ref(&body_line_fail),
+    )
+    .unwrap();
+    BackupStore::new(cfg.clone(), machine.to_string())
+        .push(&stage, &mk)
+        .unwrap();
+
+    let fail_meta_path =
+        chat_stasher::collect::opencode_record_map_meta_path(&stage, machine, session_fail);
+    // Block write by placing a directory where the temp file would be
+    fs::create_dir_all(fail_meta_path.parent().unwrap()).unwrap();
+    let tmp = fail_meta_path.with_extension("json.tmp");
+    fs::create_dir(&tmp).unwrap(); // fs::File::create(&temp) fails because it is a directory
+
+    let err = stagereclaim::reclaim_stage(&stage, &dests, true, None);
+    assert!(
+        err.is_err(),
+        "persist failure must not be silently swallowed"
+    );
+    let err_msg = format!("{:#}", err.unwrap_err());
+    assert!(
+        err_msg.contains("persist synthesized increment map"),
+        "error message must report persist failure: {err_msg}"
+    );
+}

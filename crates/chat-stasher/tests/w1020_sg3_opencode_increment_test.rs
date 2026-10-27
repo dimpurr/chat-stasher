@@ -1454,11 +1454,11 @@ fn self_attack_unchanged_session_fully_rewritten_must_fail() {
     assert_eq!(report.unchanged_records, 1);
 }
 
-/// SG-2b fresh destination test: after reclaim, collect against a fresh destination
-/// (where debts has no entry, so old is None) still exports 0 for unchanged sessions
-/// and writes only the increment for changed sessions.
+/// SG-2b / H1 test: after reclaim, a destination that never received the records
+/// (a post-reclaim, never-pushed destination with no cursor debts) MUST receive
+/// full bodies, not an increment or empty export. The local sources are the truth.
 #[test]
-fn sg2b_post_reclaim_with_no_stored_debts_exports_zero_and_writes_increment_only() {
+fn sg2b_post_reclaim_with_no_stored_debts_exports_full_body_for_never_pushed_destination() {
     let fx = Fixture::new();
 
     let unchanged_sid = "ses_fresh_dest_unchanged";
@@ -1521,25 +1521,25 @@ fn sg2b_post_reclaim_with_no_stored_debts_exports_zero_and_writes_increment_only
         collect::collect_scan_report(&fx.scan(), &fx.stage, MACHINE, &fx.state, 20, &fresh_dest)
             .unwrap();
 
-    // 1. Unchanged session must write 0 shards
+    // 1. Unchanged session must write full body (1 shard, not 0), because dest-b never received it
     assert_eq!(
         fx.shard_count(&session_unchanged_id),
-        0,
-        "fresh destination must write zero shards for unchanged session"
+        1,
+        "fresh destination must write full body for unchanged session"
     );
     let unchanged_outcome = second
         .outcomes
         .iter()
         .find(|o| o.session_prefix == chat_stasher::id::short_session_id(&session_unchanged_id))
         .unwrap();
-    assert_eq!(unchanged_outcome.lines_written, 0);
-    assert!(unchanged_outcome.shard.is_none());
+    assert_eq!(unchanged_outcome.lines_written, 1);
+    assert!(unchanged_outcome.shard.is_some());
 
-    // 2. Changed session must write only the increment
+    // 2. Changed session must write full body (1 shard with complete session history, not only increment)
     assert_eq!(
         fx.shard_count(&session_growing_id),
         1,
-        "fresh destination must write exactly one increment shard for changed session"
+        "fresh destination must write full body for changed session"
     );
     let growing_outcome = second
         .outcomes
@@ -1549,13 +1549,13 @@ fn sg2b_post_reclaim_with_no_stored_debts_exports_zero_and_writes_increment_only
     assert!(growing_outcome.shard.is_some());
     let bodies = fx.stage_shard_bodies(&session_growing_id);
     let lines = shard_lines(&bodies[0]);
-    assert_eq!(lines.len(), 2, "only session row + m3 written");
-    assert!(lines
-        .iter()
-        .any(|l| l["record_id"] == format!("{SESSION}-m3")));
-    assert!(!lines
-        .iter()
-        .any(|l| l["record_id"] == format!("{SESSION}-m1")));
+    // Full export of growing session contains the whole v1 export line (which includes m1, m2, m3)
+    assert_eq!(lines.len(), 1, "full export v1 line written");
+    assert_eq!(lines[0]["session"]["id"], SESSION);
+    let messages = lines[0]["messages"].as_array().expect("messages array");
+    assert!(messages.iter().any(|m| m["id"] == format!("{SESSION}-m1")));
+    assert!(messages.iter().any(|m| m["id"] == format!("{SESSION}-m2")));
+    assert!(messages.iter().any(|m| m["id"] == format!("{SESSION}-m3")));
 }
 
 /// A `chat-stasher` binary run with fully isolated XDG/home env (the same

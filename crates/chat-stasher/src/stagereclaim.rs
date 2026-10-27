@@ -558,7 +558,12 @@ pub fn reclaim_stage(
                             &cand.session_id,
                             &records,
                         )
-                        .ok();
+                        .with_context(|| {
+                            format!(
+                                "persist synthesized increment map for {} before reclaim",
+                                cand.session_id
+                            )
+                        })?;
                     }
                 }
             }

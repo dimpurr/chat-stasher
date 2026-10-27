@@ -721,55 +721,57 @@ fn stage_prefix_entry(
     }
     let sealed_shards = stage_sealed_shards(stage, machine, &record.id)?;
     if sealed_shards.is_empty() {
-        if record.compressed || is_zstd_path(&record.absolute_path) {
-            let compressed = fs::read(&record.absolute_path).with_context(|| {
-                format!(
-                    "read compressed source ({})",
-                    path_digest(&record.absolute_path)
-                )
-            })?;
-            let decoded =
-                zstd::stream::decode_all(&compressed[..]).context("decompress jsonl.zst")?;
-            let (lines, _) = complete_lines(&decoded);
-            if !lines.is_empty()
-                && manifest_holds_this_framed(manifest_facts, &record.id, &seal_framed(&lines))
-            {
-                let len = compressed.len() as u64;
-                return Ok(Some(OffsetEntry {
-                    offset: len,
-                    prefix_len: len,
-                    prefix_sha256: sha256_hex(&compressed),
-                    compressed: true,
-                    opencode: None,
-                    store_fingerprint: None,
-                    grok_bot_row_digests: None,
-                    opencode_record_digests: None,
-                    opencode_map_digest: None,
-                }));
-            }
-        } else if !is_jsonl_path(&record.absolute_path) {
-            let bytes = fs::read(&record.absolute_path).with_context(|| {
-                format!("read source bytes ({})", path_digest(&record.absolute_path))
-            })?;
-            if !bytes.is_empty()
-                && manifest_holds_this_framed(
-                    manifest_facts,
-                    &record.id,
-                    &seal_framed(std::slice::from_ref(&bytes)),
-                )
-            {
-                let len = bytes.len() as u64;
-                return Ok(Some(OffsetEntry {
-                    offset: len,
-                    prefix_len: len,
-                    prefix_sha256: sha256_hex(&bytes),
-                    compressed: false,
-                    opencode: None,
-                    store_fingerprint: None,
-                    grok_bot_row_digests: None,
-                    opencode_record_digests: None,
-                    opencode_map_digest: None,
-                }));
+        if let Some(fact) = manifest_facts.and_then(|m| m.get(&record.id)) {
+            if record.compressed || is_zstd_path(&record.absolute_path) {
+                let compressed = fs::read(&record.absolute_path).with_context(|| {
+                    format!(
+                        "read compressed source ({})",
+                        path_digest(&record.absolute_path)
+                    )
+                })?;
+                let decoded =
+                    zstd::stream::decode_all(&compressed[..]).context("decompress jsonl.zst")?;
+                let (lines, _) = complete_lines(&decoded);
+                let framed = seal_framed(&lines);
+                if !lines.is_empty()
+                    && fact.concat_bytes == framed.len() as u64
+                    && fact.concat_sha256 == sha256_hex(&framed)
+                {
+                    let len = compressed.len() as u64;
+                    return Ok(Some(OffsetEntry {
+                        offset: len,
+                        prefix_len: len,
+                        prefix_sha256: sha256_hex(&compressed),
+                        compressed: true,
+                        opencode: None,
+                        store_fingerprint: None,
+                        grok_bot_row_digests: None,
+                        opencode_record_digests: None,
+                        opencode_map_digest: None,
+                    }));
+                }
+            } else if !is_jsonl_path(&record.absolute_path) {
+                let bytes = fs::read(&record.absolute_path).with_context(|| {
+                    format!("read source bytes ({})", path_digest(&record.absolute_path))
+                })?;
+                let framed = seal_framed(std::slice::from_ref(&bytes));
+                if !bytes.is_empty()
+                    && fact.concat_bytes == framed.len() as u64
+                    && fact.concat_sha256 == sha256_hex(&framed)
+                {
+                    let len = bytes.len() as u64;
+                    return Ok(Some(OffsetEntry {
+                        offset: len,
+                        prefix_len: len,
+                        prefix_sha256: sha256_hex(&bytes),
+                        compressed: false,
+                        opencode: None,
+                        store_fingerprint: None,
+                        grok_bot_row_digests: None,
+                        opencode_record_digests: None,
+                        opencode_map_digest: None,
+                    }));
+                }
             }
         }
         return Ok(None);
@@ -1806,13 +1808,7 @@ pub fn collect_scan_report(
             // content like any cursor-less source, instead of re-sealing the
             // bytes the archive already holds.
             None if !record.provenance.is_empty() && !record.movable_root => None,
-            None => stage_prefix_entry(
-                &record,
-                stage,
-                machine,
-                &mut counters,
-                manifest_facts.as_ref(),
-            )?,
+            None => stage_prefix_entry(&record, stage, machine, &mut counters, None)?,
         };
         // The cursor is still handed down so the outcome can report this as a
         // reread rather than a first read; `force_reset` is what actually stops
@@ -2703,8 +2699,7 @@ fn process_sqlite_snapshot(
     // store the conversation twice.
     if old.is_none()
         && !force_reset
-        && (stage_holds_this_export(stage, machine, &record.id, &json_line)?
-            || manifest_holds_this_export(manifest_facts, &record.id, &json_line))
+        && stage_holds_this_export(stage, machine, &record.id, &json_line)?
     {
         return Ok(unchanged_content_sqlite(
             record,
@@ -3550,13 +3545,22 @@ pub(crate) fn opencode_record_map_path(state_dir: &Path, session_id: &str) -> Pa
         .join(format!("{}.json", sha256_hex(session_id.as_bytes())))
 }
 
+pub(crate) fn safe_machine_id(machine: &str) -> bool {
+    !machine.is_empty()
+        && machine != "."
+        && machine != ".."
+        && !machine.contains('/')
+        && !machine.contains('\\')
+        && !machine.contains('\0')
+}
+
 /// SG-2b: Map file under `<stage>/meta/<machine>/opencode-session-maps/`,
 /// ensuring the record-digest list survives reclaim when stage shard bodies are deleted.
-pub(crate) fn opencode_record_map_meta_path(
-    stage: &Path,
-    machine: &str,
-    session_id: &str,
-) -> PathBuf {
+pub fn opencode_record_map_meta_path(stage: &Path, machine: &str, session_id: &str) -> PathBuf {
+    assert!(
+        safe_machine_id(machine),
+        "machine partition must be a safe path component"
+    );
     stage
         .join(crate::manifest::META_DIR)
         .join(machine)
@@ -3610,7 +3614,7 @@ fn commit_by_rename(temp: &Path, path: &Path) -> std::io::Result<()> {
 
 /// Persist one session's increment map (tmp + rename, parent fsync like the
 /// state file itself).
-pub(crate) fn save_opencode_record_map(
+pub fn save_opencode_record_map(
     path: &Path,
     session_id: &str,
     records: &BTreeMap<String, String>,
@@ -3662,10 +3666,13 @@ fn save_opencode_record_map_both(
 /// file answers `None`: unknown is never empty, and the caller degrades to
 /// one full export that re-derives the map (D2) rather than trusting a file
 /// it could not establish.
-pub(crate) fn load_opencode_record_map(path: &Path) -> Option<BTreeMap<String, String>> {
+pub fn load_opencode_record_map(
+    path: &Path,
+    expected_session_id: &str,
+) -> Option<BTreeMap<String, String>> {
     let bytes = fs::read(path).ok()?;
     let state: OpenCodeRecordMapState = serde_json::from_slice(&bytes).ok()?;
-    if state.version != OPENCODE_RECORD_MAP_VERSION {
+    if state.version != OPENCODE_RECORD_MAP_VERSION || state.session_id != expected_session_id {
         return None;
     }
     Some(state.records)
@@ -3679,11 +3686,11 @@ pub(crate) fn load_opencode_record_map_any(
     session_id: &str,
 ) -> Option<BTreeMap<String, String>> {
     let meta_path = opencode_record_map_meta_path(stage, machine, session_id);
-    if let Some(records) = load_opencode_record_map(&meta_path) {
+    if let Some(records) = load_opencode_record_map(&meta_path, session_id) {
         return Some(records);
     }
     let state_path = opencode_record_map_path(state_dir, session_id);
-    load_opencode_record_map(&state_path)
+    load_opencode_record_map(&state_path, session_id)
 }
 
 /// The overall digest of one increment map — the bounded shape a session
@@ -3854,7 +3861,7 @@ fn process_opencode(
             None
         }
     } else {
-        resolve_opencode_stored_map(stage, machine, state_dir, &record.id)
+        fold_opencode_staged_map(stage, machine, &record.id)
     };
 
     let outcome = |lines_written: usize, shard: Option<String>, reset: bool| CollectOutcome {
@@ -4006,8 +4013,9 @@ fn process_opencode(
     // subsumes it, and a degrade must write — the entry's offset fields
     // describe the last observed export, not bytes this entry may skip.
     // (First sight with a stage already folded above never lands here.)
-    let matches_manifest =
-        !force_reset && manifest_holds_this_export(manifest_facts, &record.id, &snapshot.json_line);
+    let matches_manifest = !force_reset
+        && old.is_some()
+        && manifest_holds_this_export(manifest_facts, &record.id, &snapshot.json_line);
     let guards_apply = matches_manifest
         || (!force_reset
             && old.is_some_and(|entry| {
@@ -4087,21 +4095,6 @@ pub(crate) fn fold_opencode_staged_map(
         assembly.feed_shard_body(&body).ok()?;
     }
     Some(assembly.live_map())
-}
-
-/// Resolve the stored increment map for a session: from staged records if present,
-/// or from the SG-2b record-digest list under meta or state_dir.
-fn resolve_opencode_stored_map(
-    stage: &Path,
-    machine: &str,
-    state_dir: &Path,
-    session_id: &str,
-) -> Option<BTreeMap<String, String>> {
-    if let Some(records) = fold_opencode_staged_map(stage, machine, session_id) {
-        save_opencode_record_map_both(stage, machine, state_dir, session_id, &records).ok();
-        return Some(records);
-    }
-    load_opencode_record_map_any(stage, machine, state_dir, session_id)
 }
 
 /// Recover the increment map the state entry endorses, in ADR-012's order:
@@ -5692,20 +5685,28 @@ mod opencode_increment_tests {
         let path = opencode_record_map_path(dir.path(), "opencode.m.ses");
         let map = map_of(&[("session:ses", "deadbeefcafe")]);
         save_opencode_record_map(&path, "opencode.m.ses", &map).unwrap();
-        assert_eq!(load_opencode_record_map(&path), Some(map));
+        assert_eq!(
+            load_opencode_record_map(&path, "opencode.m.ses"),
+            Some(map.clone())
+        );
+        // Session ID mismatch: answers None.
+        assert_eq!(
+            load_opencode_record_map(&path, "opencode.m.other_ses"),
+            None
+        );
         // Corrupt file: unknown is not empty — None, and the caller degrades.
         fs::write(&path, b"{not json").unwrap();
-        assert_eq!(load_opencode_record_map(&path), None);
+        assert_eq!(load_opencode_record_map(&path, "opencode.m.ses"), None);
         let wrong = OpenCodeRecordMapState {
             version: OPENCODE_RECORD_MAP_VERSION + 1,
             session_id: "opencode.m.ses".to_string(),
             records: map_of(&[]),
         };
         fs::write(&path, serde_json::to_vec(&wrong).unwrap()).unwrap();
-        assert_eq!(load_opencode_record_map(&path), None);
+        assert_eq!(load_opencode_record_map(&path, "opencode.m.ses"), None);
         // Missing entirely.
         let other = opencode_record_map_path(dir.path(), "opencode.m.other");
-        assert_eq!(load_opencode_record_map(&other), None);
+        assert_eq!(load_opencode_record_map(&other, "opencode.m.other"), None);
     }
 
     /// The entry-level digest list is derived from a *state file* round trip:
