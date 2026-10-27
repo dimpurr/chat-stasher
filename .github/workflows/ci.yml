@@ -207,9 +207,9 @@ jobs:
       # only on macOS.
       #
       #   * Windows: it is a `#!/usr/bin/env bash` script that shells out to
-      #     `target/debug/chat-stasher` (release-gate.sh:25) — no `.exe`
+      #     `target/debug/chat-stasher` (release-gate.sh:37) — no `.exe`
       #     suffix — plus `find`/`dd`/`od`. Not run here.
-      #   * Linux: it uses BSD `stat -f` (release-gate.sh:87 and :258). Both
+      #   * Linux: it uses BSD `stat -f` (release-gate.sh:75 and :642). Both
       #     call sites sit on the `--real-data` and `--selftest` branches,
       #     which this workflow does not take, so the synthetic happy path
       #     *may* work under GNU coreutils — but that has never been executed

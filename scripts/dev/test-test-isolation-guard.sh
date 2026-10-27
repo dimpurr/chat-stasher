@@ -210,6 +210,14 @@ run_host -- bash -c 'mkdir -p "$HOME/.local/share/chat-stasher/state"
 record "gate fixture in push-state.json is red" 1
 contains "carrying a fixture identity"
 
+# Multi-separator mapping: gate--mbp / gate__mbp in stage is red.
+reset_host
+seed_data_root
+run_host -- bash -c 'mkdir -p "$HOME/.local/share/chat-stasher/stage/sessions/leak"
+  echo x > "$HOME/.local/share/chat-stasher/stage/sessions/leak/chatgpt.gate--mbp"'
+record "gate--mbp multi-separator fixture leak is red" 1
+contains "fixture-named entry appeared"
+
 # The per-run baseline (W306c): an identity that was already in the store
 # before the run — the residue an earlier leak left on this machine — is not a
 # leak, even though the wrapped command rewrites the file that holds it (what
@@ -379,7 +387,7 @@ record "no HOME refuses" 1
 contains "refusing"
 
 # The shell's reserved-token list is the Rust one, read back out of the source.
-rust_tokens=$(sed -n '/FIXTURE_IDENTITY_TOKENS/,/;/p' \
+rust_tokens=$(sed -n '/pub const FIXTURE_IDENTITY_TOKENS/,/;/p' \
   "$ROOT/crates/chat-stasher/src/test_identity_guard.rs" |
   grep -oE '"[a-z-]+"' | tr -d '"' | LC_ALL=C sort | tr '\n' ' ')
 shell_tokens=$(grep -E '^FIXTURE_TOKENS=' "$GUARD" | sed 's/^[^"]*"//; s/"$//' |

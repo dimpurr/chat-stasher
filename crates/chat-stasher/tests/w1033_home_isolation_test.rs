@@ -7,7 +7,7 @@
 //! because `scripts/release-gate.sh` ran `chat-stasher push` without HOME / XDG isolation.
 //!
 //! W1033 isolates `HOME`, `USERPROFILE`, and `XDG_*` in `release-gate.sh`, and
-//! reserves `gate` in `test_identity_guard`, so that any push-state or state
+//! reserves `gate-mbp` in `test_identity_guard`, so that any push-state or state
 //! write for a gate/fixture machine outside the temporary directory fails closed.
 //!
 //! The guard test here exercises that refusal against a scratch directory outside
@@ -62,6 +62,8 @@ fn non_temp_dir(name: &str) -> NonTempDir {
 fn gate_fixture_identity_is_reserved() {
     assert!(test_identity_guard::is_fixture_identity("gate-mbp"));
     assert!(test_identity_guard::is_fixture_identity("gate_mbp"));
+    assert!(test_identity_guard::is_fixture_identity("gate--mbp"));
+    assert!(test_identity_guard::is_fixture_identity("gate__mbp"));
     assert!(test_identity_guard::is_fixture_identity("GATE-MBP"));
     // Real hostnames containing "gate" as a whole token must NOT be reserved:
     assert!(!test_identity_guard::is_fixture_identity("gate"));
