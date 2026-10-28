@@ -12560,6 +12560,18 @@ fn print_check_summary(s: &CheckSummary, name: &str) {
         s.warns,
         s.duration
     );
+    // Torn debris (ISSUE-006 step A): a reminder, printed beside the findings
+    // without being one — never counted into them, and never worded as
+    // corruption of a backup.
+    if s.torn_packs > 0 {
+        println!(
+            "[verify] {:<16} {} torn pack(s) ({}) — {}",
+            "torn",
+            s.torn_packs,
+            fmt_bytes(s.torn_bytes),
+            chat_stasher::debris::INTERRUPTED_PUSH_SENTENCE
+        );
+    }
     for detail in &s.details {
         println!("  ! {detail}");
     }
@@ -13384,6 +13396,18 @@ fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode
         fmt_bytes(report.remote_total_bytes),
         report.snapshots_remote
     );
+    // Torn debris (ISSUE-006 step A): what this round classified and never
+    // copied. A reminder beside the outcome, never a failure of it — the
+    // debris belongs to no backup and the copy's completeness is untouched,
+    // because no index file names these bytes either.
+    if report.torn_files > 0 {
+        println!(
+            "[mirror] torn         : {} file(s) / {} skipped as interrupted-push debris — {}",
+            report.torn_files,
+            fmt_bytes(report.torn_bytes),
+            chat_stasher::debris::INTERRUPTED_PUSH_SENTENCE
+        );
+    }
     match outcome {
         chat_stasher::mirror::SyncOutcome::Completed => {
             println!(
@@ -13641,20 +13665,26 @@ fn prune_orphans_json(inventory: &chat_stasher::prune_orphans::Inventory) -> ser
     let candidates: Vec<serde_json::Value> = inventory
         .candidates
         .iter()
-        .map(|pack| match &pack.verdict {
-            Verdict::Verified => serde_json::json!({
+        .map(|pack| {
+            serde_json::json!({
                 "id": pack.id,
                 "id_prefix": pack.id_prefix(),
                 "bytes": pack.bytes,
-                "status": "verified",
-            }),
-            Verdict::Unverified { reason } => serde_json::json!({
-                "id": pack.id,
-                "id_prefix": pack.id_prefix(),
-                "bytes": pack.bytes,
-                "status": "unknown",
-                "reason": reason,
-            }),
+                "status": pack.status_word(),
+                // torn/stranded only: the reason decided the status; unknown packs
+                // carry their reason in `reason` below.
+                "reason": match &pack.verdict {
+                    Verdict::Torn { reason } | Verdict::Unverified { reason } => reason,
+                    Verdict::Stranded => "verified complete",
+                },
+                // The earliest-seen time is unknown for every candidate: the
+                // backend interface carries no modification time, and no field
+                // here may fabricate a clock (ISSUE-006 step A).
+                "first_seen": {
+                    "kind": "unknown",
+                    "why": chat_stasher::debris::NO_MTIME_SENTENCE,
+                },
+            })
         })
         .collect();
 
@@ -13691,18 +13721,21 @@ fn prune_orphans_json(inventory: &chat_stasher::prune_orphans::Inventory) -> ser
             "bytes": inventory.total_bytes,
             "unindexed": inventory.candidate_packs(),
             "unindexed_bytes": inventory.candidate_bytes(),
-            "verified": inventory.verified_packs(),
-            "verified_bytes": inventory.verified_bytes(),
+            "torn": inventory.torn_packs(),
+            "torn_bytes": inventory.torn_bytes(),
+            "stranded": inventory.stranded_packs(),
+            "stranded_bytes": inventory.stranded_bytes(),
             "unknown": inventory.unknown_packs(),
             "unknown_bytes": inventory.unknown_bytes(),
         },
+        "torn_sentence": chat_stasher::debris::INTERRUPTED_PUSH_SENTENCE,
         "missing_packs": {
             "count": inventory.missing.len(),
             "ids": inventory.missing,
         },
         "next_push": next_push,
         "candidates": candidates,
-        "exit_semantics": "0 = the survey read every pack · 1 = it finished and found an index naming a pack the backend does not list · 3 = it did not finish reading, or `--apply` was asked for · 2 = usage error",
+        "exit_semantics": "0 = the survey read every pack (torn debris included: it is a known state, not an unfinished read) · 1 = it finished and found an index naming a pack the backend does not list · 3 = it did not finish reading, or `--apply` was asked for · 2 = usage error",
     })
 }
 
@@ -13738,15 +13771,37 @@ fn print_prune_orphans(inventory: &chat_stasher::prune_orphans::Inventory, dry_r
         inventory.total_packs,
         fmt_bytes(inventory.total_bytes)
     );
+    // Torn debris and stranded content are two different facts about the same
+    // unindexed set (ISSUE-006 step A), so the counts and byte totals print
+    // apart — folding them would word interrupted-push debris as if it were
+    // adoptable content, or the reverse.
     println!(
-        "[prune] unindexed   : {} ({}) — {} verified ({}), {} unknown ({})",
+        "[prune] unindexed   : {} ({}) — {} torn ({}), {} stranded ({}), {} unknown ({})",
         inventory.candidate_packs(),
         fmt_bytes(inventory.candidate_bytes()),
-        inventory.verified_packs(),
-        fmt_bytes(inventory.verified_bytes()),
+        inventory.torn_packs(),
+        fmt_bytes(inventory.torn_bytes()),
+        inventory.stranded_packs(),
+        fmt_bytes(inventory.stranded_bytes()),
         inventory.unknown_packs(),
         fmt_bytes(inventory.unknown_bytes()),
     );
+    if inventory.torn_packs() > 0 {
+        println!(
+            "[prune] torn        : {} file(s) belong to no backup — {}",
+            inventory.torn_packs(),
+            chat_stasher::debris::INTERRUPTED_PUSH_SENTENCE
+        );
+    }
+    // The earliest-seen time of any torn or stranded pack: unknown, stated as
+    // such — the backend interface carries no modification time, and a
+    // fabricated clock is the lie the tri-state rules exist against.
+    if inventory.torn_packs() > 0 || inventory.stranded_packs() > 0 {
+        println!(
+            "[prune] first seen  : unknown — {}",
+            chat_stasher::debris::NO_MTIME_SENTENCE
+        );
+    }
     println!(
         "[prune] missing     : {} pack(s) an index names that the backend does not list",
         inventory.missing.len()
@@ -13771,8 +13826,16 @@ fn print_prune_orphans(inventory: &chat_stasher::prune_orphans::Inventory, dry_r
     }
     for pack in &inventory.candidates {
         match &pack.verdict {
-            chat_stasher::prune_orphans::Verdict::Verified => println!(
-                "[prune] pack {}  {}  verified",
+            chat_stasher::prune_orphans::Verdict::Stranded => println!(
+                "[prune] pack {}  {}  stranded (verified; the next open adopts it)",
+                pack.id_prefix(),
+                fmt_bytes(pack.bytes)
+            ),
+            // The reason is the probe's own (header does not fit / will not
+            // decrypt); the sentence itself rode the summary lines above, so
+            // one candidate list does not repeat it once per pack.
+            chat_stasher::prune_orphans::Verdict::Torn { reason } => println!(
+                "[prune] pack {}  {}  torn ({reason})",
                 pack.id_prefix(),
                 fmt_bytes(pack.bytes)
             ),

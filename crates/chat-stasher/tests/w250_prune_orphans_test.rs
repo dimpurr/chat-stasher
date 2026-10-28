@@ -547,7 +547,10 @@ fn the_json_document_carries_full_ids_and_refuses_apply_structurally() {
     let candidates = value["candidates"].as_array().unwrap();
     assert_eq!(candidates.len(), stranded.len());
     for candidate in candidates {
-        assert_eq!(candidate["status"], "verified");
+        // ISSUE-006 step A: a verified unindexed pack is *stranded* — the
+        // word the torn/stranded split exists to keep exact, and the one this
+        // command's human report and `--json` share.
+        assert_eq!(candidate["status"], "stranded");
         assert_eq!(
             candidate["id"].as_str().unwrap().len(),
             64,

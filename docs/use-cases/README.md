@@ -10,6 +10,7 @@ Every transcript in them comes from a synthetic archive: the machines, session i
 
 | Your situation | Page | What it needs |
 |---|---|---|
+| An interrupted push left something behind, and a command just mentioned torn debris | [Check that your backup is still fine](interrupted-push.md) | Nothing — every command it names is read-only, and the one you already ran is on the page. |
 | A machine is gone (sold, wiped, dead) and you want the conversations it archived | [Recover a lost machine's conversations](lost-machine.md) | The destination, its key file, and any computer you can run from. The machine that wrote the archive is not needed. |
 | You have a working archive and want a reusable procedure out of it | [Turn old conversations into a skill](skill-from-history.md) | A readable archive, its key file, and an agent to hand the exported files to. |
 

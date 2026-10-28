@@ -303,14 +303,14 @@ scheduled `push` would then run exactly as if you had never declared one, and th
 archive would quietly stop being copied anywhere
 (`crates/chat-stasher/src/config.rs:170-179`, and the refusal that stops every
 command that reads the config rather than falling back to those defaults,
-`crates/chat-stasher/src/main.rs:15987-16038`).
+`crates/chat-stasher/src/main.rs:16050-16101`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
 destination declared" is never printed as a finding about a config nobody read.
 When the error is an unexpandable `rustic_cache_dir`, it also names that cache
 path check as unavailable and says to fix the value and run doctor again
-(`crates/chat-stasher/src/doctor.rs:2275-2330`). And an **absent** config file is a
+(`crates/chat-stasher/src/doctor.rs:2413-2468`). And an **absent** config file is a
 different state altogether, not an error: that is the normal first run, and it
 does use the defaults (`crates/chat-stasher/src/config.rs:495-504`). If you want
 the defaults back, move the file aside rather than leaving a broken one in place.
@@ -626,8 +626,8 @@ does not exist yet — so a headless run that owes nothing but
 (`steps.local_save` is `not_attempted`) creates every key it will ask about,
 reports them in `masterkey.keys` (`masterkey.path` is the local one), and stops
 before the local archive pass and the timer
-(`crates/chat-stasher/src/main.rs:17204-17211`; the refusal's own wording is
-`crates/chat-stasher/src/main.rs:16767-16781`). Nothing is archived on that run,
+(`crates/chat-stasher/src/main.rs:17267-17274`; the refusal's own wording is
+`crates/chat-stasher/src/main.rs:16830-16844`). Nothing is archived on that run,
 and every other missing parameter still refuses before the first write.
 
 The `steps.local_save` half is what tells that bootstrap apart from a run that
@@ -990,12 +990,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:20611-20612`). This is the
+does not (`crates/chat-stasher/src/main.rs:20674-20675`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its timer and scan output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:20103-20104`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:20166-20167`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:436-522`):
 
 - No timer installed / never run successfully:
@@ -1011,7 +1011,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:436-522`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:20703-20710`):
+(`crates/chat-stasher/src/main.rs:20766-20773`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -1024,7 +1024,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:20078-20085`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:20141-20148`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -1034,7 +1034,7 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 or a requested destination; unavailable counts remain unknown) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:15987-15998`, the shared refusal that stops
+(`crates/chat-stasher/src/main.rs:16050-16061`, the shared refusal that stops
 every command that reads the config rather than falling back to defaults).
 **Note:** the human-readable report goes to **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
@@ -1065,16 +1065,16 @@ reports what came back in three separate states rather than two: reached (and
 whether a repository is there), not reached (with the classifier's verdict
 attached), and not configured at all — a destination with no `repo` was never
 dialled, and calling it "unreachable" would put a config mistake and a dead
-network in one bucket (`crates/chat-stasher/src/doctor.rs:1756-1766,1894-1915,2047-2100`).
+network in one bucket (`crates/chat-stasher/src/doctor.rs:1756-1771,1988-2009,2140-2215`).
 When the repository is there it also reads each machine's `writer.json` and
 reports the machines whose archived activity index was written by an older
 `chat-stasher`, with the exact command that rebuilds each one
-(`crates/chat-stasher/src/doctor.rs:1784-1891`).
+(`crates/chat-stasher/src/doctor.rs:1884-1991`).
 It creates nothing, so a destination it reports as "not there yet" is still not
 created by running `doctor`. D10 also checks each destination's local FTS index
-without connecting to it (`crates/chat-stasher/src/doctor.rs:2750-2751,3341-3403`).
+without connecting to it (`crates/chat-stasher/src/doctor.rs:2888-2889,3479-3541`).
 The destination probes are the one check that touches the network; see section
-4.4 if it reports a host it cannot trust (`crates/chat-stasher/src/doctor.rs:1756-1766,1894-1915,2047-2100`).
+4.4 if it reports a host it cannot trust (`crates/chat-stasher/src/doctor.rs:1756-1771,1988-2009,2140-2215`).
 
 ### 5.1 Exporting a day
 

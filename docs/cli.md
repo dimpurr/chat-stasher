@@ -285,10 +285,16 @@ retry is allowed to reuse one and write a snapshot that depends on it while it
 stays unindexed on disk, so a pack can be the only copy of archived content.
 [docs-dev/orphan-packs.md](../docs-dev/orphan-packs.md) has the full argument.
 
-Every pack it reports is verified the way the adopting open verifies one before
-reusing it: the header must decrypt, every blob it declares must decrypt and hash
-to the id the header gives, and the pack's bytes must hash to the id it is stored
-under.
+Every pack it reports is classified the way the shared interrupted-push
+classification does: a pack whose bytes verify complete is **stranded** — a
+later open adopts it, and the report says so; a pack that cannot be read as a
+pack at all (its length field declares a header the file cannot hold, or the
+header will not decrypt) is **torn debris** from an interrupted push — it
+belongs to no backup and can be ignored, and it makes the survey neither
+incomplete nor a failure; anything else is `unknown` with the verifier's own
+reason. `verify`, `doctor`, and `mirror sync` use the same classification and
+the same sentence for torn debris — see
+[use-cases/interrupted-push.md](use-cases/interrupted-push.md).
 
 | Flag | Meaning |
 |---|---|
@@ -300,18 +306,24 @@ under.
 The report carries the repository's **own id** from its config — the same on every
 machine that reads it — and never the path, host or account it was reached at. Along
 with it: the backend family, pack and byte totals, the unindexed packs by id prefix
-and size, how many of those verified, how many are unknown with the verifier's own
-reason, and any pack an index names that the backend no longer lists. No
-conversation text appears in it.
+and size, how many of those are torn and stranded (each with their own count and
+byte total), how many are unknown with the verifier's own reason, and any pack an
+index names that the backend no longer lists. The earliest-seen time of a torn or
+stranded pack is reported as unknown — the backend interface carries no
+modification time, and no field invents a clock. No conversation text appears in
+it.
 
-Exit codes: `0` the survey read every pack · `1` it read everything and found an
+Exit codes: `0` the survey read every pack (torn debris included — it is a known
+state, not an unfinished read) · `1` it read everything and found an
 index naming a pack the backend does not list · `3` it did not finish reading — a
 pack or an index file could not be read, the backend was unreachable, or `--apply`
 was asked for — so no absence in the output proves anything · `2` usage error.
 
-An empty answer and an unknown one never look alike: a pack that could not be read
-is reported `unknown` with its size and the verifier's reason, never as nothing
-there, and it makes the whole survey incomplete. A clean report of zero candidates
+An empty answer and an unknown one never look alike: a pack whose header reads
+but whose bytes do not verify is reported `unknown` with its size and the
+verifier's reason, never as nothing there, and it makes the whole survey
+incomplete. Torn debris is not that case: it is established, classified, and
+reported as its own count. A clean report of zero candidates
 is produced only after a complete survey.
 
 Nothing calls this command for you: no schedule, no `push`, no `run-once`, no
@@ -366,9 +378,9 @@ a copy without them.
 
 Exit codes, the same vocabulary `verify` and `read` use — and the one place
 a "checked and failed" answer exists for the *remote*:
-`0` the mirror holds everything the remote listed, verified ·
+`0` the mirror holds everything the remote listed, verified — torn debris from an interrupted push excepted: a half-written pack no index file names is classified, skipped, and counted (`[mirror] torn : …` with the standard sentence), never downloaded, never a failure —
 `3` the round did not finish — the budget ran out, the free-disk floor tripped, the space pre-estimate refused to start, or the remote could not be read mid-round — progress is recorded and the next round resumes ·
-`1` a finished read that failed: the source proved corrupt (a file hashed against its own name twice and failed both times — not a transfer a later round can heal), a local write failed, or the listing named a file over the whole-file bound ·
+`1` a finished read that failed: the source proved corrupt (a file hashed against its own name twice and failed both times — a pack an index file names, or one that is neither torn debris nor complete; not a transfer a later round can heal), a local write failed, or the listing named a file over the whole-file bound ·
 `2` usage error — no `[mirror]` section, the switch is off, `mirror_of` names no declared destination, the destination has never been initialised (run a push first), or the destination's masterkey file is missing on this machine or unusable. Nothing was read or written.
 
 The round's own records (`mirror-state.json`, written only by a completed

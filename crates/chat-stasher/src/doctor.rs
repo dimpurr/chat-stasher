@@ -1763,6 +1763,106 @@ pub struct DestinationProbe {
     /// the running CLI. `None` means **not checked** (the destination was not
     /// reached, is not configured, or holds no repository yet) — never "fresh".
     pub activity_index: Option<ActivityIndexFreshness>,
+    /// Interrupted-push debris at this destination (ISSUE-006 step A), by
+    /// the shared classification. `None` means **not checked** for the same
+    /// reasons [`Self::activity_index`] has; a checked-but-unestablished
+    /// answer is the `NotChecked` variant with its reason, never a zero.
+    pub debris: Option<DebrisProbe>,
+}
+
+/// What a connection classified as debris, or why it could not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DebrisProbe {
+    /// The survey finished and measured.
+    Measured(Box<DebrisAtDestination>),
+    /// The survey could not establish anything — the fail-closed convention:
+    /// an unreadable key or an unfinished read is an unknown, never "no
+    /// debris".
+    NotChecked {
+        /// Redacted reason, in the shape the rest of D7's lines carry.
+        why: String,
+    },
+}
+
+/// Interrupted-push debris at one declared destination, as the shared
+/// classification measured it: torn and stranded report **separate** counts
+/// and byte totals, and an unclassifiable pack counts as unknown — never as
+/// debris and never as a zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebrisAtDestination {
+    /// Torn debris: no index file names it and it cannot be read as a pack.
+    /// It belongs to no backup and can be ignored
+    /// ([`crate::debris::INTERRUPTED_PUSH_SENTENCE`] — the row's sentence).
+    pub torn: usize,
+    /// Backend bytes those torn packs occupy.
+    pub torn_bytes: u64,
+    /// Stranded content: complete, verified, adoptable by the next open.
+    pub stranded: usize,
+    /// Backend bytes those stranded packs occupy.
+    pub stranded_bytes: u64,
+    /// Packs whose bytes could not be classified, so their status is unknown.
+    pub unknown: usize,
+    /// Backend bytes those unknown packs occupy.
+    pub unknown_bytes: u64,
+}
+
+impl DebrisAtDestination {
+    /// From the read-only inventory `prune-orphans` computes — the same survey,
+    /// so `doctor`'s lines and a pasted `prune-orphans` report describe the
+    /// same measured set.
+    #[must_use]
+    pub fn from_inventory(inventory: &crate::prune_orphans::Inventory) -> Self {
+        Self {
+            torn: inventory.torn_packs(),
+            torn_bytes: inventory.torn_bytes(),
+            stranded: inventory.stranded_packs(),
+            stranded_bytes: inventory.stranded_bytes(),
+            unknown: inventory.unknown_packs(),
+            unknown_bytes: inventory.unknown_bytes(),
+        }
+    }
+
+    /// Whether there is any debris fact a D7 line owes the reader. A measured
+    /// empty is silence, which the doctor's healthy-run convention keeps.
+    #[must_use]
+    pub fn has_anything_to_say(&self) -> bool {
+        self.torn > 0 || self.stranded > 0 || self.unknown > 0
+    }
+}
+
+/// Classify the debris at one declared destination's repository, read-only.
+///
+/// Only called once the destination answered and holds a repository; a key
+/// that cannot be read or a survey that cannot finish is
+/// [`DebrisProbe::NotChecked`] — the doctor's unknown, never a zero. The
+/// costs track `prune-orphans`'s (one listing, one index pass, the
+/// unindexed set only): a healthy destination adds nothing but those two
+/// passes, and debris is the one reason a destination is worth this look.
+fn probe_debris(cfg: &StoreConfig) -> DebrisProbe {
+    let mk = match store::load_key_file(cfg) {
+        Ok(mk) => mk,
+        Err(error) => {
+            return DebrisProbe::NotChecked {
+                why: format!("cannot read the destination's masterkey: {error:#}"),
+            };
+        }
+    };
+    let backends = match crate::store::BackupStore::for_metadata_query(cfg.clone()).backends() {
+        Ok(backends) => backends,
+        Err(error) => {
+            return DebrisProbe::NotChecked {
+                why: crate::prune_orphans::redact(&error),
+            };
+        }
+    };
+    match crate::prune_orphans::survey(cfg, &backends, &mk) {
+        Ok(inventory) => {
+            DebrisProbe::Measured(Box::new(DebrisAtDestination::from_inventory(&inventory)))
+        }
+        Err(error) => DebrisProbe::NotChecked {
+            why: crate::prune_orphans::error_line(&error),
+        },
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2055,14 +2155,15 @@ pub fn probe_destinations(config: &Config) -> Vec<DestinationProbe> {
                     repo_root: "(not configured)".to_string(),
                     outcome: DestinationOutcome::NotConfigured {
                         detail: "this destination declares no `repo`, so no connection was \
-                                 attempted and nothing about it is known"
+                                  attempted and nothing about it is known"
                             .to_string(),
                     },
                     activity_index: None,
+                    debris: None,
                 };
             };
             let repo_root = cfg.repo_root.clone();
-            let (outcome, activity_index) =
+            let (outcome, activity_index, debris) =
                 match crate::remote_err::probe_destination_connectivity(&cfg) {
                     Ok(repository_exists) => {
                         // The index check only means something once there is a
@@ -2073,9 +2174,21 @@ pub fn probe_destinations(config: &Config) -> Vec<DestinationProbe> {
                         } else {
                             None
                         };
+                        // Debris needs the same two things the activity check
+                        // does — a repository and its key — and it is the
+                        // same read-only family: D7 already dialed the
+                        // destination to say "reachable", and the debris it
+                        // can leave behind is the question an interrupted
+                        // push makes worth an answer.
+                        let debris = if repository_exists {
+                            Some(probe_debris(&cfg))
+                        } else {
+                            None
+                        };
                         (
                             DestinationOutcome::Reached { repository_exists },
                             activity_index,
+                            debris,
                         )
                     }
                     Err(e) => (
@@ -2087,6 +2200,7 @@ pub fn probe_destinations(config: &Config) -> Vec<DestinationProbe> {
                         // nothing here is "not checked", which the field
                         // already means.
                         None,
+                        None,
                     ),
                 };
             DestinationProbe {
@@ -2094,6 +2208,7 @@ pub fn probe_destinations(config: &Config) -> Vec<DestinationProbe> {
                 repo_root,
                 outcome,
                 activity_index,
+                debris,
             }
         })
         .collect()
@@ -2101,6 +2216,26 @@ pub fn probe_destinations(config: &Config) -> Vec<DestinationProbe> {
 
 /// JSON shape for one destination probe.
 fn destination_probe_json(p: &DestinationProbe) -> serde_json::Value {
+    let debris = match &p.debris {
+        None => serde_json::Value::Null,
+        Some(DebrisProbe::Measured(debris)) => serde_json::json!({
+            "kind": "measured",
+            "torn": debris.torn,
+            "torn_bytes": debris.torn_bytes,
+            "stranded": debris.stranded,
+            "stranded_bytes": debris.stranded_bytes,
+            "unknown": debris.unknown,
+            "unknown_bytes": debris.unknown_bytes,
+            "torn_sentence": crate::debris::INTERRUPTED_PUSH_SENTENCE,
+            // Every candidate's earliest-seen time: the backend interface
+            // carries no modification time, and this document never
+            // fabricates a clock (ISSUE-006 step A).
+            "first_seen": {"kind": "unknown", "why": crate::debris::NO_MTIME_SENTENCE},
+        }),
+        Some(DebrisProbe::NotChecked { why }) => {
+            serde_json::json!({"kind": "not_checked", "why": why})
+        }
+    };
     match &p.outcome {
         DestinationOutcome::Reached { repository_exists } => serde_json::json!({
             "name": p.name,
@@ -2110,6 +2245,9 @@ fn destination_probe_json(p: &DestinationProbe) -> serde_json::Value {
             // connection failed) — a script must not read "not checked" as
             // "every index is current".
             "activity_index": p.activity_index.as_ref().map(activity_index_json),
+            // `null` for the same "not checked" reasons above; a checked
+            // answer never folds an unknown into a zero.
+            "debris": debris,
         }),
         DestinationOutcome::Unreachable { kind, detail } => serde_json::json!({
             "name": p.name,
@@ -5225,6 +5363,9 @@ fn print_destinations(probes: &[DestinationProbe]) {
                 if let Some(freshness) = &p.activity_index {
                     print_activity_index(freshness);
                 }
+                if let Some(debris) = &p.debris {
+                    print_debris(debris);
+                }
             }
             DestinationOutcome::Unreachable { kind, detail } => {
                 eprintln!(
@@ -5302,6 +5443,59 @@ fn print_activity_index(freshness: &ActivityIndexFreshness) {
             eprintln!("               activity index: UNKNOWN — {detail}");
         }
     }
+}
+
+/// D7 printing — interrupted-push debris at this destination (ISSUE-006 step
+/// A), as the shared classification measured it.
+///
+/// Only spoken when there is debris to name: a destination whose packs are
+/// all indexed holds none, and a line reading "0 torn, 0 stranded" would be
+/// noise the doctor's healthy-run convention exists to avoid. Torn and
+/// stranded carry **separate** counts and byte totals, torn rides the one
+/// sentence every surface shares
+/// ([`crate::debris::INTERRUPTED_PUSH_SENTENCE`]), and the earliest-seen time
+/// stays the honest unknown it is ([`crate::debris::NO_MTIME_SENTENCE`]) —
+/// never a fabricated clock. A survey that could not establish anything says
+/// UNKNOWN with its reason, in the same shape the activity-index line keeps.
+fn print_debris(debris: &DebrisProbe) {
+    let measured = match debris {
+        DebrisProbe::NotChecked { why } => {
+            eprintln!("               debris: UNKNOWN — {why}");
+            return;
+        }
+        DebrisProbe::Measured(measured) => measured,
+    };
+    if !measured.has_anything_to_say() {
+        return;
+    }
+    if measured.torn > 0 {
+        eprintln!(
+            "               debris: {} torn pack(s) ({}) — {}",
+            measured.torn,
+            fmt_bytes(measured.torn_bytes),
+            crate::debris::INTERRUPTED_PUSH_SENTENCE
+        );
+    }
+    if measured.stranded > 0 {
+        eprintln!(
+            "               debris: {} stranded pack(s) ({}) — complete and verified; the \
+             next open adopts them, `prune-orphans --destination <name>` reports the set in full",
+            measured.stranded,
+            fmt_bytes(measured.stranded_bytes)
+        );
+    }
+    if measured.unknown > 0 {
+        eprintln!(
+            "               debris: {} pack(s) ({}) with an unknown status — neither torn \
+             nor verified; `prune-orphans --destination <name>` carries each one's reason",
+            measured.unknown,
+            fmt_bytes(measured.unknown_bytes)
+        );
+    }
+    eprintln!(
+        "               debris: earliest-seen time unknown — {}",
+        crate::debris::NO_MTIME_SENTENCE
+    );
 }
 
 /// D12 printing — the four-fact destination reconciliation (W1012 / SG-1

@@ -1216,6 +1216,8 @@ fn the_steady_row_words_behindness_orphans_and_age_from_the_records() {
             mirror_files: 9,
             orphan_files: Some(1),
             orphan_bytes: Some(1_234),
+            torn_files: 0,
+            torn_bytes: 0,
         },
     );
 
@@ -1564,6 +1566,8 @@ fn a_gone_mirror_directory_with_records_reads_absent_not_healthy_empty() {
             mirror_files: 9,
             orphan_files: Some(0),
             orphan_bytes: Some(0),
+            torn_files: 0,
+            torn_bytes: 0,
         },
     );
     assert!(
@@ -1641,6 +1645,8 @@ fn the_gone_copy_row_carries_the_hold_back_count_too() {
             mirror_files: 9,
             orphan_files: Some(0),
             orphan_bytes: Some(0),
+            torn_files: 0,
+            torn_bytes: 0,
         },
     );
     write_reclaim_record(
@@ -1878,6 +1884,8 @@ fn a_record_whose_halves_disagree_words_behindness_unknown_not_clamped() {
             mirror_files: 9,
             orphan_files: Some(0),
             orphan_bytes: Some(0),
+            torn_files: 0,
+            torn_bytes: 0,
         },
     );
 
@@ -2090,6 +2098,8 @@ fn an_unwalkable_mirror_directory_words_size_unknown_without_a_path() {
             mirror_files: 9,
             orphan_files: Some(0),
             orphan_bytes: Some(0),
+            torn_files: 0,
+            torn_bytes: 0,
         },
     );
 

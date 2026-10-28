@@ -53,6 +53,47 @@ use std::sync::Arc;
 /// The unencrypted length field that ends every pack.
 const LENGTH_LEN: u64 = 4;
 
+/// Why a pack's own bytes could not be trusted, in the two shapes that matter
+/// to [`crate::debris`]'s torn classification (ISSUE-006 step A).
+///
+/// * [`PackError::UnreadableHeader`] — the pack **cannot be read as a pack**:
+///   it is shorter than a header could be, its length field declares a header
+///   the file cannot hold, or the header will not decrypt with the
+///   repository's key. When no index file names the pack either, this is
+///   debris from an interrupted push ([`crate::debris::PackClass::Torn`]),
+///   never corruption of a backup.
+/// * [`PackError::Unusable`] — every other refusal: the header reads, but a
+///   blob, the pack's own accounting, or the name the pack is stored under
+///   does not. Not interrupt-shaped, so every caller keeps its "unknown"
+///   behaviour for it.
+///
+/// The strings are what `verify_pack` refused with before this type existed,
+/// because `prune-orphans` and the adopting open print them verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackError {
+    /// The pack cannot be read as a pack at all: the header does not fit or
+    /// cannot be decrypted.
+    UnreadableHeader {
+        /// The verifier's own message, naming the pack by its id prefix.
+        why: String,
+    },
+    /// The header reads, but something past it refused.
+    Unusable {
+        /// The verifier's own message, naming the pack by its id prefix.
+        why: String,
+    },
+}
+
+impl std::fmt::Display for PackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnreadableHeader { why } | Self::Unusable { why } => write!(f, "{why}"),
+        }
+    }
+}
+
+impl std::error::Error for PackError {}
+
 /// How much of a pack is read at a time while verifying it. Every byte of a pack
 /// is read exactly once, and a bounded buffer means a large pack cannot turn the
 /// check that protects it into an allocation. (rustic's own `check --read-data`
@@ -88,40 +129,38 @@ struct Blob {
 ///
 /// # Errors
 ///
-/// A reason naming the failure — a pack whose bytes do not hash to its name, a
-/// header that does not decrypt or does not parse, a length that disagrees with
-/// the file, a blob that does not decrypt or does not hash to the id its header
-/// gives it — as a `String`, because every caller only reports it.
+/// A [`PackError`]: a pack whose bytes do not hash to its name, a header that
+/// does not decrypt or does not parse, a length that disagrees with the file, a
+/// blob that does not decrypt or does not hash to the id its header gives it —
+/// as a `String` inside each variant, because every caller only reports it.
 pub fn verify_pack(
     be: &Arc<dyn WriteBackend>,
     hex: &str,
     listed: u64,
     mk: &MasterKey,
-) -> Result<IndexPack, String> {
+) -> Result<IndexPack, PackError> {
     let short = hex.get(..12).unwrap_or(hex);
-    let id: Id = hex
-        .parse()
-        .map_err(|err| format!("pack {short} is not a valid id: {err}"))?;
+    let id: Id = hex.parse().map_err(|err| PackError::Unusable {
+        why: format!("pack {short} is not a valid id: {err}"),
+    })?;
     if listed < COMP_OVERHEAD + LENGTH_LEN {
-        return Err(format!(
-            "pack {short} is {listed} bytes, too short to hold a header"
-        ));
+        return Err(PackError::UnreadableHeader {
+            why: format!("pack {short} is {listed} bytes, too short to hold a header"),
+        });
     }
 
     // The last four bytes are the header's ciphertext length, unencrypted.
     let tail = read(be, &id, listed - LENGTH_LEN, LENGTH_LEN as u32)?;
-    let header_len = u64::from(u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]));
-    if header_len < COMP_OVERHEAD || header_len + LENGTH_LEN > listed {
-        return Err(format!(
-            "pack {short} declares a {header_len}-byte header, which does not fit a {listed}-byte pack"
-        ));
-    }
+    let key = aead_key(mk);
+    let header_len = header_length_fits(listed, short, &tail)
+        .map_err(|why| PackError::UnreadableHeader { why })?;
 
     let header = read(be, &id, listed - LENGTH_LEN - header_len, header_len as u32)?;
-    let key = aead_key(mk);
-    let plaintext = decrypt(&key, &header).map_err(|why| format!("pack {short}: {why}"))?;
-    let (blobs, header_bytes) = parse_header(&plaintext)
-        .map_err(|why| format!("pack {short} does not declare a usable header: {why}"))?;
+    let plaintext =
+        header_decrypts(short, &header, &key).map_err(|why| PackError::UnreadableHeader { why })?;
+    let (blobs, header_bytes) = parse_header(&plaintext).map_err(|why| PackError::Unusable {
+        why: format!("pack {short} does not declare a usable header: {why}"),
+    })?;
 
     // What the header claims has to add up to the file on disk, in both
     // directions: the entries fill the header ciphertext (minus the AEAD
@@ -131,17 +170,21 @@ pub fn verify_pack(
     // makes "every blob entry" a complete traversal of the file rather than a
     // walk over a prefix of it.
     if header_bytes + COMP_OVERHEAD != header_len {
-        return Err(format!(
-            "pack {short}'s header declares {header_bytes} bytes of entries, not the {} its length field gives",
-            header_len - COMP_OVERHEAD
-        ));
+        return Err(PackError::Unusable {
+            why: format!(
+                "pack {short}'s header declares {header_bytes} bytes of entries, not the {} its length field gives",
+                header_len - COMP_OVERHEAD
+            ),
+        });
     }
     let blob_bytes: u64 = blobs.iter().map(|blob| blob.length).sum();
     if blob_bytes + header_len + LENGTH_LEN != listed {
-        return Err(format!(
-            "pack {short}'s header accounts for {} of its {listed} bytes",
-            blob_bytes + header_len + LENGTH_LEN
-        ));
+        return Err(PackError::Unusable {
+            why: format!(
+                "pack {short}'s header accounts for {} of its {listed} bytes",
+                blob_bytes + header_len + LENGTH_LEN
+            ),
+        });
     }
 
     // Read every blob the header names. The reads are sequential and go through
@@ -170,28 +213,33 @@ pub fn verify_pack(
         // accumulating ones this crate writes is a header this check refuses.
         let start = next - buffer.len() as u64;
         if blob.offset != start {
-            return Err(format!(
-                "pack {short}, blob {index}: its header puts it at {} of a region that reads at {start}",
-                blob.offset
-            ));
+            return Err(PackError::Unusable {
+                why: format!(
+                    "pack {short}, blob {index}: its header puts it at {} of a region that reads at {start}",
+                    blob.offset
+                ),
+            });
         }
         let ciphertext: Vec<u8> = buffer.drain(..blob.length as usize).collect();
-        let bytes = decrypt(&key, &ciphertext)
-            .map_err(|why| format!("pack {short}, blob {}: {why}", blob_hex(&blob.id)))?;
+        let bytes = decrypt(&key, &ciphertext).map_err(|why| PackError::Unusable {
+            why: format!("pack {short}, blob {}: {why}", blob_hex(&blob.id)),
+        })?;
         let bytes = match blob.uncompressed {
             Some(length) => {
-                let bytes = zstd::decode_all(&*bytes).map_err(|err| {
-                    format!(
+                let bytes = zstd::decode_all(&*bytes).map_err(|err| PackError::Unusable {
+                    why: format!(
                         "pack {short}, blob {}: its bytes do not decompress: {err}",
                         blob_hex(&blob.id)
-                    )
+                    ),
                 })?;
                 if bytes.len() != length.get() as usize {
-                    return Err(format!(
-                        "pack {short}, blob {}: decompresses to {} bytes, not the {length} its header gives",
-                        blob_hex(&blob.id),
-                        bytes.len()
-                    ));
+                    return Err(PackError::Unusable {
+                        why: format!(
+                            "pack {short}, blob {}: decompresses to {} bytes, not the {length} its header gives",
+                            blob_hex(&blob.id),
+                            bytes.len()
+                        ),
+                    });
                 }
                 bytes
             }
@@ -204,20 +252,24 @@ pub fn verify_pack(
             .id
             .blob_matches_reader(bytes.len() as u64, &mut &bytes[..])
         {
-            return Err(format!(
-                "pack {short}, blob {index}: its plaintext is not the content of {}",
-                blob_hex(&blob.id)
-            ));
+            return Err(PackError::Unusable {
+                why: format!(
+                    "pack {short}, blob {index}: its plaintext is not the content of {}",
+                    blob_hex(&blob.id)
+                ),
+            });
         }
     }
     hasher.update(&header);
     hasher.update(&tail);
     let computed = hex_digest(&hasher.finalize());
     if computed != *hex {
-        return Err(format!(
-            "pack {short} is not the bytes it is stored under: its contents hash to {}",
-            computed.get(..12).unwrap_or(&computed)
-        ));
+        return Err(PackError::Unusable {
+            why: format!(
+                "pack {short} is not the bytes it is stored under: its contents hash to {}",
+                computed.get(..12).unwrap_or(&computed)
+            ),
+        });
     }
 
     let blobs = blobs
@@ -227,17 +279,20 @@ pub fn verify_pack(
                 id: blob.id.into(),
                 tpe: blob.tpe,
                 location: BlobLocation {
-                    offset: u32::try_from(blob.offset)
-                        .map_err(|err| format!("pack {short} has an invalid blob offset: {err}"))?,
-                    length: u32::try_from(blob.length)
-                        .map_err(|err| format!("pack {short} has an invalid blob length: {err}"))?,
+                    offset: u32::try_from(blob.offset).map_err(|err| PackError::Unusable {
+                        why: format!("pack {short} has an invalid blob offset: {err}"),
+                    })?,
+                    length: u32::try_from(blob.length).map_err(|err| PackError::Unusable {
+                        why: format!("pack {short} has an invalid blob length: {err}"),
+                    })?,
                     uncompressed_length: blob.uncompressed,
                 },
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    let size = u32::try_from(listed)
-        .map_err(|err| format!("pack {short} has an invalid listed size: {err}"))?;
+        .collect::<Result<Vec<_>, PackError>>()?;
+    let size = u32::try_from(listed).map_err(|err| PackError::Unusable {
+        why: format!("pack {short} has an invalid listed size: {err}"),
+    })?;
     Ok(IndexPack {
         id: PackId::from(id),
         blobs,
@@ -258,21 +313,124 @@ fn blob_hex(id: &Id) -> String {
     id.to_hex().as_str().to_string()
 }
 
-/// Read one exact range of a pack's stored bytes.
-fn read(be: &Arc<dyn WriteBackend>, id: &Id, offset: u64, length: u32) -> Result<Vec<u8>, String> {
-    let offset = u32::try_from(offset)
-        .map_err(|_| format!("pack {id} is larger than a pack can be: offset {offset}"))?;
+/// Read one exact range of a pack's stored bytes. A range the backend will not
+/// serve is [`PackError::Unusable`], not a header finding: it establishes
+/// nothing about the pack's shape, so no caller may name it torn debris.
+fn read(
+    be: &Arc<dyn WriteBackend>,
+    id: &Id,
+    offset: u64,
+    length: u32,
+) -> Result<Vec<u8>, PackError> {
+    let offset = u32::try_from(offset).map_err(|_| PackError::Unusable {
+        why: format!("pack {id} is larger than a pack can be: offset {offset}"),
+    })?;
     // `false`: read the stored bytes, never a cached copy of them.
     let data = be
         .read_partial(FileType::Pack, id, false, offset, length)
-        .map_err(|err| format!("pack {id} could not be read at {offset}+{length}: {err:#}"))?;
+        .map_err(|err| PackError::Unusable {
+            why: format!("pack {id} could not be read at {offset}+{length}: {err:#}"),
+        })?;
     if data.len() != length as usize {
-        return Err(format!(
-            "pack {id} ended after {} of the {length} bytes its header gives at {offset}",
-            data.len()
-        ));
+        return Err(PackError::Unusable {
+            why: format!(
+                "pack {id} ended after {} of the {length} bytes its header gives at {offset}",
+                data.len()
+            ),
+        });
     }
     Ok(data.to_vec())
+}
+
+/// The one shared fit check: a pack's last four bytes name its header's
+/// ciphertext length, and that length must cover a header this file can hold.
+///
+/// This and [`header_decrypts`] are the whole of "the pack cannot be read as a
+/// pack" ([`crate::debris`]'s torn definition, ISSUE-006 step A): both
+/// [`verify_pack`] and the header probes use them, so a torn classification
+/// never depends on which reader asked.
+fn header_length_fits(listed: u64, short: &str, tail: &[u8]) -> Result<u64, String> {
+    let header_len = u64::from(u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]));
+    if header_len < COMP_OVERHEAD || header_len + LENGTH_LEN > listed {
+        return Err(format!(
+            "pack {short} declares a {header_len}-byte header, which does not fit a {listed}-byte pack"
+        ));
+    }
+    Ok(header_len)
+}
+
+/// The one shared decrypt check: the header must decrypt with the repository's
+/// key. See [`header_length_fits`] for why both are shared.
+fn header_decrypts(short: &str, header: &[u8], key: &AeadKey) -> Result<Vec<u8>, String> {
+    decrypt(key, header).map_err(|why| format!("pack {short}: {why}"))
+}
+
+/// Can these bytes — a whole pack already in hand — be read as a pack at all:
+/// long enough to hold a header, a header length that fits, and a header that
+/// decrypts. This is the mirror's torn probe (the copy loop already holds the
+/// bytes both its hash checks read), reading nothing further.
+///
+/// Torn debris is caught here: an interrupted push's half-written file carries
+/// blob ciphertext where the tail and header should be, so the declared header
+/// length does not fit or the header will not decrypt
+/// ([`crate::debris::PackClass::Torn`]).
+///
+/// # Errors
+///
+/// [`PackError::UnreadableHeader`] when the bytes cannot be read as a pack;
+/// [`PackError::Unusable`] never — a byte range is never read here.
+pub fn probe_header_bytes(hex: &str, bytes: &[u8], mk: &MasterKey) -> Result<(), PackError> {
+    let short = hex.get(..12).unwrap_or(hex);
+    let len = bytes.len() as u64;
+    if len < COMP_OVERHEAD + LENGTH_LEN {
+        return Err(PackError::UnreadableHeader {
+            why: format!("pack {short} is {len} bytes, too short to hold a header"),
+        });
+    }
+    let tail = &bytes[len as usize - LENGTH_LEN as usize..];
+    let header_len =
+        header_length_fits(len, short, tail).map_err(|why| PackError::UnreadableHeader { why })?;
+    let header =
+        &bytes[(len - LENGTH_LEN - header_len) as usize..len as usize - LENGTH_LEN as usize];
+    header_decrypts(short, header, &aead_key(mk))
+        .map(|_| ())
+        .map_err(|why| PackError::UnreadableHeader { why })
+}
+
+/// [`probe_header_bytes`] over a backend: reads only the four-byte tail and the
+/// header ciphertext — the two small reads that fail fast on torn debris — so a
+/// reader that does not hold the bytes (the mirror-standing scans
+/// [`crate::verify`] makes) can still classify debris without reading a
+/// whole pack.
+///
+/// # Errors
+///
+/// [`PackError::UnreadableHeader`] when the pack cannot be read as a pack;
+/// [`PackError::Unusable`] when even the tail or header range could not be
+/// read — that pack's status is unknown, never torn.
+pub fn probe_header(
+    be: &Arc<dyn WriteBackend>,
+    hex: &str,
+    listed: u64,
+    mk: &MasterKey,
+) -> Result<(), PackError> {
+    let short = hex.get(..12).unwrap_or(hex);
+    let id: Id = hex.parse().map_err(|err| PackError::Unusable {
+        why: format!("pack {short} is not a valid id: {err}"),
+    })?;
+    if listed < COMP_OVERHEAD + LENGTH_LEN {
+        return Err(PackError::UnreadableHeader {
+            why: format!("pack {short} is {listed} bytes, too short to hold a header"),
+        });
+    }
+    let tail = read(be, &id, listed - LENGTH_LEN, LENGTH_LEN as u32)?;
+    let key = aead_key(mk);
+    let header_len = header_length_fits(listed, short, &tail)
+        .map_err(|why| PackError::UnreadableHeader { why })?;
+    let header = read(be, &id, listed - LENGTH_LEN - header_len, header_len as u32)?;
+    header_decrypts(short, &header, &key)
+        .map(|_| ())
+        .map_err(|why| PackError::UnreadableHeader { why })
 }
 
 /// Turn the decrypted header into the blobs it declares, in the order they lie

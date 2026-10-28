@@ -671,19 +671,19 @@ crates/chat-stasher/src/destinit.rs:122-141  8546544e08a8  lines=20
   <- docs-dev/threat-model.md:878  :: /// How a run was able (or unable) to account for one exist…
 crates/chat-stasher/src/destinit.rs:391-399  d2438d975abb  lines=9
   <- docs-dev/threat-model.md:878  :: Ok(true) => continue,
-crates/chat-stasher/src/doctor.rs:1756-1766  e88e5fd731c5  lines=11
+crates/chat-stasher/src/doctor.rs:1756-1771  b5116adb6d46  lines=16
   <- docs-dev/install.md:1068, docs-dev/install.md:1077  :: /// What one read-only connection to a declared destination…
-crates/chat-stasher/src/doctor.rs:1784-1891  bbabec918aa9  lines=108
+crates/chat-stasher/src/doctor.rs:1884-1991  bbabec918aa9  lines=108
   <- docs-dev/install.md:1072  :: /// Whether the activity indexes a destination carries were…
-crates/chat-stasher/src/doctor.rs:1894-1915  7b4d69687a1b  lines=22
-  <- docs-dev/install.md:1068, docs-dev/install.md:1077  :: pub enum DestinationOutcome {
-crates/chat-stasher/src/doctor.rs:2047-2100  4176d416bb38  lines=54
-  <- docs-dev/install.md:1068, docs-dev/install.md:1077  :: pub fn probe_destinations(config: &Config) -> Vec<Destinati…
-crates/chat-stasher/src/doctor.rs:2275-2330  236804c27b4c  lines=56
+crates/chat-stasher/src/doctor.rs:1988-2009  8166f8003396  lines=22
+  <- docs-dev/install.md:1068, docs-dev/install.md:1077  :: /// The answers a destination can give, kept apart for the …
+crates/chat-stasher/src/doctor.rs:2140-2215  3d64a92946e2  lines=76
+  <- docs-dev/install.md:1068, docs-dev/install.md:1077  :: /// Connect once to every declared destination, read-only.
+crates/chat-stasher/src/doctor.rs:2413-2468  236804c27b4c  lines=56
   <- docs-dev/install.md:313  :: pub fn config_unreadable(error: String) -> DoctorReport {
-crates/chat-stasher/src/doctor.rs:2750-2751  c49d6fc9ccfa  lines=2
+crates/chat-stasher/src/doctor.rs:2888-2889  c49d6fc9ccfa  lines=2
   <- docs-dev/install.md:1075  :: // D10 — local-only, no repository connection and no docume…
-crates/chat-stasher/src/doctor.rs:3341-3403  0d89a3dbd659  lines=63
+crates/chat-stasher/src/doctor.rs:3479-3541  0d89a3dbd659  lines=63
   <- docs-dev/install.md:1075  :: /// D10 — inspect only local index files; this never opens …
 crates/chat-stasher/src/export.rs:974-991  bd664b7c0646  lines=18
   <- docs-dev/openclaw-scanner.md:99  :: // `.jsonl` is appended here, so this file name is one path…
@@ -841,21 +841,21 @@ crates/chat-stasher/src/main.rs:10805-10810  13896e8d543a  lines=6
   <- SECURITY.md:70, docs-dev/threat-model.md:869  :: eprintln!("push: cannot check stage metadata: {e:#}");
 crates/chat-stasher/src/main.rs:11243-11429  b256db959826  lines=187
   <- docs-dev/threat-model.md:933  :: let destination = destination.or_else(|| {
-crates/chat-stasher/src/main.rs:15987-16038  eb6db4f4050d  lines=52
+crates/chat-stasher/src/main.rs:16050-16101  eb6db4f4050d  lines=52
   <- docs-dev/install.md:306  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:15987-15998  8f911ffc9cf6  lines=12
+crates/chat-stasher/src/main.rs:16050-16061  8f911ffc9cf6  lines=12
   <- docs-dev/install.md:1037  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:16767-16781  da484ba556b2  lines=15
+crates/chat-stasher/src/main.rs:16830-16844  da484ba556b2  lines=15
   <- docs-dev/install.md:630  :: `dest-init`) — the destination block itself does not have t…
-crates/chat-stasher/src/main.rs:17204-17211  c5ec574f3326  lines=8
+crates/chat-stasher/src/main.rs:17267-17274  c5ec574f3326  lines=8
   <- docs-dev/install.md:629  :: )
-crates/chat-stasher/src/main.rs:20078-20085  9cd8be148a6b  lines=8
+crates/chat-stasher/src/main.rs:20141-20148  9cd8be148a6b  lines=8
   <- docs-dev/install.md:1027  :: render_status(report, false)
-crates/chat-stasher/src/main.rs:20103-20104  d745898fe057  lines=2
+crates/chat-stasher/src/main.rs:20166-20167  d745898fe057  lines=2
   <- docs-dev/install.md:998  :: // would answer "is my timer healthy?" from a machine the t…
-crates/chat-stasher/src/main.rs:20611-20612  f5217dab38af  lines=2
+crates/chat-stasher/src/main.rs:20674-20675  f5217dab38af  lines=2
   <- docs-dev/install.md:993  :: // them. `destinations` and `reclaim` are the machine-reada…
-crates/chat-stasher/src/main.rs:20703-20710  7df1b5962a59  lines=8
+crates/chat-stasher/src/main.rs:20766-20773  7df1b5962a59  lines=8
   <- docs-dev/install.md:1014  :: };
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:440, docs-dev/threat-model.md:722  :: //! ADR-022: content-addressed hash tracking for stage meta…
@@ -863,7 +863,7 @@ crates/chat-stasher/src/mirror.rs:1-16  fe152090ebb3  lines=16
   <- docs-dev/privacy.md:1155  :: //! The local mirror (ADR-062, LM-2): one declared remote d…
 crates/chat-stasher/src/mirror.rs:48-50  f48b2aff1d75  lines=3
   <- docs-dev/privacy.md:1155  :: //! Privacy: ids, byte counts, times and the declared desti…
-crates/chat-stasher/src/mirror.rs:1474-1477  3a13a0bc6bb2  lines=4
+crates/chat-stasher/src/mirror.rs:1698-1701  3a13a0bc6bb2  lines=4
   <- docs-dev/privacy.md:1155  :: pub remote_files: u64,
 crates/chat-stasher/src/mirrorstate.rs:30-31  3f1c0e8f18cc  lines=2
   <- docs-dev/privacy.md:1155  :: //! Privacy: a destination name, a unix time, byte counts a…
@@ -967,19 +967,19 @@ crates/chat-stasher/src/orphans.rs:271-309  23cfea028f95  lines=39
   <- docs-dev/orphan-packs.md:140  :: let listed = backends
 crates/chat-stasher/src/orphans.rs:327  3a21d2f444c5  lines=1
   <- docs-dev/orphan-packs.md:65  :: fn verify_unindexed(
-crates/chat-stasher/src/orphans.rs:358-387  08abb9e9f7b4  lines=30
-  <- docs-dev/orphan-packs.md:307  :: /// A test-only rendezvous, for the one window an outside p…
-crates/chat-stasher/src/orphans.rs:458  1da6da7eb8e8  lines=1
+crates/chat-stasher/src/orphans.rs:362-391  08abb9e9f7b4  lines=30
+  <- docs-dev/orphan-packs.md:350  :: /// A test-only rendezvous, for the one window an outside p…
+crates/chat-stasher/src/orphans.rs:462  1da6da7eb8e8  lines=1
   <- docs-dev/orphan-packs.md:94  :: pub fn index_adopting<S: Open>(
-crates/chat-stasher/src/orphans.rs:480-494  db8f4c9c1759  lines=15
+crates/chat-stasher/src/orphans.rs:484-498  db8f4c9c1759  lines=15
   <- docs-dev/orphan-packs.md:142  :: // not have: rebuilding from only the backend's listing wou…
-crates/chat-stasher/src/orphans.rs:500-502  b588e8e898ab  lines=3
-  <- docs-dev/orphan-packs.md:123  :: Ok(verified) => verified,
+crates/chat-stasher/src/orphans.rs:503-506  f760da2d874a  lines=4
+  <- docs-dev/orphan-packs.md:123  :: let verified = match verify_unindexed(backends, &report.uni…
 crates/chat-stasher/src/overview.rs:702-708  8fd8722ad5a0  lines=7
   <- docs-dev/threat-model.md:818  :: /// A report is stale when its timestamp is unreadable or i…
 crates/chat-stasher/src/overview.rs:722-779  cada79442043  lines=58
   <- docs-dev/privacy.md:425, docs-dev/threat-model.md:818  :: }
-crates/chat-stasher/src/packcheck.rs:95  bda148c6d69d  lines=1
+crates/chat-stasher/src/packcheck.rs:136  bda148c6d69d  lines=1
   <- docs-dev/orphan-packs.md:64  :: pub fn verify_pack(
 crates/chat-stasher/src/provenance.rs:22-55  a5096e190884  lines=34
   <- docs-dev/privacy.md:520  :: /// The optional dimensions used to describe a session's ob…
