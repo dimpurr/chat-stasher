@@ -1269,25 +1269,25 @@ enum Command {
     /// depends on it while it stays unindexed on disk — so the gap is real, not
     /// a formality.
     ///
-    /// Every pack it reports is verified the way the adopting open verifies one
-    /// before reusing it: the header must decrypt, every blob it declares must
-    /// decrypt and hash to the id the header gives, and the pack's bytes must
-    /// hash to the id it is stored under. A pack that fails any of those is
-    /// reported **unknown** with the verifier's reason, never as empty and
-    /// never as zero, and its presence makes the whole survey incomplete.
+    /// Every pack it reports gets the shared interrupted-push
+    /// classification: bytes that verify complete are **stranded** — the
+    /// next open adopts them; bytes that cannot be read as a pack at all
+    /// are **torn debris** from an interrupted push, which belongs to no
+    /// backup and can be ignored. Anything else is **unknown**, with the
+    /// verifier's reason — the one state that makes the survey incomplete.
     ///
     /// Reads only: nothing is written to the repository, to an index file or to
-    /// a pack. The report carries the repository fingerprint, the backend
-    /// family, pack and byte totals, the unindexed packs by id prefix and size,
-    /// what the next push would adopt, and any pack an index names that the
-    /// backend does not list. It never carries a path, a host, a machine or an
-    /// account name, or any conversation text.
+    /// a pack. The report carries the repository fingerprint, the backend family,
+    /// pack and byte totals, the unindexed packs by id prefix and size, what the
+    /// next push would adopt, and any pack an index names that the backend does
+    /// not list — and never a path, host, machine, account or conversation text.
     ///
-    /// Exit codes: 0 = the survey finished and read every pack; 1 = the survey
-    /// finished and found a contradiction (an index naming a pack the backend
-    /// does not have); 3 = it did not finish reading — a pack or an index file
-    /// could not be read, the backend was unreachable, or `--apply` was asked
-    /// for — so no absence in the output proves anything; 2 = usage error.
+    /// Exit codes: 0 = the survey read every pack, torn debris included — it
+    /// is a known state, not an unfinished read; 1 = it read everything and
+    /// found an index naming a pack the backend does not list; 3 = it did
+    /// not finish reading — a pack or an index file could not be read, the
+    /// backend was unreachable, or `--apply` was asked for — no absence in
+    /// the output proves anything; 2 = usage error.
     PruneOrphans {
         /// Named destination from the config. Required unless `--repo` is given.
         #[arg(long)]

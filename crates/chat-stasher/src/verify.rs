@@ -511,12 +511,15 @@ fn count_torn_debris<S: Open>(
         // it cannot say (a header that reads, a range the backend will not
         // serve) stays with the verdicts named above.
         let probe = crate::packcheck::probe_header(&backends.repository(), hex, *listed, mk);
-        if probe.is_err_and(|failure| {
-            matches!(
-                failure,
-                crate::packcheck::PackError::UnreadableHeader { .. }
-            )
-        }) {
+        // The verdict is the shared classification's, never a private match
+        // here (W1040f): the survey itself established that no index file
+        // names this candidate, and the probe's own error is borrowed for
+        // the call — nothing new is read past the two probe reads.
+        let check = probe.as_ref().map(|_| ());
+        if matches!(
+            crate::debris::classify_pack(Some(false), &check),
+            crate::debris::PackClass::Torn { .. }
+        ) {
             torn_packs += 1;
             torn_bytes += *listed;
         }

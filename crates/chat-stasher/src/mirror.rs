@@ -872,7 +872,7 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
         ));
     }
 
-    // ---- Copy, ≤2 in flight ----
+    // ---- Copy, ≤2 in flight, in two phases ----
     // Small metadata first: config, keys, then index and snapshots, packs
     // last by ascending size — the ordering makes a first fill useful as
     // early as possible (an index and snapshot set is the minimum a mirror
@@ -897,29 +897,62 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
         )
     });
 
+    // The torn-debris classifier's once-per-round survey reads the mirror's
+    // own index copies, so no pack may be classified until the round's index
+    // set is complete (W1040f). Run as one queue with two workers, the sort
+    // above is only a tendency: a pack can reach its second hash failure
+    // while another worker still holds an index file mid-copy, and the
+    // survey would judge that pack against a set that does not name it yet —
+    // misreading corruption as debris, and caching the incomplete set for
+    // every later ask of the round — while on a first fill a pack reached
+    // before the config lands turns a merely unreadable survey into the
+    // round's hard failure. So the round copies in two phases: every config,
+    // key and index file the listing holds copies to completion first, and
+    // only then do the snapshots and packs run, with classification racing
+    // nothing.
+    let meta_len = queue.partition_point(|file| match file.kind {
+        FileKind::Config | FileKind::Key | FileKind::Index => true,
+        FileKind::Snapshot | FileKind::Pack => false,
+    });
+    let (meta_queue, tail_queue) = queue.split_at(meta_len);
+
     let counters = Counters::default();
     let stop = Mutex::new(None::<StopCause>);
-    // The torn-debris classifier (ISSUE-006 step A), shared by both workers:
-    // classifications happen only at a pack's twice-failed hash check, and the
-    // index-named set it needs is read lazily from the already-verified
-    // mirror-local index copies — one survey per round, however many packs end
-    // up debris.
+    // The torn-debris classifier (ISSUE-006 step A), shared by both workers
+    // of the tail phase: classifications happen only at a pack's twice-failed
+    // hash check, and the index-named set it needs is read lazily from the
+    // mirror's hash-verified index copies — one survey per round, however
+    // many packs end up debris, and never a per-pack backend read: the set
+    // is mirror-local. The phase barrier above is what makes the lazy read
+    // sound: once a worker can be holding a failing pack, every config, key
+    // and index file of the listing is on disk, so the mirror's index set is
+    // the listing's.
     let classifier = CopyClassifier::new(&mirror_root, req.master_key);
-    std::thread::scope(|scope| {
-        for _ in 0..MIRROR_CONNECTIONS.min(queue.len()) {
-            scope.spawn(|| {
-                worker(
-                    &mirror_root,
-                    &be,
-                    &queue,
-                    req.round_ends,
-                    &counters,
-                    &stop,
-                    &classifier,
-                );
-            });
-        }
-    });
+    copy_phase(
+        &mirror_root,
+        &be,
+        meta_queue,
+        req.round_ends,
+        &counters,
+        &stop,
+        &classifier,
+    );
+    if !stop_set(&stop) {
+        // reason: the claim counter indexes each phase's own queue slice, so
+        // the tail phase starts its claims at 0 again; the join inside
+        // `copy_phase` guarantees no worker still holds a claim when the
+        // counter rewinds.
+        counters.next.store(0, Ordering::SeqCst);
+        copy_phase(
+            &mirror_root,
+            &be,
+            tail_queue,
+            req.round_ends,
+            &counters,
+            &stop,
+            &classifier,
+        );
+    }
     let downloaded_files = counters.files.load(Ordering::SeqCst);
     let downloaded_bytes = counters.bytes.load(Ordering::SeqCst);
     let torn_files = counters.torn.load(Ordering::SeqCst);
@@ -1153,10 +1186,14 @@ enum Copied {
 /// facts this round already holds: whether any index file names the pack, and
 /// whether the bytes that just failed the hash check can be read as a pack. The
 /// index-named set comes from the mirror's **own, hash-verified** index
-/// copies — the queue orders index files ahead of packs, and every copied or
-/// present file has re-hashed as its own name, so by the time a pack is being
-/// copied the mirror's index set *is* the remote listing's — read locally,
-/// once per round, never re-fetched per failure.
+/// copies, read locally, once per round, never re-fetched per failure. The
+/// round's phase barrier is what makes that read sound (W1040f): config, key
+/// and index files copy to completion before the first snapshot or pack is
+/// claimed, so by the time a worker can be holding a failing pack the mirror's
+/// index set *is* the remote listing's. Queue ordering alone could not say
+/// that — with two workers a pack could reach its second hash failure while
+/// another worker still held an index file mid-copy, and the survey judged it
+/// against a set that had not named it yet.
 struct CopyClassifier<'a> {
     mirror_root: &'a Path,
     master_key: &'a MasterKey,
@@ -1192,7 +1229,10 @@ impl<'a> CopyClassifier<'a> {
     /// Every pack id some index file names, from the mirror's verified index
     /// copies — or `None`, the fail-closed input
     /// ([`debris::classify_pack`]): the mirror's index files could not be
-    /// read, so no pack in this round may be skipped as debris.
+    /// read, so no pack in this round may be skipped as debris. Asked only
+    /// after the round's metadata phase has put every config, key and index
+    /// file the listing holds on disk, so the set it returns — and caches
+    /// for the whole round — is the round's complete one.
     fn indexed_pack_names(&self) -> Option<BTreeSet<String>> {
         // reason: a poisoned cache means a worker unwound through the guard
         // mid-survey; None is the fail-closed verdict that keeps every ask
@@ -1335,6 +1375,39 @@ fn set_stop_once(stop: &Mutex<Option<StopCause>>, end: StopCause) {
             *guard = Some(end);
         }
     }
+}
+
+/// One phase of the round's copy: at most [`MIRROR_CONNECTIONS`] workers
+/// over one contiguous slice of the queue, joined before the caller
+/// proceeds. The two phases exist for the classifier's correctness (see
+/// [`sync_once`]'s phase barrier): config, keys and index files copy to
+/// completion in the first phase, snapshots and packs run in the second —
+/// the join between them is the barrier that guarantees no pack is ever
+/// classified against a half-copied index set.
+fn copy_phase(
+    mirror_root: &Path,
+    be: &std::sync::Arc<dyn rustic_core::WriteBackend>,
+    queue: &[&PlannedFile],
+    round_ends: &dyn RoundEnds,
+    counters: &Counters,
+    stop: &Mutex<Option<StopCause>>,
+    classifier: &CopyClassifier<'_>,
+) {
+    std::thread::scope(|scope| {
+        for _ in 0..MIRROR_CONNECTIONS.min(queue.len()) {
+            scope.spawn(|| {
+                worker(
+                    mirror_root,
+                    be,
+                    queue,
+                    round_ends,
+                    counters,
+                    stop,
+                    classifier,
+                );
+            });
+        }
+    });
 }
 
 /// One copy worker. Runs until the queue is drained or the round is ordered

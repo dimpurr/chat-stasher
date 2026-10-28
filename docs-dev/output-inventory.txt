@@ -1314,25 +1314,25 @@ help_doc     crates/chat-stasher/src/main.rs:1268  the pack is unused — a retr
 help_doc     crates/chat-stasher/src/main.rs:1269  depends on it while it stays unindexed on disk — so the gap is real, not
 help_doc     crates/chat-stasher/src/main.rs:1270  a formality.
 help_doc     crates/chat-stasher/src/main.rs:1271
-help_doc     crates/chat-stasher/src/main.rs:1272  Every pack it reports is verified the way the adopting open verifies one
-help_doc     crates/chat-stasher/src/main.rs:1273  before reusing it: the header must decrypt, every blob it declares must
-help_doc     crates/chat-stasher/src/main.rs:1274  decrypt and hash to the id the header gives, and the pack's bytes must
-help_doc     crates/chat-stasher/src/main.rs:1275  hash to the id it is stored under. A pack that fails any of those is
-help_doc     crates/chat-stasher/src/main.rs:1276  reported **unknown** with the verifier's reason, never as empty and
-help_doc     crates/chat-stasher/src/main.rs:1277  never as zero, and its presence makes the whole survey incomplete.
+help_doc     crates/chat-stasher/src/main.rs:1272  Every pack it reports gets the shared interrupted-push
+help_doc     crates/chat-stasher/src/main.rs:1273  classification: bytes that verify complete are **stranded** — the
+help_doc     crates/chat-stasher/src/main.rs:1274  next open adopts them; bytes that cannot be read as a pack at all
+help_doc     crates/chat-stasher/src/main.rs:1275  are **torn debris** from an interrupted push, which belongs to no
+help_doc     crates/chat-stasher/src/main.rs:1276  backup and can be ignored. Anything else is **unknown**, with the
+help_doc     crates/chat-stasher/src/main.rs:1277  verifier's reason — the one state that makes the survey incomplete.
 help_doc     crates/chat-stasher/src/main.rs:1278
 help_doc     crates/chat-stasher/src/main.rs:1279  Reads only: nothing is written to the repository, to an index file or to
-help_doc     crates/chat-stasher/src/main.rs:1280  a pack. The report carries the repository fingerprint, the backend
-help_doc     crates/chat-stasher/src/main.rs:1281  family, pack and byte totals, the unindexed packs by id prefix and size,
-help_doc     crates/chat-stasher/src/main.rs:1282  what the next push would adopt, and any pack an index names that the
-help_doc     crates/chat-stasher/src/main.rs:1283  backend does not list. It never carries a path, a host, a machine or an
-help_doc     crates/chat-stasher/src/main.rs:1284  account name, or any conversation text.
-help_doc     crates/chat-stasher/src/main.rs:1285
-help_doc     crates/chat-stasher/src/main.rs:1286  Exit codes: 0 = the survey finished and read every pack; 1 = the survey
-help_doc     crates/chat-stasher/src/main.rs:1287  finished and found a contradiction (an index naming a pack the backend
-help_doc     crates/chat-stasher/src/main.rs:1288  does not have); 3 = it did not finish reading — a pack or an index file
-help_doc     crates/chat-stasher/src/main.rs:1289  could not be read, the backend was unreachable, or `--apply` was asked
-help_doc     crates/chat-stasher/src/main.rs:1290  for — so no absence in the output proves anything; 2 = usage error.
+help_doc     crates/chat-stasher/src/main.rs:1280  a pack. The report carries the repository fingerprint, the backend family,
+help_doc     crates/chat-stasher/src/main.rs:1281  pack and byte totals, the unindexed packs by id prefix and size, what the
+help_doc     crates/chat-stasher/src/main.rs:1282  next push would adopt, and any pack an index names that the backend does
+help_doc     crates/chat-stasher/src/main.rs:1283  not list — and never a path, host, machine, account or conversation text.
+help_doc     crates/chat-stasher/src/main.rs:1284
+help_doc     crates/chat-stasher/src/main.rs:1285  Exit codes: 0 = the survey read every pack, torn debris included — it
+help_doc     crates/chat-stasher/src/main.rs:1286  is a known state, not an unfinished read; 1 = it read everything and
+help_doc     crates/chat-stasher/src/main.rs:1287  found an index naming a pack the backend does not list; 3 = it did
+help_doc     crates/chat-stasher/src/main.rs:1288  not finish reading — a pack or an index file could not be read, the
+help_doc     crates/chat-stasher/src/main.rs:1289  backend was unreachable, or `--apply` was asked for — no absence in
+help_doc     crates/chat-stasher/src/main.rs:1290  the output proves anything; 2 = usage error.
 help_doc     crates/chat-stasher/src/main.rs:1292  Named destination from the config. Required unless `--repo` is given.
 help_doc     crates/chat-stasher/src/main.rs:1295  Check the destination and stop: no repository is opened and nothing
 help_doc     crates/chat-stasher/src/main.rs:1296  is deleted. This is what happens without the flag too.
@@ -2845,22 +2845,22 @@ with_context crates/chat-stasher/src/mirror.rs:725  "list {} in the destination"
 with_context crates/chat-stasher/src/mirror.rs:765  "create mirror dir {}"
 context      crates/chat-stasher/src/mirror.rs:779  "read the destination config for comparison"
 context      crates/chat-stasher/src/mirror.rs:840  "query free space on the mirror volume"
-eprintln     crates/chat-stasher/src/mirror.rs:991  "[mirror] coverage anomaly this round: {anomaly}"
-context      crates/chat-stasher/src/mirror.rs:1004  "write mirror-state.json after a completed sync"
-with_context crates/chat-stasher/src/mirror.rs:1031  "open {} for the tamper sweep"
-with_context crates/chat-stasher/src/mirror.rs:1037  "read {} for the tamper sweep"
-with_context crates/chat-stasher/src/mirror.rs:1089  "walk the mirror dir {}"
-with_context crates/chat-stasher/src/mirror.rs:1091  "walk the mirror dir {}"
-with_context crates/chat-stasher/src/mirror.rs:1095  "classify {}"
-with_context crates/chat-stasher/src/mirror.rs:1108  "size {}"
-context      crates/chat-stasher/src/mirror.rs:1282  "read the mirror's index files"
-context      crates/chat-stasher/src/mirror.rs:1284  "read one of the mirror's index files"
-with_context crates/chat-stasher/src/mirror.rs:1529  "create {}"
-anyhow       crates/chat-stasher/src/mirror.rs:1535  "file name is not utf-8: {}"
-with_context crates/chat-stasher/src/mirror.rs:1537  "create {}"
-context      crates/chat-stasher/src/mirror.rs:1658  "build the mirror's local backend"
-context      crates/chat-stasher/src/mirror.rs:1660  "build the mirror repository handle"
-context      crates/chat-stasher/src/mirror.rs:1662  "open the copied mirror"
+eprintln     crates/chat-stasher/src/mirror.rs:1024  "[mirror] coverage anomaly this round: {anomaly}"
+context      crates/chat-stasher/src/mirror.rs:1037  "write mirror-state.json after a completed sync"
+with_context crates/chat-stasher/src/mirror.rs:1064  "open {} for the tamper sweep"
+with_context crates/chat-stasher/src/mirror.rs:1070  "read {} for the tamper sweep"
+with_context crates/chat-stasher/src/mirror.rs:1122  "walk the mirror dir {}"
+with_context crates/chat-stasher/src/mirror.rs:1124  "walk the mirror dir {}"
+with_context crates/chat-stasher/src/mirror.rs:1128  "classify {}"
+with_context crates/chat-stasher/src/mirror.rs:1141  "size {}"
+context      crates/chat-stasher/src/mirror.rs:1322  "read the mirror's index files"
+context      crates/chat-stasher/src/mirror.rs:1324  "read one of the mirror's index files"
+with_context crates/chat-stasher/src/mirror.rs:1602  "create {}"
+anyhow       crates/chat-stasher/src/mirror.rs:1608  "file name is not utf-8: {}"
+with_context crates/chat-stasher/src/mirror.rs:1610  "create {}"
+context      crates/chat-stasher/src/mirror.rs:1731  "build the mirror's local backend"
+context      crates/chat-stasher/src/mirror.rs:1733  "build the mirror repository handle"
+context      crates/chat-stasher/src/mirror.rs:1735  "open the copied mirror"
 anyhow       crates/chat-stasher/src/mirror_read.rs:594  "build the local backend over the mirror of `{}`: {e:#}"
 write        crates/chat-stasher/src/models.rs:116  "{}"
 bail         crates/chat-stasher/src/nativehost.rs:657  "host binary path must be absolute, got {}"
@@ -3227,10 +3227,10 @@ context      crates/chat-stasher/src/verify.rs:341  "build repository"
 context      crates/chat-stasher/src/verify.rs:343  "open repository for verify"
 context      crates/chat-stasher/src/verify.rs:353  "run rustic check"
 context      crates/chat-stasher/src/verify.rs:397  "read archive back for reconcile"
-context      crates/chat-stasher/src/verify.rs:538  "read sessions root"
-context      crates/chat-stasher/src/verify.rs:544  "read machine dir"
-bail         crates/chat-stasher/src/verify.rs:578  "L3 baseline: stage body is gone and no stored summary exists under {}; there is nothing to reconcile against"
-context      crates/chat-stasher/src/verify.rs:645  "read sessions root"
-context      crates/chat-stasher/src/verify.rs:651  "read machine dir"
-bail         crates/chat-stasher/src/verify.rs:715  "L3 baseline: stage body is gone and no stored summary exists under {}; there is nothing to reconcile against"
+context      crates/chat-stasher/src/verify.rs:541  "read sessions root"
+context      crates/chat-stasher/src/verify.rs:547  "read machine dir"
+bail         crates/chat-stasher/src/verify.rs:581  "L3 baseline: stage body is gone and no stored summary exists under {}; there is nothing to reconcile against"
+context      crates/chat-stasher/src/verify.rs:648  "read sessions root"
+context      crates/chat-stasher/src/verify.rs:654  "read machine dir"
+bail         crates/chat-stasher/src/verify.rs:718  "L3 baseline: stage body is gone and no stored summary exists under {}; there is nothing to reconcile against"
 eprintln     crates/chat-stasher/src/view.rs:517  "ui: accepted a connection but cannot set it blocking: {e}"

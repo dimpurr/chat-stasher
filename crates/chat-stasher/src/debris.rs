@@ -106,16 +106,26 @@ pub fn classify_pack(named_by_index: Option<bool>, check: &Result<(), &PackError
             // Indices were read, and a pack no index file names that verifies
             // complete: content that has not been indexed yet.
             Some(false) => PackClass::Stranded,
-            // An index names a pack whose bytes verified, or the index state is
-            // unknown — for the callers this function serves (each reached it
-            // holding a pack that something flagged) neither arises with a
-            // complete, verified pack in hand, because `mirror` classifies
-            // only after its own hash check failed and the other three never
-            // ask about an indexed pack. Fail closed rather than invent a
-            // fifth class no caller words.
-            _ => PackClass::FailClosed {
+            // An index names a pack whose bytes verify. That state does not
+            // arise with the callers this function serves — each reaches it
+            // holding a pack that something flagged — so fail closed rather
+            // than invent a fifth class no caller words. The reason states
+            // only what this arm knows: the index was read, and it names the
+            // pack (W1040f — it used to assert that fact over an unreadable
+            // index too).
+            Some(true) => PackClass::FailClosed {
                 why: "an index file names this pack and its bytes verify; there is \
                       no debris to classify"
+                    .to_string(),
+            },
+            // The index state is unknown, so whether any index file names a
+            // verifying pack cannot be established either — the same fail-closed
+            // rule as below, worded for bytes that verify (W1040f: this used to
+            // claim "an index file names this pack", which an unreadable index
+            // does not establish).
+            None => PackClass::FailClosed {
+                why: "the index files could not be read, so whether any index \
+                      file names this pack is unknown (its bytes verify)"
                     .to_string(),
             },
         };
@@ -230,6 +240,33 @@ mod tests {
                 "an unreadable index must fail closed, got {verdict:?}"
             );
         }
+    }
+
+    /// W1040f: the two fail-closed facts that come with verifying bytes are
+    /// worded as two different reasons. An index the classification could not
+    /// read must not claim "an index file names this pack" — that is the
+    /// fact only the read-and-named state has, and the old single reason
+    /// asserted it over both.
+    #[test]
+    fn an_unreadable_index_never_claims_the_pack_was_named_by_one() {
+        let PackClass::FailClosed { why: unknown_why } = classify_pack(None, &Ok(())) else {
+            panic!("an unreadable index over verifying bytes fails closed");
+        };
+        let PackClass::FailClosed { why: named_why } = classify_pack(Some(true), &Ok(())) else {
+            panic!("an index-named pack over verifying bytes fails closed");
+        };
+        assert!(
+            unknown_why.contains("could not be read"),
+            "the unreadable-index reason states what failed (the read): {unknown_why}"
+        );
+        assert!(
+            !unknown_why.contains("an index file names this pack"),
+            "the unreadable-index reason must not claim the naming fact: {unknown_why}"
+        );
+        assert!(
+            named_why.contains("an index file names this pack"),
+            "the named state claims its own fact: {named_why}"
+        );
     }
 
     /// Every surface words torn debris with the same sentence, and that
