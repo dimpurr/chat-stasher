@@ -13198,6 +13198,14 @@ fn cmd_reclaim_stage(
             fmt_bytes(r.bytes)
         );
     }
+    for omitted in &report.map_omitted {
+        println!(
+            "  whole-content: {} {} — reclaimed without an increment map; the body family is a \
+             sealed capture bundle, not snapshot records, so there is no map to make",
+            omitted.machine,
+            short_session_id(&omitted.session_id)
+        );
+    }
     println!(
         "[reclaim-stage] reclaimed    : {} session(s) / {}",
         report.reclaimed.len(),
