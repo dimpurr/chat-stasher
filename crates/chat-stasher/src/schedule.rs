@@ -2491,7 +2491,15 @@ mod tests {
                     &ReclaimStageArgs::default(),
                     Path::new("/home/tester"),
                 );
-                let service = &rendered[0].content;
+                // The renderer spells the log paths with `Path::join`, so
+                // they carry the host's separator, and only macOS ever reads
+                // the file (Windows refuses to install a scheduler outright,
+                // `schedule_platform_refusal`), where the separator is "/".
+                // Normalize before matching so the placement of both logs
+                // under <home>/Library/Logs/chat-stasher is asserted on every
+                // host this suite runs on, not only the ones whose separator
+                // is already "/".
+                let service = rendered[0].content.replace('\\', "/");
                 match format {
                     Format::Launchd => {
                         let name = match unit {
