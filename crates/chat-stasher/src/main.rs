@@ -12941,21 +12941,32 @@ fn cmd_reclaim_stage(
                 // Prose keeps the absence rule (D2): "no push on record",
                 // never "never pushed" — the slug in the durable record is
                 // `never-pushed`, and the human line does not repeat it.
-                let upgrade_window = chat_stasher::store::destination_has_snapshots(&dest.cfg);
-                if upgrade_window {
-                    let msg = "升级后还没有推送记录，下一次定时推送后恢复"; // t5-allow:
-                    println!(
-                        "[reclaim-stage]   health: {} — degraded; {msg}; not consulted this run",
-                        dest.name
-                    );
+                //
+                // W1034's upgrade window narrows the absence sentence: no
+                // push record on this machine but the repository provably
+                // holds snapshots, so an older binary pushed before the
+                // record existed. The proof stays local (rev3): only a
+                // repository `repository_is_local` recognises on this
+                // machine's own filesystem is checked, because this listing
+                // is degraded-set bookkeeping, not a consult, and a
+                // backend's `list()` opens a connection with no timeout.
+                // A backend-shaped repository keeps the record-based
+                // sentence; an unreadable one keeps it too.
+                let upgrade_window = chat_stasher::store::repository_is_local(&dest.cfg)
+                    && chat_stasher::store::destination_has_snapshots(&dest.cfg);
+                let absence = if upgrade_window {
+                    chat_stasher::destdiag::UPGRADE_WINDOW_MESSAGE.to_string()
                 } else {
-                    println!(
-                        "[reclaim-stage]   health: {} — degraded; no push on record; not consulted \
-                         this run",
-                        dest.name
-                    );
-                    print_degraded_two_roads(&dest.name);
-                }
+                    "no push on record".to_string()
+                };
+                println!(
+                    "[reclaim-stage]   health: {} — degraded; {absence}; not consulted \
+                     this run",
+                    dest.name
+                );
+                // A2 holds whichever absence the row printed — the degraded
+                // set never sees one road only.
+                print_degraded_two_roads(&dest.name);
             }
             chat_stasher::destdiag::DestinationHealth::Unknown { why } => {
                 println!(

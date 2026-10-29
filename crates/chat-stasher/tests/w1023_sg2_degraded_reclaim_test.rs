@@ -492,16 +492,25 @@ fn a_never_pushed_destination_does_not_hold_the_reclaim_hostage() {
         status_text.contains("[dest] r2: degraded — no push to `r2` is on record"),
         "truly never-pushed destination keeps original no push on record wording in status: {status_text}"
     );
+    let upgrade_sentence = format!(
+        "degraded — {}",
+        chat_stasher::destdiag::UPGRADE_WINDOW_MESSAGE
+    );
     assert!(
-        !status_text.contains("升级后还没有推送记录，下一次定时推送后恢复"), // t5-allow:
+        !status_text.contains(&format!("[dest] r2: {upgrade_sentence}")),
         "truly never-pushed destination does not use upgrade window wording: {status_text}"
     );
 }
 
 /// Upgrade window: destination has snapshots in repository (pushed by old binary),
 /// but no push-state record yet.
-/// Both status and reclaim-stage must say the upgrade window wording,
-/// while --json keeps "never-pushed", and truly never-pushed continues to say "no push on record".
+/// Both status and reclaim-stage must say the upgrade window wording **with
+/// the two roads ADR-060 A2 keeps under every degraded row and a repair fix**
+/// (W1034 rev3 Medium 1), the window is proved only from a local-path
+/// repository — the `opendal:fs` canary below is never consulted, so no
+/// backend's `list()` can turn these reads into a connection (Medium 2) —
+/// `--json` keeps "never-pushed" with the alert's fix intact, and a truly
+/// never-pushed destination continues to say "no push on record".
 #[test]
 fn upgrade_window_destination_wording_in_status_and_reclaim_stage() {
     let machine = Machine::new();
@@ -517,46 +526,108 @@ fn upgrade_window_destination_wording_in_status_and_reclaim_stage() {
     let r2 = store_config(machine.root(), "r2");
     init_empty_repo(&r2);
 
-    machine.write_config(&destinations_config(
+    // `cold-storage`: a repository that provably holds snapshots, but reached
+    // through a backend string — opendal's local filesystem service over a
+    // directory filled the same way `storagebox`'s was. Checking it would
+    // succeed offline, which is exactly why it makes the canary: the proof
+    // must consult no backend at all (a backend `list()` opens a connection
+    // with no timeout, and building the opendal operator writes a staging
+    // directory under the repository root), so `cold-storage` keeps the
+    // record-based wording even though its repository holds snapshots.
+    let cold_repo = store_config(machine.root(), "cold-repo");
+    init_and_push(&cold_repo, machine_name, &stage);
+    let cold_key = store_config(machine.root(), "cold-storage");
+    store::persist_key_file(&cold_key, &MasterKey::new()).unwrap();
+
+    let escape = |p: &Path| p.display().to_string().replace('\\', "\\\\");
+    let mut text = destinations_config(
         machine.root(),
         "storagebox",
         "",
         Some("r2"),
         "[reclaim]\ndegrade_after_days = 7",
         None,
+    );
+    text.push_str(&format!(
+        "\n[destinations.cold-storage]\nrepo = \"opendal:fs\"\nkey_file = \"{}\"\n\n\
+         [destinations.cold-storage.options]\nroot = \"{}\"\n",
+        escape(&machine.root().join("cold-storage.key")),
+        escape(&machine.root().join("cold-repo")),
     ));
+    machine.write_config(&text);
 
     // state_dir has NO push-state record for storagebox or r2
     let state_dir = machine.state_dir();
     fs::create_dir_all(&state_dir).unwrap();
 
-    // 1. reclaim-stage test
+    // 1. reclaim-stage: the upgrade row keeps both roads (the sentence alone
+    // would point at a push nothing schedules on a machine with no timer),
+    // and the backend-shaped repository is never consulted to prove one.
     let output = machine.run(&["reclaim-stage", "--stage", stage.to_str().unwrap()]);
     let stdout = stdout_of(&output);
     assert!(
-        stdout.contains("health: storagebox — degraded; 升级后还没有推送记录，下一次定时推送后恢复; not consulted this run"), // t5-allow:
+        stdout.contains(&format!(
+            "health: storagebox — degraded; {}; not consulted this run",
+            chat_stasher::destdiag::UPGRADE_WINDOW_MESSAGE
+        )),
         "upgrade window destination says upgrade wording in reclaim-stage: {stdout}"
+    );
+    assert!(
+        stdout.contains("chat-stasher push --destination storagebox --stage <stage>"),
+        "A2: the upgrade window row keeps road one, the repair command: {stdout}"
+    );
+    assert!(
+        stdout.contains("or remove `[destinations.storagebox]` from the config"),
+        "A2: the upgrade window row keeps road two, the removal: {stdout}"
     );
     assert!(
         stdout.contains("health: r2 — degraded; no push on record; not consulted this run"),
         "truly never pushed destination keeps no push on record in reclaim-stage: {stdout}"
     );
+    assert!(
+        stdout
+            .contains("health: cold-storage — degraded; no push on record; not consulted this run"),
+        "a backend-shaped repository is never consulted to prove the window: {stdout}"
+    );
+    assert!(
+        !stdout.contains(&format!(
+            "health: cold-storage — degraded; {}; not consulted this run",
+            chat_stasher::destdiag::UPGRADE_WINDOW_MESSAGE
+        )),
+        "the upgrade wording is reserved for a proved window: {stdout}"
+    );
 
     // 2. status human-readable test
     let status_human = machine.run(&["status"]);
     let status_text = combined(&status_human);
+    let upgrade_sentence = format!(
+        "degraded — {}",
+        chat_stasher::destdiag::UPGRADE_WINDOW_MESSAGE
+    );
     assert!(
-        status_text
-            .contains("[dest] storagebox: degraded — 升级后还没有推送记录，下一次定时推送后恢复"), // t5-allow:
+        status_text.contains(&format!("[dest] storagebox: {upgrade_sentence}")),
         "upgrade window destination says upgrade wording in status: {status_text}"
+    );
+    assert!(
+        status_text.contains("give it its next successful push"),
+        "A2: the upgrade window alert keeps road one, the next push: {status_text}"
+    );
+    assert!(
+        status_text.contains("remove `[destinations.storagebox]` from the config"),
+        "A2: the upgrade window alert keeps road two, the removal: {status_text}"
     );
     assert!(
         status_text.contains("[dest] r2: degraded — no push to `r2` is on record"),
         "truly never pushed destination keeps original wording in status: {status_text}"
     );
     assert!(
-        !status_text.contains("[dest] r2: degraded — 升级后还没有推送记录，下一次定时推送后恢复"), // t5-allow:
+        !status_text.contains(&format!("[dest] r2: {upgrade_sentence}")),
         "r2 does not get upgrade window wording: {status_text}"
+    );
+    assert!(
+        status_text
+            .contains("[dest] cold-storage: degraded — no push to `cold-storage` is on record"),
+        "a backend-shaped repository keeps the record-based wording in status: {status_text}"
     );
 
     // 3. status --json keeps never-pushed
@@ -573,6 +644,26 @@ fn upgrade_window_destination_wording_in_status_and_reclaim_stage() {
     assert_eq!(
         r2_row["health"]["kind"], "never-pushed",
         "--json slug is preserved"
+    );
+    // And the alert keeps its repair fix: the window changes what the
+    // absence says, never the advice that follows it.
+    let alerts = value["local"]["dest_alerts"]
+        .as_array()
+        .expect("dest_alerts array");
+    let storagebox_alert = alerts
+        .iter()
+        .find(|alert| {
+            alert["sentence"]
+                .as_str()
+                .is_some_and(|sentence| sentence.contains("storagebox"))
+        })
+        .expect("the storagebox alert is in dest_alerts");
+    let fix = storagebox_alert["fix"]
+        .as_str()
+        .expect("the upgrade window alert keeps its repair command");
+    assert!(
+        fix.contains("chat-stasher schedule install --destination storagebox --stage <stage>"),
+        "the fix still points at the push and its timer: {fix}"
     );
 }
 

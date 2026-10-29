@@ -38,6 +38,16 @@
 //! raw `env:NAME` references come from a second read of the config file's
 //! own text — the loaded [`Config`] already replaced or dropped them, and
 //! a reconciliation that read it back would see only the disappearance.
+//!
+//! The one read that touches a repository is W1034's upgrade-window proof,
+//! and it is local in the same sense everything here is: only a repository
+//! [`crate::store::repository_is_local`] recognises on this machine's own
+//! filesystem has its snapshot listing read — a backend string
+//! (`opendal:sftp`, `rest:…`, `opendal:fs` alike) is never opened from
+//! here, so none of the surfaces this reconciliation feeds (`status`,
+//! `doctor`, the menu-bar poll) can dial a destination through it, and a
+//! repository that is unreadable or empty keeps the record-based wording
+//! rather than a claim the read could not prove.
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -709,13 +719,30 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
             per_destination_degrade_after_days,
         );
         let health = classify_destination_health(&last_push, degrade_after_days, inputs.now_unix);
-        let upgrade_window = if matches!(last_push, LastPush::NoRecord) {
-            destination_store_config_by_name(inputs.config, name)
-                .map(|cfg| crate::store::destination_has_snapshots(&cfg))
-                // reason: failure to load config or check repo means no verifiable snapshots
-                .unwrap_or(false)
-        } else {
-            false
+        // W1034's upgrade window: the push record is absent but the
+        // repository provably holds snapshots — an older binary pushed
+        // before the record existed. rev3 keeps the proof local: only a
+        // repository `repository_is_local` recognises from this machine's
+        // own filesystem may be checked here, because this reconciliation
+        // is the read path `status`, `doctor` and the menu bar poll share —
+        // the module's own "no destination is dialed" contract — and a
+        // backend's `list()` opens a connection with no timeout. A remote
+        // destination therefore keeps the record-based never-pushed wording
+        // (both its roads and its fix, which is exactly the cure the window
+        // sentence describes) until a push records itself: an upgrade
+        // window this machine cannot prove is not a fact to assert.
+        let upgrade_window = match (
+            matches!(last_push, LastPush::NoRecord),
+            destination_store_config_by_name(inputs.config, name),
+        ) {
+            (true, Some(cfg)) if crate::store::repository_is_local(&cfg) => {
+                // reason: a repository that cannot be read or listed proves
+                // no snapshots, so the record-based wording stands — the
+                // suppression direction, never a claimed upgrade window out
+                // of a check that failed.
+                crate::store::destination_has_snapshots(&cfg)
+            }
+            _ => false,
         };
         // ④ from the latest recorded reclaim attempt, with ADR-060 D7's
         // distinct arm for the destination the run classified degraded: it
@@ -1205,11 +1232,35 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                 }
                 DestinationHealth::NeverPushed => {
                     if facts.upgrade_window {
-                        let msg = "升级后还没有推送记录，下一次定时推送后恢复"; // t5-allow:
+                        // W1034's upgrade window, rev3's shape: the sentence
+                        // the task mandated leads, and everything A2 promised
+                        // under a degraded destination follows it — both roads,
+                        // and the fix that names the push and the timer it
+                        // needs. The sentence alone would point at a next
+                        // scheduled push on a machine whose timer is the thing
+                        // that is missing; the roads are how that machine
+                        // escapes either way.
                         reconciliation.alerts.push(Alert {
                             severity: Severity::Yellow,
-                            sentence: format!("[dest] {}: degraded — {msg}", facts.name),
-                            fix: None,
+                            sentence: format!(
+                                "[dest] {name}: degraded — {msg}. The repository already \
+                                 holds snapshots, so only this machine's push record is \
+                                 missing; the weekly stage clean-up still does not consult \
+                                 it, and if no healthy destination remains nothing is \
+                                 reclaimed at all. Two roads: give it its next successful \
+                                 push (health heals automatically from there), or remove \
+                                 `[destinations.{name}]` from the config if this \
+                                 destination is no longer needed",
+                                name = facts.name,
+                                msg = UPGRADE_WINDOW_MESSAGE,
+                            ),
+                            fix: Some(format!(
+                                "chat-stasher push --destination {name} --stage <stage>   # one \
+                                     successful push ends the degraded state; also install \
+                                     its hourly timer: chat-stasher schedule install \
+                                     --destination {name} --stage <stage>",
+                                name = facts.name
+                            )),
                         });
                     } else {
                         reconciliation.alerts.push(Alert {
@@ -2163,6 +2214,24 @@ fn destination_store_config_by_name(
     }
 }
 
+/// W1034's upgrade-window sentence: when a destination's push record is
+/// absent but its repository **provably** holds snapshots — the window
+/// between upgrading from a binary that did not keep the per-destination
+/// record and the first successful push the new one records — the degraded
+/// surfaces state that no push is recorded since the upgrade and that the
+/// record recovers with the next scheduled push.
+///
+/// Defined once, as the constant every wording site references (the
+/// `reclaim-stage` health row, `doctor`'s health cell and the `[dest]`
+/// alert), so the sentence cannot drift into three spellings the way a
+/// triplicated literal can — and so `check-terminology.py`'s T5 rule can
+/// sanction exactly this one Chinese production string by naming this one
+/// definition line (its `T5_PRODUCTION_ALLOWS` table), the sanctioned
+/// amendment to the "English surface" invariant CLAUDE.md's Language
+/// section states. Any other CJK line anywhere in the scanned trees stays a
+/// violation, including a re-typed copy of this sentence.
+pub const UPGRADE_WINDOW_MESSAGE: &str = "升级后还没有推送记录，下一次定时推送后恢复";
+
 /// The absent-record wording, shared by the JSON and `doctor`'s table: the
 /// absence names itself, the version that started keeping the record names
 /// itself, and "never" is nowhere in the sentence.
@@ -2275,8 +2344,7 @@ pub fn doctor_lines(r: &Reconciliation) -> Vec<String> {
                 // record" and never "never pushed".
                 DestinationHealth::NeverPushed => {
                     if facts.upgrade_window {
-                        let msg = "升级后还没有推送记录，下一次定时推送后恢复"; // t5-allow:
-                        format!("degraded — {msg}")
+                        format!("degraded — {}", UPGRADE_WINDOW_MESSAGE)
                     } else {
                         "degraded — no push on record".to_string()
                     }
@@ -4345,9 +4413,7 @@ mod tests {
             .find(|a| a.sentence.contains("storagebox"))
             .unwrap();
         assert!(
-            storagebox_alert
-                .sentence
-                .contains("升级后还没有推送记录，下一次定时推送后恢复"), // t5-allow:
+            storagebox_alert.sentence.contains(UPGRADE_WINDOW_MESSAGE),
             "storagebox alert uses upgrade window wording: {}",
             storagebox_alert.sentence
         );
@@ -4362,12 +4428,211 @@ mod tests {
         let lines = doctor_lines(&out);
         let text = lines.join("\n");
         assert!(
-            text.contains("degraded — 升级后还没有推送记录，下一次定时推送后恢复"), // t5-allow:
+            text.contains(&format!("degraded — {UPGRADE_WINDOW_MESSAGE}")),
             "doctor lines contains upgrade window wording for storagebox: {text}"
         );
         assert!(
             text.contains("degraded — no push on record"),
             "doctor lines contains no push on record for r2: {text}"
+        );
+    }
+
+    /// The repo half of the upgrade-window fixture: one local repository
+    /// that already holds a snapshot (an older binary pushed before the
+    /// per-destination record existed), one stage that seeded it, and a
+    /// config declaring it as its one destination. Nothing ever calls
+    /// `record_success`, so the push record is the absent half — W1034's
+    /// exact shape.
+    fn local_upgrade_window_fixture(
+        name: &str,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Config,
+        crate::store::StoreConfig,
+    ) {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let stage_dir = tempfile::tempdir().unwrap();
+        let lines: Vec<String> = vec!["{\"seq\":1,\"i\":0,\"s\":\"synthetic\"}".to_string()];
+        crate::store::write_sealed_shard(
+            crate::store::StageWriter::Collect,
+            stage_dir.path(),
+            "m-old",
+            "s-old",
+            &lines,
+        )
+        .unwrap();
+        let cfg = crate::store::StoreConfig {
+            repo_root: repo_dir.path().to_string_lossy().into_owned(),
+            key_file: repo_dir.path().join("masterkey.json"),
+            connections: 1,
+            options: BTreeMap::new(),
+            cache_dir: None,
+            no_cache: true,
+        };
+        let mk = rustic_core::repofile::MasterKey::new();
+        crate::store::persist_key_file(&cfg, &mk).unwrap();
+        crate::store::BackupStore::new(cfg.clone(), "m-old".to_string())
+            .push(stage_dir.path(), &mk)
+            .unwrap();
+        let mut config = Config::default();
+        config.destinations.insert(
+            name.to_string(),
+            crate::config::DestinationConfig {
+                repo: Some(cfg.repo_root.clone()),
+                key_file: Some(cfg.key_file.to_string_lossy().into_owned()),
+                options: BTreeMap::new(),
+                connections: None,
+                cache_dir: None,
+                no_cache: Some(true),
+                degrade_after_days: Some(7),
+            },
+        );
+        (repo_dir, stage_dir, config, cfg)
+    }
+
+    fn reconcile_offline(config: &Config, home: &Path, state_dir: &Path) -> Reconciliation {
+        reconcile(&Inputs {
+            config,
+            format: Format::Launchd,
+            home,
+            state_dir,
+            now_unix: 1_750_100_200,
+            scheduler_readable: false,
+            stage: None,
+        })
+    }
+
+    /// W1034 rev3 Medium 1 / ADR-060 A2: the upgrade-window alert keeps both
+    /// roads and the repair command it had before the window got its own
+    /// sentence — the window changes what the absence says, never the advice
+    /// that follows it; on a machine with no installed timer the sentence
+    /// alone would point at a push nothing schedules.
+    #[test]
+    fn an_upgrade_window_alert_keeps_the_two_roads_and_the_repair_fix() {
+        let (_repo_dir, _stage_dir, config, _) = local_upgrade_window_fixture("storagebox");
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let out = reconcile_offline(&config, home.path(), state.path());
+
+        let alerts = out.all_alerts();
+        let alert = alerts
+            .iter()
+            .find(|a| a.sentence.contains("storagebox"))
+            .unwrap();
+        assert!(
+            alert.sentence.contains(UPGRADE_WINDOW_MESSAGE),
+            "the upgrade-window sentence leads the alert: {}",
+            alert.sentence
+        );
+        assert!(
+            alert.sentence.contains("Two roads"),
+            "A2 holds on the upgrade window too — never one road only: {}",
+            alert.sentence
+        );
+        assert!(
+            alert.sentence.contains("give it its next successful push"),
+            "road one is the next push: {}",
+            alert.sentence
+        );
+        assert!(
+            alert
+                .sentence
+                .contains("remove `[destinations.storagebox]` from the config"),
+            "road two names the removal: {}",
+            alert.sentence
+        );
+        let fix = alert
+            .fix
+            .as_deref()
+            .expect("the upgrade window keeps its repair command");
+        assert!(
+            fix.contains("chat-stasher push --destination storagebox --stage <stage>"),
+            "the fix still names the push: {fix}"
+        );
+        assert!(
+            fix.contains("chat-stasher schedule install --destination storagebox --stage <stage>"),
+            "the fix still names the timer a machine without one needs: {fix}"
+        );
+    }
+
+    /// W1034 rev3 Medium 2: the upgrade window is proved only from a
+    /// repository this machine can read without opening a connection.
+    /// `opendal:fs` answers over the local filesystem — an Operator over the
+    /// same directory the plain-path fixture filled — so this fixture proves
+    /// the gate, not the transport: without the gate the reconciliation would
+    /// list it (offline, and it would report the window), and the same gate
+    /// is what keeps `opendal:sftp` / `rest:` repositories, whose `list()`
+    /// opens a connection with no timeout, off the read path `status`,
+    /// `doctor` and the menu bar poll share. With the gate, an unprovable
+    /// window is never asserted; the record-based never-pushed wording and
+    /// both its roads stand in for it.
+    #[test]
+    fn the_upgrade_window_is_proved_only_from_a_local_path_repository() {
+        let (repo_dir, _stage_dir, _plain_view_config, _) =
+            local_upgrade_window_fixture("discarded");
+        let key_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.destinations.insert(
+            "cold-storage".to_string(),
+            crate::config::DestinationConfig {
+                repo: Some("opendal:fs".to_string()),
+                key_file: Some(
+                    key_dir
+                        .path()
+                        .join("cold-storage.key")
+                        .display()
+                        .to_string(),
+                ),
+                options: BTreeMap::from([(
+                    "root".to_string(),
+                    repo_dir.path().display().to_string(),
+                )]),
+                connections: None,
+                cache_dir: None,
+                no_cache: Some(true),
+                degrade_after_days: Some(7),
+            },
+        );
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let out = reconcile_offline(&config, home.path(), state.path());
+
+        let facts = out
+            .destinations
+            .iter()
+            .find(|d| d.name == "cold-storage")
+            .unwrap();
+        assert!(
+            !facts.upgrade_window,
+            "a backend-string repository is never consulted to prove the window"
+        );
+
+        let alerts = out.all_alerts();
+        let alert = alerts
+            .iter()
+            .find(|a| a.sentence.contains("cold-storage"))
+            .unwrap();
+        assert!(
+            alert
+                .sentence
+                .contains("no push to `cold-storage` is on record"),
+            "the unprovable window keeps the record-based wording: {}",
+            alert.sentence
+        );
+        assert!(
+            !alert.sentence.contains(UPGRADE_WINDOW_MESSAGE),
+            "the upgrade-window sentence is only for a proved window: {}",
+            alert.sentence
+        );
+        assert!(
+            alert.sentence.contains("Two roads"),
+            "A2: an unprovable window keeps both roads: {}",
+            alert.sentence
+        );
+        assert!(
+            alert.fix.is_some(),
+            "an unprovable window keeps its repair command"
         );
     }
 }

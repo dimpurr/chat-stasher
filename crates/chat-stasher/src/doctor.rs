@@ -2906,7 +2906,9 @@ pub fn run() -> DoctorReport {
     // W1012 / SG-1 C1 — the four-fact destination reconciliation, filled here
     // rather than in the CLI because every input is a file read (the
     // installed timer unit files, the state records the product itself
-    // writes): no destination is dialed, so the test-suite-visible entry
+    // writes, and — for W1034's upgrade-window proof — the snapshot
+    // listing of a repository on this machine's own filesystem): no
+    // destination is dialed, so the test-suite-visible entry
     // point can keep producing it. The platform's format follows the same
     // split `setup_schedule_format` makes in the CLI.
     let now_unix = std::time::SystemTime::now()
@@ -5514,7 +5516,11 @@ fn print_dest_reconcile(reconciliation: &Option<crate::destdiag::Reconciliation>
         return;
     };
     eprintln!("D12 · Declared destinations vs installed timers — push coverage, credentials, last push, reclaim");
-    eprintln!("     read-only: reads the timer files and the reclaim/push state records, and never opens a destination.");
+    eprintln!(
+        "     read-only: reads the timer files, the reclaim/push state records, and — for the \
+          upgrade-window proof — one local repository's snapshot listing; never opens a \
+          destination behind a backend string."
+    );
     for line in crate::destdiag::doctor_lines(reconciliation) {
         eprintln!("{line}");
     }

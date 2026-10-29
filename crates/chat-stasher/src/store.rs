@@ -2724,6 +2724,49 @@ pub fn destination_has_snapshots(cfg: &StoreConfig) -> bool {
     }
 }
 
+/// Whether `cfg` names a repository a shared read path may check from this
+/// machine's own filesystem — the gate for W1034's upgrade-window proof.
+///
+/// "Local" must be *positively recognised*, never inferred from "not a known
+/// backend string": the classification mirrors `rustic_backend`'s own
+/// `location_to_type_and_path` local rules (no scheme at all, or the explicit
+/// `local:` prefix; on Windows the drive-letter and backslash shapes that
+/// backend itself routes local), so the predicate and the backend a resolved
+/// config eventually opens cannot disagree. Everything else — every
+/// `opendal:` service, `rest:`, and any other scheme-shaped string — answers
+/// `false`, because a backend's `list()` opens a connection with no timeout
+/// and the callers of this gate are the read paths `status` (including the
+/// menu-bar poll), `doctor` and `reclaim-stage`'s degraded listing, whose
+/// contract reads local files and dials no destination.
+///
+/// `opendal:fs` — opendal's own filesystem service — is excluded with the
+/// rest: its backend build creates a staging directory under the repository
+/// root (`StoreConfig::with_atomic_fs_writes`), a write a read-only path must
+/// not perform, so a repository reached that way keeps the record-based
+/// never-pushed wording instead of a proved upgrade window.
+pub fn repository_is_local(cfg: &StoreConfig) -> bool {
+    let Some((scheme, path)) = cfg.repo_root.split_once(':') else {
+        // No scheme at all: a plain (absolute or relative) path.
+        return true;
+    };
+    if scheme == "local" {
+        return true;
+    }
+    if cfg!(windows) {
+        // `rustic_backend`'s own Windows local rules: a one-letter drive with
+        // no `/` (its `C:\repo` and `C:Projects\` shapes), and a
+        // colon-bearing backslash form (its `\\?\C:\Test\repo` shape — a
+        // colon-less UNC never reaches here, being the no-scheme arm).
+        if scheme.len() == 1 && !cfg.repo_root.contains('/') {
+            return true;
+        }
+        if scheme.contains('\\') || path.contains('\\') {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -2972,6 +3015,89 @@ mod tests {
         assert_eq!(parse_shard_seq("000001.json"), None);
         assert_eq!(parse_shard_seq("000001.txt"), None);
         assert_eq!(parse_shard_seq("0000000.jsonl"), None); // wrong width
+    }
+
+    /// W1034 rev3 Medium 2: the gate that decides whether a shared read path
+    /// (`reconcile` / `reclaim-stage`'s degraded listing) may check a
+    /// repository's snapshots. Local must be *positively recognised* — every
+    /// backend string, known or not, rejects the check rather than risking a
+    /// network dial with no timeout — and the recognition must be
+    /// `rustic_backend`'s own `location_to_type_and_path` local rules, so the
+    /// predicate and the backend a resolved config eventually opens cannot
+    /// disagree about what "local" means.
+    #[test]
+    fn repository_is_local_classifies_every_backend_shape() {
+        for repo in ["/srv/backup-repo", "relative/repo"] {
+            let cfg = StoreConfig {
+                repo_root: repo.into(),
+                ..StoreConfig::default()
+            };
+            assert!(
+                repository_is_local(&cfg),
+                "a plain path ({repo}) is the local repository"
+            );
+        }
+        let explicit = StoreConfig {
+            repo_root: "local:/srv/backup-repo".into(),
+            ..StoreConfig::default()
+        };
+        assert!(
+            repository_is_local(&explicit),
+            "the explicit `local:` scheme is the local backend's own name"
+        );
+        for backend in [
+            "opendal:sftp",
+            "opendal:s3",
+            "opendal:fs",
+            "opendal:fs:/srv/repo",
+            "rest:https://backup.example/",
+            "sftp:user@box:/srv/repo",
+            "opendal:",
+            "b2:bucket",
+        ] {
+            let cfg = StoreConfig {
+                repo_root: backend.into(),
+                ..StoreConfig::default()
+            };
+            assert!(
+                !repository_is_local(&cfg),
+                "a backend string ({backend}) never gets the shared-read check"
+            );
+        }
+        // The Windows shapes `location_to_type_and_path` itself routes to the
+        // local backend split by their punctuation: a colon-less UNC path is
+        // the no-scheme arm (local on every platform — a backslash path is a
+        // path), while the colon-bearing drive and `\\?\C:\…` forms are local
+        // only where rustic_backend's Windows rules apply. On this platform
+        // the drive-letter case is a scheme parse error in rustic_backend
+        // (`C` is no backend), so the expected value is the platform fact,
+        // asserted on both sides.
+        for local_everywhere in [
+            r"\\.\Volume{b75e2c83-0000-0000-0000-602f00000000}\Test\repo",
+            r"\\Server2\Share\Test\repo",
+        ] {
+            let cfg = StoreConfig {
+                repo_root: local_everywhere.into(),
+                ..StoreConfig::default()
+            };
+            assert!(
+                repository_is_local(&cfg),
+                "a colon-less UNC path ({local_everywhere}) is the no-scheme arm, \
+                 local on every platform"
+            );
+        }
+        for windows_local in [r"C:\srv\repo", r"\\?\C:\Test\repo"] {
+            let cfg = StoreConfig {
+                repo_root: windows_local.into(),
+                ..StoreConfig::default()
+            };
+            assert_eq!(
+                repository_is_local(&cfg),
+                cfg!(windows),
+                "the colon-bearing Windows shape {windows_local} follows \
+                 rustic_backend's own local rules"
+            );
+        }
     }
 
     #[test]
