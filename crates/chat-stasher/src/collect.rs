@@ -540,7 +540,7 @@ fn stage_holds_this_export(
     Ok(stage_tail_is(&sealed, &framed))
 }
 
-/// ADR-020 role C / SG-2b: when the stage body has been reclaimed, does the
+/// ADR-020 role C / SG-2b / SG-2c: when the stage body has been reclaimed, does the
 /// retained manifest summary prove that the archive already holds this exact
 /// sealed framed payload?
 fn manifest_holds_this_framed(
@@ -566,6 +566,50 @@ fn manifest_holds_this_export(
     let mut framed = json_line.to_vec();
     framed.push(b'\n');
     manifest_holds_this_framed(manifest_facts, session_id, &framed)
+}
+
+/// Can a byte-identical match against a baseline (the stage's held bodies,
+/// a retained manifest fact) be trusted to say "this is the observation the
+/// baseline already holds", so the pass may read in full and then seal
+/// nothing — instead of capturing the bytes again with their multiplicity?
+///
+/// It is the same rule the cursor-recovery arm in `collect_scan_report`
+/// (`None if !record.provenance.is_empty() && !record.movable_root`) and
+/// the writer choice in `process_jsonl` apply, stated once for the
+/// baseline-suppression sites that consult a fact instead of a prefix:
+///
+/// - Through a **movable root** byte equality is identity: a store that
+///   MOVES its files between the roots of one registry entry makes a
+///   same-id same-content discovery at a new path the same file by its
+///   own rules (W1007, ADR-059 draft D4), so a baseline holding the bytes
+///   proves the observation is already archived.
+/// - A record with **no provenance rows** carries no measured observation
+///   that a second root could out-run: byte equality then has no
+///   cross-root identity question to answer, and the baseline match is
+///   conclusive the way the stage-derived cursor recovery already treats
+///   it for these records.
+/// - A fresh **provenance-bearing** discovery at a **non-movable** root is
+///   ambiguous even when every byte matches the baseline: one native UUID
+///   may appear in multiple source roots, and the match can be a replay
+///   of the same bytes or a genuinely repeated identical event. Suppressing
+///   the seal would drop that turn — a silent omission — so such a record
+///   must fall through to the multiplicity-preserving writer.
+///
+/// A stored cursor is not a baseline in this sense and needs no gate here:
+/// it is identity-bearing through the debt stream it was verified against,
+/// which is why the `old.is_some_and(...)` digest comparisons above each
+/// manifest gate stay ungated.
+///
+/// These gates answer *one more question first*, though: a retained manifest
+/// fact is machine-level — it proves some push delivered this payload to the
+/// archive, not that the calling destination did. So every suppression that
+/// consults a manifest fact is additionally scoped to a destination with a
+/// cursor of its own (`old.is_some()`), and a destination that never pushed
+/// the session captures it in full; the stage-derived cursor recovery is
+/// scoped the same way at its own call sites (H1 destination scoping,
+/// acf6a8df).
+fn byte_equality_establishes_event_identity(record: &SessionRecord) -> bool {
+    record.movable_root || record.provenance.is_empty()
 }
 
 /// Is `frame` one sealed shard, or an exact repeated-shard suffix, of the
@@ -711,6 +755,7 @@ fn stage_prefix_entry(
     stage: &Path,
     machine: &str,
     counters: &mut CollectCounters,
+    manifest_facts: Option<&BTreeMap<String, ShardFact>>,
 ) -> anyhow::Result<Option<OffsetEntry>> {
     // A SQLite session's cursor is logical, not a file offset, so the stage
     // cannot be turned into one without re-exporting the session. Those paths
@@ -721,8 +766,54 @@ fn stage_prefix_entry(
     let sealed_shards = stage_sealed_shards(stage, machine, &record.id)?;
     if sealed_shards.is_empty() {
         // A reclaimed session's shards are gone and a just-scanned one has
-        // none yet — either way there is no stage prefix to reuse, so the
-        // caller reads its source in full.
+        // none yet — either way there is no stage prefix to reuse, so with
+        // no manifest fact the caller reads its source in full.
+        //
+        // A retained manifest fact (ADR-020 role C) is *machine-level*: it
+        // proves the stage once sealed these bytes for some push, never
+        // that the calling destination holds them. Destination scoping
+        // (H1, acf6a8df): the fact may extend only a position a stored
+        // debt of this destination's own already claimed, so the only
+        // caller that consults facts here is the covered-position
+        // resolution of such a debt (cursor_or_stage_covered_position) —
+        // and only for a plain JSONL source, whose byte-offset cursor it
+        // can extend. A destination with no debts — one that never pushed
+        // this session — is handed no facts and must read in full, so its
+        // archive still receives the body.
+        if is_jsonl_path(&record.absolute_path) {
+            if let Some(fact) = manifest_facts.and_then(|m| m.get(&record.id)) {
+                let source_len = fs::metadata(&record.absolute_path)
+                    .with_context(|| {
+                        format!("stat source ({})", path_digest(&record.absolute_path))
+                    })?
+                    .len();
+                // W880: one source file stat'ed.
+                counters.files_statted += 1;
+                if fact.concat_bytes > 0 && source_len >= fact.concat_bytes {
+                    let prefix = read_range(&record.absolute_path, 0, fact.concat_bytes)
+                        .with_context(|| {
+                            format!(
+                                "read source prefix ({})",
+                                path_digest(&record.absolute_path)
+                            )
+                        })?;
+                    if sha256_hex(&prefix) == fact.concat_sha256 {
+                        let offset = fact.concat_bytes;
+                        return Ok(Some(OffsetEntry {
+                            offset,
+                            prefix_len: offset,
+                            prefix_sha256: fact.concat_sha256.clone(),
+                            compressed: false,
+                            opencode: None,
+                            store_fingerprint: None,
+                            grok_bot_row_digests: None,
+                            opencode_record_digests: None,
+                            opencode_map_digest: None,
+                        }));
+                    }
+                }
+            }
+        }
         return Ok(None);
     }
 
@@ -769,10 +860,7 @@ fn stage_prefix_entry(
     let bytes = fs::read(&record.absolute_path)
         .with_context(|| format!("read source bytes ({})", path_digest(&record.absolute_path)))?;
     if bytes.is_empty()
-        || !stage_tail_is(
-            &stage_sealed_shards(stage, machine, &record.id)?,
-            &seal_framed(std::slice::from_ref(&bytes)),
-        )
+        || !stage_tail_is(&sealed_shards, &seal_framed(std::slice::from_ref(&bytes)))
     {
         return Ok(None);
     }
@@ -900,6 +988,7 @@ fn cursor_or_stage_covered_position(
     stage: &Path,
     machine: &str,
     counters: &mut CollectCounters,
+    manifest_facts: Option<&BTreeMap<String, ShardFact>>,
 ) -> anyhow::Result<OffsetEntry> {
     // An unverifiable stored cursor is handed down unchanged: `force_reset`
     // is what stops its reuse, and spending the stage's body read under a
@@ -921,10 +1010,21 @@ fn cursor_or_stage_covered_position(
     }
     let stage_len = session_stage_len(stage, machine, &record.id)?;
     if stage_len <= entry.cursor.offset {
+        if let Some(fact) = manifest_facts.and_then(|m| m.get(&record.id)) {
+            if fact.concat_bytes > entry.cursor.offset {
+                if let Some(covered) =
+                    stage_prefix_entry(record, stage, machine, counters, manifest_facts)?
+                {
+                    if covered.offset > entry.cursor.offset {
+                        return Ok(covered);
+                    }
+                }
+            }
+        }
         return Ok(entry.cursor.clone());
     }
     Ok(
-        match stage_prefix_entry(record, stage, machine, counters)? {
+        match stage_prefix_entry(record, stage, machine, counters, manifest_facts)? {
             Some(covered) if covered.offset > entry.cursor.offset => covered,
             _ => entry.cursor.clone(),
         },
@@ -1744,6 +1844,7 @@ pub fn collect_scan_report(
                 stage,
                 machine,
                 &mut counters,
+                manifest_facts.as_ref(),
             )?),
             // One native UUID may appear in multiple source roots. Without a
             // persisted cursor for this exact scanned source, a matching
@@ -1757,7 +1858,11 @@ pub fn collect_scan_report(
             // content like any cursor-less source, instead of re-sealing the
             // bytes the archive already holds.
             None if !record.provenance.is_empty() && !record.movable_root => None,
-            None => stage_prefix_entry(&record, stage, machine, &mut counters)?,
+            // No manifest facts here: the retained summary speaks for the
+            // machine, not for this destination, and a session this
+            // destination never pushed must be captured in full
+            // (destination scoping, H1) — so its archive receives the body.
+            None => stage_prefix_entry(&record, stage, machine, &mut counters, None)?,
         };
         // The cursor is still handed down so the outcome can report this as a
         // reread rather than a first read; `force_reset` is what actually stops
@@ -2000,6 +2105,7 @@ fn collect_one(
             stage,
             machine,
             bucket_cap,
+            manifest_facts,
         )?))
     } else if is_jsonl_path(&record.absolute_path) {
         Ok(ReadOutcome::Processed(process_jsonl(
@@ -2010,9 +2116,19 @@ fn collect_one(
             machine,
             bucket_cap,
             counters,
+            manifest_facts,
         )?))
     } else if record.source == crate::models::HarnessSource::Codebuff {
-        process_codebuff_whole_file(record, old, force_reset, stage, machine, bucket_cap, pass)
+        process_codebuff_whole_file(
+            record,
+            old,
+            force_reset,
+            stage,
+            machine,
+            bucket_cap,
+            pass,
+            manifest_facts,
+        )
     } else {
         Ok(ReadOutcome::Processed(process_whole_file(
             record,
@@ -2021,6 +2137,7 @@ fn collect_one(
             stage,
             machine,
             bucket_cap,
+            manifest_facts,
         )?))
     }
 }
@@ -2645,7 +2762,11 @@ fn process_sqlite_snapshot(
     let digest = sha256_hex(&json_line);
     // No cursor of this destination's own, and the stage already holds exactly
     // this export: the destination is owed nothing, and sealing it again would
-    // store the conversation twice.
+    // store the conversation twice. The retained manifest summary is not
+    // consulted here: it is machine-level — it says some push delivered this
+    // export to the archive, not that THIS destination holds it — so an
+    // un-pushed destination exports in full (destination scoping, H1,
+    // acf6a8df).
     if old.is_none()
         && !force_reset
         && stage_holds_this_export(stage, machine, &record.id, &json_line)?
@@ -2841,10 +2962,46 @@ fn process_jsonl(
     machine: &str,
     bucket_cap: usize,
     counters: &mut CollectCounters,
+    manifest_facts: Option<&BTreeMap<String, ShardFact>>,
 ) -> anyhow::Result<Processed> {
     let data = read_jsonl_delta(&record.absolute_path, old, force_reset, counters)?;
     let (lines, committed_delta) = complete_lines(&data.bytes);
     let new_offset = data.base_offset + committed_delta as u64;
+    // A full read whose framed lines equal the retained manifest fact is a
+    // zero-byte no-op only for the sources whose byte equality can say so —
+    // see [`byte_equality_establishes_event_identity`] — and only for a
+    // destination with a cursor of its own: the manifest fact is
+    // machine-level and says the archive holds these bytes, not that THIS
+    // destination pushed them, so an un-pushed destination still exports in
+    // full (destination scoping, H1). A fresh
+    // provenance-bearing root that re-observes byte-identical bytes stays
+    // ambiguous: it may be a legitimately repeated identical turn, and
+    // dropping it would trade a captured turn for a red invariant
+    // ("an unknown must never be recorded as empty"), so it falls through
+    // to the multiplicity-preserving writer below.
+    let matches_manifest = !force_reset
+        && old.is_some()
+        && data.base_offset == 0
+        && !lines.is_empty()
+        && byte_equality_establishes_event_identity(record)
+        && manifest_holds_this_framed(manifest_facts, &record.id, &seal_framed(&lines));
+    if matches_manifest {
+        return Ok(Processed {
+            state: plain_state(&record.absolute_path, new_offset)?,
+            outcome: CollectOutcome {
+                session_prefix: id_prefix(&record.id),
+                source_path_sha256: path_digest(&record.absolute_path),
+                source_bytes: data.source_len,
+                bytes_read: data.bytes_read,
+                prefix_bytes_validated: data.source_len,
+                lines_written: 0,
+                shard: None,
+                reset: false,
+                compressed: false,
+            },
+            dimensions: Default::default(),
+        });
+    }
     let new_state = if lines.is_empty() && !data.reset {
         old.cloned().unwrap_or(OffsetEntry {
             offset: 0,
@@ -4148,6 +4305,7 @@ fn process_codebuff_whole_file(
     machine: &str,
     bucket_cap: usize,
     pass: &PassContext,
+    manifest_facts: Option<&BTreeMap<String, ShardFact>>,
 ) -> anyhow::Result<ReadOutcome> {
     use crate::codebuff::TranscriptRead;
     let bytes = match crate::codebuff::read_transcript(&record.absolute_path) {
@@ -4204,6 +4362,32 @@ fn process_codebuff_whole_file(
         seal_codebuff_sidecars(record, stage, machine, pass)?;
         return Ok(ReadOutcome::Processed(Processed {
             state: old.expect("checked above").clone(),
+            outcome: unchanged_outcome(record, source_len, false),
+            dimensions: Default::default(),
+        }));
+    }
+    let framed = seal_framed(std::slice::from_ref(&bytes));
+    // The manifest fact is machine-level: only a destination with a cursor
+    // of its own may read a match as "already delivered" (destination
+    // scoping, H1) — an un-pushed destination seals in full.
+    if !force_reset
+        && old.is_some()
+        && byte_equality_establishes_event_identity(record)
+        && manifest_holds_this_framed(manifest_facts, &record.id, &framed)
+    {
+        seal_codebuff_sidecars(record, stage, machine, pass)?;
+        return Ok(ReadOutcome::Processed(Processed {
+            state: OffsetEntry {
+                offset: source_len,
+                prefix_len: source_len,
+                prefix_sha256: digest,
+                compressed: false,
+                opencode: None,
+                store_fingerprint: None,
+                grok_bot_row_digests: None,
+                opencode_record_digests: None,
+                opencode_map_digest: None,
+            },
             outcome: unchanged_outcome(record, source_len, false),
             dimensions: Default::default(),
         }));
@@ -4339,6 +4523,7 @@ fn process_whole_file(
     stage: &Path,
     machine: &str,
     bucket_cap: usize,
+    manifest_facts: Option<&BTreeMap<String, ShardFact>>,
 ) -> anyhow::Result<Processed> {
     let bytes = fs::read(&record.absolute_path)
         .with_context(|| format!("read source bytes ({})", path_digest(&record.absolute_path)))?;
@@ -4354,6 +4539,37 @@ fn process_whole_file(
     {
         return Ok(Processed {
             state: old.expect("checked above").clone(),
+            outcome: unchanged_outcome(record, source_len, false),
+            dimensions: Default::default(),
+        });
+    }
+    let framed = seal_framed(if bytes.is_empty() {
+        &[]
+    } else {
+        std::slice::from_ref(&bytes)
+    });
+    let state = OffsetEntry {
+        offset: source_len,
+        prefix_len: source_len,
+        prefix_sha256: digest,
+        compressed: false,
+        opencode: None,
+        store_fingerprint: None,
+        grok_bot_row_digests: None,
+        opencode_record_digests: None,
+        opencode_map_digest: None,
+    };
+    // The manifest fact is machine-level: only a destination with a cursor
+    // of its own may read a match as "already delivered" (destination
+    // scoping, H1) — an un-pushed destination seals in full.
+    if !force_reset
+        && old.is_some()
+        && !bytes.is_empty()
+        && byte_equality_establishes_event_identity(record)
+        && manifest_holds_this_framed(manifest_facts, &record.id, &framed)
+    {
+        return Ok(Processed {
+            state,
             outcome: unchanged_outcome(record, source_len, false),
             dimensions: Default::default(),
         });
@@ -4377,17 +4593,7 @@ fn process_whole_file(
     };
     let reset = old.is_some();
     Ok(Processed {
-        state: OffsetEntry {
-            offset: source_len,
-            prefix_len: source_len,
-            prefix_sha256: digest,
-            compressed: false,
-            opencode: None,
-            store_fingerprint: None,
-            grok_bot_row_digests: None,
-            opencode_record_digests: None,
-            opencode_map_digest: None,
-        },
+        state,
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
             source_path_sha256: path_digest(&record.absolute_path),
@@ -4410,6 +4616,7 @@ fn process_compressed(
     stage: &Path,
     machine: &str,
     bucket_cap: usize,
+    manifest_facts: Option<&BTreeMap<String, ShardFact>>,
 ) -> anyhow::Result<Processed> {
     let compressed = fs::read(&record.absolute_path).with_context(|| {
         format!(
@@ -4467,10 +4674,24 @@ fn process_compressed(
     // (a genuinely changed snapshot, sealed as its own generation) or the
     // same content re-read at a new path (a re-observation, sealed as
     // nothing). A stage that disagrees decodes-and-seals exactly as before.
-    let already_held = !lines.is_empty() && {
-        let sealed = stage_sealed_shards(stage, machine, &record.id)?;
-        !sealed.is_empty() && stage_tail_is(&sealed, &seal_framed(&lines))
-    };
+    let framed = seal_framed(&lines);
+    // The manifest term of this disjunction is gated the way the other
+    // baseline suppressions are (see
+    // [`byte_equality_establishes_event_identity`]) and additionally on a
+    // cursor of this destination's own — the machine-level fact does not
+    // say this destination pushed the session (destination scoping, H1);
+    // the stage-tail term keeps main's meaning: the stage is the live
+    // record of what each destination's pass has sealed here, not a
+    // re-derived claim over a reclaimed body.
+    let already_held = !lines.is_empty()
+        && !force_reset
+        && ((old.is_some()
+            && byte_equality_establishes_event_identity(record)
+            && manifest_holds_this_framed(manifest_facts, &record.id, &framed))
+            || {
+                let sealed = stage_sealed_shards(stage, machine, &record.id)?;
+                !sealed.is_empty() && stage_tail_is(&sealed, &framed)
+            });
     if already_held {
         // The state names the content just read (length and digest — a
         // compressed cursor is always whole-source), so the next pass over

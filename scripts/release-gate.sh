@@ -29,7 +29,7 @@ set -euo pipefail
 
 # --------------------------------------------------------------------- config
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$ROOT/target/debug/chat-stasher"
+BIN="${CARGO_TARGET_DIR:-$ROOT/target}/debug/chat-stasher"
 MACHINE="gate-mbp"        # fixed path partition + snapshot host
 N_SESSIONS=3              # sessions to archive in either fixture mode
 SHARDS=4                  # sealed shards per session
