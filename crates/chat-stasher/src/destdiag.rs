@@ -41,13 +41,16 @@
 //!
 //! The one read that touches a repository is W1034's upgrade-window proof,
 //! and it is local in the same sense everything here is: only a repository
-//! [`crate::store::repository_is_local`] recognises on this machine's own
-//! filesystem has its snapshot listing read — a backend string
+//! [`crate::store::repository_is_local`] recognises on this machine's own,
+//! **un-mounted** filesystem has its snapshot listing read — a backend string
 //! (`opendal:sftp`, `rest:…`, `opendal:fs` alike) is never opened from
-//! here, so none of the surfaces this reconciliation feeds (`status`,
-//! `doctor`, the menu-bar poll) can dial a destination through it, and a
-//! repository that is unreadable or empty keeps the record-based wording
-//! rather than a claim the read could not prove.
+//! here, and neither is a path under the OSes' conventional mount roots
+//! (`/Volumes/…`, `/mnt/…`: `docs/destinations.md`'s mounted-storage
+//! example), where a stale SMB/NFS handle has no timeout — so none of the
+//! surfaces this reconciliation feeds (`status`, `doctor`, the menu-bar
+//! poll) can dial a destination *or hang on a mount* through it, and a
+//! repository that is unreadable, unmounted or empty keeps the
+//! record-based wording rather than a claim the read could not prove.
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -726,11 +729,16 @@ pub fn reconcile(inputs: &Inputs) -> Reconciliation {
         // own filesystem may be checked here, because this reconciliation
         // is the read path `status`, `doctor` and the menu bar poll share —
         // the module's own "no destination is dialed" contract — and a
-        // backend's `list()` opens a connection with no timeout. A remote
-        // destination therefore keeps the record-based never-pushed wording
-        // (both its roads and its fix, which is exactly the cure the window
-        // sentence describes) until a push records itself: an upgrade
-        // window this machine cannot prove is not a fact to assert.
+        // backend's `list()` opens a connection with no timeout. W1034f2
+        // adds the gate's second half: a local-backend *string* still does
+        // not name a disk, so a path under the OSes' mount roots
+        // (`/Volumes/…`, the shipped shared-storage example) is never
+        // consulted either — a stale SMB/NFS handle there would be the
+        // same hang through a different door. Both refusals keep the
+        // record-based never-pushed wording (with both its roads and its
+        // fix, which is exactly the cure the window sentence describes)
+        // until a push records itself: an upgrade window this machine
+        // cannot prove is not a fact to assert.
         let upgrade_window = match (
             matches!(last_push, LastPush::NoRecord),
             destination_store_config_by_name(inputs.config, name),
@@ -2041,6 +2049,14 @@ fn destination_facts_json(facts: &DestinationFacts) -> serde_json::Value {
                 "degrade_after_days": facts.degrade_after_days,
             }),
         },
+        // W1034f2 (rev4 Low 2): the window as a first-class machine fact,
+        // so a `--json` consumer distinguishes a proved upgrade window
+        // from a plain never-pushed destination by reading a field rather
+        // than sentence-matching an alert whose lead sentence is the
+        // mandated Chinese wording. The `health.kind` slug above stays
+        // `never-pushed` either way — this field says only what the proof
+        // established, never re-words the health vocabulary.
+        "upgrade_window": facts.upgrade_window,
         "reclaim_share": match &facts.reclaim_share {
             ReclaimShare::NotBlocking => serde_json::json!({ "kind": "not_blocking" }),
             ReclaimShare::Blocking { kind, error_kind, sessions, bytes } => serde_json::json!({
@@ -2176,6 +2192,14 @@ fn reclaim_json(r: &Reconciliation) -> serde_json::Value {
     out
 }
 
+/// The store config one destination is proved through: a declared
+/// destination's own resolution, or — while the config declares none at
+/// all, the pre-ADR-013 single-repository mode — the machine's repository
+/// from the one definition the CLI shares
+/// ([`crate::doctor::home_repository_store_config`]). It used to be a third
+/// hand-kept copy of that default resolution (rev4 Low 1), which is how a
+/// change to the CLI's defaults would have silently sent this proof at a
+/// directory that is not the repository it describes.
 fn destination_store_config_by_name(
     config: &Config,
     name: &str,
@@ -2183,32 +2207,7 @@ fn destination_store_config_by_name(
     if let Some(entry) = config.destinations.get(name) {
         crate::doctor::destination_store_config(config, name, entry)
     } else if config.destinations.is_empty() {
-        let data_root = crate::config::default_data_root();
-        let repo_root = config
-            .rustic_repo
-            .clone()
-            .unwrap_or_else(|| data_root.join("repo").to_string_lossy().into_owned());
-        let key_file = config
-            .rustic_key_file
-            .clone()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| data_root.join("masterkey.json"));
-        let cache_dir = config
-            .rustic_cache_dir
-            .as_deref()
-            .map(std::path::PathBuf::from);
-        Some(
-            crate::store::StoreConfig {
-                repo_root,
-                key_file,
-                connections: 0,
-                options: std::collections::BTreeMap::new(),
-                cache_dir,
-                // reason: config default when unset
-                no_cache: config.rustic_no_cache.unwrap_or(false),
-            }
-            .with_capped_connections(config.rustic_connections),
-        )
+        Some(crate::doctor::home_repository_store_config(config))
     } else {
         None
     }
@@ -4633,6 +4632,160 @@ mod tests {
         assert!(
             alert.fix.is_some(),
             "an unprovable window keeps its repair command"
+        );
+    }
+
+    /// W1034f2 Medium 1's companion pin, the "never initialised" half: a
+    /// destination that is declared but whose repository was never
+    /// initialised (`[destinations.external]` with no `dest-init`, an empty
+    /// directory) sits in `LastPush::NoRecord` permanently, so its check
+    /// would repeat on every poll forever. The wording must stay the
+    /// record-based one — a repository without its `config` file ends the
+    /// check with "no snapshots" before any walk, and nothing it could say
+    /// proves a window. A pin (green against the pre-W1034f2 gate too: the
+    /// read of this shape has always been one failing `stat`), stated here
+    /// so the class the rev4 finding names has its record-based half
+    /// guarded; the fix-RED half of the finding is
+    /// `store::repository_is_local_never_proofs_a_mounted_storage_path`.
+    #[test]
+    fn an_uninitialised_destination_keeps_the_record_based_wording() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let key_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.destinations.insert(
+            "external".to_string(),
+            crate::config::DestinationConfig {
+                repo: Some(repo_dir.path().to_string_lossy().into_owned()),
+                key_file: Some(key_dir.path().join("external.key").display().to_string()),
+                options: BTreeMap::new(),
+                connections: None,
+                cache_dir: None,
+                no_cache: Some(true),
+                degrade_after_days: Some(7),
+            },
+        );
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let out = reconcile_offline(&config, home.path(), state.path());
+
+        let facts = out
+            .destinations
+            .iter()
+            .find(|d| d.name == "external")
+            .unwrap();
+        assert!(
+            !facts.upgrade_window,
+            "a repository with no config of its own proves exactly no snapshots"
+        );
+        let rows = &destinations_json(&out)["destinations"];
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "external")
+            .unwrap();
+        assert_eq!(
+            row["upgrade_window"],
+            serde_json::json!(false),
+            "the --json field says the same thing as the prose"
+        );
+
+        let alerts = out.all_alerts();
+        let alert = alerts
+            .iter()
+            .find(|a| a.sentence.contains("external"))
+            .unwrap();
+        assert!(
+            alert
+                .sentence
+                .contains("no push to `external` is on record"),
+            "the never-initialised destination keeps the record-based wording: {}",
+            alert.sentence
+        );
+        assert!(
+            !alert.sentence.contains(UPGRADE_WINDOW_MESSAGE),
+            "no window may be claimed from an uninitialised repository: {}",
+            alert.sentence
+        );
+        assert!(
+            alert.sentence.contains("Two roads"),
+            "A2: the record-based wording keeps both roads: {}",
+            alert.sentence
+        );
+        assert!(
+            alert.fix.is_some(),
+            "the record-based wording keeps its repair command"
+        );
+    }
+
+    /// W1034f2 Medium 1's other companion pin, the mounted-storage half:
+    /// `/Volumes/<your-disk>/chat-stasher/repo` is the shipped
+    /// shared-storage example (`docs/destinations.md`) and a stale
+    /// SMB/NFS handle there turns the proof's `stat` into a hang with no
+    /// timeout, so the shared read paths must never consult it. What the
+    /// reconciliation can be asserted on is the worded outcome, which is
+    /// the same whichever side of the gate the path lands on: the
+    /// record-based wording, never a window (on this platform the
+    /// mount-root half of the gate refuses the read outright; on a
+    /// platform without the root the path simply does not exist here, and
+    /// a failing read falls back the same way — the suppression
+    /// direction). The fix-RED half is the store-level predicate test.
+    #[test]
+    fn a_mounted_storage_path_keeps_the_record_based_wording() {
+        let key_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        let repo = if cfg!(target_os = "macos") {
+            "/Volumes/Shared-Disk/chat-stasher/repo"
+        } else if cfg!(windows) {
+            r"\\Fileserver\Share\chat-stasher\repo"
+        } else {
+            "/mnt/Shared-Disk/chat-stasher/repo"
+        };
+        config.destinations.insert(
+            "the-share".to_string(),
+            crate::config::DestinationConfig {
+                repo: Some(repo.to_string()),
+                key_file: Some(key_dir.path().join("the-share.key").display().to_string()),
+                options: BTreeMap::new(),
+                connections: None,
+                cache_dir: None,
+                no_cache: Some(true),
+                degrade_after_days: Some(7),
+            },
+        );
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let out = reconcile_offline(&config, home.path(), state.path());
+
+        let facts = out
+            .destinations
+            .iter()
+            .find(|d| d.name == "the-share")
+            .unwrap();
+        assert!(
+            !facts.upgrade_window,
+            "mounted storage ({repo}) is never consulted to prove a window"
+        );
+        let alerts = out.all_alerts();
+        let alert = alerts
+            .iter()
+            .find(|a| a.sentence.contains("the-share"))
+            .unwrap();
+        assert!(
+            alert
+                .sentence
+                .contains("no push to `the-share` is on record"),
+            "the mounted destination keeps the record-based wording: {}",
+            alert.sentence
+        );
+        assert!(
+            !alert.sentence.contains(UPGRADE_WINDOW_MESSAGE),
+            "no window may be claimed from mounted storage: {}",
+            alert.sentence
+        );
+        assert!(
+            alert.fix.is_some(),
+            "the mounted destination keeps its repair command"
         );
     }
 }

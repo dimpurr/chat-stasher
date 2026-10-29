@@ -268,10 +268,16 @@ T5_LINE_ALLOW = "t5-allow:"
 # the task issuer mandated verbatim. It exists exactly once, as the definition
 # of `UPGRADE_WINDOW_MESSAGE` in destdiag.rs — the constant every wording site
 # references, so the sentence cannot be triplicated across files — and only
-# that one definition line is exempt. The allowance is pinned to the
-# definition's file and line shape, not to the sentence's bytes: a re-typed
-# copy of the sentence anywhere, in destdiag.rs itself included, still fires
-# T5. This is the sanctioned exception CLAUDE.md's Language section names; a
+# that one definition is exempt. The allowance is pinned to the definition's
+# file and line shape, not to the sentence's bytes: a re-typed copy of the
+# sentence anywhere, in destdiag.rs itself included, still fires T5. Because
+# `rustfmt` may wrap a grown value onto continuation lines of its own (so the
+# CJK no longer sits on the line that names the constant), the exemption
+# spans the definition *statement*: the matched line plus its continuations,
+# ending at the first line whose content terminates the statement (`;`). The
+# span cannot be widened by anything else — a copy, a drift or a stray
+# CJK line later in the file is scanned normally again from the terminator
+# on. This is the sanctioned exception CLAUDE.md's Language section names; a
 # new production CJK string needs a new entry here and a new line there, in
 # the same change, not a `t5-allow:` marker on prose.
 T5_PRODUCTION_ALLOWS = (
@@ -301,9 +307,15 @@ def check_cjk(root: str, rule: dict) -> list[tuple[FileLineHit, dict]]:
     production surface carries one sanctioned Chinese sentence (W1034's
     upgrade-window wording), defined once as a named constant the wording
     sites reference, and the entry names that definition's file and line
-    shape. The match is on the line, never on the sentence — so the exemption
-    covers the constant's single definition line and cannot be extended by
-    copying the sentence anywhere else, in the same file included.
+    shape. The match opens the definition's *statement*, and the exemption
+    then spans its continuation lines too, ending at the first line that
+    terminates the statement (`;`) — `rustfmt` may wrap a grown value so
+    the CJK lands on a continuation line, and the pinned definition must
+    not turn into a T5 hit on a file the contributor did not touch. The
+    span is never wider than the statement: the match is on the opening
+    line, never on the sentence, so the exemption cannot be extended by
+    copying the sentence anywhere else, in the same file included, and any
+    CJK after the terminator is scanned normally again.
 
     A file that cannot be read or decoded is reported, not skipped: a gate that
     treats "could not look" as "clean" is the exact failure this repository
@@ -325,17 +337,27 @@ def check_cjk(root: str, rule: dict) -> list[tuple[FileLineHit, dict]]:
                 rel_path = os.path.relpath(full_path, root)
                 if rel_path in scope["skip_files"]:
                     continue
+                # True while scanning the continuation lines of the sanctioned
+                # production constant's definition; reset by the statement's
+                # terminator so the very next line is checked again.
+                in_allow_definition = False
                 try:
                     with open(full_path, "r", encoding="utf-8") as fh:
                         for lineno, line in enumerate(fh, start=1):
                             line_content = line.rstrip("\r\n")
                             if T5_LINE_ALLOW in line_content:
                                 continue
+                            if in_allow_definition:
+                                if line_content.rstrip().endswith(";"):
+                                    in_allow_definition = False
+                                continue
                             if any(
                                 rel_path == allow["file"]
                                 and line_content.lstrip().startswith(allow["line_prefix"])
                                 for allow in T5_PRODUCTION_ALLOWS
                             ):
+                                if not line_content.rstrip().endswith(";"):
+                                    in_allow_definition = True
                                 continue
                             if pat.search(line_content):
                                 out.append((FileLineHit(path=rel_path, line=lineno, text=line_content.strip()), rule))
@@ -502,12 +524,16 @@ FIXTURE_VIOLATING = {
     ),
     # The production-exception half of T5 (W1034 rev3): the sanctioned
     # sentence is exempt ONLY as its one constant definition in destdiag.rs.
-    # This file carries both the definition line (silently skipped, the
-    # allowance at work) and a drifted re-typed copy on a different line —
+    # This file carries the definition WRAPPED the way rustfmt would grow a
+    # long value (W1034f2: the CJK lands on a continuation line — the
+    # definition's opening line and its continuations are silently skipped,
+    # the allowance at work) and a drifted re-typed copy on a later line —
     # the copy must be reported, or the exemption is a blanket silent pass
     # for the sentence's bytes rather than a pin on its one definition.
+    # Skipping the copy would also mean the span never closed at `;`.
     "destdiag.rs": (
-        'pub const UPGRADE_WINDOW_MESSAGE: &str = "升级后还没有推送记录，下一次定时推送后恢复";\n'
+        'pub const UPGRADE_WINDOW_MESSAGE: &str =\n'
+        '    "升级后还没有推送记录，下一次定时推送后恢复";\n'
         'let drifted_copy = "升级后还没有推送记录，下一次定时推送后恢复";\n'
     ),
     # The same definition shape in a different file is NOT exempt: the
@@ -785,13 +811,17 @@ def selftest() -> int:
         os.makedirs(src2)
         _write_fixtures(src2, FIXTURE_CLEAN)
         # The production-exception clean probe: the sanctioned sentence's one
-        # definition line, in its sanctioned file. Written apart from
-        # FIXTURE_CLEAN because the name is pinned to destdiag.rs and the
-        # violating half planted a different destdiag.rs on purpose — the
-        # loop above asserts clean names against that violating run's report.
+        # definition, in its sanctioned file, in the WRAPPED shape a grown
+        # value takes under rustfmt (W1034f2) — both the naming line and its
+        # continuation are exempt, and nothing else in the file is. Written
+        # apart from FIXTURE_CLEAN because the name is pinned to destdiag.rs
+        # and the violating half planted a different destdiag.rs on purpose —
+        # the loop above asserts clean names against that violating run's
+        # report.
         _write_fixtures(src2, {
             "destdiag.rs": (
-                'pub const UPGRADE_WINDOW_MESSAGE: &str = "升级后还没有推送记录，下一次定时推送后恢复";\n'
+                'pub const UPGRADE_WINDOW_MESSAGE: &str =\n'
+                '    "升级后还没有推送记录，下一次定时推送后恢复";\n'
             ),
         })
         # The extension half of the clean tree. It deliberately includes the

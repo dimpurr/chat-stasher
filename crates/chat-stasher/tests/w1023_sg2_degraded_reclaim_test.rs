@@ -511,6 +511,17 @@ fn a_never_pushed_destination_does_not_hold_the_reclaim_hostage() {
 /// backend's `list()` can turn these reads into a connection (Medium 2) —
 /// `--json` keeps "never-pushed" with the alert's fix intact, and a truly
 /// never-pushed destination continues to say "no push on record".
+///
+/// W1034f2 adds the round-2 facts: a destination on mounted storage
+/// (`shared-disk`, `/Volumes/…` — the shape `docs/destinations.md` ships as
+/// the multi-machine example) is never consulted either, W1034f2 Medium 1;
+/// `--json` carries the window as a first-class `upgrade_window` field
+/// instead of only inside the alert sentence (Low 2); and `doctor`'s D12
+/// page carries the English gloss and the repair advice — through the
+/// `doctor_lines` tail, which is why the rev4 review, looking for an
+/// `all_alerts` loop inside `print_dest_reconcile`, reported it missing
+/// (Medium 2): that step was green at f6efbf78 and is pinned so it stays
+/// that way.
 #[test]
 fn upgrade_window_destination_wording_in_status_and_reclaim_stage() {
     let machine = Machine::new();
@@ -539,6 +550,25 @@ fn upgrade_window_destination_wording_in_status_and_reclaim_stage() {
     let cold_key = store_config(machine.root(), "cold-storage");
     store::persist_key_file(&cold_key, &MasterKey::new()).unwrap();
 
+    // `shared-disk`: the shipped multi-machine example's shape — the
+    // repository lives under the OS's conventional mount root, where the
+    // storage "they all mount" answer reaches every machine. The W1034f2
+    // gate must never consult it (a stale SMB/NFS handle there turns the
+    // proof's `stat` into a hang with no timeout from the menu-bar poll of
+    // all places), so it keeps the record-based wording like every other
+    // unprovable window. Its configuration names a path this test does not
+    // create: pre-gate the missing `stat` fails and post-gate the read is
+    // refused outright — the pinned observable is the wording, identical
+    // either way, which is the suppression direction the whole proof runs
+    // on.
+    let shared_disk_repo = if cfg!(target_os = "macos") {
+        "/Volumes/Shared-Disk/chat-stasher/repo".to_string()
+    } else if cfg!(windows) {
+        r"\\Fileserver\Share\chat-stasher\repo".to_string()
+    } else {
+        "/mnt/Shared-Disk/chat-stasher/repo".to_string()
+    };
+
     let escape = |p: &Path| p.display().to_string().replace('\\', "\\\\");
     let mut text = destinations_config(
         machine.root(),
@@ -553,6 +583,14 @@ fn upgrade_window_destination_wording_in_status_and_reclaim_stage() {
          [destinations.cold-storage.options]\nroot = \"{}\"\n",
         escape(&machine.root().join("cold-storage.key")),
         escape(&machine.root().join("cold-repo")),
+    ));
+    // TOML basic strings escape every backslash, so the Windows UNC shape is
+    // written with `\\` the way a real config would; every other platform's
+    // example path contains none and passes through unchanged.
+    text.push_str(&format!(
+        "\n[destinations.shared-disk]\nrepo = \"{}\"\nkey_file = \"{}\"\n",
+        shared_disk_repo.replace('\\', "\\\\"),
+        escape(&machine.root().join("shared-disk.key")),
     ));
     machine.write_config(&text);
 
@@ -596,6 +634,19 @@ fn upgrade_window_destination_wording_in_status_and_reclaim_stage() {
         )),
         "the upgrade wording is reserved for a proved window: {stdout}"
     );
+    assert!(
+        stdout
+            .contains("health: shared-disk — degraded; no push on record; not consulted this run"),
+        "a mounted-storage repository is never consulted to prove the window (W1034f2 \
+         Medium 1): {stdout}"
+    );
+    assert!(
+        !stdout.contains(&format!(
+            "health: shared-disk — degraded; {}; not consulted this run",
+            chat_stasher::destdiag::UPGRADE_WINDOW_MESSAGE
+        )),
+        "the /Volumes-shaped example keeps the record-based wording: {stdout}"
+    );
 
     // 2. status human-readable test
     let status_human = machine.run(&["status"]);
@@ -629,6 +680,16 @@ fn upgrade_window_destination_wording_in_status_and_reclaim_stage() {
             .contains("[dest] cold-storage: degraded — no push to `cold-storage` is on record"),
         "a backend-shaped repository keeps the record-based wording in status: {status_text}"
     );
+    assert!(
+        status_text
+            .contains("[dest] shared-disk: degraded — no push to `shared-disk` is on record"),
+        "a mounted-storage repository keeps the record-based wording in status \
+         (W1034f2 Medium 1): {status_text}"
+    );
+    assert!(
+        !status_text.contains(&format!("[dest] shared-disk: {upgrade_sentence}")),
+        "the mounted-storage example never gets the upgrade wording in status: {status_text}"
+    );
 
     // 3. status --json keeps never-pushed
     let output_json = machine.run(&["status", "--json"]);
@@ -640,10 +701,39 @@ fn upgrade_window_destination_wording_in_status_and_reclaim_stage() {
         storagebox_row["health"]["kind"], "never-pushed",
         "--json slug is preserved"
     );
+    assert_eq!(
+        storagebox_row["upgrade_window"],
+        serde_json::json!(true),
+        "W1034f2 (Low 2): a --json consumer reads the proved window from a field, \
+         not by sentence-matching the partly-Chinese alert"
+    );
     let r2_row = rows.iter().find(|row| row["name"] == "r2").unwrap();
     assert_eq!(
         r2_row["health"]["kind"], "never-pushed",
         "--json slug is preserved"
+    );
+    assert_eq!(
+        r2_row["upgrade_window"],
+        serde_json::json!(false),
+        "an empty repository proves no window"
+    );
+    let cold_row = rows
+        .iter()
+        .find(|row| row["name"] == "cold-storage")
+        .unwrap();
+    assert_eq!(
+        cold_row["upgrade_window"],
+        serde_json::json!(false),
+        "a backend-shaped repository is never consulted, so there is no window"
+    );
+    let shared_row = rows
+        .iter()
+        .find(|row| row["name"] == "shared-disk")
+        .expect("the mounted-storage destination is declared and in --json");
+    assert_eq!(
+        shared_row["upgrade_window"],
+        serde_json::json!(false),
+        "a mounted-storage repository is never consulted, so there is no window"
     );
     // And the alert keeps its repair fix: the window changes what the
     // absence says, never the advice that follows it.
@@ -664,6 +754,57 @@ fn upgrade_window_destination_wording_in_status_and_reclaim_stage() {
     assert!(
         fix.contains("chat-stasher schedule install --destination storagebox --stage <stage>"),
         "the fix still points at the push and its timer: {fix}"
+    );
+
+    // 4. doctor: the D12 page carries the cell AND, under it, the English
+    // half of the same alert plus its repair advice — the visibility the
+    // rev4 review reported missing (W1034f2 Medium 2). Those lines do not
+    // come from a `print_dest_reconcile` loop over `all_alerts`; they come
+    // from `destdiag::doctor_lines`'s tail, which renders every alert and
+    // its fix the way `status` does, so a page with the graduated cell
+    // always carries its gloss. This step was green at f6efbf78 (found
+    // already correct there — see W1034f2-OUT) and is pinned so losing it
+    // is a red test instead of a review finding; a run against 86df09a4
+    // (pre-f6efbf78) is red on the English half and on the fix, which is
+    // the round-1 behaviour this guards.
+    let doctor_output = machine.run(&["doctor"]);
+    let doctor_text = combined(&doctor_output);
+    assert!(
+        doctor_text.contains("D12 · Declared destinations vs installed timers"),
+        "the D12 panel is on the doctor page: {doctor_text}"
+    );
+    assert!(
+        doctor_text.contains(&format!(
+            "health         : degraded — {}",
+            chat_stasher::destdiag::UPGRADE_WINDOW_MESSAGE
+        )),
+        "the D12 cell renders the mandated sentence: {doctor_text}"
+    );
+    assert!(
+        doctor_text.contains(&format!(
+            "[dest] storagebox: degraded — {}",
+            chat_stasher::destdiag::UPGRADE_WINDOW_MESSAGE
+        )),
+        "the upgrade alert itself is on the page under the table: {doctor_text}"
+    );
+    assert!(
+        doctor_text.contains(
+            "The repository already holds snapshots, so only this machine's push \
+                       record is missing"
+        ),
+        "the English gloss the cell cannot carry is under the table: {doctor_text}"
+    );
+    assert!(
+        doctor_text.contains("give it its next successful push"),
+        "road one is on the doctor page too: {doctor_text}"
+    );
+    assert!(
+        doctor_text.contains("or remove `[destinations.storagebox]` from the config"),
+        "road two is on the doctor page too: {doctor_text}"
+    );
+    assert!(
+        doctor_text.contains("fix: chat-stasher push --destination storagebox --stage <stage>"),
+        "the repair advice is on the doctor page too: {doctor_text}"
     );
 }
 

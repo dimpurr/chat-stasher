@@ -2137,6 +2137,41 @@ pub fn destination_store_config(
     )
 }
 
+/// The store configuration of a machine with no `[destinations.<name>]` —
+/// the pre-ADR-013 single-repository mode, defined **once** because three
+/// hand-kept copies of its defaults are how the CLI and the diagnostics
+/// drift (W1034f2, rev4 Low 1): the CLI's `store_config_from` layers its
+/// CLI-argument expansion over each config-sourced half and falls back to
+/// this for every *unset* half, and `destdiag`'s destination proof reads
+/// exactly this for the destination-less machine, so a change to the
+/// defaults can never again move one reader and not the other.
+///
+/// The config-sourced values arrive already `~`-expanded at load
+/// (`config::expand_and_verify`); this builder performs no expansion and no
+/// I/O of its own.
+pub fn home_repository_store_config(config: &Config) -> StoreConfig {
+    let data_root = default_data_root();
+    StoreConfig {
+        repo_root: config
+            .rustic_repo
+            .clone()
+            .unwrap_or_else(|| data_root.join("repo").to_string_lossy().into_owned()),
+        key_file: config
+            .rustic_key_file
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_root.join("masterkey.json")),
+        connections: 0,
+        options: std::collections::BTreeMap::new(),
+        cache_dir: config.rustic_cache_dir.as_deref().map(PathBuf::from),
+        // reason: rustic_no_cache unset means rustic's own default (cache
+        // on) — a config default, not an unknown read result collapsed to
+        // false
+        no_cache: config.rustic_no_cache.unwrap_or(false),
+    }
+    .with_capped_connections(config.rustic_connections)
+}
+
 /// Connect once to every declared destination, read-only.
 ///
 /// Deliberately not called from [`run()`]: `run()` is a library entry point
@@ -2907,10 +2942,13 @@ pub fn run() -> DoctorReport {
     // rather than in the CLI because every input is a file read (the
     // installed timer unit files, the state records the product itself
     // writes, and — for W1034's upgrade-window proof — the snapshot
-    // listing of a repository on this machine's own filesystem): no
-    // destination is dialed, so the test-suite-visible entry
-    // point can keep producing it. The platform's format follows the same
-    // split `setup_schedule_format` makes in the CLI.
+    // listing of a repository on this machine's own *un-mounted*
+    // filesystem: no destination is dialed, and no mount root —
+    // `/Volumes/…` among them — is read either (the gate
+    // [`crate::store::repository_is_local`] carries both halves), so the
+    // test-suite-visible entry point can keep producing it. The platform's
+    // format follows the same split `setup_schedule_format` makes in the
+    // CLI.
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -5506,6 +5544,17 @@ fn print_debris(debris: &DebrisProbe) {
 /// lines, this page and the menu bar app all display one vocabulary, which
 /// is the requirement the "one function" in `destdiag` exists to satisfy.
 ///
+/// The alert lines — sentence and fix, the English gloss and repair advice
+/// a degraded destination carries — arrive *inside*
+/// [`crate::destdiag::doctor_lines`]: its tail renders every alert and each
+/// one's fix the same way `status` renders its loop, so a page that shows
+/// the D12 table cell (the mandated sentence alone, a table row) always
+/// carries the gloss and the roads under it. W1034f2's note: this function
+/// has no `all_alerts` loop of its own, and the rev4 review read exactly
+/// that loop's absence as the gloss "not printed anywhere on the page" —
+/// the alerts' path into this page is the `doctor_lines` tail, asserted on
+/// the D12 step of `w1023_sg2_degraded_reclaim_test`.
+///
 /// Silent when the reconciliation was not computed (config unreadable —
 /// `not_checked` names it there) and prints nothing for a machine with
 /// nothing declared beyond its default-repository row: a start.md machine
@@ -5519,7 +5568,7 @@ fn print_dest_reconcile(reconciliation: &Option<crate::destdiag::Reconciliation>
     eprintln!(
         "     read-only: reads the timer files, the reclaim/push state records, and — for the \
           upgrade-window proof — one local repository's snapshot listing; never opens a \
-          destination behind a backend string."
+          destination behind a backend string, never reads one under a mounted volume."
     );
     for line in crate::destdiag::doctor_lines(reconciliation) {
         eprintln!("{line}");
@@ -5907,6 +5956,46 @@ mod tests {
     }
 
     use super::*;
+
+    /// W1034f2 (rev4 Low 1): the destination-less machine's repository and
+    /// key file, from the one definition the CLI's `store_config_from` falls
+    /// back to and `destdiag`'s proof reads — so a change to the default
+    /// repository location moves both readers together, and this test pins
+    /// that the definition is still the data-dir one (unconfigured) and
+    /// still passes config-sourced values through untouched.
+    #[test]
+    fn home_repository_store_config_is_the_single_default_definition() {
+        let base = home_repository_store_config(&Config::default());
+        let data_root = default_data_root();
+        assert_eq!(
+            base.repo_root,
+            data_root.join("repo").to_string_lossy().into_owned(),
+            "an unconfigured machine keeps the data-dir repository default"
+        );
+        assert_eq!(
+            base.key_file,
+            data_root.join("masterkey.json"),
+            "an unconfigured machine keeps the data-dir key default"
+        );
+        assert_eq!(base.connections, crate::store::DEFAULT_CONNECTIONS);
+
+        let mut config = Config::default();
+        config.rustic_repo = Some("/srv/backup-repo".to_string());
+        config.rustic_key_file = Some("/srv/backup.key".to_string());
+        config.rustic_cache_dir = Some("/srv/cache".to_string());
+        let configured = home_repository_store_config(&config);
+        assert_eq!(configured.repo_root, "/srv/backup-repo");
+        assert_eq!(
+            configured.key_file,
+            std::path::PathBuf::from("/srv/backup.key")
+        );
+        assert_eq!(
+            configured.cache_dir,
+            Some(std::path::PathBuf::from("/srv/cache")),
+            "config-sourced values pass through unexpanded — the config loader \
+             expanded them, and expansion gates are the CLI wrapper's own"
+        );
+    }
 
     #[test]
     fn configured_stage_duplicate_scan_counts_and_names_the_repair_command() {

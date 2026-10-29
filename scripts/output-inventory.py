@@ -38,7 +38,15 @@ HEADER = """\
 #   anyhow::bail! / anyhow! / .context() / .with_context()   first string literal
 #   clap help: /// doc inside clap types + explicit about/help = "..."  in #[command]/#[arg]
 #   panic!/unreachable!/todo!/unimplemented!   prod code only (today: none)
-# NOT covered: standalone format! (mostly construction), --json values, apps/extension.
+# NOT covered: standalone format! (mostly construction), --json values, apps/extension,
+#   const &str definitions (referenced by name at their print sites, so no line here).
+# One consequence, stated so nobody re-derives it (W1034f2): destdiag.rs's
+# UPGRADE_WINDOW_MESSAGE — the mandated upgrade-window sentence, the one
+# sanctioned non-English production string — does NOT appear in this file.
+# Its definition stays pinned elsewhere instead: by
+# scripts/check-terminology.py's T5 production allowance (that one
+# definition statement, continuation lines included) and by the tests
+# that assert wording surfaces against the constant by name.
 #
 # Format: <kind>  <file>:<line>  <text>   · sorted by file+line · deterministic
 """
