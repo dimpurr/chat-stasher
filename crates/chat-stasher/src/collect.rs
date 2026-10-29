@@ -711,7 +711,6 @@ fn stage_prefix_entry(
     stage: &Path,
     machine: &str,
     counters: &mut CollectCounters,
-    manifest_facts: Option<&BTreeMap<String, ShardFact>>,
 ) -> anyhow::Result<Option<OffsetEntry>> {
     // A SQLite session's cursor is logical, not a file offset, so the stage
     // cannot be turned into one without re-exporting the session. Those paths
@@ -721,59 +720,7 @@ fn stage_prefix_entry(
     }
     let sealed_shards = stage_sealed_shards(stage, machine, &record.id)?;
     if sealed_shards.is_empty() {
-        if let Some(fact) = manifest_facts.and_then(|m| m.get(&record.id)) {
-            if record.compressed || is_zstd_path(&record.absolute_path) {
-                let compressed = fs::read(&record.absolute_path).with_context(|| {
-                    format!(
-                        "read compressed source ({})",
-                        path_digest(&record.absolute_path)
-                    )
-                })?;
-                let decoded =
-                    zstd::stream::decode_all(&compressed[..]).context("decompress jsonl.zst")?;
-                let (lines, _) = complete_lines(&decoded);
-                let framed = seal_framed(&lines);
-                if !lines.is_empty()
-                    && fact.concat_bytes == framed.len() as u64
-                    && fact.concat_sha256 == sha256_hex(&framed)
-                {
-                    let len = compressed.len() as u64;
-                    return Ok(Some(OffsetEntry {
-                        offset: len,
-                        prefix_len: len,
-                        prefix_sha256: sha256_hex(&compressed),
-                        compressed: true,
-                        opencode: None,
-                        store_fingerprint: None,
-                        grok_bot_row_digests: None,
-                        opencode_record_digests: None,
-                        opencode_map_digest: None,
-                    }));
-                }
-            } else if !is_jsonl_path(&record.absolute_path) {
-                let bytes = fs::read(&record.absolute_path).with_context(|| {
-                    format!("read source bytes ({})", path_digest(&record.absolute_path))
-                })?;
-                let framed = seal_framed(std::slice::from_ref(&bytes));
-                if !bytes.is_empty()
-                    && fact.concat_bytes == framed.len() as u64
-                    && fact.concat_sha256 == sha256_hex(&framed)
-                {
-                    let len = bytes.len() as u64;
-                    return Ok(Some(OffsetEntry {
-                        offset: len,
-                        prefix_len: len,
-                        prefix_sha256: sha256_hex(&bytes),
-                        compressed: false,
-                        opencode: None,
-                        store_fingerprint: None,
-                        grok_bot_row_digests: None,
-                        opencode_record_digests: None,
-                        opencode_map_digest: None,
-                    }));
-                }
-            }
-        }
+        // Note (L3): A cursor-less plain-JSONL / file source post-reclaim has empty staged shards and returns None, re-exporting in full.
         return Ok(None);
     }
 
@@ -975,7 +922,7 @@ fn cursor_or_stage_covered_position(
         return Ok(entry.cursor.clone());
     }
     Ok(
-        match stage_prefix_entry(record, stage, machine, counters, None)? {
+        match stage_prefix_entry(record, stage, machine, counters)? {
             Some(covered) if covered.offset > entry.cursor.offset => covered,
             _ => entry.cursor.clone(),
         },
@@ -1808,7 +1755,7 @@ pub fn collect_scan_report(
             // content like any cursor-less source, instead of re-sealing the
             // bytes the archive already holds.
             None if !record.provenance.is_empty() && !record.movable_root => None,
-            None => stage_prefix_entry(&record, stage, machine, &mut counters, None)?,
+            None => stage_prefix_entry(&record, stage, machine, &mut counters)?,
         };
         // The cursor is still handed down so the outcome can report this as a
         // reread rather than a first read; `force_reset` is what actually stops
@@ -3556,16 +3503,22 @@ pub(crate) fn safe_machine_id(machine: &str) -> bool {
 
 /// SG-2b: Map file under `<stage>/meta/<machine>/opencode-session-maps/`,
 /// ensuring the record-digest list survives reclaim when stage shard bodies are deleted.
-pub fn opencode_record_map_meta_path(stage: &Path, machine: &str, session_id: &str) -> PathBuf {
-    assert!(
-        safe_machine_id(machine),
-        "machine partition must be a safe path component"
-    );
-    stage
+pub fn opencode_record_map_meta_path(
+    stage: &Path,
+    machine: &str,
+    session_id: &str,
+) -> anyhow::Result<PathBuf> {
+    if !safe_machine_id(machine) {
+        anyhow::bail!(
+            "machine `{}` cannot name an archive partition",
+            crate::id::bounded_path_component(machine, 64)
+        );
+    }
+    Ok(stage
         .join(crate::manifest::META_DIR)
         .join(machine)
         .join(OPENCODE_RECORD_MAP_DIR)
-        .join(format!("{}.json", sha256_hex(session_id.as_bytes())))
+        .join(format!("{}.json", sha256_hex(session_id.as_bytes()))))
 }
 
 /// Rename a freshly written temp file onto its final name, waiting out the
@@ -3619,6 +3572,11 @@ pub fn save_opencode_record_map(
     session_id: &str,
     records: &BTreeMap<String, String>,
 ) -> anyhow::Result<()> {
+    if let Some(existing) = load_opencode_record_map(path, session_id) {
+        if &existing == records {
+            return Ok(());
+        }
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -3655,7 +3613,7 @@ fn save_opencode_record_map_both(
     session_id: &str,
     records: &BTreeMap<String, String>,
 ) -> anyhow::Result<()> {
-    let meta_path = opencode_record_map_meta_path(stage, machine, session_id);
+    let meta_path = opencode_record_map_meta_path(stage, machine, session_id)?;
     save_opencode_record_map(&meta_path, session_id, records)?;
     let state_path = opencode_record_map_path(state_dir, session_id);
     save_opencode_record_map(&state_path, session_id, records)?;
@@ -3672,6 +3630,7 @@ pub fn load_opencode_record_map(
 ) -> Option<BTreeMap<String, String>> {
     let bytes = fs::read(path).ok()?;
     let state: OpenCodeRecordMapState = serde_json::from_slice(&bytes).ok()?;
+    // Note (tautology): File path is sha256_hex(session_id), but verify state.session_id as defense-in-depth against corrupt files.
     if state.version != OPENCODE_RECORD_MAP_VERSION || state.session_id != expected_session_id {
         return None;
     }
@@ -3685,7 +3644,7 @@ pub(crate) fn load_opencode_record_map_any(
     state_dir: &Path,
     session_id: &str,
 ) -> Option<BTreeMap<String, String>> {
-    let meta_path = opencode_record_map_meta_path(stage, machine, session_id);
+    let meta_path = opencode_record_map_meta_path(stage, machine, session_id).ok()?;
     if let Some(records) = load_opencode_record_map(&meta_path, session_id) {
         return Some(records);
     }
@@ -3861,7 +3820,7 @@ fn process_opencode(
             None
         }
     } else {
-        fold_opencode_staged_map(stage, machine, &record.id)
+        fold_opencode_staged_map(stage, machine, &record.id).ok().flatten()
     };
 
     let outcome = |lines_written: usize, shard: Option<String>, reset: bool| CollectOutcome {
@@ -4075,26 +4034,42 @@ fn incremental_write_allowed(
 
 /// Fold the session's staged shard set into its live record map — the map
 /// the stage proves by itself (ADR-012: the stage is the truth a cursor
-/// claims to copy). An empty set, an unreadable file or an unfoldable body
-/// answers `None`: unknown, never an empty map.
+/// claims to copy). An empty set answers `Ok(None)`: unknown, never an empty map.
+/// An unreadable file or an unfoldable body returns an error so it is never
+/// silently deleted without a map.
 pub(crate) fn fold_opencode_staged_map(
     stage: &Path,
     machine: &str,
     session_id: &str,
-) -> Option<BTreeMap<String, String>> {
+) -> anyhow::Result<Option<BTreeMap<String, String>>> {
     let dir = store::session_shard_dir(stage, machine, session_id);
-    let mut shards = store::sealed_shard_entries(&dir).ok()?;
+    let mut shards = match store::sealed_shard_entries(&dir) {
+        Ok(s) => s,
+        Err(e)
+            if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None);
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("read shard entries in {}", dir.display()));
+        }
+    };
     shards.sort_by_key(|(seq, _)| *seq);
     if shards.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let native = crate::opencode_records::native_session_id(session_id)?;
+    let native = crate::opencode_records::native_session_id(session_id)
+        .ok_or_else(|| anyhow::anyhow!("invalid opencode session id: {session_id}"))?;
     let mut assembly = crate::opencode_records::Assembly::for_session(native);
     for (_, shard_path) in &shards {
-        let body = fs::read(shard_path).ok()?;
-        assembly.feed_shard_body(&body).ok()?;
+        let body = fs::read(shard_path)
+            .with_context(|| format!("read shard body {}", shard_path.display()))?;
+        assembly
+            .feed_shard_body(&body)
+            .map_err(|e| anyhow::anyhow!("fold shard body {}: {e}", shard_path.display()))?;
     }
-    Some(assembly.live_map())
+    Ok(Some(assembly.live_map()))
 }
 
 /// Recover the increment map the state entry endorses, in ADR-012's order:
@@ -4117,7 +4092,7 @@ fn reconcile_opencode_increment_map(
     }
     // Rebuild from the staged records (D2: "the map is rebuilt from the
     // staged records on mismatch").
-    let records = fold_opencode_staged_map(stage, machine, session_id)?;
+    let records = fold_opencode_staged_map(stage, machine, session_id).ok().flatten()?;
     if opencode_map_matches_entry(&records, entry) {
         // Restored; persist so the next pass takes the fast path. A failed
         // persist only costs the same rebuild on the next pass — the

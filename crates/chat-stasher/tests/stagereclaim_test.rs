@@ -951,7 +951,8 @@ fn reclaim_stage_synthesizes_opencode_increment_map_before_deleting_body() {
     let mk = init_and_push(&cfg, machine, &stage);
     let dests = vec![named(dir.path(), "repo-a", DestinationHealth::Healthy)];
 
-    let meta_path = chat_stasher::collect::opencode_record_map_meta_path(&stage, machine, session);
+    let meta_path =
+        chat_stasher::collect::opencode_record_map_meta_path(&stage, machine, session).unwrap();
     assert!(
         !meta_path.exists(),
         "meta map must not exist before reclaim"
@@ -1036,7 +1037,8 @@ fn reclaim_stage_synthesizes_opencode_increment_map_before_deleting_body() {
         .unwrap();
 
     let fail_meta_path =
-        chat_stasher::collect::opencode_record_map_meta_path(&stage, machine, session_fail);
+        chat_stasher::collect::opencode_record_map_meta_path(&stage, machine, session_fail)
+            .unwrap();
     // Block write by placing a directory where the temp file would be
     fs::create_dir_all(fail_meta_path.parent().unwrap()).unwrap();
     let tmp = fail_meta_path.with_extension("json.tmp");
@@ -1052,4 +1054,109 @@ fn reclaim_stage_synthesizes_opencode_increment_map_before_deleting_body() {
         err_msg.contains("persist synthesized increment map"),
         "error message must report persist failure: {err_msg}"
     );
+}
+
+#[test]
+fn reclaim_stage_unreadable_body_aborts_without_deleting_and_collect_first_protects_prior_candidates(
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let machine = "m";
+    let session_valid = "opencode.m.ses_valid";
+    let session_corrupt = "opencode.m.ses_corrupt";
+    let stage = dir.path().join("stage");
+    let cfg = store_config(dir.path(), "repo-a");
+
+    // Stage valid opencode session
+    let body_bytes_valid = chat_stasher::opencode_records::record_line(
+        "ses_valid",
+        chat_stasher::opencode_records::RecordKind::Message,
+        "ses_valid-m1",
+        &serde_json::json!({"role": "user", "text": "valid"}),
+    );
+    let body_line_valid = String::from_utf8(body_bytes_valid).unwrap();
+    store::write_sealed_shard(
+        StageWriter::Collect,
+        &stage,
+        machine,
+        session_valid,
+        &[body_line_valid],
+    )
+    .unwrap();
+
+    // Stage corrupt opencode session (invalid JSON shard body)
+    store::write_sealed_shard(
+        StageWriter::Collect,
+        &stage,
+        machine,
+        session_corrupt,
+        &["this is not valid json\n".to_string()],
+    )
+    .unwrap();
+
+    let _mk = init_and_push(&cfg, machine, &stage);
+    let dests = vec![named(dir.path(), "repo-a", DestinationHealth::Healthy)];
+
+    let err = stagereclaim::reclaim_stage(&stage, &dests, true, None);
+    assert!(
+        err.is_err(),
+        "unreadable/unfoldable body must cause reclaim to fail"
+    );
+    let err_msg = format!("{:#}", err.unwrap_err());
+    assert!(
+        err_msg.contains("fold staged increment map"),
+        "error message must report fold failure: {err_msg}"
+    );
+
+    // Both bodies must be kept (not deleted) because collect-first aborted before deletions started
+    assert_eq!(
+        shard_count(&stage, machine, session_valid),
+        1,
+        "valid candidate body must be kept when a sibling candidate fails in collect-first"
+    );
+    assert_eq!(
+        shard_count(&stage, machine, session_corrupt),
+        1,
+        "unfoldable candidate body must be kept"
+    );
+}
+
+#[test]
+fn opencode_record_map_meta_path_validation_and_unchanged_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = dir.path().join("stage");
+
+    // 1. Validation returns error on unsafe machine
+    assert!(chat_stasher::collect::opencode_record_map_meta_path(
+        &stage,
+        "../escape",
+        "opencode.m.s"
+    )
+    .is_err());
+    assert!(
+        chat_stasher::collect::opencode_record_map_meta_path(&stage, "", "opencode.m.s").is_err()
+    );
+    assert!(
+        chat_stasher::collect::opencode_record_map_meta_path(&stage, "m/sub", "opencode.m.s")
+            .is_err()
+    );
+    assert!(chat_stasher::collect::opencode_record_map_meta_path(
+        &stage,
+        "valid-machine",
+        "opencode.m.s"
+    )
+    .is_ok());
+
+    // 2. Unchanged map is not rewritten
+    let meta_path =
+        chat_stasher::collect::opencode_record_map_meta_path(&stage, "m", "opencode.m.s").unwrap();
+    let records = std::collections::BTreeMap::from([("rec1".to_string(), "hash1".to_string())]);
+    chat_stasher::collect::save_opencode_record_map(&meta_path, "opencode.m.s", &records).unwrap();
+    assert!(meta_path.exists());
+
+    let mtime1 = fs::metadata(&meta_path).unwrap().modified().unwrap();
+    // Short sleep to ensure if rewritten, mtime would differ
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    chat_stasher::collect::save_opencode_record_map(&meta_path, "opencode.m.s", &records).unwrap();
+    let mtime2 = fs::metadata(&meta_path).unwrap().modified().unwrap();
+    assert_eq!(mtime1, mtime2, "unchanged map must not be rewritten");
 }

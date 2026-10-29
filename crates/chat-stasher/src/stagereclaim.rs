@@ -531,6 +531,46 @@ pub fn reclaim_stage(
         return Ok(report);
     }
 
+    // Pre-synthesize and persist any missing opencode meta increment maps
+    // BEFORE deleting any bodies ("collect first"), so an unreadable,
+    // unfoldable or unpersistable map errors out and aborts before a single
+    // body is deleted.
+    for cand in &report.candidates {
+        if cand.session_id.starts_with("opencode.") {
+            let meta_path = crate::collect::opencode_record_map_meta_path(
+                stage,
+                &cand.machine,
+                &cand.session_id,
+            )?;
+            if !meta_path.exists() {
+                let records = crate::collect::fold_opencode_staged_map(
+                    stage,
+                    &cand.machine,
+                    &cand.session_id,
+                )
+                .with_context(|| {
+                    format!(
+                        "fold staged increment map for {} before reclaim",
+                        cand.session_id
+                    )
+                })?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "staged session {} has no sealed shards to fold",
+                        cand.session_id
+                    )
+                })?;
+                crate::collect::save_opencode_record_map(&meta_path, &cand.session_id, &records)
+                    .with_context(|| {
+                        format!(
+                            "persist synthesized increment map for {} before reclaim",
+                            cand.session_id
+                        )
+                    })?;
+            }
+        }
+    }
+
     // The summary must land before the body goes: refresh each machine's
     // manifest from the current body (preserving rows of already-reclaimed
     // sessions), then delete session by session.
@@ -546,27 +586,6 @@ pub fn reclaim_stage(
             .with_context(|| format!("generate manifest for machine {machine}"))?;
         refresh_manifest(stage, machine, &fresh)?;
         for cand in cands {
-            if cand.session_id.starts_with("opencode.") {
-                let meta_path =
-                    crate::collect::opencode_record_map_meta_path(stage, machine, &cand.session_id);
-                if !meta_path.exists() {
-                    if let Some(records) =
-                        crate::collect::fold_opencode_staged_map(stage, machine, &cand.session_id)
-                    {
-                        crate::collect::save_opencode_record_map(
-                            &meta_path,
-                            &cand.session_id,
-                            &records,
-                        )
-                        .with_context(|| {
-                            format!(
-                                "persist synthesized increment map for {} before reclaim",
-                                cand.session_id
-                            )
-                        })?;
-                    }
-                }
-            }
             let removed = reclaim_session_body(stage, &cand.machine, &cand.session_id)
                 .with_context(|| {
                     format!(
