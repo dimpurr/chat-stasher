@@ -153,7 +153,7 @@ Change the interval in the config, then run `schedule install` again so the time
 
 | | Where |
 |---|---|
-| macOS | `~/Library/Logs/chat-stasher/run-once.log` and `run-once.err.log`. All destinations' timers write to these two files. Each is emptied at the start of a run once it passes 5 MB. |
+| macOS | `~/Library/Logs/chat-stasher/run-once.log` and `run-once.err.log`. All destinations' timers write to these two files. Both append across runs and can grow until you manage them yourself. Reinstall the schedule to replace older templates that emptied logs over 5 MB. |
 | Linux | The journal: `journalctl --user -u chat-stasher-run-once-<destination>.service` |
 
 A successful pass ends with `result: COMPLETED` (a new snapshot) or `result: NOOP` (nothing changed). Both are healthy.
@@ -167,9 +167,9 @@ chat-stasher reclaim-stage --stage ~/stash/chat-stasher/stage           # dry ru
 chat-stasher schedule install --unit reclaim-stage --stage ~/stash/chat-stasher/stage
 ```
 
-It runs weekly, on Sunday at 03:17 local time on macOS, and around then on Linux (with up to 15 minutes of random delay). It is one timer for all destinations, so it takes no `--destination`. If any destination cannot be reached or does not hold a session, nothing is removed that week. The reason is in its log (`reclaim-stage.log`), and it is also what `chat-stasher status` and `doctor` report: a blocked clean-up names the destination it waits for and how much it holds back, and the menu bar app posts a system notification once it has been blocked twice in a row. `schedule install --unit reclaim-stage` warns on the spot when a declared destination is pushed by no installed hourly timer — a destination that never receives pushes keeps the clean-up blocked for the whole machine.
+It runs weekly, on Sunday at 03:17 local time on macOS, and around then on Linux (with up to 15 minutes of random delay). It is one timer for all destinations, so it takes no `--destination`. If any destination cannot be reached or does not hold a session, nothing is removed that week. The reason is in its log (on macOS, `reclaim-stage.log` and `reclaim-stage.err.log` append across runs; on Linux, the journal for `chat-stasher-reclaim-stage.service`), and it is also what `chat-stasher status` and `doctor` report: a blocked clean-up names the destination it waits for and how much it holds back, and the menu bar app posts a system notification once it has been blocked twice in a row. `schedule install --unit reclaim-stage` warns on the spot when a declared destination is pushed by no installed hourly timer — a destination that never receives pushes keeps the clean-up blocked for the whole machine.
 
-Run the dry run by hand first, so you see what it would do.
+Run the dry run by hand first, so you see what it would do. Reinstall an existing macOS reclaim schedule to replace older templates that emptied logs over 5 MB.
 
 ## Remove the timer
 

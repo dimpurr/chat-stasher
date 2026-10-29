@@ -2377,7 +2377,7 @@ mod tests {
         // requests each plus the durable per-conversation commits — and,
         // riding every round after the first, the proof of the previous
         // round's receipts. The pace and the budget keep the pass's request
-        // quanta at 64 (9,600 ms of 150 ms intervals — the arithmetic the
+        // quanta at 64 (19,200 ms of 300 ms intervals — the arithmetic the
         // slice and steady-count assertions below derive from), while the
         // interval itself is sized against the per-request wall cost the
         // slowest supported environment measures: the first cut of this
@@ -2387,18 +2387,26 @@ mod tests {
         // latency, timer quantization, durable commits and receipt
         // sealing), so a backfill round admitted about twenty of its 64
         // quanta before the wall deadline and the sweep blew past the
-        // twelve allowed rounds (run 40069931562). At 150 ms the
-        // overhead is a third of the interval, so a round's wall cost
-        // stays close to its declared quanta everywhere, and the sweep
-        // converges in a handful of rounds on quiet and loaded machines
-        // alike.
+        // twelve allowed rounds (run 40069931562). The second cut paced at
+        // 150 ms and broke on a round the first sizing never budgeted:
+        // a caught-up round plans six agent-level routes, the
+        // two-request window and a sixteen-conversation slice — forty
+        // requests against sixty-four intervals, which leaves the plan's
+        // overhead only the twenty-four spare intervals, 3.6 s at 150 ms,
+        // and the Windows runner spent ~100 ms per request again, ~4 s
+        // across the plan, so the deadline correctly declared the steady
+        // round unfinished and the steady assertions failed (run
+        // 40868043372). At 300 ms the overhead is actually a third of the
+        // interval, so a round's wall cost stays close to its declared
+        // quanta everywhere, and the sweep converges in a handful of
+        // rounds on quiet and loaded machines alike.
         let pull = || {
             run(
                 &mut Api::new(
                     &server.base,
                     None,
-                    Duration::from_millis(150),
-                    Duration::from_millis(9600),
+                    Duration::from_millis(300),
+                    Duration::from_millis(19200),
                     DEFAULT_PAGE_SIZE,
                 )
                 .unwrap(),
