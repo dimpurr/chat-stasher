@@ -61,7 +61,7 @@ of them.
 
 **A header is not a pack, so a header read is not a verification.** This project
 reads the header of every pack the index does not name *and every blob that
-header declares* (`crates/chat-stasher/src/packcheck.rs:95`, called from
+header declares* (`crates/chat-stasher/src/packcheck.rs:136`, called from
 `crates/chat-stasher/src/orphans.rs:327`): the header has to decrypt with the
 repository key, every blob has to decrypt and decompress to the length its
 header gives, and every blob's plaintext has to hash to the id the header names.
@@ -91,7 +91,7 @@ over a stranded 1 045 700 B repository — a second full copy — while the adop
 retry adds only its snapshot, index and tree pack
 (`crates/chat-stasher/tests/w245_interrupted_push_test.rs:637-648`).
 
-Implementation: `crates/chat-stasher/src/orphans.rs:458`. Every read path reaches
+Implementation: `crates/chat-stasher/src/orphans.rs:462`. Every read path reaches
 it through `crates/chat-stasher/src/store.rs:507`, which is the whole point of
 routing reads through it — after an adopting push, the snapshot's tree and its
 shards exist **only** in packs no index file names, so a read that reads only
@@ -120,7 +120,7 @@ age gate would have to outlast the slowest concurrent upload (minutes for a larg
 pack) and would then refuse to reuse our own just-killed push's packs, which is
 the entire point of the change. Completeness is also the stronger guard: it is a
 property of the bytes, not a guess about who is writing them.
-`crates/chat-stasher/src/orphans.rs:500-502` is where every failure to validate sends
+`crates/chat-stasher/src/orphans.rs:503-506` is where every failure to validate sends
 the open back to the plain index — the same fallback whether the refuser was a
 pack this open could not verify or a pack set that changed under it.
 
@@ -139,7 +139,7 @@ again and the archive is complete either way.
 **Adoption is fenced by a survey, so a healthy repository is untouched.**
 `crates/chat-stasher/src/orphans.rs:271-309` diffs the backend's pack listing against
 the packs the index files name, and
-`crates/chat-stasher/src/orphans.rs:480-494` refuses to adopt when the index names a
+`crates/chat-stasher/src/orphans.rs:484-498` refuses to adopt when the index names a
 pack the backend no longer has. That case matters: adopting from existing index
 files plus only newly verified packs would otherwise drop that entry — and an
 entry for a missing pack is one the local metadata cache can still serve, a documented
@@ -167,14 +167,17 @@ which is what the tool did before this change).
 * Every open pays one survey: a pack listing plus one pass over the index files.
   With rustic's local metadata cache on (the default) that pass is served
   locally.
-* When the survey finds packs no index file names, that open also reads all of
-  them — every byte, once, to decrypt each blob — before it may adopt anything,
-  and lists the index files once more on each side of the adopting pass. A
-  healthy repository pays nothing: a repository whose index names every pack in
-  its backend skips the verification entirely, because no pack is a candidate.
-  An archive that keeps stranded packs pays this on every open, on the read paths
-  as well as on `push`, which is the price of never reusing a pack whose bytes
-  were not read.
+* When the survey finds packs no index file names, that open also verifies
+  all of them — and a verification reads every byte, once, to decrypt each
+  blob — before it may adopt anything, and lists the index files once more on
+  each side of the adopting pass. A healthy repository pays nothing: a
+  repository whose index names every pack in its backend skips the
+  verification entirely, because no pack is a candidate. Torn debris stops it
+  own probe closer than that: the verifier refuses those bytes at the header
+  (the length field or the decrypt check), so it never reads the rest of a
+  half-written pack. An archive that keeps stranded packs pays the full read
+  on every open, on the read paths as well as on `push`, which is the price
+  of never reusing a pack whose bytes were not read.
 * A push whose adoption is refused because the pack set changed while it ran says
   so in the same place and the same shape: `NOT adopted (the packs no index file
   names changed while this open ran)`. It is the same state for the operator —
@@ -207,8 +210,9 @@ chat-stasher prune-orphans --destination <name> [--dry-run | --apply] [--json]
 
 `--dry-run` and `--apply` cannot be combined; omitting both also runs the
 read-only inventory. `--json` writes one JSON object to stdout, with the same
-counts and byte totals plus each candidate's full id and verified/unknown status
-(including the verifier's reason).
+counts and byte totals plus each candidate's full id and status — torn
+(interrupted-push debris, with the probe's reason), stranded (verified, with
+the next open's verdict) or unknown (with the verifier's reason).
 
 It opens the repository read-only — no index is built, and nothing is adopted —
 lists the backend once, reads the index files, and then verifies each unindexed
@@ -216,10 +220,27 @@ pack's bytes with the same verifier the adopting open uses. Every count it repor
 comes from that one listing, so its totals and its unindexed set describe the same
 moment. It reports the repository's own config id as its fingerprint (never the
 path or host it was reached at), the backend family, pack and byte totals, the
-unindexed packs by id prefix and size, how many of those verified, how many are
-unknown with the verifier's reason, what the next push would do about them, and any
-pack an index names that the backend does not list. It writes nothing, and it
+unindexed packs by id prefix and size, how many of those are torn debris and how
+many are stranded content (each with their own byte totals), how many are
+unknown with the verifier's reason, what the next push would do about them, and
+any pack an index names that the backend does not list. It writes nothing, and it
 appears in no schedule, no `push`, no `run-once` and no browser host.
+
+**Torn debris is a known state, not an incomplete read (ISSUE-006 step A).**
+An unindexed candidate whose header cannot even be read — too short to hold
+one, a length field describing a header the file cannot hold, or a header that
+will not decrypt — is the shape an interrupted push's half-written pack takes,
+and it is classified by the one function every scanning reader shares
+(`crates/chat-stasher/src/debris.rs`: `mirror sync`, `verify`, `doctor` and
+this command all call it, and all of them print the one sentence
+"An interrupted push left a partial file. It belongs to no backup and can be
+ignored."). Torn candidates make the survey neither incomplete nor a failure:
+the exit stays `0` when everything else read, because being debris is an
+answer. What stays `unknown` is the pack whose header reads but whose bytes
+do not verify, and the pack the backend would not serve — those keep the
+whole-survey `3`. The earliest-seen time of any candidate is reported as
+unknown: the backend interface carries no modification time, and no output
+invents a clock.
 
 **Deletion is refused, and the refusal names what is missing.** `--apply` exits `3`
 and prints the three capabilities a safe delete would need:
@@ -241,15 +262,19 @@ The policy boundary is the fourth reason and the oldest — `append_only:true` i
 left on, and disabling it to call rustic's broad `prune` would let that command
 rewrite indexes and repack *indexed* data, which is not what this command is for.
 
-**An unreadable pack is unknown, and it makes the whole survey incomplete.** A pack
-whose bytes do not read back as the id it is stored under is reported `unknown`
-with the verifier's reason, never as empty and never as zero, and the command exits
-`3` — the same third state `CLAUDE.md` keeps for "did not finish reading". An index
+**An unreadable pack is unknown, and it makes the whole survey incomplete —
+except when it is classified as debris.** A pack whose header reads but whose
+bytes do not read back as the id it is stored under is reported `unknown`
+with the verifier's reason, never as empty and never as zero, and the command
+exits `3` — the same third state `CLAUDE.md` keeps for "did not finish
+reading". A torn candidate is not that case (see above): it is a
+classification, and a survey that classified every pack is complete. An index
 that names a pack the backend does not list is a contradiction rather than an
-unknown: if every pack was readable, the finished survey exits `1`; if any pack is
-unknown too, incompleteness takes precedence and the exit is `3`. A run that read
-every pack, found no unindexed candidate, and found no contradiction exits `0`, and
-that zero is a measurement made after a complete survey.
+unknown: if every pack was readable, the finished survey exits `1`; if any
+pack is unknown too, incompleteness takes precedence and the exit is `3`. A
+run that read every pack, found no unindexed candidate, and found no
+contradiction exits `0`, and that zero is a measurement made after a complete
+survey.
 
 ## What pins it
 
@@ -283,13 +308,31 @@ them.
 
 `crates/chat-stasher/tests/w250_prune_orphans_test.rs` carries the read-only
 report's tests: an empty repository, a healthy one, stranded packs reported
-verified and adoptable, a damaged orphan reported unknown with its reason and exit
-`3`, `--apply` refused and refused *before* the destination is dialled (proved by
-pointing it at a path that is not a repository), the `--json` document's full ids,
-and a destination named in the config reaching the same repository `--repo` does.
-Every mode also compares the repository tree — every file's contents hashed, not
-just its name — before and after, because "the survey writes nothing" is the claim
-the whole command rests on.
+stranded and adoptable, a torn candidate reported as debris (not unknown, not
+a failure), a damaged orphan reported unknown with its reason and exit
+`3`, `--apply` refused and refused *before* the destination is dialled (proved
+by pointing it at a path that is not a repository), the `--json` document's
+full ids, and a destination named in the config reaching the same repository
+`--repo` does. Every mode also compares the repository tree — every file's
+contents hashed, not just its name — before and after, because "the survey
+writes nothing" is the claim the whole command rests on.
+
+**The torn classification's fixtures**
+(`crates/chat-stasher/tests/w1040_torn_debris_test.rs`, ISSUE-006 step A)
+pin the behaviour every scanning reader owes the debris: with one
+unreferenced torn pack in the repository, `mirror sync`, `status`, `doctor`,
+`verify`, `read` and `export` all exit `0`, the torn pack never enters the
+mirror (no copy, no torn-write temp), `status` counts exactly it as torn, no
+user-facing string about the archive calls it corrupt, and `prune-orphans`
+carries torn and stranded as separate counts with byte totals and an honest
+unknown earliest-seen time. Two controls pin the boundary: the same bad bytes
+under a name an index file lists still fail `mirror sync` with exit `1`, and
+a complete unindexed pack still counts as stranded, adoptable, never torn.
+The adopting open's own refusal granularity is deliberately unchanged by
+step A: a torn candidate still refuses the whole set (the all-or-nothing
+behaviour above), because the mirror — not the adopting open — is the reader
+that skips debris; the open only classifies when it verifies, and a pack that
+cannot be verified is still not adopted.
 
 **The backend family a destination actually uses.** The tests above run on
 `rustic_backend`'s `LocalBackend`, which writes a pack to `data/<xx>/<id>-tmp-`
@@ -304,7 +347,7 @@ injected into that same window — where nothing may be adopted a second time an
 no content may be uploaded again.
 
 **The window is a fixture, not a race.** `CHAT_STASHER_TEST_HOLD_OPEN_AFTER_SURVEY`
-parks an open between those two listings (`crates/chat-stasher/src/orphans.rs:358-387`),
+parks an open between those two listings (`crates/chat-stasher/src/orphans.rs:362-391`),
 which is how the injected-index and injected-pack tests put something there at
 all: without it, a test can only inject on a timer and assert the properties that
 hold whichever phase saw the file. The variable is read on every open and does

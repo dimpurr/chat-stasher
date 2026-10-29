@@ -406,6 +406,36 @@ under its own heading below.
 
 #### Changed
 
+- **Interrupted-push debris is classified, skipped and worded as debris, never
+  as corruption (ISSUE-006 step A).** A push can be interrupted at any moment,
+  and can leave a half-written pack under its final name — a file no index
+  names, whose own length field describes a header it cannot hold. Before this
+  change the first `mirror sync` over such bytes stopped dead with
+  `exit_code=1 — the source proved corrupt`, reading exactly like a damaged
+  backup; a `prune-orphans` survey counted the debris as an unknown and exited
+  `3` on every run, forever. One classification function
+  (`crates/chat-stasher/src/debris.rs`), shared by `mirror`, `prune-orphans`,
+  `doctor` and `verify`, now decides what a flagged pack is: **torn** — no
+  index names it and it cannot be read as a pack — is debris from the
+  interrupted push itself. `mirror sync` skips it (a reminder with the
+  counts beside the round's own result, exit `0`, and no copy of it ever
+  enters the mirror), `status` and `doctor`'s mirror rows carry the count,
+  `doctor` reports the destination's torn and stranded counts and byte totals
+  separately, and `verify` prints a reminder that never touches its verdict.
+  The same sentence appears on every surface:
+  *An interrupted push left a partial file. It belongs to no backup and can be
+  ignored.* — and no output about the archive calls the debris corrupt.
+  Complete unindexed packs keep today's behaviour exactly: they stay
+  **stranded** and adoptable, `prune-orphans` reports torn and stranded as
+  separate counts, each with its own byte total, and the earliest-seen time is
+  stated as unknown (the backend interface carries no modification time — no
+  field invents a clock). The fail-closed rule holds: an index that names the
+  bad bytes still exits `1` with the same sentence as before, index files that
+  cannot be read classify nothing, and a pack that is neither torn nor
+  verifiable stays `unknown` and still makes the `prune-orphans` survey
+  incomplete. The adopt-on-open's all-or-nothing refusal is deliberately
+  unchanged — the mirror is the reader that skips debris. New user-facing
+  page: [docs/use-cases/interrupted-push.md](docs/use-cases/interrupted-push.md).
 - **Snapshot sources write per record, and their readback assembles the source's
   final state (ADR-061, SG-3; opencode first).** A changed opencode session no
   longer re-stores the whole session as a new full-snapshot line on every pass:

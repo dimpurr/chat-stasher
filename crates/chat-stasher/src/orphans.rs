@@ -328,7 +328,7 @@ fn verify_unindexed(
     backends: &RepositoryBackends,
     unindexed: &[(String, u64)],
     mk: &MasterKey,
-) -> Result<Vec<IndexPack>, String> {
+) -> Result<Vec<IndexPack>, crate::packcheck::PackError> {
     verify_candidates(backends, unindexed, mk)
         .into_iter()
         .collect()
@@ -341,13 +341,17 @@ fn verify_unindexed(
 /// refuses the whole adoption, so it stops there. A read-only report needs the
 /// other granularity — which packs verified, which did not, and the reason for
 /// each — so `prune-orphans` calls this. The checks are the same either way;
-/// `crate::packcheck::verify_pack` holds them.
+/// `crate::packcheck::verify_pack` holds them. The error is
+/// [`crate::packcheck::PackError`] so the caller can tell the two shapes of
+/// refusal apart: a pack whose header cannot be read at all (unindexed ⇒
+/// debris from an interrupted push, `crate::debris`) and every other refusal,
+/// which stays unknown.
 #[must_use]
 pub fn verify_candidates(
     backends: &RepositoryBackends,
     unindexed: &[(String, u64)],
     mk: &MasterKey,
-) -> Vec<Result<IndexPack, String>> {
+) -> Vec<Result<IndexPack, crate::packcheck::PackError>> {
     let be = backends.repository();
     unindexed
         .iter()
@@ -498,7 +502,7 @@ pub fn index_adopting<S: Open>(
     // second listing would otherwise enter the dedup index unread.
     let verified = match verify_unindexed(backends, &report.unindexed, mk) {
         Ok(verified) => verified,
-        Err(why) => return refused(repo, report, why),
+        Err(why) => return refused(repo, report, why.to_string()),
     };
 
     // Recheck for an index file that arrived after the first survey, then pin

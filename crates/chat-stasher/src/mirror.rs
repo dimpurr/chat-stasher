@@ -50,9 +50,9 @@
 //! this module's outputs.
 
 use crate::store::{BackupStore, StoreConfig};
-use crate::{config::Config, mirrorstate, orphans};
+use crate::{config::Config, debris, mirrorstate, orphans, packcheck};
 use anyhow::Context;
-use rustic_core::repofile::MasterKey;
+use rustic_core::repofile::{IndexFile, MasterKey};
 use rustic_core::{Credentials, FileType, Id, OpenStatus, ReadBackend, Repository};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -627,6 +627,16 @@ pub struct SyncReport {
     /// Their bytes — the `X` of `doctor`'s reclaimable line. `None`
     /// exactly when [`Self::orphan_files`] is.
     pub orphan_bytes: Option<u64>,
+    /// Remote files this round classified as torn debris from an interrupted
+    /// push and therefore never copied (ISSUE-006 step A): each one is a pack
+    /// that failed its own-name hash check twice, that no index file in the
+    /// verified copy names, and that cannot be read as a pack. The counts ride
+    /// every surface the round reports through — the result lines, the
+    /// progress record, `status`'s and `doctor`'s mirror rows — always beside
+    /// [`crate::debris::INTERRUPTED_PUSH_SENTENCE`], never as a failure.
+    pub torn_files: u64,
+    /// Their bytes, from this round's listing.
+    pub torn_bytes: u64,
 }
 
 /// Everything one sync round needs. `master_key` is the destination's own
@@ -862,7 +872,7 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
         ));
     }
 
-    // ---- Copy, ≤2 in flight ----
+    // ---- Copy, ≤2 in flight, in two phases ----
     // Small metadata first: config, keys, then index and snapshots, packs
     // last by ascending size — the ordering makes a first fill useful as
     // early as possible (an index and snapshot set is the minimum a mirror
@@ -887,32 +897,84 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
         )
     });
 
+    // The torn-debris classifier's once-per-round survey reads the mirror's
+    // own index copies, so no pack may be classified until the round's index
+    // set is complete (W1040f). Run as one queue with two workers, the sort
+    // above is only a tendency: a pack can reach its second hash failure
+    // while another worker still holds an index file mid-copy, and the
+    // survey would judge that pack against a set that does not name it yet —
+    // misreading corruption as debris, and caching the incomplete set for
+    // every later ask of the round — while on a first fill a pack reached
+    // before the config lands turns a merely unreadable survey into the
+    // round's hard failure. So the round copies in two phases: every config,
+    // key and index file the listing holds copies to completion first, and
+    // only then do the snapshots and packs run, with classification racing
+    // nothing.
+    let meta_len = queue.partition_point(|file| match file.kind {
+        FileKind::Config | FileKind::Key | FileKind::Index => true,
+        FileKind::Snapshot | FileKind::Pack => false,
+    });
+    let (meta_queue, tail_queue) = queue.split_at(meta_len);
+
     let counters = Counters::default();
     let stop = Mutex::new(None::<StopCause>);
-    std::thread::scope(|scope| {
-        for _ in 0..MIRROR_CONNECTIONS.min(queue.len()) {
-            scope.spawn(|| {
-                worker(&mirror_root, &be, &queue, req.round_ends, &counters, &stop);
-            });
-        }
-    });
+    // The torn-debris classifier (ISSUE-006 step A), shared by both workers
+    // of the tail phase: classifications happen only at a pack's twice-failed
+    // hash check, and the index-named set it needs is read lazily from the
+    // mirror's hash-verified index copies — one survey per round, however
+    // many packs end up debris, and never a per-pack backend read: the set
+    // is mirror-local. The phase barrier above is what makes the lazy read
+    // sound: once a worker can be holding a failing pack, every config, key
+    // and index file of the listing is on disk, so the mirror's index set is
+    // the listing's.
+    let classifier = CopyClassifier::new(&mirror_root, req.master_key);
+    copy_phase(
+        &mirror_root,
+        &be,
+        meta_queue,
+        req.round_ends,
+        &counters,
+        &stop,
+        &classifier,
+    );
+    if !stop_set(&stop) {
+        // reason: the claim counter indexes each phase's own queue slice, so
+        // the tail phase starts its claims at 0 again; the join inside
+        // `copy_phase` guarantees no worker still holds a claim when the
+        // counter rewinds.
+        counters.next.store(0, Ordering::SeqCst);
+        copy_phase(
+            &mirror_root,
+            &be,
+            tail_queue,
+            req.round_ends,
+            &counters,
+            &stop,
+            &classifier,
+        );
+    }
     let downloaded_files = counters.files.load(Ordering::SeqCst);
     let downloaded_bytes = counters.bytes.load(Ordering::SeqCst);
+    let torn_files = counters.torn.load(Ordering::SeqCst);
+    let torn_bytes = counters.torn_bytes.load(Ordering::SeqCst);
     let ended = stop.into_inner().ok().flatten();
-    let hard_report = |downloaded_files: u64, downloaded_bytes: u64| SyncReport {
-        mirror_of: req.settings.mirror_of.clone(),
-        remote_files: planned.len() as u64,
-        remote_total_bytes,
-        present_files,
-        present_bytes,
-        downloaded_files,
-        downloaded_bytes,
-        missing_bytes_remaining: missing_bytes.saturating_sub(downloaded_bytes),
-        snapshots_remote: snapshot_ids.len() as u64,
-        orphan_files,
-        orphan_bytes,
-        ..SyncReport::default()
-    };
+    let hard_report =
+        |downloaded_files: u64, downloaded_bytes: u64, torn_files, torn_bytes| SyncReport {
+            mirror_of: req.settings.mirror_of.clone(),
+            remote_files: planned.len() as u64,
+            remote_total_bytes,
+            present_files,
+            present_bytes,
+            downloaded_files,
+            downloaded_bytes,
+            missing_bytes_remaining: missing_bytes.saturating_sub(downloaded_bytes),
+            snapshots_remote: snapshot_ids.len() as u64,
+            orphan_files,
+            orphan_bytes,
+            torn_files,
+            torn_bytes,
+            ..SyncReport::default()
+        };
     match ended {
         Some(StopCause::Hard(failure)) => {
             // The one class that is not a pause (invariant 2, `CLAUDE.md`):
@@ -923,7 +985,7 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
             // error chain.
             write_progress(
                 req,
-                &hard_report(downloaded_files, downloaded_bytes),
+                &hard_report(downloaded_files, downloaded_bytes, torn_files, torn_bytes),
                 Err(failure.why.clone()),
             )?;
             return Err(anyhow::Error::new(failure.clone()));
@@ -931,21 +993,23 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
         Some(StopCause::Pause(end)) => {
             write_progress(
                 req,
-                &hard_report(downloaded_files, downloaded_bytes),
+                &hard_report(downloaded_files, downloaded_bytes, torn_files, torn_bytes),
                 Ok(ProgressOutcome::Stopped(&end)),
             )?;
             return Ok((
-                hard_report(downloaded_files, downloaded_bytes),
+                hard_report(downloaded_files, downloaded_bytes, torn_files, torn_bytes),
                 SyncOutcome::Stopped(end),
             ));
         }
         None => {}
     }
     anyhow::ensure!(
-        downloaded_files == queue.len() as u64,
-        "the copy loop ended without finishing or stopping; {} of {} missing files copied",
+        downloaded_files + torn_files == queue.len() as u64,
+        "the copy loop ended without finishing or stopping; {} of {} missing files copied \
+         ({} classified as torn debris and skipped)",
         downloaded_files,
-        queue.len()
+        queue.len(),
+        torn_files
     );
 
     // ---- Completed: closure and records ----
@@ -984,6 +1048,8 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
         covered_snapshots,
         orphan_files,
         orphan_bytes,
+        torn_files,
+        torn_bytes,
     };
     write_progress(req, &report, Ok(ProgressOutcome::Complete))?;
     Ok((report, SyncOutcome::Completed))
@@ -1095,6 +1161,192 @@ struct Counters {
     next: AtomicUsize,
     files: AtomicU64,
     bytes: AtomicU64,
+    /// Files this round classified as torn debris (ISSUE-006 step A) and
+    /// skipped, with their bytes in `torn_bytes` — counted beside the copied
+    /// totals so a "drained" round's missing-file ledger closes.
+    torn: AtomicU64,
+    torn_bytes: AtomicU64,
+}
+
+/// What a completed copy attempt of one queued file left behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Copied {
+    /// The file was hash-verified and written, and holds `u64` bytes.
+    Wrote(u64),
+    /// The file was classified as torn debris from an interrupted push and
+    /// skipped: it belongs to no backup, and no copy of it exists in the
+    /// mirror.
+    Torn,
+}
+
+/// The once-per-round classifier a copy worker consults at a pack's
+/// twice-failed hash check (ISSUE-006 step A).
+///
+/// One classification ([`crate::debris::classify_pack`]), answered from two
+/// facts this round already holds: whether any index file names the pack, and
+/// whether the bytes that just failed the hash check can be read as a pack. The
+/// index-named set comes from the mirror's **own, hash-verified** index
+/// copies, read locally, once per round, never re-fetched per failure. The
+/// round's phase barrier is what makes that read sound (W1040f): config, key
+/// and index files copy to completion before the first snapshot or pack is
+/// claimed, so by the time a worker can be holding a failing pack the mirror's
+/// index set *is* the remote listing's. Queue ordering alone could not say
+/// that — with two workers a pack could reach its second hash failure while
+/// another worker still held an index file mid-copy, and the survey judged it
+/// against a set that had not named it yet.
+struct CopyClassifier<'a> {
+    mirror_root: &'a Path,
+    master_key: &'a MasterKey,
+    /// The lazy survey, one of three states: not yet asked, the pack ids some
+    /// index file names, or a read that failed and is **not retried** inside
+    /// this round — the fail-closed answer every later ask returns, because
+    /// an index that cannot be read is not a per-pack event.
+    indexed_packs: Mutex<IndexedPacks>,
+}
+
+/// The three states of [`CopyClassifier`]'s one-per-round index survey.
+/// [`IndexedPacks::Failed`] carries no reason: the hard failure it causes is
+/// worded through the same [`HardFailure`] every unclassifiable pack takes, and
+/// a retry that might succeed would make two packs in one round take two
+/// different verdicts over the same index.
+#[derive(Default)]
+enum IndexedPacks {
+    #[default]
+    NotYet,
+    Ready(BTreeSet<String>),
+    Failed,
+}
+
+impl<'a> CopyClassifier<'a> {
+    fn new(mirror_root: &'a Path, master_key: &'a MasterKey) -> CopyClassifier<'a> {
+        CopyClassifier {
+            mirror_root,
+            master_key,
+            indexed_packs: Mutex::new(IndexedPacks::NotYet),
+        }
+    }
+
+    /// Every pack id some index file names, from the mirror's verified index
+    /// copies — or `None`, the fail-closed input
+    /// ([`debris::classify_pack`]): the mirror's index files could not be
+    /// read, so no pack in this round may be skipped as debris. Asked only
+    /// after the round's metadata phase has put every config, key and index
+    /// file the listing holds on disk, so the set it returns — and caches
+    /// for the whole round — is the round's complete one.
+    fn indexed_pack_names(&self) -> Option<BTreeSet<String>> {
+        // reason: a poisoned cache means a worker unwound through the guard
+        // mid-survey; None is the fail-closed verdict that keeps every ask
+        // honest instead of deadlocking the round.
+        let Ok(mut guard) = self.indexed_packs.lock() else {
+            return None;
+        };
+        match &*guard {
+            IndexedPacks::Ready(names) => Some(names.clone()),
+            IndexedPacks::Failed => None,
+            IndexedPacks::NotYet => {
+                match mirror_indexed_pack_names(self.mirror_root, self.master_key) {
+                    Ok(names) => {
+                        // reason: remembered under the guard and handed back
+                        // cloned, so the survey's one read is shared by both
+                        // workers and every later pack this round.
+                        *guard = IndexedPacks::Ready(names.clone());
+                        Some(names)
+                    }
+                    Err(_) => {
+                        *guard = IndexedPacks::Failed;
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    /// The verdict for a pack whose bytes failed the copy loop's own-name hash
+    /// check twice: `None` — torn debris, skip it — or the `HardFailure` the
+    /// round still is for anything else. `bytes` are the last read's own
+    /// failing bytes, so answering costs no further backend read.
+    fn classify(&self, file: &PlannedFile, bytes: &[u8]) -> Option<HardFailure> {
+        let indexed = self
+            .indexed_pack_names()
+            .map(|names| names.contains(&file.hex));
+        let check: Result<(), packcheck::PackError> =
+            match packcheck::probe_header_bytes(&file.hex, bytes, self.master_key) {
+                // A header that reads over bytes their own name disavows is not
+                // the shape an interrupted push leaves (a header is not a
+                // verification, `docs-dev/orphan-packs.md`), so fail closed
+                // rather than call it debris.
+                Ok(()) => Err(packcheck::PackError::Unusable {
+                    why: "its header reads while its bytes are not the content their own \
+                      name declares"
+                        .to_string(),
+                }),
+                Err(failure) => Err(failure),
+            };
+        // Borrowed for the shared classification, so nothing is cloned per
+        // failed pack; copying the error's few dozen bytes would be cheap
+        // but needless, and the borrowed shape keeps one calling convention.
+        let check = check.as_ref().map(|_| ());
+        match debris::classify_pack(indexed, &check) {
+            debris::PackClass::Torn { .. } => None,
+            // An index names these bytes, the index could not be read, or the
+            // pack is neither torn nor complete: the checked-and-failed class
+            // the round was before interrupted-push debris had a name — exit
+            // 1, today's wording, never skipped (ISSUE-006 fixture 2).
+            debris::PackClass::Corrupt { .. }
+            | debris::PackClass::FailClosed { .. }
+            | debris::PackClass::Stranded => Some(hard_source_corrupt(file)),
+        }
+    }
+}
+
+/// Read the mirror copy's index files and name every pack they mention. This is
+/// [`closure_snapshot_ids`]'s survey read applied to the pack set alone, through
+/// the same survey-level open (`open_mirror_for_survey`), because both ask the
+/// already-copied repository the same question over its own verified bytes.
+fn mirror_indexed_pack_names(
+    mirror_root: &Path,
+    master_key: &MasterKey,
+) -> anyhow::Result<BTreeSet<String>> {
+    let mirror_store = StoreConfig {
+        repo_root: mirror_root.to_string_lossy().into_owned(),
+        key_file: PathBuf::new(),
+        connections: 1,
+        options: BTreeMap::new(),
+        cache_dir: None,
+        no_cache: true,
+    };
+    let (backends, repo) = open_mirror_for_survey(&mirror_store, master_key)?;
+    let mut names = BTreeSet::new();
+    for file in repo
+        .stream_files::<IndexFile>()
+        .context("read the mirror's index files")?
+    {
+        let (_, index) = file.context("read one of the mirror's index files")?;
+        for pack in index.packs.iter().chain(index.packs_to_delete.iter()) {
+            names.insert(pack.id.to_hex().to_string());
+        }
+    }
+    // The backend handle keeps the survey-level repository alive through the
+    // stream; both drop here, after the survey, holding no pack bytes.
+    drop(backends);
+    Ok(names)
+}
+
+/// The hard failure a pack that is not debris ends the round with: today's
+/// `SourceCorrupt` class and wording, word for word.
+fn hard_source_corrupt(file: &PlannedFile) -> HardFailure {
+    let short = file.hex.get(..12).unwrap_or(&file.hex);
+    HardFailure {
+        class: HardClass::SourceCorrupt,
+        why: format!(
+            "file {}/{} hashed against its own name twice and failed both times; \
+             the destination no longer holds the bytes its listing claims — \
+             this is source corruption, not a transfer a later round can heal",
+            file.kind.name(),
+            short
+        ),
+        detail: None,
+    }
 }
 
 /// What ended the round: a pause ([`RoundEnd`], resumable by design) or a
@@ -1125,10 +1377,46 @@ fn set_stop_once(stop: &Mutex<Option<StopCause>>, end: StopCause) {
     }
 }
 
+/// One phase of the round's copy: at most [`MIRROR_CONNECTIONS`] workers
+/// over one contiguous slice of the queue, joined before the caller
+/// proceeds. The two phases exist for the classifier's correctness (see
+/// [`sync_once`]'s phase barrier): config, keys and index files copy to
+/// completion in the first phase, snapshots and packs run in the second —
+/// the join between them is the barrier that guarantees no pack is ever
+/// classified against a half-copied index set.
+fn copy_phase(
+    mirror_root: &Path,
+    be: &std::sync::Arc<dyn rustic_core::WriteBackend>,
+    queue: &[&PlannedFile],
+    round_ends: &dyn RoundEnds,
+    counters: &Counters,
+    stop: &Mutex<Option<StopCause>>,
+    classifier: &CopyClassifier<'_>,
+) {
+    std::thread::scope(|scope| {
+        for _ in 0..MIRROR_CONNECTIONS.min(queue.len()) {
+            scope.spawn(|| {
+                worker(
+                    mirror_root,
+                    be,
+                    queue,
+                    round_ends,
+                    counters,
+                    stop,
+                    classifier,
+                );
+            });
+        }
+    });
+}
+
 /// One copy worker. Runs until the queue is drained or the round is ordered
 /// to stop; every finished file is already on disk, whole and renamed,
 /// when the worker exits — a stopped round leaves no "half file" state a
 /// resume has to trust, so the next round can simply list and diff again.
+/// A file the classifier holds to be torn debris is left where it is (the
+/// remote) and counted as skipped: the next round re-classifies it from the
+/// bytes, and no copy of it ever exists in the mirror.
 fn worker(
     mirror_root: &Path,
     be: &std::sync::Arc<dyn rustic_core::WriteBackend>,
@@ -1136,6 +1424,7 @@ fn worker(
     round_ends: &dyn RoundEnds,
     counters: &Counters,
     stop: &Mutex<Option<StopCause>>,
+    classifier: &CopyClassifier<'_>,
 ) {
     loop {
         // Claim the next file, then decide about it: the stop-rule needs the
@@ -1153,10 +1442,14 @@ fn worker(
             set_stop_once(stop, StopCause::Pause(end));
             return;
         }
-        match copy_one(mirror_root, be, file) {
-            Ok(bytes) => {
+        match copy_one(mirror_root, be, file, classifier) {
+            Ok(Copied::Wrote(bytes)) => {
                 counters.files.fetch_add(1, Ordering::SeqCst);
                 counters.bytes.fetch_add(bytes, Ordering::SeqCst);
+            }
+            Ok(Copied::Torn) => {
+                counters.torn.fetch_add(1, Ordering::SeqCst);
+                counters.torn_bytes.fetch_add(file.size, Ordering::SeqCst);
             }
             Err(end) => {
                 counters.next.fetch_sub(1, Ordering::SeqCst);
@@ -1171,12 +1464,16 @@ fn worker(
 /// bytes against its own name, write atomically (temp + rename). A hash
 /// mismatch is re-downloaded once, exactly once — a second mismatch is not
 /// a transfer problem but the source itself no longer holding the bytes its
-/// own listing claims, and that is reported as the hard error it is.
+/// own listing claims. For a *pack*, that second mismatch is then classified
+/// (ISSUE-006 step A): a pack no index file names and that cannot be read as
+/// a pack is debris from an interrupted push — skipped, never copied, never a
+/// failure — while anything else stays the hard error it was.
 fn copy_one(
     mirror_root: &Path,
     be: &std::sync::Arc<dyn rustic_core::WriteBackend>,
     file: &PlannedFile,
-) -> Result<u64, StopCause> {
+    classifier: &CopyClassifier<'_>,
+) -> Result<Copied, StopCause> {
     let label = if file.kind == FileKind::Config {
         "config".to_string()
     } else {
@@ -1249,21 +1546,21 @@ fn copy_one(
                     detail: Some(format!("{e:#}")),
                 })
             })?;
-            return Ok(bytes.len() as u64);
+            return Ok(Copied::Wrote(bytes.len() as u64));
         }
         if attempt + 1 == attempts {
-            let short = file.hex.get(..12).unwrap_or(&file.hex);
-            return Err(StopCause::Hard(HardFailure {
-                class: HardClass::SourceCorrupt,
-                why: format!(
-                    "file {}/{} hashed against its own name twice and failed both times; \
-                     the destination no longer holds the bytes its listing claims — \
-                     this is source corruption, not a transfer a later round can heal",
-                    file.kind.name(),
-                    short
-                ),
-                detail: None,
-            }));
+            // A pack reaches here with the bytes that just failed the hash
+            // check twice in hand, so the classification costs no further
+            // read. Only packs classify: an interrupted push leaves the
+            // debris shape in `data/`, and the sentence the other surfaces
+            // share is this one's to reuse too.
+            if file.kind == FileKind::Pack {
+                if let Some(failure) = classifier.classify(file, &bytes) {
+                    return Err(StopCause::Hard(failure));
+                }
+                return Ok(Copied::Torn);
+            }
+            return Err(StopCause::Hard(hard_source_corrupt(file)));
         }
     }
     Err(StopCause::Hard(HardFailure {
@@ -1488,6 +1785,19 @@ pub struct MirrorProgress {
     /// [`Self::orphan_files`]'s bytes; `None` exactly when that is.
     #[serde(default)]
     pub orphan_bytes: Option<u64>,
+    /// Remote files the round that wrote this record classified as **torn
+    /// debris from an interrupted push** (ISSUE-006 step A) and never copied:
+    /// debris is never deleted and never mirrored, so it re-appears in every
+    /// listing until the pushed write path (`data/` temp-then-rename, ADR-063)
+    /// or a deliberate remote cleanup removes it. Every surface that words
+    /// these counts carries [`crate::debris::INTERRUPTED_PUSH_SENTENCE`]
+    /// beside them — they are never a failure (`serde(default)`: the field is
+    /// additive, so records written before it existed still parse).
+    #[serde(default)]
+    pub torn_files: u64,
+    /// [`Self::torn_files`]'s bytes, from the round's own listing.
+    #[serde(default)]
+    pub torn_bytes: u64,
 }
 
 impl MirrorProgress {
@@ -1583,6 +1893,8 @@ fn write_progress(
         mirror_files: report.present_files + report.downloaded_files,
         orphan_files: report.orphan_files,
         orphan_bytes: report.orphan_bytes,
+        torn_files: report.torn_files,
+        torn_bytes: report.torn_bytes,
     };
     fs::create_dir_all(req.state_dir)?;
     let path = mirror_progress_path(req.state_dir);
@@ -2206,6 +2518,28 @@ pub fn mirror_status(
             });
         }
     }
+    // Torn debris (ISSUE-006 step A): what the last round's own record says it
+    // skipped, read from the same progress record every other row in this
+    // ladder reads, so the count cannot disagree with the round that measured
+    // it. Info, never yellow: debris is a fact about the source repository,
+    // not a degradation of the copy — and the one sentence
+    // ([`crate::debris::INTERRUPTED_PUSH_SENTENCE`]) is the same one
+    // `mirror sync` prints and `doctor` shows.
+    if let MirrorProgressRead::Present(progress) = &progress {
+        if progress_names_this && progress.torn_files > 0 {
+            rows.push(MirrorRow {
+                severity: MirrorRowSeverity::Info,
+                sentence: format!(
+                    "[mirror] {} torn file(s) ({}) sit in the source repository and are never \
+                     copied into the local copy of `{}` — {}",
+                    progress.torn_files,
+                    crate::destdiag::fmt_bytes(progress.torn_bytes),
+                    settings.mirror_of,
+                    crate::debris::INTERRUPTED_PUSH_SENTENCE,
+                ),
+            });
+        }
+    }
     // rev0 ① / ADR-062 C2's other half: "reclaim holds sessions back"
     // carries its count, read in *every* state that words a hold-back
     // (rev2 ③: the gone-copy and not-declared returns exit before the
@@ -2448,6 +2782,11 @@ pub fn status_json(
                 "mirror_bytes": progress.mirror_bytes,
                 "remote_total_bytes": progress.remote_total_bytes,
                 "outcome": progress.outcome,
+                // Torn debris the round skipped (ISSUE-006 step A), straight
+                // from the record: zero is a measured zero, and an unknown
+                // progress record already answers `kind: unknown` above.
+                "torn_files": progress.torn_files,
+                "torn_bytes": progress.torn_bytes,
             }),
             MirrorProgressRead::Unreadable(why) => serde_json::json!({
                 "kind": "unknown",
@@ -2647,6 +2986,8 @@ mod tests {
             mirror_files: 0,
             orphan_files: None,
             orphan_bytes: None,
+            torn_files: 0,
+            torn_bytes: 0,
         };
         assert_eq!(progress.percent(), 100);
         let partial = MirrorProgress {
@@ -2687,6 +3028,8 @@ mod tests {
             mirror_files: 3,
             orphan_files: Some(0),
             orphan_bytes: Some(0),
+            torn_files: 0,
+            torn_bytes: 0,
         };
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(
@@ -2761,7 +3104,13 @@ mod tests {
             hex: hex.clone(),
             size: MAX_WHOLE_FILE_BYTES + 1,
         };
-        match copy_one(dir.path().join("mirror").as_path(), &be, &huge) {
+        // The classifier is never consulted for an over-bound listing — the
+        // refusal fires before the read — so its inputs here are dead weight
+        // the signature demands.
+        let mirror_path = dir.path().join("mirror");
+        let key = MasterKey::new();
+        let classifier = CopyClassifier::new(&mirror_path, &key);
+        match copy_one(&mirror_path, &be, &huge, &classifier) {
             Err(StopCause::Hard(failure)) => {
                 assert_eq!(failure.class, HardClass::OversizeListing);
                 assert!(failure.why.contains("listed at"), "{}", failure.why);

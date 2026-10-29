@@ -29,7 +29,7 @@
 
 use anyhow::Context;
 use rustic_core::repofile::MasterKey;
-use rustic_core::{CheckOptions, Credentials, Repository};
+use rustic_core::{CheckOptions, Credentials, Open, Repository};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -51,6 +51,13 @@ pub struct CheckSummary {
     pub errors: usize,
     /// `CheckErrorLevel::Warn` findings (strange, but integrity not affected).
     pub warns: usize,
+    /// Torn debris from an interrupted push, counted by the shared
+    /// classification (ISSUE-006 step A): packs no index file names whose
+    /// bytes cannot be read as a pack. A reminder on the report, never a
+    /// finding — these bytes never counted into the three fields above.
+    pub torn_packs: usize,
+    /// Their bytes, from the backend's own listing.
+    pub torn_bytes: u64,
     pub duration: Duration,
     /// One line per finding, ready to print.
     pub details: Vec<String>,
@@ -335,6 +342,13 @@ impl BackupStore {
             .open(&Credentials::Masterkey(mk.clone()))
             .context("open repository for verify")?;
         self.require_sound_packs(&repo)?;
+        // Torn debris (ISSUE-006 step A), classified before the check so its
+        // own sentence can sit beside the findings without being one: the
+        // classification runs only over packs no index file names, and it
+        // fails closed with the read — a survey that cannot read the index
+        // files answers the whole level with "did not finish", never with
+        // torn numbers.
+        let (torn_packs, torn_bytes) = count_torn_debris(&repo, &backends, mk)?;
         let opts = CheckOptions::default().read_data(read_data).clone();
         let results = repo.check(opts).context("run rustic check")?;
 
@@ -354,6 +368,8 @@ impl BackupStore {
             findings,
             errors,
             warns,
+            torn_packs,
+            torn_bytes,
             duration: start.elapsed(),
             details,
         })
@@ -464,6 +480,51 @@ impl BackupStore {
             duration: start.elapsed(),
         })
     }
+}
+
+/// Count the torn debris among the packs no index file names (ISSUE-006 step
+/// A), through the one classification every repository-scanning reader shares.
+///
+/// The probe reads only the pack's last four bytes and its header ciphertext —
+/// the two small reads that fail fast on interrupted-push debris — so a healthy
+/// repository (nothing unindexed) pays one listing and one index pass, the same
+/// survey [`crate::orphans::survey`] performs for every open. Everything that
+/// is *not* torn is left to the verdicts that already own it: rustic's own
+/// `check` warns `pack … not referenced in index` for the unindexed set, and
+/// `prune-orphans` carries the full stranded/unknown report.
+///
+/// # Errors
+///
+/// If the backend cannot be listed or an index file cannot be decrypted — the
+/// fail-closed rule: with the index unreadable, torn cannot be told from
+/// named-by-index, and this scan answers nothing rather than guess.
+fn count_torn_debris<S: Open>(
+    repo: &Repository<S>,
+    backends: &rustic_core::RepositoryBackends,
+    mk: &MasterKey,
+) -> anyhow::Result<(usize, u64)> {
+    let report = crate::orphans::survey(repo, backends)?;
+    let mut torn_packs = 0_usize;
+    let mut torn_bytes = 0_u64;
+    for (hex, listed) in &report.unindexed {
+        // Only the header probe is wanted here: it decides torn, and anything
+        // it cannot say (a header that reads, a range the backend will not
+        // serve) stays with the verdicts named above.
+        let probe = crate::packcheck::probe_header(&backends.repository(), hex, *listed, mk);
+        // The verdict is the shared classification's, never a private match
+        // here (W1040f): the survey itself established that no index file
+        // names this candidate, and the probe's own error is borrowed for
+        // the call — nothing new is read past the two probe reads.
+        let check = probe.as_ref().map(|_| ());
+        if matches!(
+            crate::debris::classify_pack(Some(false), &check),
+            crate::debris::PackClass::Torn { .. }
+        ) {
+            torn_packs += 1;
+            torn_bytes += *listed;
+        }
+    }
+    Ok((torn_packs, torn_bytes))
 }
 
 /// Build the L3 expected manifest from the sealed staging tree:
