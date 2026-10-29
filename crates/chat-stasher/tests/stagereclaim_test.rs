@@ -1083,13 +1083,25 @@ fn reclaim_stage_unreadable_body_aborts_without_deleting_and_collect_first_prote
     )
     .unwrap();
 
-    // Stage corrupt opencode session (invalid JSON shard body)
+    // Stage a snapshot-records session whose body cannot fold: the first
+    // stored line is a real session record (so the body's family is
+    // SnapshotRecords and it owes an increment map before reclaim), and a
+    // garbage second line breaks the fold. A whole-content body — an
+    // inbox bundle — is the other family and has its own test: it must
+    // not abort the run.
+    let record_corrupt = String::from_utf8(chat_stasher::opencode_records::record_line(
+        "ses_corrupt",
+        chat_stasher::opencode_records::RecordKind::Message,
+        "ses_corrupt-m1",
+        &serde_json::json!({"role": "user", "text": "corrupt"}),
+    ))
+    .unwrap();
     store::write_sealed_shard(
         StageWriter::Collect,
         &stage,
         machine,
         session_corrupt,
-        &["this is not valid json\n".to_string()],
+        &[record_corrupt, "this is not valid json\n".to_string()],
     )
     .unwrap();
 
@@ -1117,6 +1129,107 @@ fn reclaim_stage_unreadable_body_aborts_without_deleting_and_collect_first_prote
         shard_count(&stage, machine, session_corrupt),
         1,
         "unfoldable candidate body must be kept"
+    );
+}
+
+/// A whole-content body under an `opencode.*` id — an `inbox@3` capture
+/// bundle sealed byte-verbatim (W213: the bundle is the identity, so it has
+/// no increment map to fold) — must not abort the reclaim: before the family
+/// gate, `fold_opencode_staged_map` errored on its foreign schema and the
+/// stage could never reclaim, siblings included. The run exempts the
+/// session with a recorded reason and still synthesizes the missing meta
+/// map for a snapshot sibling.
+#[test]
+fn inbox_bundle_is_exempt_from_map_synthesis_but_still_reclaims_alongside_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine = "m";
+    let session_inbox = "opencode.m.inbox1";
+    let session_valid = "opencode.m.ses_valid2";
+    let stage = dir.path().join("stage");
+    let cfg = store_config(dir.path(), "repo-a");
+
+    // The inbox capture bundle, shaped like the seal path writes it: the
+    // first stored line names the inbox schema, and the bytes are the
+    // bundle this session's identity is.
+    let bundle = serde_json::json!({
+        "schema": chat_stasher::inbox::SEALED_SCHEMA_V3,
+        "kind": "web-capture",
+        "sessionId": "cap-1",
+        "raw": {"text": "opaque-capture-bytes", "bytes": 20},
+    })
+    .to_string();
+    store::write_sealed_shard(
+        StageWriter::Collect,
+        &stage,
+        machine,
+        session_inbox,
+        &[bundle],
+    )
+    .unwrap();
+
+    // A snapshot-records sibling whose meta increment map does not exist
+    // yet: the pre-pass must still fold and persist one before deleting.
+    let record = String::from_utf8(chat_stasher::opencode_records::record_line(
+        "ses_valid2",
+        chat_stasher::opencode_records::RecordKind::Message,
+        "ses_valid2-m1",
+        &serde_json::json!({"role": "user", "text": "valid"}),
+    ))
+    .unwrap();
+    store::write_sealed_shard(
+        StageWriter::Collect,
+        &stage,
+        machine,
+        session_valid,
+        &[record],
+    )
+    .unwrap();
+
+    let _mk = init_and_push(&cfg, machine, &stage);
+    let dests = vec![named(dir.path(), "repo-a", DestinationHealth::Healthy)];
+
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
+    assert!(
+        !report.blocked(),
+        "an inbox bundle must not block the reclaim: {:?}",
+        report.blocked
+    );
+    assert_eq!(report.reclaimed.len(), 2, "both sessions must reclaim");
+    assert_eq!(
+        shard_count(&stage, machine, session_inbox),
+        0,
+        "the inbox body must be deleted, not held hostage"
+    );
+    assert_eq!(
+        shard_count(&stage, machine, session_valid),
+        0,
+        "the snapshot sibling must reclaim too"
+    );
+    // The exemption is recorded with its reason, never decided silently.
+    assert_eq!(
+        report
+            .map_omitted
+            .iter()
+            .map(|omitted| omitted.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![session_inbox],
+        "the whole-content session is the one recorded as owing no map"
+    );
+    assert!(
+        chat_stasher::collect::opencode_record_map_meta_path(&stage, machine, session_valid)
+            .unwrap()
+            .exists(),
+        "the snapshot sibling must still get its increment map before the delete"
+    );
+    assert!(
+        !chat_stasher::collect::opencode_record_map_meta_path(&stage, machine, session_inbox)
+            .unwrap()
+            .exists(),
+        "an inbox bundle has no increment map to synthesize"
+    );
+    assert!(
+        stored_summary(&stage, machine, session_inbox).is_some(),
+        "the reclaimed inbox session keeps its summary row"
     );
 }
 

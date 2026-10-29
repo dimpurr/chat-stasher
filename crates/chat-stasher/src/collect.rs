@@ -720,7 +720,9 @@ fn stage_prefix_entry(
     }
     let sealed_shards = stage_sealed_shards(stage, machine, &record.id)?;
     if sealed_shards.is_empty() {
-        // Note (L3): A cursor-less plain-JSONL / file source post-reclaim has empty staged shards and returns None, re-exporting in full.
+        // A reclaimed session's shards are gone and a just-scanned one has
+        // none yet — either way there is no stage prefix to reuse, so the
+        // caller reads its source in full.
         return Ok(None);
     }
 
@@ -3630,7 +3632,9 @@ pub fn load_opencode_record_map(
 ) -> Option<BTreeMap<String, String>> {
     let bytes = fs::read(path).ok()?;
     let state: OpenCodeRecordMapState = serde_json::from_slice(&bytes).ok()?;
-    // Note (tautology): File path is sha256_hex(session_id), but verify state.session_id as defense-in-depth against corrupt files.
+    // The path is derived from the session id, but a corrupt or swapped
+    // file must fail on its own recorded identity, so the value inside is
+    // checked too.
     if state.version != OPENCODE_RECORD_MAP_VERSION || state.session_id != expected_session_id {
         return None;
     }
@@ -3638,6 +3642,16 @@ pub fn load_opencode_record_map(
 }
 
 /// Load from `<stage>/meta/<machine>` first, then `state_dir` (SG-2b).
+///
+/// Deliberately asymmetric with the writers. A meta path this stage cannot
+/// derive answers `None` here: the map is unknown, and the caller
+/// (the increment-map reconcile) degrades to rebuilding it from the staged
+/// records — the same recovery every unreadable map takes. The write path
+/// (`save_opencode_record_map_both`) and the reclaim pre-pass propagate
+/// the same derivation error instead: there, a location that cannot even
+/// be named must never silently pass as saved. Reading is the fast path,
+/// so its failures degrade to a rebuild; writing is the durable claim, so
+/// its failures are loud.
 pub(crate) fn load_opencode_record_map_any(
     stage: &Path,
     machine: &str,
@@ -3820,7 +3834,9 @@ fn process_opencode(
             None
         }
     } else {
-        fold_opencode_staged_map(stage, machine, &record.id).ok().flatten()
+        fold_opencode_staged_map(stage, machine, &record.id)
+            .ok()
+            .flatten()
     };
 
     let outcome = |lines_written: usize, shard: Option<String>, reset: bool| CollectOutcome {
@@ -4092,7 +4108,9 @@ fn reconcile_opencode_increment_map(
     }
     // Rebuild from the staged records (D2: "the map is rebuilt from the
     // staged records on mismatch").
-    let records = fold_opencode_staged_map(stage, machine, session_id).ok().flatten()?;
+    let records = fold_opencode_staged_map(stage, machine, session_id)
+        .ok()
+        .flatten()?;
     if opencode_map_matches_entry(&records, entry) {
         // Restored; persist so the next pass takes the fast path. A failed
         // persist only costs the same rebuild on the next pass — the

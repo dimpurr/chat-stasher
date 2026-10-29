@@ -43,7 +43,7 @@ and the complete JSONL lines — the ones terminated by a newline — are
 preserved in the raw archive; a trailing line still missing its final newline
 is held as in progress rather than sealed, and the first pass after the source
 gains that newline re-decodes and seals that tail in full
-(`crates/chat-stasher/src/collect.rs:4432-4447`, `:4548-4562`, `:25-34`). The
+(`crates/chat-stasher/src/collect.rs:4446-4461`, `:4562-4576`, `:25-34`). The
 OpenClaw normalizer does not interpret that native line format, so those lines
 remain unrendered.
 

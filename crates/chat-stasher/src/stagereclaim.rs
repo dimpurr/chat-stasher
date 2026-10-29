@@ -187,6 +187,19 @@ pub struct Reclaimed {
     pub bytes: u64,
 }
 
+/// One whole-content opencode session the pre-pass reclaimed without
+/// synthesizing an increment map for. The reason is structural and the
+/// same for every entry: the staged body is not the snapshot-records
+/// family, but a byte-verbatim capture (a W213 `inbox@*` bundle stored
+/// under an `opencode.*` id), and such a body has no records to map —
+/// demanding one would abort every reclaim on a session that can never
+/// grow a map. The session is reclaimed like any other candidate.
+#[derive(Debug, Clone)]
+pub struct MapOmitted {
+    pub machine: String,
+    pub session_id: String,
+}
+
 /// Full result of a proof (and optional reclaim).
 #[derive(Debug, Default)]
 pub struct ReclaimReport {
@@ -210,6 +223,12 @@ pub struct ReclaimReport {
     pub blocked: Vec<Blocked>,
     /// Only populated when `apply` ran with an empty `blocked`.
     pub reclaimed: Vec<Reclaimed>,
+    /// Whole-content opencode sessions the apply run reclaimed without an
+    /// increment map: each entry is the exemption's record and its
+    /// reason ([`MapOmitted`]), so the run never silently decides a session
+    /// owes no map. Empty on dry runs and whenever every opencode
+    /// candidate either has or gets a map.
+    pub map_omitted: Vec<MapOmitted>,
     /// Total body bytes across candidates.
     pub candidate_bytes: u64,
 }
@@ -534,41 +553,72 @@ pub fn reclaim_stage(
     // Pre-synthesize and persist any missing opencode meta increment maps
     // BEFORE deleting any bodies ("collect first"), so an unreadable,
     // unfoldable or unpersistable map errors out and aborts before a single
-    // body is deleted.
+    // body is deleted. The requirement is gated on the body family that
+    // owes a map: snapshot-record bodies fold into their increment map,
+    // while a whole-content body — a W213 `inbox@*` capture bundle sealed
+    // byte-verbatim under an `opencode.*` id — has no records to map, and
+    // demanding one would permanently abort every reclaim of the stage,
+    // siblings included. So when the fold of a map-less candidate fails,
+    // the pre-pass classifies the body: the whole-content family is
+    // exempted with a recorded reason ([`MapOmitted`]) and the reclaim
+    // proceeds, while a snapshot-records body — or a body whose family
+    // cannot even be established, which may not claim the exemption the
+    // way an unknown may not read as empty — still aborts before any
+    // deletion.
     for cand in &report.candidates {
-        if cand.session_id.starts_with("opencode.") {
-            let meta_path = crate::collect::opencode_record_map_meta_path(
-                stage,
-                &cand.machine,
-                &cand.session_id,
-            )?;
-            if !meta_path.exists() {
-                let records = crate::collect::fold_opencode_staged_map(
-                    stage,
-                    &cand.machine,
-                    &cand.session_id,
-                )
-                .with_context(|| {
-                    format!(
-                        "fold staged increment map for {} before reclaim",
-                        cand.session_id
-                    )
-                })?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "staged session {} has no sealed shards to fold",
-                        cand.session_id
-                    )
-                })?;
-                crate::collect::save_opencode_record_map(&meta_path, &cand.session_id, &records)
-                    .with_context(|| {
+        if !cand.session_id.starts_with("opencode.") {
+            continue;
+        }
+        let meta_path =
+            crate::collect::opencode_record_map_meta_path(stage, &cand.machine, &cand.session_id)?;
+        if meta_path.exists() {
+            continue;
+        }
+        let records = match crate::collect::fold_opencode_staged_map(
+            stage,
+            &cand.machine,
+            &cand.session_id,
+        ) {
+            Ok(Some(records)) => records,
+            Ok(None) => {
+                // Unreachable for a candidate this run surveyed: every
+                // candidate has ≥1 sealed shard, because candidates are
+                // the same `sealed_shard_entries` scan `expected_manifest`
+                // counts. Reaching this arm means the body vanished between
+                // the survey and this pre-pass — a concurrent reclaim or
+                // delete touched the stage mid-run — and this report's
+                // candidate list no longer describes the stage, so the
+                // safe direction is to abort before deleting anything.
+                anyhow::bail!(
+                    "staged session {} has no sealed shards to fold",
+                    cand.session_id
+                );
+            }
+            Err(e) => match staged_body_family(stage, &cand.machine, &cand.session_id) {
+                Some(crate::opencode_records::BodyFamily::Other) => {
+                    report.map_omitted.push(MapOmitted {
+                        machine: cand.machine.clone(),
+                        session_id: cand.session_id.clone(),
+                    });
+                    continue;
+                }
+                _ => {
+                    return Err(e).with_context(|| {
                         format!(
-                            "persist synthesized increment map for {} before reclaim",
+                            "fold staged increment map for {} before reclaim",
                             cand.session_id
                         )
-                    })?;
-            }
-        }
+                    });
+                }
+            },
+        };
+        crate::collect::save_opencode_record_map(&meta_path, &cand.session_id, &records)
+            .with_context(|| {
+                format!(
+                    "persist synthesized increment map for {} before reclaim",
+                    cand.session_id
+                )
+            })?;
     }
 
     // The summary must land before the body goes: refresh each machine's
@@ -603,6 +653,28 @@ pub fn reclaim_stage(
     }
 
     Ok(report)
+}
+
+/// The body family of one staged opencode session, read the way the fold
+/// reads it (global sequence order), so the exemption in the map pre-pass
+/// decides on the same bytes a fold saw. `None` means the family could not
+/// be established — the shard entries cannot be listed, or a shard body
+/// cannot be read — and must never be read as "whole-content": an unknown
+/// family may not claim the exemption, exactly the way an unknown may not
+/// be recorded as empty.
+fn staged_body_family(
+    stage: &Path,
+    machine: &str,
+    session_id: &str,
+) -> Option<crate::opencode_records::BodyFamily> {
+    let dir = store::session_shard_dir(stage, machine, session_id);
+    let mut shards = store::sealed_shard_entries(&dir).ok()?;
+    shards.sort_by_key(|(sequence, _)| *sequence);
+    let mut bodies = Vec::with_capacity(shards.len());
+    for (_, shard_path) in &shards {
+        bodies.push(fs::read(shard_path).ok()?);
+    }
+    Some(crate::opencode_records::classify_session_body(&bodies))
 }
 
 /// How a destination answered the consult. The unreachable arm carries the
