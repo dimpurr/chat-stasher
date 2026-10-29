@@ -105,14 +105,20 @@ impl Sandbox {
     }
 
     /// A `[mirror]` declaration pointing at this repository — the LM-5 shape.
+    ///
+    /// The paths ride TOML literal strings (single quotes), the spelling
+    /// `w250_prune_orphans_test.rs` writes too: no platform needs its paths
+    /// escaped, so a Windows child (whose sandbox paths carry backslashes)
+    /// never takes the config loader's backslash-repair detour and never
+    /// prints its repair warning onto any command's stderr.
     fn write_mirror_config(&self) {
         let config_dir = self.dir.path().join("config").join("chat-stasher");
         fs::create_dir_all(&config_dir).unwrap();
         fs::write(
             config_dir.join("config.toml"),
             format!(
-                "[destinations.storagebox]\nrepo = \"{}\"\nkey_file = \"{}\"\nno_cache = \
-                 true\n\n[mirror]\nenabled = true\nmirror_of = \"storagebox\"\nmin_free_gib = \
+                "[destinations.storagebox]\nrepo = '{}'\nkey_file = '{}'\nno_cache = \
+                 true\n\n[mirror]\nenabled = true\nmirror_of = 'storagebox'\nmin_free_gib = \
                  1.0\n",
                 self.repo().display(),
                 self.key().display()
@@ -438,14 +444,20 @@ fn a_torn_pack_is_debris_every_command_skips_and_reports() {
     );
     assert_no_corrupt_claim(&all, "prune-orphans");
 
-    // --- the same facts in --json, for scripts.
-    let (code, all) = run_all(
-        &sandbox,
-        &["prune-orphans", "--destination", "storagebox", "--json"],
+    // --- the same facts in --json, for scripts. The object is stdout's
+    // contract alone (the repo's other `--json` assertions read it there);
+    // warnings belong to stderr, so the parse is fed stdout only rather than
+    // the merged stream [`run_all`] collects for prose.
+    let out = sandbox.run(&["prune-orphans", "--destination", "storagebox", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code().unwrap_or(-1),
+        0,
+        "the structured survey is also complete:\n{stdout}{stderr}"
     );
-    assert_eq!(code, 0, "the structured survey is also complete:\n{all}");
-    let value: serde_json::Value =
-        serde_json::from_str(all.trim()).unwrap_or_else(|e| panic!("json: {e}\n{all}"));
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("json: {e}\n{stdout}{stderr}"));
     assert_eq!(value["packs"]["torn"], serde_json::json!(1));
     assert_eq!(value["packs"]["torn_bytes"], serde_json::json!(1000));
     assert_eq!(value["packs"]["stranded"], serde_json::json!(0));
