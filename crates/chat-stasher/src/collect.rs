@@ -568,6 +568,41 @@ fn manifest_holds_this_export(
     manifest_holds_this_framed(manifest_facts, session_id, &framed)
 }
 
+/// Can a byte-identical match against a baseline (the stage's held bodies,
+/// a retained manifest fact) be trusted to say "this is the observation the
+/// baseline already holds", so the pass may read in full and then seal
+/// nothing — instead of capturing the bytes again with their multiplicity?
+///
+/// It is the same rule the cursor-recovery arm in `collect_scan_report`
+/// (`None if !record.provenance.is_empty() && !record.movable_root`) and
+/// the writer choice in `process_jsonl` apply, stated once for the
+/// baseline-suppression sites that consult a fact instead of a prefix:
+///
+/// - Through a **movable root** byte equality is identity: a store that
+///   MOVES its files between the roots of one registry entry makes a
+///   same-id same-content discovery at a new path the same file by its
+///   own rules (W1007, ADR-059 draft D4), so a baseline holding the bytes
+///   proves the observation is already archived.
+/// - A record with **no provenance rows** carries no measured observation
+///   that a second root could out-run: byte equality then has no
+///   cross-root identity question to answer, and the baseline match is
+///   conclusive the way the stage-derived cursor recovery already treats
+///   it for these records.
+/// - A fresh **provenance-bearing** discovery at a **non-movable** root is
+///   ambiguous even when every byte matches the baseline: one native UUID
+///   may appear in multiple source roots, and the match can be a replay
+///   of the same bytes or a genuinely repeated identical event. Suppressing
+///   the seal would drop that turn — a silent omission — so such a record
+///   must fall through to the multiplicity-preserving writer.
+///
+/// A stored cursor is not a baseline in this sense and needs no gate here:
+/// it is identity-bearing through the debt stream it was verified against,
+/// which is why the `old.is_some_and(...)` digest comparisons above each
+/// manifest gate stay ungated.
+fn byte_equality_establishes_event_identity(record: &SessionRecord) -> bool {
+    record.movable_root || record.provenance.is_empty()
+}
+
 /// Is `frame` one sealed shard, or an exact repeated-shard suffix, of the
 /// body sealed so far?
 ///
@@ -2971,9 +3006,18 @@ fn process_jsonl(
     let data = read_jsonl_delta(&record.absolute_path, old, force_reset, counters)?;
     let (lines, committed_delta) = complete_lines(&data.bytes);
     let new_offset = data.base_offset + committed_delta as u64;
+    // A full read whose framed lines equal the retained manifest fact is a
+    // zero-byte no-op only for the sources whose byte equality can say so —
+    // see [`byte_equality_establishes_event_identity`]. A fresh
+    // provenance-bearing root that re-observes byte-identical bytes stays
+    // ambiguous: it may be a legitimately repeated identical turn, and
+    // dropping it would trade a captured turn for a red invariant
+    // ("an unknown must never be recorded as empty"), so it falls through
+    // to the multiplicity-preserving writer below.
     let matches_manifest = !force_reset
         && data.base_offset == 0
         && !lines.is_empty()
+        && byte_equality_establishes_event_identity(record)
         && manifest_holds_this_framed(manifest_facts, &record.id, &seal_framed(&lines));
     if matches_manifest {
         return Ok(Processed {
@@ -4357,7 +4401,10 @@ fn process_codebuff_whole_file(
         }));
     }
     let framed = seal_framed(std::slice::from_ref(&bytes));
-    if !force_reset && manifest_holds_this_framed(manifest_facts, &record.id, &framed) {
+    if !force_reset
+        && byte_equality_establishes_event_identity(record)
+        && manifest_holds_this_framed(manifest_facts, &record.id, &framed)
+    {
         seal_codebuff_sidecars(record, stage, machine, pass)?;
         return Ok(ReadOutcome::Processed(Processed {
             state: OffsetEntry {
@@ -4544,6 +4591,7 @@ fn process_whole_file(
     };
     if !force_reset
         && !bytes.is_empty()
+        && byte_equality_establishes_event_identity(record)
         && manifest_holds_this_framed(manifest_facts, &record.id, &framed)
     {
         return Ok(Processed {
@@ -4653,12 +4701,19 @@ fn process_compressed(
     // same content re-read at a new path (a re-observation, sealed as
     // nothing). A stage that disagrees decodes-and-seals exactly as before.
     let framed = seal_framed(&lines);
+    // The manifest term of this disjunction is gated the way the other
+    // baseline suppressions are (see [`byte_equality_establishes_event_identity`]);
+    // the stage-tail term keeps main's meaning: the stage is the live
+    // record of what each destination's pass has sealed here, not a
+    // re-derived claim over a reclaimed body.
     let already_held = !lines.is_empty()
         && !force_reset
-        && (manifest_holds_this_framed(manifest_facts, &record.id, &framed) || {
-            let sealed = stage_sealed_shards(stage, machine, &record.id)?;
-            !sealed.is_empty() && stage_tail_is(&sealed, &framed)
-        });
+        && ((byte_equality_establishes_event_identity(record)
+            && manifest_holds_this_framed(manifest_facts, &record.id, &framed))
+            || {
+                let sealed = stage_sealed_shards(stage, machine, &record.id)?;
+                !sealed.is_empty() && stage_tail_is(&sealed, &framed)
+            });
     if already_held {
         // The state names the content just read (length and digest — a
         // compressed cursor is always whole-source), so the next pass over
