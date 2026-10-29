@@ -13,8 +13,9 @@
 //! 3. Changed session writes increment only; assembled view equals final source state.
 //! 4. Self-attack 1: a changed session treated as unchanged must fail.
 //! 5. Self-attack 2: an unchanged session fully rewritten must fail.
-//! 6. Fresh destination test: post-reclaim collect against fresh destination
-//!    (no stored debts) exports zero for unchanged and increment only for changed.
+//! 6. Fresh destination test: post-reclaim collect against a fresh destination
+//!    (no stored debts) exports the full bodies — never-pushed sessions are not
+//!    covered by the machine-level manifest summary (destination scoping, H1).
 //! 7. Multi-source audit coverage: compressed codex (.jsonl.zst), Claude Code (.jsonl),
 //!    and Grok CLI (chat_history.jsonl).
 
@@ -376,11 +377,16 @@ fn self_attack_unchanged_session_fully_rewritten_must_fail() {
     assert_eq!(report.unchanged_records, 1);
 }
 
-/// Fresh destination test:
-/// After reclaim, collecting against a fresh destination (with no stored debt)
-/// exports zero for unchanged sessions and writes only the increment for changed sessions.
+/// SG-2c / H1 destination-scoping test: after reclaim, a destination that
+/// never received the records (a fresh destination with no stored debt)
+/// MUST receive full bodies, not a zero-byte skip or an increment-only
+/// export. The retained manifest summary is machine-level — it proves the
+/// stage once sealed these bytes for some push, not that THIS destination
+/// pushed them — so a destination with no cursor of its own re-captures in
+/// full. The same rule is pinned for snapshot sources by
+/// `w1020_sg3_opencode_increment_test.rs` (SG-2b / H1).
 #[test]
-fn sg2c_post_reclaim_with_fresh_destination_exports_zero_and_writes_increment_only() {
+fn sg2c_post_reclaim_with_fresh_destination_exports_full_body_for_never_pushed_destination() {
     let fx = CodexFixture::new();
 
     let unchanged_file = fx.codex_dir.join("rollout-fresh-unchanged.jsonl");
@@ -440,25 +446,32 @@ fn sg2c_post_reclaim_with_fresh_destination_exports_zero_and_writes_increment_on
         collect::collect_scan_report(&fx.scan(), &fx.stage, MACHINE, &fx.state, 20, &fresh_dest)
             .unwrap();
 
-    // 1. Unchanged session must write zero shards
+    // 1. Unchanged session: dest-fresh never pushed it, so this pass seals
+    // the full body (one shard, both source lines), not zero shards.
     assert_eq!(
         fx.shard_count(&unchanged_id),
-        0,
-        "fresh destination must write zero shards for unchanged session"
+        1,
+        "fresh destination must write the full body for the unchanged session"
     );
     let unchanged_outcome = second
         .outcomes
         .iter()
         .find(|o| o.session_prefix == chat_stasher::id::short_session_id(&unchanged_id))
         .unwrap();
-    assert_eq!(unchanged_outcome.lines_written, 0);
-    assert!(unchanged_outcome.shard.is_none());
+    assert_eq!(unchanged_outcome.lines_written, 2);
+    assert!(unchanged_outcome.shard.is_some());
+    assert_eq!(
+        String::from_utf8_lossy(&fx.stage_shard_bodies(&unchanged_id)[0]),
+        String::from_utf8_lossy(&fs::read(&unchanged_file).unwrap()),
+        "the sealed body is the whole unchanged source, not a baseline skip"
+    );
 
-    // 2. Changed session writes only the increment
+    // 2. Changed session: the full body including the pre-reclaim turns,
+    // not only the appended increment.
     assert_eq!(
         fx.shard_count(&growing_id),
         1,
-        "fresh destination must write exactly one increment shard for changed session"
+        "fresh destination must write the full body for the changed session"
     );
     let growing_outcome = second
         .outcomes
@@ -466,7 +479,14 @@ fn sg2c_post_reclaim_with_fresh_destination_exports_zero_and_writes_increment_on
         .find(|o| o.session_prefix == chat_stasher::id::short_session_id(&growing_id))
         .unwrap();
     assert!(growing_outcome.shard.is_some());
-    assert_eq!(growing_outcome.lines_written, 1);
+    assert_eq!(growing_outcome.lines_written, 3);
+    assert_eq!(
+        String::from_utf8_lossy(&fx.stage_shard_bodies(&growing_id)[0]),
+        String::from_utf8_lossy(&fs::read(&growing_file).unwrap()),
+        "the sealed body is the whole grown source, not the increment alone"
+    );
+    assert_eq!(second.shards_written, 2);
+    assert_eq!(second.changed_records, 2);
 }
 
 /// Compressed codex session (.jsonl.zst):

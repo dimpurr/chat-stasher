@@ -599,6 +599,15 @@ fn manifest_holds_this_export(
 /// it is identity-bearing through the debt stream it was verified against,
 /// which is why the `old.is_some_and(...)` digest comparisons above each
 /// manifest gate stay ungated.
+///
+/// These gates answer *one more question first*, though: a retained manifest
+/// fact is machine-level — it proves some push delivered this payload to the
+/// archive, not that the calling destination did. So every suppression that
+/// consults a manifest fact is additionally scoped to a destination with a
+/// cursor of its own (`old.is_some()`), and a destination that never pushed
+/// the session captures it in full; the stage-derived cursor recovery is
+/// scoped the same way at its own call sites (H1 destination scoping,
+/// acf6a8df).
 fn byte_equality_establishes_event_identity(record: &SessionRecord) -> bool {
     record.movable_root || record.provenance.is_empty()
 }
@@ -758,39 +767,21 @@ fn stage_prefix_entry(
     if sealed_shards.is_empty() {
         // A reclaimed session's shards are gone and a just-scanned one has
         // none yet — either way there is no stage prefix to reuse, so with
-        // no manifest fact the caller reads its source in full. A retained
-        // manifest fact (ADR-020 role C) can still prove the archive holds
-        // the whole body, and is consulted per source shape below.
-        if let Some(fact) = manifest_facts.and_then(|m| m.get(&record.id)) {
-            if record.compressed || is_zstd_path(&record.absolute_path) {
-                let compressed = fs::read(&record.absolute_path).with_context(|| {
-                    format!(
-                        "read compressed source ({})",
-                        path_digest(&record.absolute_path)
-                    )
-                })?;
-                let decoded =
-                    zstd::stream::decode_all(&compressed[..]).context("decompress jsonl.zst")?;
-                let (lines, _) = complete_lines(&decoded);
-                let framed = seal_framed(&lines);
-                if !lines.is_empty()
-                    && fact.concat_bytes == framed.len() as u64
-                    && fact.concat_sha256 == sha256_hex(&framed)
-                {
-                    let len = compressed.len() as u64;
-                    return Ok(Some(OffsetEntry {
-                        offset: len,
-                        prefix_len: len,
-                        prefix_sha256: sha256_hex(&compressed),
-                        compressed: true,
-                        opencode: None,
-                        store_fingerprint: None,
-                        grok_bot_row_digests: None,
-                        opencode_record_digests: None,
-                        opencode_map_digest: None,
-                    }));
-                }
-            } else if is_jsonl_path(&record.absolute_path) {
+        // no manifest fact the caller reads its source in full.
+        //
+        // A retained manifest fact (ADR-020 role C) is *machine-level*: it
+        // proves the stage once sealed these bytes for some push, never
+        // that the calling destination holds them. Destination scoping
+        // (H1, acf6a8df): the fact may extend only a position a stored
+        // debt of this destination's own already claimed, so the only
+        // caller that consults facts here is the covered-position
+        // resolution of such a debt (cursor_or_stage_covered_position) —
+        // and only for a plain JSONL source, whose byte-offset cursor it
+        // can extend. A destination with no debts — one that never pushed
+        // this session — is handed no facts and must read in full, so its
+        // archive still receives the body.
+        if is_jsonl_path(&record.absolute_path) {
+            if let Some(fact) = manifest_facts.and_then(|m| m.get(&record.id)) {
                 let source_len = fs::metadata(&record.absolute_path)
                     .with_context(|| {
                         format!("stat source ({})", path_digest(&record.absolute_path))
@@ -820,28 +811,6 @@ fn stage_prefix_entry(
                             opencode_map_digest: None,
                         }));
                     }
-                }
-            } else {
-                let bytes = fs::read(&record.absolute_path).with_context(|| {
-                    format!("read source bytes ({})", path_digest(&record.absolute_path))
-                })?;
-                let framed = seal_framed(std::slice::from_ref(&bytes));
-                if !bytes.is_empty()
-                    && fact.concat_bytes == framed.len() as u64
-                    && fact.concat_sha256 == sha256_hex(&framed)
-                {
-                    let len = bytes.len() as u64;
-                    return Ok(Some(OffsetEntry {
-                        offset: len,
-                        prefix_len: len,
-                        prefix_sha256: sha256_hex(&bytes),
-                        compressed: false,
-                        opencode: None,
-                        store_fingerprint: None,
-                        grok_bot_row_digests: None,
-                        opencode_record_digests: None,
-                        opencode_map_digest: None,
-                    }));
                 }
             }
         }
@@ -1889,13 +1858,11 @@ pub fn collect_scan_report(
             // content like any cursor-less source, instead of re-sealing the
             // bytes the archive already holds.
             None if !record.provenance.is_empty() && !record.movable_root => None,
-            None => stage_prefix_entry(
-                &record,
-                stage,
-                machine,
-                &mut counters,
-                manifest_facts.as_ref(),
-            )?,
+            // No manifest facts here: the retained summary speaks for the
+            // machine, not for this destination, and a session this
+            // destination never pushed must be captured in full
+            // (destination scoping, H1) — so its archive receives the body.
+            None => stage_prefix_entry(&record, stage, machine, &mut counters, None)?,
         };
         // The cursor is still handed down so the outcome can report this as a
         // reread rather than a first read; `force_reset` is what actually stops
@@ -1977,21 +1944,13 @@ pub fn collect_scan_report(
                     Some(previous) if outcome.shard.is_none() && unverifiable.is_none() => {
                         previous.shards.clone()
                     }
-                    _ if outcome.shard.is_none() => {
-                        if let Some(fact) = manifest_facts.as_ref().and_then(|m| m.get(&record.id))
-                        {
-                            fact.clone()
-                        } else {
-                            stage_shard_fact(stage, machine, &record.id)?
-                        }
-                    }
                     _ => stage_shard_fact(stage, machine, &record.id)?,
                 };
                 let entry = DebtEntry {
                     machine: machine.to_string(),
                     session_id: record.id.clone(),
                     cursor: processed.state,
-                    shards: shards.clone(),
+                    shards,
                 };
                 if stored.as_ref() != Some(&entry) {
                     debts.insert(key, entry);
@@ -2803,13 +2762,14 @@ fn process_sqlite_snapshot(
     let digest = sha256_hex(&json_line);
     // No cursor of this destination's own, and the stage already holds exactly
     // this export: the destination is owed nothing, and sealing it again would
-    // store the conversation twice.
-    let matches_manifest =
-        !force_reset && manifest_holds_this_export(manifest_facts, &record.id, &json_line);
-    if matches_manifest
-        || (old.is_none()
-            && !force_reset
-            && stage_holds_this_export(stage, machine, &record.id, &json_line)?)
+    // store the conversation twice. The retained manifest summary is not
+    // consulted here: it is machine-level — it says some push delivered this
+    // export to the archive, not that THIS destination holds it — so an
+    // un-pushed destination exports in full (destination scoping, H1,
+    // acf6a8df).
+    if old.is_none()
+        && !force_reset
+        && stage_holds_this_export(stage, machine, &record.id, &json_line)?
     {
         return Ok(unchanged_content_sqlite(
             record,
@@ -2822,7 +2782,8 @@ fn process_sqlite_snapshot(
     }
     if let Some(entry) = old {
         if !force_reset
-            && (export_content_matches(entry, source_bytes, &digest) || matches_manifest)
+            && (export_content_matches(entry, source_bytes, &digest)
+                || manifest_holds_this_export(manifest_facts, &record.id, &json_line))
         {
             return Ok(unchanged_content_sqlite(
                 record,
@@ -3008,13 +2969,18 @@ fn process_jsonl(
     let new_offset = data.base_offset + committed_delta as u64;
     // A full read whose framed lines equal the retained manifest fact is a
     // zero-byte no-op only for the sources whose byte equality can say so —
-    // see [`byte_equality_establishes_event_identity`]. A fresh
+    // see [`byte_equality_establishes_event_identity`] — and only for a
+    // destination with a cursor of its own: the manifest fact is
+    // machine-level and says the archive holds these bytes, not that THIS
+    // destination pushed them, so an un-pushed destination still exports in
+    // full (destination scoping, H1). A fresh
     // provenance-bearing root that re-observes byte-identical bytes stays
     // ambiguous: it may be a legitimately repeated identical turn, and
     // dropping it would trade a captured turn for a red invariant
     // ("an unknown must never be recorded as empty"), so it falls through
     // to the multiplicity-preserving writer below.
     let matches_manifest = !force_reset
+        && old.is_some()
         && data.base_offset == 0
         && !lines.is_empty()
         && byte_equality_establishes_event_identity(record)
@@ -4401,7 +4367,11 @@ fn process_codebuff_whole_file(
         }));
     }
     let framed = seal_framed(std::slice::from_ref(&bytes));
+    // The manifest fact is machine-level: only a destination with a cursor
+    // of its own may read a match as "already delivered" (destination
+    // scoping, H1) — an un-pushed destination seals in full.
     if !force_reset
+        && old.is_some()
         && byte_equality_establishes_event_identity(record)
         && manifest_holds_this_framed(manifest_facts, &record.id, &framed)
     {
@@ -4589,7 +4559,11 @@ fn process_whole_file(
         opencode_record_digests: None,
         opencode_map_digest: None,
     };
+    // The manifest fact is machine-level: only a destination with a cursor
+    // of its own may read a match as "already delivered" (destination
+    // scoping, H1) — an un-pushed destination seals in full.
     if !force_reset
+        && old.is_some()
         && !bytes.is_empty()
         && byte_equality_establishes_event_identity(record)
         && manifest_holds_this_framed(manifest_facts, &record.id, &framed)
@@ -4702,13 +4676,17 @@ fn process_compressed(
     // nothing). A stage that disagrees decodes-and-seals exactly as before.
     let framed = seal_framed(&lines);
     // The manifest term of this disjunction is gated the way the other
-    // baseline suppressions are (see [`byte_equality_establishes_event_identity`]);
+    // baseline suppressions are (see
+    // [`byte_equality_establishes_event_identity`]) and additionally on a
+    // cursor of this destination's own — the machine-level fact does not
+    // say this destination pushed the session (destination scoping, H1);
     // the stage-tail term keeps main's meaning: the stage is the live
     // record of what each destination's pass has sealed here, not a
     // re-derived claim over a reclaimed body.
     let already_held = !lines.is_empty()
         && !force_reset
-        && ((byte_equality_establishes_event_identity(record)
+        && ((old.is_some()
+            && byte_equality_establishes_event_identity(record)
             && manifest_holds_this_framed(manifest_facts, &record.id, &framed))
             || {
                 let sealed = stage_sealed_shards(stage, machine, &record.id)?;
