@@ -2704,6 +2704,160 @@ impl StoreConfig {
     }
 }
 
+/// Whether the repository `cfg` points to exists and contains at least one snapshot.
+///
+/// Returns `false` on any error, missing repo, or empty snapshot list.
+pub fn destination_has_snapshots(cfg: &StoreConfig) -> bool {
+    let store = BackupStore::for_metadata_query(cfg.clone());
+    let Ok(backends) = store.backends() else {
+        return false;
+    };
+    let Ok(repo_exists) = store.repo_exists(&backends) else {
+        return false;
+    };
+    if !repo_exists {
+        return false;
+    }
+    match backends.repository().list(FileType::Snapshot) {
+        Ok(list) => !list.is_empty(),
+        Err(_) => false,
+    }
+}
+
+/// The first half of the shared-read gate: does the string name a location
+/// `rustic_backend`'s own `location_to_type_and_path` would route to its
+/// local backend?
+///
+/// Kept as its own function because "which backend would open this string"
+/// and "which disk would be read" are different questions (the second half
+/// of the gate answers the second), and because this half must keep
+/// mirroring `rustic_backend`'s classification exactly, so the predicate
+/// and the backend a resolved config eventually opens cannot disagree about
+/// the *backend*: no scheme at all (a plain or relative path), the explicit
+/// `local:` prefix, and on Windows the one-letter drive and colon-bearing
+/// backslash shapes that backend itself routes local. Everything else —
+/// every `opendal:` service, `rest:`, and any other scheme-shaped string —
+/// answers `false`.
+fn repository_routes_local_backend(cfg: &StoreConfig) -> bool {
+    let Some((scheme, path)) = cfg.repo_root.split_once(':') else {
+        // No scheme at all: a plain (absolute or relative) path.
+        return true;
+    };
+    if scheme == "local" {
+        return true;
+    }
+    if cfg!(windows) {
+        // `rustic_backend`'s own Windows local rules: a one-letter drive with
+        // no `/` (its `C:\repo` and `C:Projects\` shapes), and a
+        // colon-bearing backslash form (its `\\?\C:\Test\repo` shape — a
+        // colon-less UNC never reaches here, being the no-scheme arm).
+        if scheme.len() == 1 && !cfg.repo_root.contains('/') {
+            return true;
+        }
+        if scheme.contains('\\') || path.contains('\\') {
+            return true;
+        }
+    }
+    false
+}
+
+/// The conventional roots each OS itself mounts *other* filesystems at —
+/// the places Finder and the desktop environments attach external disks
+/// and network shares, and therefore the places a stale SMB/NFS handle
+/// turns a plain `stat` into a hang no caller can bound. The shipped
+/// multi-machine example (`docs/destinations.md`) lives exactly there:
+/// `/Volumes/<your-disk>/chat-stasher/repo`, on storage "they all mount".
+///
+/// A convention, deliberately: the gate must itself perform **no I/O**,
+/// because it is evaluated for precisely the stale paths it exists to
+/// refuse. Storage mounted outside these roots stays checkable today —
+/// a hand-run `mount_smbfs` into a home directory, macOS's
+/// `~/Library/CloudStorage`, and on Windows a drive letter mapped to a
+/// share (which a drive letter cannot be told apart from) — and that
+/// residual is stated here rather than closed by a stat that would hang.
+fn mounted_storage_roots() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        &["/Volumes/"]
+    } else if cfg!(unix) {
+        &["/mnt/", "/media/", "/run/media/"]
+    } else {
+        // Windows mounts shares as drive letters; only the UNC shapes are
+        // its provably-network paths, and `proof_reads_mounted_storage`
+        // rejects those on its own.
+        &[]
+    }
+}
+
+/// The second half of the shared-read gate: does the *path* a
+/// local-backend-shaped string names sit under one of the OS's
+/// mounted-storage roots (or, on Windows, is it a `\\`-rooted network
+/// reference)? `true` means the proof must not touch it whatever its
+/// speed on a good day.
+fn proof_reads_mounted_storage(path: &str) -> bool {
+    if cfg!(windows) {
+        // A `\\`-rooted path here — the no-scheme arm, or the tail of a
+        // `local:` — is `\\server\share` or its `\\?\UNC\server\share`
+        // spelling: a network reference by construction, whatever the
+        // backend does with it.
+        return path.starts_with("\\\\");
+    }
+    mounted_storage_roots()
+        .iter()
+        .any(|root| path == root.trim_end_matches('/') || path.starts_with(root))
+}
+
+/// Whether `cfg` names a repository a shared read path may check from this
+/// machine's own filesystem — the gate for W1034's upgrade-window proof
+/// (its callers: `status` including the menu-bar poll, `doctor`, and
+/// `reclaim-stage`'s degraded listing).
+///
+/// "Local" must be *positively recognised*, never inferred from "not a
+/// known backend string": [`repository_routes_local_backend`] mirrors
+/// `rustic_backend`'s own `location_to_type_and_path` local rules, and
+/// everything it does not recognise answers `false`, because a backend's
+/// `list()` opens a connection with no timeout and the callers of this
+/// gate are read paths whose contract reads local files and dials no
+/// destination.
+///
+/// A local-backend string still does not name a *disk* — "no scheme" says
+/// which backend would open the path, not which filesystem the path lands
+/// on. `docs/destinations.md` ships exactly that shape as its
+/// mounted-storage example (`/Volumes/<your-disk>/chat-stasher/repo`), and
+/// a stale SMB/NFS handle on such a mount turns the proof's `stat` and
+/// snapshot walk into the same hang the backend-shaped half refuses. So a
+/// recognised local path must also sit outside the OS's conventional
+/// mount roots: there the check is skipped, because the record-based
+/// never-pushed wording is true without the read, and the roads and the
+/// fix it prints are the same repair (a never-initialised destination
+/// gains nothing from the check — a repository without its `config` file
+/// ends it before any walk — and a skipped or unreadable repository keeps
+/// that record-based wording: the suppression direction, never a claimed
+/// window out of a read that did not happen).
+///
+/// `opendal:fs` — opendal's own filesystem service — is excluded with the
+/// rest: its backend build creates a staging directory under the repository
+/// root (`StoreConfig::with_atomic_fs_writes`), a write a read-only path must
+/// not perform, so a repository reached that way keeps the record-based
+/// never-pushed wording instead of a proved upgrade window.
+pub fn repository_is_local(cfg: &StoreConfig) -> bool {
+    if !repository_routes_local_backend(cfg) {
+        return false;
+    }
+    match cfg.repo_root.split_once(':') {
+        // No scheme at all: a plain path, judged by the mount-root bound
+        // exactly as written.
+        None => !proof_reads_mounted_storage(&cfg.repo_root),
+        // The explicit `local:` scheme carries the same paths the
+        // no-scheme arm does — so it carries the same bound.
+        Some((scheme, tail)) if scheme == "local" => !proof_reads_mounted_storage(tail),
+        // The Windows drive / volume shapes: a drive letter does not name
+        // the transport (`Z:` may be a mapped share), so these keep the
+        // check and the residual stays the one stated on
+        // [`mounted_storage_roots`].
+        Some(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -2952,6 +3106,181 @@ mod tests {
         assert_eq!(parse_shard_seq("000001.json"), None);
         assert_eq!(parse_shard_seq("000001.txt"), None);
         assert_eq!(parse_shard_seq("0000000.jsonl"), None); // wrong width
+    }
+
+    /// W1034rev3 Medium 2 / W1034f2: the gate that decides whether a shared
+    /// read path (`reconcile` / `reclaim-stage`'s degraded listing) may check
+    /// a repository's snapshots. Local must be *positively recognised* — every
+    /// backend string, known or not, rejects the check rather than risking a
+    /// network dial with no timeout — and the recognition must be
+    /// `rustic_backend`'s own `location_to_type_and_path` local rules, so the
+    /// predicate and the backend a resolved config eventually opens cannot
+    /// disagree about what "local" means. The classification half is its own
+    /// function since W1034f2, because the composed gate adds a second
+    /// property on top of it: a local-backend string must also name a disk
+    /// the machine did not mount (the next test pins that half).
+    #[test]
+    fn repository_is_local_classifies_every_backend_shape() {
+        for repo in ["/srv/backup-repo", "relative/repo"] {
+            let cfg = StoreConfig {
+                repo_root: repo.into(),
+                ..StoreConfig::default()
+            };
+            assert!(
+                repository_routes_local_backend(&cfg),
+                "a plain path ({repo}) is the local backend's own shape"
+            );
+            assert!(
+                repository_is_local(&cfg),
+                "a plain path ({repo}) outside every mount root keeps the check"
+            );
+        }
+        let explicit = StoreConfig {
+            repo_root: "local:/srv/backup-repo".into(),
+            ..StoreConfig::default()
+        };
+        assert!(
+            repository_routes_local_backend(&explicit),
+            "the explicit `local:` scheme is the local backend's own name"
+        );
+        assert!(
+            repository_is_local(&explicit),
+            "the explicit `local:` scheme outside every mount root keeps the check"
+        );
+        for backend in [
+            "opendal:sftp",
+            "opendal:s3",
+            "opendal:fs",
+            "opendal:fs:/srv/repo",
+            "rest:https://backup.example/",
+            "sftp:user@box:/srv/repo",
+            "opendal:",
+            "b2:bucket",
+        ] {
+            let cfg = StoreConfig {
+                repo_root: backend.into(),
+                ..StoreConfig::default()
+            };
+            assert!(
+                !repository_routes_local_backend(&cfg),
+                "a backend string ({backend}) is not the local backend's shape"
+            );
+            assert!(
+                !repository_is_local(&cfg),
+                "a backend string ({backend}) never gets the shared-read check"
+            );
+        }
+        // The Windows shapes `location_to_type_and_path` itself routes to the
+        // local backend split by their punctuation: a colon-less UNC path is
+        // the no-scheme arm, while the colon-bearing drive and `\\?\C:\…`
+        // forms are local only where rustic_backend's Windows rules apply —
+        // on this platform the drive-letter case is a scheme parse error in
+        // rustic_backend (`C` is no backend), so the classification's
+        // expected value is the platform fact, asserted on both sides. The
+        // composed gate keeps those shapes where no mount-root text applies
+        // but refuses the UNC *network* reference on the platform that can
+        // open one without a backend string hanging off it.
+        for unc in [
+            r"\\.\Volume{b75e2c83-0000-0000-0000-602f00000000}\Test\repo",
+            r"\\Server2\Share\Test\repo",
+        ] {
+            let cfg = StoreConfig {
+                repo_root: unc.into(),
+                ..StoreConfig::default()
+            };
+            assert!(
+                repository_routes_local_backend(&cfg),
+                "a colon-less backslash-rooted path ({unc}) is the no-scheme arm, \
+                 local-backend-shaped on every platform"
+            );
+            assert_eq!(
+                repository_is_local(&cfg),
+                !cfg!(windows),
+                "the composed gate refuses a `\\`-rooted network reference on \
+                 Windows; elsewhere such a string is only a local filename"
+            );
+        }
+        for windows_local in [r"C:\srv\repo", r"\\?\C:\Test\repo"] {
+            let cfg = StoreConfig {
+                repo_root: windows_local.into(),
+                ..StoreConfig::default()
+            };
+            assert_eq!(
+                repository_routes_local_backend(&cfg),
+                cfg!(windows),
+                "the colon-bearing Windows shape {windows_local} follows \
+                 rustic_backend's own local rules"
+            );
+            assert_eq!(
+                repository_is_local(&cfg),
+                cfg!(windows),
+                "the colon-bearing Windows shape {windows_local} keeps the \
+                 same verdict as its classification: no mount-root text applies"
+            );
+        }
+    }
+
+    /// W1034f2 Medium 1 (the rev4 review's first finding): a local-backend
+    /// *string* is not a bounded *read*. A colon-less `repo` was classified
+    /// local even when it names mounted storage — `/Volumes/<your-disk>/
+    /// chat-stasher/repo` is the shipped multi-machine example
+    /// (`docs/destinations.md`), and a stale SMB/NFS handle there turns the
+    /// proof's `stat` into a hang with no timeout, from `status`, the
+    /// menu-bar poll and `doctor` alike. The composed gate now refuses the
+    /// OSes' conventional mount roots — this test was run red against the
+    /// one-layer gate on every platform before the second half was added.
+    #[test]
+    fn repository_is_local_never_proofs_a_mounted_storage_path() {
+        let cfg_for = |repo: &str| StoreConfig {
+            repo_root: repo.into(),
+            ..StoreConfig::default()
+        };
+        if cfg!(target_os = "macos") {
+            for repo in [
+                "/Volumes/Backup/chat-stasher/repo",
+                "local:/Volumes/Backup/chat-stasher/repo",
+                "/Volumes",
+            ] {
+                assert!(
+                    !repository_is_local(&cfg_for(repo)),
+                    "the macOS mount root ({repo}) is never consulted for the window"
+                );
+            }
+            assert!(
+                repository_is_local(&cfg_for("/Users/archivist/chat-stasher/repo")),
+                "a path on the boot volume keeps the check"
+            );
+        }
+        if cfg!(unix) && !cfg!(target_os = "macos") {
+            for repo in [
+                "/mnt/backup/chat-stasher/repo",
+                "/media/archivist/usb/chat-stasher/repo",
+                "/run/media/archivist/usb/chat-stasher/repo",
+                "local:/mnt/backup/chat-stasher/repo",
+            ] {
+                assert!(
+                    !repository_is_local(&cfg_for(repo)),
+                    "the conventional mount root ({repo}) is never consulted for the window"
+                );
+            }
+            assert!(
+                repository_is_local(&cfg_for("/home/archivist/chat-stasher/repo")),
+                "a path on the boot volume keeps the check"
+            );
+        }
+        if cfg!(windows) {
+            for repo in [r"\\Fileserver\Share\chat-stasher\repo"] {
+                assert!(
+                    !repository_is_local(&cfg_for(repo)),
+                    "a colon-less UNC network reference ({repo}) is never consulted for the window"
+                );
+            }
+            assert!(
+                repository_is_local(&cfg_for(r"C:\Users\archivist\chat-stasher\repo")),
+                "an ordinary drive-letter path keeps the check — the residual \
+                 `mounted_storage_roots` states (a drive letter does not name the transport)"
+            );
+        }
     }
 
     #[test]

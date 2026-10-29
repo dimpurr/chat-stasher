@@ -45,8 +45,12 @@ git config core.hooksPath scripts/hooks
 
 Git does not read hooks out of a checkout by itself, and nothing in this
 repository runs that command for you, so a fresh clone is unfiltered until you
-do. The Chinese in `apps/extension/locales/zh_CN.yml` is the single exception,
-and it is the same one `check-terminology.py` encodes as T5.
+do. The Chinese in `apps/extension/locales/zh_CN.yml` is one sanctioned home;
+the single `UPGRADE_WINDOW_MESSAGE` constant in
+`crates/chat-stasher/src/destdiag.rs` (W1034's upgrade-window sentence) is the
+other — the same two exceptions `check-terminology.py` encodes as T5's
+production allowance, which pins that one definition line and lets any other
+CJK anywhere, a re-typed copy included, fire.
 
 ## Local checks
 

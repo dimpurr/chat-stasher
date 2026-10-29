@@ -10583,7 +10583,6 @@ fn store_config_from(
     connections: Option<usize>,
     options: &[String],
 ) -> StoreConfig {
-    let data_root = data_root();
     let options = options
         .iter()
         .map(|kv| {
@@ -10598,13 +10597,22 @@ fn store_config_from(
             for (k, v) in &mut options {
                 *v = expand_path_arg(&format!("option {k}"), v);
             }
+            // The repository and key file of a machine that configured
+            // neither — the pre-ADR-013 defaults — have one definition, in
+            // the lib (`home_repository_store_config`), so the CLI wrapper
+            // and the destdiag proof cannot drift about which directory a
+            // destination-less machine reads (W1034f2, rev4 Low 1). This
+            // wrapper still expands every config-sourced half, which the
+            // lib does not: expanding is this side's own exit-2 gate on a
+            // value the user typed.
+            let base = chat_stasher::doctor::home_repository_store_config(config);
             let repo_root = match repo.or_else(|| config.rustic_repo.clone()) {
                 Some(raw) => expand_path_arg("repo", &raw),
-                None => data_root.join("repo").to_string_lossy().into_owned(),
+                None => base.repo_root,
             };
             let key_file = match key_file.or_else(|| config.rustic_key_file.clone()) {
                 Some(raw) => PathBuf::from(expand_path_arg("key_file", &raw)),
-                None => data_root.join("masterkey.json"),
+                None => base.key_file,
             };
             StoreConfig {
                 repo_root,
@@ -12941,11 +12949,33 @@ fn cmd_reclaim_stage(
                 // Prose keeps the absence rule (D2): "no push on record",
                 // never "never pushed" — the slug in the durable record is
                 // `never-pushed`, and the human line does not repeat it.
+                //
+                // W1034's upgrade window narrows the absence sentence: no
+                // push record on this machine but the repository provably
+                // holds snapshots, so an older binary pushed before the
+                // record existed. The proof stays local (rev3): only a
+                // repository `repository_is_local` recognises on this
+                // machine's own, un-mounted filesystem is checked, because
+                // this listing is degraded-set bookkeeping, not a consult,
+                // and a backend's `list()` — or a stale SMB/NFS mount's
+                // `stat`, the second half the gate carries since W1034f2 —
+                // is I/O with no timeout this row must not wait for. A
+                // backend-shaped or mounted repository keeps the
+                // record-based sentence; an unreadable one keeps it too.
+                let upgrade_window = chat_stasher::store::repository_is_local(&dest.cfg)
+                    && chat_stasher::store::destination_has_snapshots(&dest.cfg);
+                let absence = if upgrade_window {
+                    chat_stasher::destdiag::UPGRADE_WINDOW_MESSAGE.to_string()
+                } else {
+                    "no push on record".to_string()
+                };
                 println!(
-                    "[reclaim-stage]   health: {} — degraded; no push on record; not consulted \
+                    "[reclaim-stage]   health: {} — degraded; {absence}; not consulted \
                      this run",
                     dest.name
                 );
+                // A2 holds whichever absence the row printed — the degraded
+                // set never sees one road only.
                 print_degraded_two_roads(&dest.name);
             }
             chat_stasher::destdiag::DestinationHealth::Unknown { why } => {
