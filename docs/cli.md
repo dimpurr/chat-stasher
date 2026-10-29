@@ -113,9 +113,11 @@ Exit codes: `0` done · `1` a step did not finish · `2` missing parameter or ma
 
 Read-only. Reports each AI tool on this machine, whether its settings delete old sessions, each declared destination (reached or not, with the reason), identical duplicate shards in the configured local stage, the browser host registration, local cache sizes, and the key files this machine holds — one per archive copy, with whether each is present here and whether you have declared a copy of it — and how the declared set agrees with what the timers and the weekly stage clean-up actually do: push coverage, credentials a timer can resolve, the last recorded push per destination, and the latest recorded reclaim. Prints paths, counts, sizes and dates, never conversation text. To inspect archived destinations for duplicates, run [`repair-duplicates`](#repair-duplicates).
 
+Every check runs behind its own deadline, and each prints a `doctor: checking …` line before it starts, so a wedged step names itself instead of holding the whole report hostage: a check that does not answer within its budget is abandoned, its section is worded as unknown (never zero, never absent), the sections that did answer still print, and the run ends with exit `3` — the same "could not look" code an unreadable config gets, never a clean-looking `0` for a machine only half of which was inspected. A destination that accepts the connection and then says nothing is the case this exists for: its line reads `NO ANSWER WITHIN <N>s`, which is unknown, not a refusal. On a slow link, budgets are what a healthy probe fits in with room to spare — a check that needs longer than its budget on a healthy machine is a bug in the check, not a budget to raise; say so in an issue.
+
 | Flag | Meaning |
 |---|---|
-| `--json` | One JSON object. |
+| `--json` | One JSON object. Under `--json`, a non-empty `timed_out` array lists the checks that outlived their budget (`check`, `budget_secs`); the sections it names carry placeholders and must be read as "did not look", exactly as under a non-null `config_error`. |
 
 ## Archiving
 
