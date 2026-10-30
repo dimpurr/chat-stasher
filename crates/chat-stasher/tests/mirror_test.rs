@@ -12,7 +12,10 @@
 //!   * tampered file (47 §3.2): `tampered_mirror_files_are_re_downloaded`
 //!   * the first fill's two numbers, downloaded and verified (W1044):
 //!     `on_disk_unverified_bytes_make_the_two_fill_numbers_diverge` and
-//!     `a_complete_mirrors_two_fill_numbers_converge`
+//!     `a_complete_mirrors_two_fill_numbers_converge`; their one drawn
+//!     tri-state on every record-reading surface, unmeasured and
+//!     invariant-inverting records included (W1044f):
+//!     `a_record_whose_fill_halves_disagree_words_the_downloaded_half_unknown`
 //!   * a round cut mid-fill — the budget-cut shape C2 says must resume and
 //!     not count as failure: `budget_cut_resumes_across_rounds_and_states_only_on_completion`
 //!   * disk-floor pause: `disk_floor_pauses_the_round_without_failing_it`
@@ -794,7 +797,16 @@ fn on_disk_unverified_bytes_make_the_two_fill_numbers_diverge() {
     assert_eq!(status.rows[0].severity, mirror::MirrorRowSeverity::Info);
     let line = &status.rows[0].sentence;
     assert!(line.contains("first sync"), "{line}");
-    let numbers = mirror::first_fill_numbers(Some(total), verified, total, "unused tail");
+    let numbers = mirror::first_fill_numbers(
+        // The pair the round's own record holds, drawn from it the way
+        // every surface draws (rev1 ②): known while the invariant holds.
+        &mirror::MirrorUsageState::Known {
+            files: total_files,
+            bytes: total,
+        },
+        verified,
+        total,
+    );
     assert!(
         line.contains(&numbers),
         "the row words the pair, downloaded headline first: {line}"
@@ -1568,10 +1580,15 @@ fn a_progress_record_from_before_downloaded_accounting_words_unknown() {
     );
     assert!(
         row.contains(&mirror::first_fill_numbers(
-            None,
+            // The pre-W1044 record measures no downloaded half, so the row
+            // words the one tri-state such a record can draw: unknown with
+            // the record family's unmeasured why (rev1 ②).
+            &mirror::MirrorUsageState::Unknown {
+                why: "the round that wrote the progress record did not measure the bytes on disk"
+                    .to_string(),
+            },
             4_000,
             10_000,
-            "the round that wrote the progress record did not measure the bytes on disk"
         )),
         "the known half keeps its numbers in the same one spelling: {row}"
     );
@@ -1586,6 +1603,107 @@ fn a_progress_record_from_before_downloaded_accounting_words_unknown() {
         })
     );
     assert_eq!(json["first_sync"]["percent"], serde_json::json!(40));
+}
+
+/// W1044f (rev1 ②, the review's Medium): a record whose downloaded half
+/// falls below its verified half — the pair's own invariant (downloaded ≥
+/// verified) inverted, reachable without hand-editing when a listed path
+/// is a symlink whose target the verifying hash follows but the walking
+/// size read skips — words the downloaded half unknown on **both**
+/// surfaces, never a clamped pair that reads as a subset bigger than its
+/// whole. One drawn tri-state feeds the row and `--json` (rev0 ⑤'s shape,
+/// the honesty behindness keeps for its own record self-disagreement), so
+/// the one document the menu bar decodes cannot say `downloaded: unknown`
+/// beside a row that still words the raw pair.
+#[test]
+fn a_record_whose_fill_halves_disagree_words_the_downloaded_half_unknown() {
+    use chat_stasher::destdiag::fmt_bytes;
+
+    let sb = tempfile::TempDir::new().unwrap();
+    let state_dir = sb.path().join("state");
+    let data_root = sb.path().join("data");
+    fs::create_dir_all(&state_dir).unwrap();
+    let mirror_root = mirror_dir(&data_root, "storagebox");
+    fs::create_dir_all(&mirror_root).unwrap();
+    fs::write(mirror_root.join("config"), [0_u8; 4096]).unwrap();
+
+    write_progress_record(
+        &state_dir,
+        &mirror::MirrorProgress {
+            version: mirror::MIRROR_PROGRESS_VERSION,
+            mirror_of: "storagebox".to_string(),
+            round_finished_at_unix: 1_800_000_000,
+            complete: false,
+            outcome: "stopped".to_string(),
+            outcome_note: Some("round budget spent mid-fill; the next round resumes".to_string()),
+            remote_total_bytes: 10_000,
+            mirror_bytes: 4_000,
+            remote_files: 90,
+            mirror_files: 36,
+            orphan_files: Some(0),
+            orphan_bytes: Some(0),
+            downloaded_bytes: Some(1_000),
+            downloaded_files: Some(4),
+            torn_files: 0,
+            torn_bytes: 0,
+        },
+    );
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &data_root, &state_dir, 1_800_000_000);
+    assert_eq!(
+        status.rows.len(),
+        1,
+        "one mirror row while a fill is on record"
+    );
+    assert_eq!(
+        status.rows[0].severity,
+        mirror::MirrorRowSeverity::Info,
+        "a self-disagreeing record is unknown, not a finding: {}",
+        status.rows[0].sentence
+    );
+    let row = &status.rows[0].sentence;
+    assert!(
+        row.contains("first sync"),
+        "the fill family still words the state: {row}"
+    );
+    assert!(
+        row.contains("downloaded unknown"),
+        "the disagreement is worded, not clamped: {row}"
+    );
+    assert!(
+        row.contains("disagrees with itself"),
+        "the row names the record's self-disagreement: {row}"
+    );
+    assert!(
+        !row.contains(&format!("downloaded {}", fmt_bytes(1_000))),
+        "the raw pair would read as a subset bigger than its whole: {row}"
+    );
+    assert!(
+        row.contains(&format!(
+            ", {} of {} (40%) hash-verified",
+            fmt_bytes(4_000),
+            fmt_bytes(10_000)
+        )),
+        "the verified half keeps its numbers in the one spelling: {row}"
+    );
+
+    let json = status_json(&config, &data_root, &state_dir, 1_800_000_000);
+    assert_eq!(
+        json["first_sync"]["downloaded"]["kind"], "unknown",
+        "the one drawn tri-state rides the downloaded field, not a clamped known pair"
+    );
+    let why = json["first_sync"]["downloaded"]["why"].as_str().unwrap();
+    assert!(
+        why.contains("disagrees with itself")
+            && why.contains("the two measures' invariant forbids"),
+        "the why names the self-disagreement and the invariant it breaks: {why}"
+    );
+    assert_eq!(
+        json["rows"][0]["sentence"].as_str(),
+        Some(row.as_str()),
+        "the row and its JSON twin carry one drawn decision, the rev0 ⑤ shape"
+    );
 }
 
 /// Orphan files a remote cleanup leaves behind appear in the next round's

@@ -9557,10 +9557,14 @@ fn mirror_step_after_push(
                     "[run-once] mirror-sync: paused — this pass's round budget is \
                              spent, {}; the next pass resumes",
                     chat_stasher::mirror::first_fill_numbers(
-                        report.downloaded_bytes_on_disk,
+                        // The pair as one drawn tri-state — the very state
+                        // the record this round already wrote
+                        // (`write_progress` runs inside `sync_once`)
+                        // carries, so the result line and the record
+                        // behind it cannot disagree (rev1 ②/L5).
+                        &chat_stasher::mirror::report_downloaded_state(&report),
                         report.present_bytes + report.downloaded_bytes,
-                        report.remote_total_bytes,
-                        "this round's directory walk did not measure the bytes on disk"
+                        report.remote_total_bytes
                     )
                 ),
                 chat_stasher::mirror::RoundEnd::DiskBelowThreshold {
@@ -13541,12 +13545,14 @@ fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode
                     // a watch on the mirror directory reconciles with;
                     // the verified half rides as its "of which" subset so
                     // a mid-fill pause can never read as two competing
-                    // totals. An unmeasured walk words unknown, never 0.
+                    // totals. An unmeasured walk words unknown, never 0,
+                    // and the downloaded half arrives as the one drawn
+                    // tri-state (rev1 ②/L5) — the very state the record
+                    // this round wrote already carries.
                     let numbers = chat_stasher::mirror::first_fill_numbers(
-                        report.downloaded_bytes_on_disk,
+                        &chat_stasher::mirror::report_downloaded_state(&report),
                         report.present_bytes + report.downloaded_bytes,
                         report.remote_total_bytes,
-                        "this round's directory walk did not measure the bytes on disk",
                     );
                     println!(
                         "[mirror] result       : paused — this round's budget is spent; \

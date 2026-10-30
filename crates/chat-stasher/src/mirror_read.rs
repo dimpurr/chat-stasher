@@ -447,7 +447,12 @@ fn mirror_copy_name(data_root: &Path, repo_root: &str) -> Option<String> {
 ///
 /// LM-4 owns the settled field family across `status` / `doctor` / menubar;
 /// this sentence is the read-surface stake in the same ground and keeps to
-/// the wording the ADR quotes.
+/// the wording the ADR quotes. Its two fill sentences (a failed round, a
+/// first fill in progress) word the pair through the one spelling every
+/// surface shares (`mirror::first_fill_numbers`) — rev1 ②/L1: a bare
+/// verified percentage is exactly the number the incident misread on this
+/// surface, and the dashboard and `status` must not show two different
+/// numbers for the same mirror either.
 #[must_use]
 pub fn behindness_sentence(state_dir: &Path, mirror_of: &str) -> String {
     let state = mirrorstate::load(state_dir);
@@ -465,20 +470,24 @@ pub fn behindness_sentence(state_dir: &Path, mirror_of: &str) -> String {
                 // (the same honesty mirror.rs's own status wording keeps).
                 let note = record.outcome_note.clone().unwrap_or_default();
                 return format!(
-                    "local copy's last sync round failed at {}% ({} of {} B): {note} — reads \
+                    "local copy's last sync round failed — {}: {note} — reads \
                      continue from what the mirror already holds and fall back to the remote",
-                    record.percent(),
-                    record.mirror_bytes,
-                    record.remote_total_bytes
+                    mirror::first_fill_numbers(
+                        &mirror::record_downloaded_state(record),
+                        record.mirror_bytes,
+                        record.remote_total_bytes
+                    )
                 );
             }
             if !record.complete {
                 return format!(
-                    "local copy's first sync is in progress: {}% ({} of {} B) — reads fall \
+                    "local copy's first sync is in progress: {} — reads fall \
                      back to the remote for what has not synced; this is not a failure",
-                    record.percent(),
-                    record.mirror_bytes,
-                    record.remote_total_bytes
+                    mirror::first_fill_numbers(
+                        &mirror::record_downloaded_state(record),
+                        record.mirror_bytes,
+                        record.remote_total_bytes
+                    )
                 );
             }
         }
@@ -1123,8 +1132,9 @@ mod tests {
             .unwrap();
         };
 
-        // A failed round that carries a note: the failure, the numbers and
-        // the note — reads continue from what the copy holds.
+        // A failed round that carries a note: the failure, the two numbers
+        // in the one spelling every surface shares, and the note — reads
+        // continue from what the copy holds.
         write(&record(
             "failed",
             false,
@@ -1132,8 +1142,15 @@ mod tests {
         ));
         let sentence = behindness_sentence(&state_dir, "storagebox");
         assert!(
-            sentence.starts_with("local copy's last sync round failed at 25% (1024 of 4096 B): "),
+            sentence.starts_with("local copy's last sync round failed — downloaded unknown"),
             "the loudest sentence leads with the failure and its numbers: {sentence}"
+        );
+        assert!(
+            sentence.contains(
+                "downloaded unknown (the round that wrote the progress record did not \
+                 measure the bytes on disk), 1.0 KiB of 4.0 KiB (25%) hash-verified"
+            ),
+            "the pair rides the read surface in the shared spelling, downloaded first: {sentence}"
         );
         assert!(
             sentence.contains("the destination could not be read mid-fill"),
@@ -1152,11 +1169,11 @@ mod tests {
         write(&record("failed", false, None));
         let sentence = behindness_sentence(&state_dir, "storagebox");
         assert!(
-            sentence.contains("failed at 25% (1024 of 4096 B)"),
+            sentence.contains("failed — downloaded unknown"),
             "{sentence}"
         );
         let after_colon = sentence
-            .split_once("(1024 of 4096 B): ")
+            .split_once("hash-verified: ")
             .unwrap_or_else(|| panic!("the sentence carries its numbers: {sentence}"))
             .1;
         assert!(
@@ -1187,8 +1204,9 @@ mod tests {
             "no dated copy while the last round failed reads as current: {sentence}"
         );
 
-        // First fill in progress: its percentage, its fallback wording, and
-        // its own "not a failure" honesty.
+        // First fill in progress: the two numbers in the shared spelling,
+        // downloaded first, its fallback wording, and its own "not a
+        // failure" honesty.
         write(&record(
             "stopped",
             false,
@@ -1197,8 +1215,10 @@ mod tests {
         let sentence = behindness_sentence(&state_dir, "storagebox");
         assert!(
             sentence.starts_with(
-                "local copy's first sync is in progress: 25% (1024 of 4096 B) — reads fall back \
-                 to the remote for what has not synced; this is not a failure"
+                "local copy's first sync is in progress: downloaded unknown (the round that \
+                 wrote the progress record did not measure the bytes on disk), 1.0 KiB of \
+                 4.0 KiB (25%) hash-verified — reads fall back to the remote for what has \
+                 not synced; this is not a failure"
             ),
             "first-fill is its own loud sentence: {sentence}"
         );

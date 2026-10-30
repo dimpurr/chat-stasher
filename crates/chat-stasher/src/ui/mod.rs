@@ -5638,9 +5638,10 @@ mod tests {
             // the apostrophe arrives escaped like every other interpolated
             // character — the sentence is rendered as text, never markup
             body.contains(
-                "<b>dest-two</b> — local copy&#39;s first sync is in progress: 70% (7000 of \
-                 10000 B) — reads fall back to the remote for what has not synced; this is \
-                 not a failure"
+                "<b>dest-two</b> — local copy&#39;s first sync is in progress: downloaded unknown \
+                 (the round that wrote the progress record did not measure the bytes on disk), \
+                 6.8 KiB of 9.8 KiB (70%) hash-verified — reads fall back to the remote for \
+                 what has not synced; this is not a failure"
             ),
             "the merged view names the copy each sentence is about: {body}"
         );
