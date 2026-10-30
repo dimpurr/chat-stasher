@@ -2996,7 +2996,24 @@ fn machine_log_footprint_line(log: &MachineLogFootprint) -> String {
     }
 }
 
-fn print_machine_logs(rows: &MachineLogRows) {
+/// The machine-log rows of the report, for both channels.
+///
+/// A wedged machine-log check (W1043f2) prints its own sub-block line — the
+/// same UNKNOWN idiom every timed-out section gets — because the rows the
+/// runner would have built are the default empty set, which on paper reads
+/// as "no logs exist": the one state that must never be worded as a
+/// measurement. With no deadline note the old shapes stand: truly empty
+/// rows stay silent under the coverage table, and non-empty rows print.
+fn print_machine_logs(rows: &MachineLogRows, timed_out_after_secs: Option<u64>) {
+    if let Some(secs) = timed_out_after_secs {
+        print_timed_out_section(
+            "  machine logs (per-machine input logs, ADR-053 — not sessions, never counted in the table above)",
+            MACHINE_LOGS_CHECK,
+            secs,
+            "the machine-log rows are unknown, not empty",
+        );
+        return;
+    }
     if rows.present.is_empty() && rows.unlooked == 0 && rows.indeterminate == 0 {
         return;
     }
@@ -3270,17 +3287,25 @@ pub fn run() -> DoctorReport {
         Some(Ok(config)) => config,
         Some(Err(e)) => return config_unreadable(checks, format!("{e:#}"), claude, gemini),
         None => {
-            let secs = check_budget_secs(CONFIG_BUDGET_SECS);
-            return config_unreadable(
-                checks,
-                format!(
-                    "reading the configuration did not answer within {secs}s — the file exists \
-                     but was never read to the end, so whether it is usable is UNKNOWN, not \
-                     invalid"
+            // The seconds the runner itself recorded for this check's note
+            // (W1043f's D7 precedent, applied to the config site the round
+            // after the review flagged it): one source for the number, not a
+            // second re-derivation of the env override — so the sentence,
+            // the `timed_out` note and any later reader of the budget can
+            // never disagree about what this run waited.
+            let secs = match checks.timed_out_after(CONFIG_CHECK) {
+                Some(secs) => secs,
+                None => std::unreachable!(
+                    "a config-check timeout on its own label always records its \
+                     budget — the same `run` call that returned None pushed the note"
                 ),
-                claude,
-                gemini,
+            };
+            let error = format!(
+                "reading the configuration did not answer within {secs}s — the file exists \
+                 but was never read to the end, so whether it is usable is UNKNOWN, not \
+                 invalid"
             );
+            return config_unreadable(checks, error, claude, gemini);
         }
     };
 
@@ -5697,6 +5722,15 @@ pub fn print_report(r: &DoctorReport) {
                 eprintln!("             ({})", f.note);
             }
         }
+        // The machine-log rows check runs behind the scan's verdict, not
+        // behind the scan itself (its deadline is its own), so a wedge
+        // there keeps its name on this path too — otherwise text and
+        // `--json` would tell two stories about a section whose check did
+        // not answer (`machine_logs` carries `{"checked": false}` and the
+        // walked-away-at seconds under `--json`; W1043f2). With no note
+        // the helper stays silent, which is the shape this branch always
+        // had for a measured — possibly empty — row list.
+        print_machine_logs(&r.machine_logs, r.check_timed_out_after(MACHINE_LOGS_CHECK));
         eprintln!();
         eprintln!("D4 · Risk summary — so what happens + when");
         for (i, risk) in r.risks.iter().enumerate() {
@@ -5765,6 +5799,21 @@ pub fn print_report(r: &DoctorReport) {
                 "the host registration and the stage are unknown, not absent",
             );
         }
+        // D12, D13 and the key inventory are not gated on the scan either:
+        // `run()` measures all three whether the registry answered or not,
+        // so this path owes the reader the same three sections below that
+        // the normal path prints. The shared dispatch keeps every shape
+        // one story — a measured section prints what it measured, a
+        // wedged one keeps its heading and words the unknown (W1043f2 —
+        // before this, a wedged or measured D12/D13/keys had no heading in
+        // text on this path while `--json` answered `{"checked": false …}`
+        // beside measured sections).
+        print_dest_reconcile(
+            &r.dest_reconcile,
+            r.check_timed_out_after(DEST_RECONCILE_CHECK),
+        );
+        print_mirror(&r.mirror, r.check_timed_out_after(MIRROR_CHECK));
+        print_keys(&r.keys, r.check_timed_out_after(KEYS_CHECK));
         return;
     }
 
@@ -5805,7 +5854,7 @@ pub fn print_report(r: &DoctorReport) {
         // D6 lower-bound language (`≥N` stays on the family row above).
         print_source_root_rows(f);
     }
-    print_machine_logs(&r.machine_logs);
+    print_machine_logs(&r.machine_logs, r.check_timed_out_after(MACHINE_LOGS_CHECK));
     if !r.other_present.is_empty() {
         #[allow(
             clippy::unwrap_used,

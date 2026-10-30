@@ -1074,7 +1074,7 @@ reports the machines whose archived activity index was written by an older
 (`crates/chat-stasher/src/doctor.rs:2200-2307`).
 It creates nothing, so a destination it reports as "not there yet" is still not
 created by running `doctor`. D10 also checks each destination's local FTS index
-without connecting to it (`crates/chat-stasher/src/doctor.rs:3461-3462,4120-4182`).
+without connecting to it (`crates/chat-stasher/src/doctor.rs:3486-3487,4145-4207`).
 The destination probes are the one check that touches the network; see section
 4.4 if it reports a host it cannot trust (`crates/chat-stasher/src/doctor.rs:2072-2087,2305-2338,2499-2618`).
 
