@@ -7173,8 +7173,20 @@ fn cmd_doctor(json: bool) -> ExitCode {
             inboxes: Vec::new(),
         },
     };
-    if let Ok(config) = Config::load() {
-        let (probes, timed_out) = chat_stasher::doctor::probe_destinations(&config);
+    // W1043f: the probes reuse the config `doctor::run()` already read behind
+    // its own deadline — `DoctorReport::config` — instead of issuing a second
+    // `Config::load()`. That second read had no deadline, no thread and no
+    // cache: a config file that had just been reported as timed out got a
+    // fresh, unbounded chance to hang the command (the rev0 review's High),
+    // and a file edited mid-run could disagree with the rest of the report.
+    // Reusing the one config keeps the surfaces telling one story: with no
+    // usable config there is nothing to probe, so `destinations` stays empty
+    // exactly when `config_error` says nothing config-derived was inspected.
+    let probed = report
+        .config
+        .as_ref()
+        .map(chat_stasher::doctor::probe_destinations);
+    if let Some((probes, timed_out)) = probed {
         report.destinations = probes;
         report.timed_out.extend(timed_out);
     }
@@ -7186,6 +7198,19 @@ fn cmd_doctor(json: bool) -> ExitCode {
     } else {
         chat_stasher::doctor::print_report(&report);
         inboxes.print();
+    }
+    // W1043: one line per timed-out check, naming the culprit the trace
+    // already named before it hung. Printed before every exit-3 branch
+    // below, because the states can coexist — a config that never answered
+    // and a settings read that wedged beside it each owe their own line,
+    // and a reader of either kind of run sees every wedged check named
+    // (W1043f).
+    for note in &report.timed_out {
+        eprintln!(
+            "doctor: INCOMPLETE exit_code=3 — the {} check did not answer within {}s, so its \
+             section is UNKNOWN, not zero; the other checks' printed results stand.",
+            note.check, note.budget_secs
+        );
     }
     if let Some(error) = &report.config_error {
         // The one command that does not refuse on an unusable config, because
@@ -7206,16 +7231,9 @@ fn cmd_doctor(json: bool) -> ExitCode {
     // table gives to a diagnosis that did not complete — never exit 0 for a
     // machine only half of which was inspected, and never a generic
     // failure that hides the sections that did answer: they are printed
-    // above and stand. One line per timed-out check, naming the culprit
-    // the trace already named before it hung.
+    // above and stand. The per-check INCOMPLETE lines above already carry
+    // the details, so this branch only decides the exit code.
     if !report.timed_out.is_empty() {
-        for note in &report.timed_out {
-            eprintln!(
-                "doctor: INCOMPLETE exit_code=3 — the {} check did not answer within {}s, so its \
-                 section is UNKNOWN, not zero; the other checks' printed results stand.",
-                note.check, note.budget_secs
-            );
-        }
         return ExitCode::from(3);
     }
     if inboxes.incomplete() {

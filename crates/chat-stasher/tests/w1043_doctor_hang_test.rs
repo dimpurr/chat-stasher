@@ -12,11 +12,19 @@
 //! nothing and the blackhole probe would hang the spawned `doctor` until the
 //! test runner's own deadline (or assert a clean exit it cannot get).
 //!
+//! W1043f adds the config-reuse regressions (rev0's High): a config file
+//! whose reader never answers is the wedge the fixture pair below pins.
+//! When the bounded config check times out, the CLI must reuse that
+//! "no usable config" answer — the unfixed command re-issued the same
+//! deadline-less `fs::read_to_string` and hung forever on the wedged file.
+//!
 //! The wedge is deterministic and machine-local: a TCP listener that accepts
 //! the connection and then never answers it — the exact shape the observed
 //! hang had (connect succeeds, the read never ends) — pointed at by an
-//! S3-shaped destination in a sandboxed HOME. No real remote, credential or
-//! session body is involved; names, counts and bytes below are synthetic.
+//! S3-shaped destination in a sandboxed HOME; the config-level wedge is a
+//! FIFO nobody ever opens for writing, so the reader's `open()` never
+//! returns. No real remote, credential or session body is involved; names,
+//! counts and bytes below are synthetic.
 
 #[path = "../src/test_support.rs"]
 mod test_support;
@@ -29,9 +37,14 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// The process environment is process-global and `cargo test` runs this
-/// file's tests as threads of one process; every spawn snapshots it. The
-/// budget override is a write to it (B97's rule: readers serialize too).
+/// Every run below measures a wall-clock budget, so two fixtures running at
+/// once on the same cores could make a working fix look like a miss: they
+/// serialize through this lock, which is what the timing assertions below
+/// measure (B97's rule: the readers of one slow resource serialize too).
+/// No spawned fixture writes to this process's environment — each child
+/// gets its variables through `Command::env`, which snapshots them at
+/// spawn; the one in-process fixture sets and restores the real ones under
+/// this lock.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Bind a listener on loopback that accepts connections and then never
@@ -239,20 +252,30 @@ fn doctor_returns_within_n_seconds_when_a_destination_never_answers() {
     let sandbox = tempfile::tempdir().expect("create sandbox");
     let registry = empty_registry(sandbox.path());
     let port = blackhole();
+    let budget: u64 = 2;
     let run = run_doctor(doctor_against_blackhole(
         sandbox.path(),
         &registry,
         port,
         false,
-        2,
+        budget,
     ));
 
-    // N = a 2 s budget plus every local check on an empty sandbox (all
-    // sub-second), with an order of slack for a busy CI machine — the point
-    // is the bound, not the exact number.
+    // N = the pathological upper bound of a *working* fix, derived rather
+    // than guessed (W1043 rev0's L3): the slowest a correct run can be is
+    // every budgeted check consuming its full budget — ~18 of them on this
+    // fixture (the settings pair, the config, the scan, the other-harness
+    // listing, the desktop probe, the nine config-derived sections, the
+    // machine-log rows, the CLI's inbox and the one destination probe that
+    // actually wedges) — plus slack for a busy CI machine. Deliberately
+    // under `run_doctor`'s 60 s hard kill: the kill plus the exit-code
+    // assertions are the bound's teeth, and a fixture whose number sits
+    // below what whole-machine slowness can produce is a flake, not a
+    // bound.
+    let bound = Duration::from_secs(budget * 18 + 10);
     assert!(
-        run.elapsed < Duration::from_secs(30),
-        "doctor must bound its run when a check wedges; waited {:?}",
+        run.elapsed < bound,
+        "doctor must bound its run when a check wedges; waited {:?} (bound {bound:?})",
         run.elapsed
     );
     assert_eq!(run.code, Some(3), "the deadline's exit is 3, not a hang");
@@ -468,4 +491,347 @@ fn doctor_bounds_the_production_budget_too() {
         "the D7 line carries the production budget: {}",
         run.text
     );
+}
+
+// ---------------------------------------------------------------------------
+// W1043f — the config a wedged run must not re-read (rev0's High)
+// ---------------------------------------------------------------------------
+
+/// W1043f (rev0's High): a config file whose reader never answers is the
+/// same class of wedge the blackhole is, one step earlier in the report —
+/// `Config::load` is a plain `fs::read_to_string`, and the library already
+/// bounds it. The regression this pair of fixtures pins is what the CLI did
+/// **after** that bounded read reported a timeout: it re-issued the same
+/// deadline-less read and hung forever on the same wedged file. The fixed
+/// command reuses the answer the report already carries.
+///
+/// The wedge: a FIFO nobody ever opens for writing, so the reader's
+/// `open()` never returns. Unix-only mechanism, stated per CLAUDE.md's cfg
+/// rule because it is the property that is platform-bound, not the fix: a
+/// writer-less FIFO is the only file shape `std` can create whose *open for
+/// read* blocks, and Windows offers no equivalent without win32 named-pipe
+/// API surface this dependency set does not carry. The replaced read and
+/// the reuse are platform-neutral Rust control flow, and the unix CI cells
+/// run this regression on every push.
+#[cfg(unix)]
+fn wedged_config(sandbox: &Path) -> std::path::PathBuf {
+    let config_dir = sandbox.join("xdg-config").join("chat-stasher");
+    fs::create_dir_all(&config_dir).expect("create the isolated config dir");
+    let path = config_dir.join("config.toml");
+    let mkfifo = Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .expect("run mkfifo for the wedged config fixture");
+    assert!(
+        mkfifo.success(),
+        "mkfifo must create the wedged config at {}",
+        path.display()
+    );
+    path
+}
+
+/// A `doctor` command against the wedged config, in the same isolated HOME
+/// shape `doctor_against_blackhole` uses, with every check's budget at
+/// `budget_secs`.
+#[cfg(unix)]
+fn doctor_against_wedged_config(
+    sandbox: &Path,
+    registry: &Path,
+    json: bool,
+    budget_secs: u64,
+) -> Command {
+    wedged_config(sandbox);
+    let home = sandbox.join("home");
+    fs::create_dir_all(&home).expect("create isolated HOME");
+    let no_tools = sandbox.join("no-host-tools");
+    fs::create_dir_all(&no_tools).expect("create empty PATH directory");
+    let mut args = vec!["doctor".to_string()];
+    if json {
+        args.push("--json".to_string());
+    }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
+    command
+        .args(&args)
+        .env("PATH", &no_tools)
+        .env("HOSTNAME", "w1043-fixture")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", sandbox.join("xdg-config"))
+        .env("XDG_DATA_HOME", sandbox.join("xdg-data"))
+        .env("XDG_STATE_HOME", sandbox.join("xdg-state"))
+        .env("XDG_CACHE_HOME", sandbox.join("xdg-cache"))
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
+        .env("CHAT_STASHER_REGISTRY", registry)
+        .env(
+            "CHAT_STASHER_DOCTOR_CHECK_BUDGET_SECS",
+            budget_secs.to_string(),
+        )
+        .env_remove("CODEX_HOME")
+        .env_remove("GEMINI_CLI_HOME")
+        .env_remove("OPENCODE_DB")
+        .env_remove("CURSOR_USER_DIR");
+    command
+}
+
+/// The bounded config check times out, words the unknown honestly, and the
+/// command still reaches its report and exits 3 — the deadline did its job.
+/// What this fixture is for is the step after: the run must not re-read the
+/// same wedged file unbounded. Under the unfixed command this exact spawn
+/// hung on the second `Config::load` with zero report printed, and the
+/// fixture's 60 s kill is the line it dies on.
+#[test]
+#[cfg(unix)]
+fn doctor_does_not_reread_a_config_that_never_answers() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    let registry = empty_registry(sandbox.path());
+    let budget: u64 = 2;
+    let run = run_doctor(doctor_against_wedged_config(
+        sandbox.path(),
+        &registry,
+        false,
+        budget,
+    ));
+    // Exactly one check can consume its budget on this fixture (the config
+    // read; D1/D2 read absent files and the CLI has nothing to probe), so
+    // the bound is that budget plus the empty-sandbox locals and slack —
+    // and far under `run_doctor`'s 60 s kill, which is how a reverted fix
+    // fails this test instead of hanging CI.
+    assert!(
+        run.elapsed < Duration::from_secs(budget + 20),
+        "doctor must reach its report without re-reading the wedged config; \
+         waited {:?}",
+        run.elapsed
+    );
+    assert_eq!(
+        run.code,
+        Some(3),
+        "the config deadline's exit is 3, not a hang: {}",
+        run.text
+    );
+    assert!(
+        run.text.contains("doctor: checking configuration file"),
+        "the trace must name the config check before it wedges: {}",
+        run.text
+    );
+    assert!(
+        run.text.contains(&format!(
+            "reading the configuration did not answer within {budget}s"
+        )),
+        "the honest note words the unknown: {}",
+        run.text
+    );
+    assert!(
+        run.text.contains(&format!(
+            "the configuration file check did not answer within {budget}s"
+        )),
+        "the per-check INCOMPLETE line prints on the config-error exit too, not \
+         only on the timeout-only one (rev0's L2): {}",
+        run.text
+    );
+    assert!(
+        run.text.contains("the config file could not be used"),
+        "the config-error branch still names the half of the setup it skipped: {}",
+        run.text
+    );
+    assert!(
+        !run.text.contains("doctor: checking D7 destination probe"),
+        "no destination was dialed: with no usable config there is nothing to \
+         probe, and re-reading the file is the hang this fixture pins: {}",
+        run.text
+    );
+}
+
+/// The machine-readable half of the same run: `timed_out` names the config
+/// check, `config_error` is a string, and `destinations` stays empty — a
+/// measured destination beside a "did not look" config was the second half
+/// of the review's finding, and reuse closes it by construction: there is
+/// no second config to disagree with the report.
+#[test]
+#[cfg(unix)]
+fn doctor_json_keeps_one_story_when_the_config_never_answers() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    let registry = empty_registry(sandbox.path());
+    let budget: u64 = 2;
+    let run = run_doctor(doctor_against_wedged_config(
+        sandbox.path(),
+        &registry,
+        true,
+        budget,
+    ));
+    assert_eq!(
+        run.code,
+        Some(3),
+        "the config deadline's exit is 3 in JSON mode too: {}",
+        run.text
+    );
+    let value: serde_json::Value = serde_json::from_str(&run.stdout)
+        .unwrap_or_else(|error| panic!("doctor --json must still print one object: {error}"));
+    assert!(
+        !value["config_error"].is_null(),
+        "the config error is a string a script reads: {value}"
+    );
+    let timed = value["timed_out"]
+        .as_array()
+        .expect("timed_out is an array");
+    assert!(
+        timed
+            .iter()
+            .any(|note| note["check"] == "configuration file" && note["budget_secs"] == 2),
+        "the array names the config check with its budget: {value}"
+    );
+    assert_eq!(
+        value["destinations"],
+        serde_json::json!([]),
+        "nothing was probed, and an empty array under a non-null config_error \
+         reads as 'did not look' — the one story: {value}"
+    );
+    assert_eq!(
+        value["claude"]["verdict"]["kind"],
+        serde_json::json!("unset_default"),
+        "the checks that did run keep their ordinary shapes: {value}"
+    );
+}
+
+/// The healthy half of the reuse: a run whose config answered hands the
+/// caller the exact config the report was measured from, so the CLI's
+/// probes reuse it instead of re-reading the file. In-process, because the
+/// spawned fixtures cannot see the pub field; env is swapped under the
+/// file's lock and restored on the way out (including a panic), the same
+/// contract `doctor_empty_machine_test` keeps.
+#[test]
+fn run_hands_the_cli_the_config_it_was_measured_from() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    let registry = empty_registry(sandbox.path());
+    let config_dir = sandbox.path().join("xdg-config").join("chat-stasher");
+    fs::create_dir_all(&config_dir).expect("create the isolated config dir");
+    let mut config =
+        fs::File::create(config_dir.join("config.toml")).expect("write the isolated config");
+    writeln!(
+        config,
+        r#"machine = "w1043f-fixture"
+
+[destinations.synthetic-destination]
+repo = "opendal:s3"
+
+[destinations.synthetic-destination.options]
+bucket = "chat-stasher"
+endpoint = "http://127.0.0.1:1"
+region = "auto"
+root = "/synthetic/v1"
+access_key_id = "synthetic-access-key-id"
+secret_access_key = "synthetic-secret-access-key"
+disable_config_load = "true"
+"#
+    )
+    .expect("write the synthetic destination");
+
+    let home = sandbox.path().join("home");
+    fs::create_dir_all(&home).expect("create isolated HOME");
+    let swap = swap_env(&[
+        ("HOME", home.clone().into_os_string()),
+        ("USERPROFILE", home.clone().into_os_string()),
+        (
+            "XDG_CONFIG_HOME",
+            sandbox.path().join("xdg-config").into_os_string(),
+        ),
+        (
+            "XDG_DATA_HOME",
+            sandbox.path().join("xdg-data").into_os_string(),
+        ),
+        (
+            "XDG_STATE_HOME",
+            sandbox.path().join("xdg-state").into_os_string(),
+        ),
+        (
+            "XDG_CACHE_HOME",
+            sandbox.path().join("xdg-cache").into_os_string(),
+        ),
+        (
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home).into_os_string(),
+        ),
+        ("CHAT_STASHER_REGISTRY", registry.into_os_string()),
+        ("CHAT_STASHER_DOCTOR_CHECK_BUDGET_SECS", "10".into()),
+        ("CODEX_HOME", std::ffi::OsString::new()),
+        ("GEMINI_CLI_HOME", std::ffi::OsString::new()),
+        ("OPENCODE_DB", std::ffi::OsString::new()),
+        ("CURSOR_USER_DIR", std::ffi::OsString::new()),
+    ]);
+    let report = chat_stasher::doctor::run();
+    drop(swap);
+
+    assert!(
+        report.config_error.is_none(),
+        "the planted config parses: {:?}",
+        report.config_error
+    );
+    assert!(
+        !report.scan_failed,
+        "the empty registry loads, so the run reached every section"
+    );
+    let config = report
+        .config
+        .as_ref()
+        .expect("a run with a usable config hands its caller that config");
+    assert_eq!(
+        config.source.label(),
+        "file",
+        "the carried config is the file's meaning, not defaults"
+    );
+    assert_eq!(config.machine.as_deref(), Some("w1043f-fixture"));
+    assert!(
+        config.destinations.contains_key("synthetic-destination"),
+        "the carried config names the declared destination — the probes reuse \
+         exactly this and never re-read the file"
+    );
+    // `run()` never dials the destination (ADR-023: probes are the CLI's
+    // step), so this fixture stays machine-local: the endpoint is synthetic,
+    // never contacted, and `destinations` stayed empty as the lib entry
+    // point promises.
+    assert!(report.destinations.is_empty());
+}
+
+/// Snapshot + swap the given environment variables, restoring the snapshot
+/// when returned (restore is a drop, so a panicking test gives the machine
+/// back its environment on the way out). An empty `value` removes the
+/// variable. Only for the one in-process fixture above, under the file's
+/// ENV_LOCK: env mutation is process-global.
+struct SwappedEnv {
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+fn swap_env(pairs: &[(&'static str, std::ffi::OsString)]) -> SwappedEnv {
+    let mut previous = Vec::with_capacity(pairs.len());
+    for (name, value) in pairs {
+        previous.push((*name, std::env::var_os(name)));
+        if value.is_empty() {
+            std::env::remove_var(name);
+        } else {
+            std::env::set_var(name, value);
+        }
+    }
+    SwappedEnv { previous }
+}
+
+impl Drop for SwappedEnv {
+    fn drop(&mut self) {
+        for (name, value) in self.previous.drain(..) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
 }
