@@ -697,6 +697,9 @@ const HARNESS_SOURCE_FORMATS: &[(&str, &str)] = &[
     // W1046: the registered half the transcripts live in is jsonl; the
     // metadata lines seal under the same session id as part of that body.
     ("workbuddy", FORMAT_JSONL),
+    // W1047: the CodeBuddy CLI archives the same-core transcripts with no
+    // metadata lines beside them, so the whole body is the jsonl events.
+    ("codebuddy", FORMAT_JSONL),
 ];
 
 fn declared_format(harness: &str) -> Option<&'static str> {
@@ -2853,6 +2856,13 @@ mod tests {
                 "workbuddy",
                 br#"{"type":"message","role":"user","content":[{"type":"input_text","text":"<user_query>synthetic workbuddy question</user_query>"}],"timestamp":1780000000000}"#,
                 Expected::Text("synthetic workbuddy question"),
+            ),
+            (
+                // The CLI body (W1047) is the same-core events with no
+                // metadata lines at all; the reader is the shared one.
+                "codebuddy",
+                br#"{"type":"message","role":"user","content":[{"type":"input_text","text":"<user_query>synthetic codebuddy question</user_query>"}],"timestamp":1780000000000}"#,
+                Expected::Text("synthetic codebuddy question"),
             ),
         ];
 

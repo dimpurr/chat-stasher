@@ -54,6 +54,13 @@
 #
 # on macOS, where the Grok Bot desktop app's persistence lives, grok-bot is
 # seedable too — one replica blob, the same shape the scanner test plants.
+# macOS also seeds the cbc family: workbuddy (W1046) through its dual store
+# — one sqlite row joined to one transcript per session — and codebuddy
+# (W1047) through the CLI's two measured transcript layouts. codebuff, whose
+# entry is all source roots with no primary cell, seeds wherever its cell is
+# scannable (macOS; its Linux cell stays `unascertained` and the run there
+# asserts the honest unknown), planted from the root cell's own declared
+# session_dir rule by the generic planter.
 # claude-code and codex now also seed their declared second roots on machines
 # whose registry cells anchor them (the desktop Cowork sandboxes and the
 # archived rollouts), each through its own cell template, so the doctor count
@@ -353,7 +360,7 @@ def plant_by_kind(kind, cell, root, n):
     raise RuntimeError(f"unknown root recipe kind {kind!r}")
 
 
-def plant_session_dir_cell(cell, root, n):
+def plant_session_dir_cell(cell, root, n, salt="", body="{}\n"):
     """Plant `n` sessions shaped by a cell's own `session_dir` rule.
 
     The rule is the source the scanner really consumes, so the fixture is
@@ -363,23 +370,36 @@ def plant_session_dir_cell(cell, root, n):
     parts get synthetic values), and each session gets its own values so `n`
     sessions produce `n` distinct transcripts the rule must then select —
     the same shape the scanner tests plant for the desktop Cowork sandboxes.
+
+    `salt` keeps the synthetic names distinct across sibling roots of one
+    entry: codebuff's three channel roots all use the same rule shape, and
+    unsalted names would mint the same id from all three — three planted
+    sessions collapsing into one archive slot, which is the aliasing the
+    scanner tests elsewhere. It rides only the directory names, because the
+    file name never carries identity in either caller's rule.
+
+    `body` is what each transcript holds. The claude-code default is one
+    JSON object per file; codebuff seals whole-file and skips unless the file
+    validates as a JSON *array* (ADR-054 D2), so its caller passes one.
     """
     rule = cell["session_dir"]
     target = rule.get("file_glob") or rule.get("file")
     planted = 0
     for i in range(n):
-        dirs = [part.replace("*", f"smoke{i}") for part in rule["pattern"].split("/") if part]
+        dirs = [
+            part.replace("*", f"{salt}smoke{i}") for part in rule["pattern"].split("/") if part
+        ]
         parts = [part for part in target.split("/") if part]
         # The last component of the file target is the transcript's own name:
         # where the rule says the file name itself varies (`*.jsonl`), each
         # session needs its own stem, or n sessions collapse to one file.
         parts = [
-            part.replace("*", f"session-{i:02d}" if idx == len(parts) - 1 else f"smoke{i}")
+            part.replace("*", f"session-{i:02d}" if idx == len(parts) - 1 else f"{salt}smoke{i}")
             for idx, part in enumerate(parts)
         ]
         p = pathlib.Path(root).joinpath(*dirs, *parts)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("{}\n", encoding="utf-8")
+        p.write_text(body, encoding="utf-8")
         planted += 1
     return planted
 
@@ -534,6 +554,63 @@ def plant_kimi(root, n):
         )
 
 
+def cbc_transcript_lines(session_id):
+    # The two-product cbc event core (tests/workbuddy_scanner_test.rs,
+    # tests/codebuddy_scanner_test.rs): a person's question inside the
+    # user_query tag and one assistant reply. Synthetic, like every fixture
+    # the smoke plants.
+    return "".join(
+        line + "\n"
+        for line in [
+            '{"id":"m1","timestamp":1780000000000,"type":"message","role":"user",'
+            '"content":[{"type":"input_text","text":"<user_query>synthetic question</user_query>"}],'
+            f'"sessionId":"{session_id}","cwd":"/synthetic/project"}}',
+            '{"id":"m2","timestamp":1780000000100,"type":"message","role":"assistant",'
+            '"content":[{"type":"output_text","text":"synthetic answer"}],'
+            f'"sessionId":"{session_id}","cwd":"/synthetic/project"}}',
+        ]
+    )
+
+
+def plant_workbuddy(root, n):
+    # The desktop app's dual store: one row per session in the sqlite half
+    # (the registry's measured required columns and nothing else), each
+    # joined to a transcript under a project slug below projects/. The
+    # store is created once — `sqlite_at` drops an existing db, so per-row
+    # reconnects would keep only the last row.
+    home_root = pathlib.Path(root).parents[0]
+    conn = sqlite_at(os.path.join(home_root, "workbuddy.db"))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, transport TEXT,"
+        " deleted_at INTEGER, created_at INTEGER, last_activity_at INTEGER)"
+    )
+    for i in range(n):
+        session_id = f"smoke-workbuddy-{i:02d}"
+        conn.execute(
+            "INSERT INTO sessions (id, transport, deleted_at, created_at, last_activity_at)"
+            " VALUES (?, 'local', NULL, 1780000000000, 1780000000000)",
+            (session_id,),
+        )
+        transcript = pathlib.Path(root) / "smoke-slug" / f"{session_id}.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(cbc_transcript_lines(session_id), encoding="utf-8")
+    conn.commit(); conn.close()
+
+
+def plant_codebuddy(root, n):
+    # The CLI's two measured layouts, one session each: flat
+    # projects/<id>.jsonl for even i and projects/<slug>/<id>.jsonl for odd.
+    projects = pathlib.Path(root)
+    for i in range(n):
+        session_id = f"smoke-codebuddy-{i:02d}"
+        if i % 2 == 0:
+            transcript = projects / f"{session_id}.jsonl"
+        else:
+            transcript = projects / "smoke-slug" / f"{session_id}.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(cbc_transcript_lines(session_id), encoding="utf-8")
+
+
 def plant_deepseek_harness(root, n):
     # Two recorded synthetic Zstandard frames: a v4 session header, then a
     # user/message. Keeping frames here needs no Python compression package or
@@ -633,6 +710,10 @@ RECIPES = {
     "grok": (1, plant_grok),
     "kimi-code": (1, plant_kimi),
     "grok-bot": (1, plant_grok_bot),
+    # The cbc family (W1046/W1047): the desktop dual store and the CLI's two
+    # transcript layouts, each seeded through its own measured shape.
+    "workbuddy": (2, plant_workbuddy),
+    "codebuddy": (2, plant_codebuddy),
 }
 
 # Harnesses with no recipe, each with the reason it has none.
@@ -711,6 +792,31 @@ for harness in registry["harnesses"]:
         n = plant_antigravity_roots(source_roots, env)
         counts[hid] = n
         manifest.append((hid, "seeded", str(n)))
+        continue
+    if hid == "codebuff":
+        # ADR-054's entry is all source roots, no primary `paths` cell — the
+        # same shape google-antigravity has — so it is planted the same way,
+        # from the root cell's own declared session_dir rule through the
+        # generic planter (one session per root the platform anchors, each
+        # salted with its root id so the channel roots never alias onto one
+        # archive id, and each transcript a JSON array: a whole-file seal
+        # skips anything it cannot validate as one).
+        planted = 0
+        unresolvable = False
+        for root_id, cell in root_cells:
+            root = resolve(cell["template"], env)
+            if root is None:
+                manifest.append((hid, "not_seeded", "template_unresolvable"))
+                unresolvable = True
+                break
+            planted += plant_session_dir_cell(
+                cell, root, 1, salt=f"{root_id}-",
+                body='[{"variant":"user","content":"synthetic"}]\n',
+            )
+        if unresolvable:
+            continue
+        counts[hid] = planted
+        manifest.append((hid, "seeded", str(planted)))
         continue
     recipe = RECIPES.get(hid)
     if recipe is None:

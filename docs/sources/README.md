@@ -27,6 +27,7 @@ One page per source chat-stasher can archive: what it is, what we collect from i
 | [DeepSeek Harness](deepseek-harness.md) | cli, desktop app, web | verified end-to-end (2026-10-06) | 2026-10-06 (macOS) |
 | [Codebuff / Freebuff](codebuff.md) | cli | supported | not yet verified end to end |
 | [WorkBuddy](workbuddy.md) | desktop app | supported | not yet verified end to end |
+| [CodeBuddy](codebuddy.md) | cli | supported | not yet verified end to end |
 
 The Status column uses exactly the words and rules of [docs/support.md](../support.md): `verified end-to-end (DATE)` is a real session archived on a real machine with the date recorded, `supported` claims the path or route and not the end to end run.
 

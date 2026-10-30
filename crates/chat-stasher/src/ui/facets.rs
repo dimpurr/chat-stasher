@@ -141,8 +141,12 @@ const CODING_AGENT_HARNESSES: &[&str] = &[
 ];
 
 /// Product agent platforms. This category describes the product, not the
-/// mechanism used to read or archive its local persistence.
-const AGENT_PLATFORM_HARNESSES: &[&str] = &["grok-bot", "workbuddy"];
+/// mechanism used to read or archive its local persistence. Grok Bot, the
+/// WorkBuddy desktop app and the CodeBuddy CLI it shares a cbc core with
+/// (W1046/W1047) live here together: the registry records the family as
+/// `agent-platforms`, and the family's desktop and CLI surfaces stay on one
+/// group either way.
+const AGENT_PLATFORM_HARNESSES: &[&str] = &["grok-bot", "workbuddy", "codebuddy"];
 
 /// Classify a harness id. Web platforms are matched **first**: `grok` lives
 /// in both lists' worlds and its group is the web one by design. Everything
@@ -507,6 +511,11 @@ mod tests {
         assert_eq!(group_of("claude"), PlatformGroup::WebPlatforms);
         assert_eq!(group_of("claude-code"), PlatformGroup::CodingAgents);
         assert_eq!(group_of("grok-bot"), PlatformGroup::AgentPlatforms);
+        // The two cbc-family spellings are one keystroke apart and land in
+        // different groups: codebuff the coding agent, codebuddy the CLI of
+        // the WorkBuddy family's cbc core.
+        assert_eq!(group_of("codebuff"), PlatformGroup::CodingAgents);
+        assert_eq!(group_of("codebuddy"), PlatformGroup::AgentPlatforms);
         assert_eq!(
             group_of("grok"),
             PlatformGroup::WebPlatforms,

@@ -1293,6 +1293,63 @@
       "notes": "Read-only dual-store adapter for the WorkBuddy desktop app (W1046): sqlite session metadata plus JSONL transcripts, one session id shared by both halves. The registry root is the projects/ directory; the sessions store is the sibling workbuddy.db, opened strictly as mode=ro (never immutable=1; a WAL store whose -shm sidecar is absent is read through a copied db, -wal and -shm trio in a temporary directory that is deleted after the read). Rows enumerate from the sessions table; a row with deleted_at IS NOT NULL is a tombstone: it exports a bare tombstone line that carries no row payload, so a session the source deleted is recorded as deleted while its earlier archived bytes stay in the archive. A live row without a matching *.jsonl transcript (a transport this machine does not hold local transcripts for, or the community-observed rows whose jsonl is gone) is a recognized session this build cannot archive: the scan names the difference as a gap and collect reports it and exits 3, never 0. The transcript walk globs only *.jsonl below projects/, excluding *.file-rollback.ndjson files and tool-results/ subdirectories by name; a session whose transcripts exist under more than one project slug is archived from the newest-mtime copy and the stale copies are named in the scan note. ~/.workbuddy/models.json is never opened or read. The reader handles nine top-level transcript types (session-meta, message, reasoning, function_call, function_call_result, file-history-snapshot, ai-title, summary, turn-metrics); the final two were measured on the sibling CodeBuddy CLI, which writes the same event core the desktop app uses.",
       "seal_policy": "not-applicable",
       "seal_source": "sqlite metadata source plus append-only JSONL transcripts, following the hermes-agent entry: neither half ever renames its files (the app appends each session into the same <id>.jsonl for its whole life), so there is no rename window for a seal to catch"
+    },
+    {
+      "id": "codebuddy",
+      "display_name": "CodeBuddy",
+      "product_group": "agent-platforms",
+      "dev_priority": "normal",
+      "known_issue": "the transcript event core is shared with the WorkBuddy desktop app and read by that same reader, so the no-official-schema caveat is shared too: every read censuses the top-level event types, and version drift between the two surfaces' builds is named as census drift, never silently folded away",
+      "paths": {
+        "macos": {
+          "template": "~/.codebuddy/projects/",
+          "format": "jsonl",
+          "confidence": "measured-locally",
+          "source": "measured locally (CS-WB-2, 2026-10-30): both the flat ~/.codebuddy/projects/<session-uuid>.jsonl layout and the ~/.codebuddy/projects/<project-slug>/<session-uuid>.jsonl layout exist on one installation (41 files, uuid stems only, counted read-only without reading any content); no sqlite session store sits in ~/.codebuddy, so a transcript file name is the only record that a session exists; ~/.codebuddy/history.jsonl is a per-typed-line input log beside projects/, never a session"
+        },
+        "linux": {
+          "template": "$HOME/.codebuddy/projects/",
+          "format": "jsonl",
+          "confidence": "unascertained",
+          "source": "no Linux install measured; the scanner refuses unmeasured paths"
+        },
+        "windows": {
+          "template": "%USERPROFILE%\\.codebuddy\\projects\\",
+          "format": "jsonl",
+          "confidence": "unascertained",
+          "source": "no Windows install measured; the scanner refuses unmeasured paths"
+        }
+      },
+      "machine_logs": [
+        {
+          "id": "history",
+          "role": "machine-log",
+          "paths": {
+            "macos": {
+              "template": "~/.codebuddy/history.jsonl",
+              "format": "jsonl",
+              "confidence": "measured-locally",
+              "source": "measured 2026-10-30 (structure only, no content read): per-typed-line JSON {display, pastedContents, project, timestamp ms} — the input-log role of the claude-code history.jsonl, with the same field names"
+            },
+            "linux": {
+              "template": "$HOME/.codebuddy/history.jsonl",
+              "format": "jsonl",
+              "confidence": "unascertained",
+              "source": "unverified: no Linux install measured"
+            },
+            "windows": {
+              "template": "%USERPROFILE%\\.codebuddy\\history.jsonl",
+              "format": "jsonl",
+              "confidence": "unascertained",
+              "source": "unverified: no Windows install measured"
+            }
+          },
+          "notes": "A per-machine input log, NOT sessions: the prompts the person typed on this machine, kept by the CLI for its own input recall. Collected raw and append-only through the same machine-log machinery the claude-code history entry uses (ADR-053): stored under machine-logs/<machine>/codebuddy/history/, outside session lists, session counts and coverage, and never under a session id. A file of this exact name inside projects/ is excluded by the transcript walk for the same reason: its stem is never a session id. rotation/truncation unverified; head rewrites keep prior sealed generations and are recorded as an observation (ADR-053 D3). dimensions: none (not a session; no 4D projection)."
+        }
+      ],
+      "notes": "Read-only transcript adapter for the CodeBuddy CLI (W1047), the sibling build of the WorkBuddy desktop app's cbc core: the two products write the same nine-type JSONL event core, and this source reuses the W1046 reader wholesale instead of forking a second one. The registry root is the projects/ directory, and the walk accepts both measured layouts — the flat projects/<session-id>.jsonl files and the projects/<project-slug>/<session-id>.jsonl files — with only *.jsonl ever a transcript: the *.file-rollback.ndjson journals are excluded by name, subdirectories inside a project slug (the tool-results/ derivative cache) never hold transcripts, and any deeper nesting is unmeasured and skipped. The CLI keeps no sqlite session store, so there is no tombstone arm and no row-join: each transcript archives on its own file-name stem through the ordinary append-only jsonl reader, and the same session id in more than one location is archived from the newest-mtime copy with the stale copies named in the scan note. Because the file name is the only record that a session exists, a *.jsonl name the walk accepted whose metadata could not be read is a recognized session this build cannot archive: the scan names the difference as a gap and collect reports it and exits 3, never 0 — the transcripts-only counterpart of the desktop store's live-row-without-transcript rule. The reader handles the same nine top-level transcript types the desktop entry names; the CLI-only summary and turn-metrics lines were measured from this very source. ~/.codebuddy/history.jsonl is the declared machine log above, never a session.",
+      "seal_policy": "not-applicable",
+      "seal_source": "append-only JSONL transcripts following the workbuddy entry: the CLI appends each session into the same <id>.jsonl for its whole life, so there is no rename window for a seal to catch"
     }
   ],
   "browsers": [

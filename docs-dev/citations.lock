@@ -689,11 +689,11 @@ crates/chat-stasher/src/export.rs:974-991  bd664b7c0646  lines=18
   <- docs-dev/openclaw-scanner.md:99  :: // `.jsonl` is appended here, so this file name is one path…
 crates/chat-stasher/src/fts.rs:1-6  b20dd3f20d50  lines=6
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:957  :: //! Local, disposable full-text index for one archive desti…
-crates/chat-stasher/src/fts.rs:1477-1697  b6dd6f684adc  lines=221
+crates/chat-stasher/src/fts.rs:1480-1700  b6dd6f684adc  lines=221
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:957  :: pub fn build<F>(&self, sources: &[SourceDoc], mut load: F) …
-crates/chat-stasher/src/fts.rs:1699-1714  c572ae968c6b  lines=16
+crates/chat-stasher/src/fts.rs:1702-1717  c572ae968c6b  lines=16
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:957  :: pub fn clear(&self) -> Result<bool> {
-crates/chat-stasher/src/fts.rs:2148-2157  64fcac75f933  lines=10
+crates/chat-stasher/src/fts.rs:2151-2160  64fcac75f933  lines=10
   <- docs-dev/threat-model.md:957  :: #[cfg(unix)]
 crates/chat-stasher/src/grok_bot.rs:232-240  35d4c6988919  lines=9
   <- docs-dev/privacy.md:581  :: /// Extract the account reference from a replica state key.
@@ -999,11 +999,11 @@ crates/chat-stasher/src/runstate.rs:436-522  502605d7d0f4  lines=87
   <- docs-dev/install.md:999  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:443-451  109067636f30  lines=9
   <- docs-dev/install.md:1297  :: }
-crates/chat-stasher/src/scanner.rs:3892-3952  9db74cb60f65  lines=61
+crates/chat-stasher/src/scanner.rs:4129-4189  9db74cb60f65  lines=61
   <- docs-dev/privacy.md:1155  :: /// through the ordinary whole-file collector.
-crates/chat-stasher/src/scanner.rs:3954-4015  d8480d0822d0  lines=62
+crates/chat-stasher/src/scanner.rs:4191-4252  d8480d0822d0  lines=62
   <- docs-dev/privacy.md:1155  :: /// The native Grok CLI transcripts — `chat_history.jsonl`,…
-crates/chat-stasher/src/scanner.rs:4172-4182  3f94015d6ac2  lines=11
+crates/chat-stasher/src/scanner.rs:4409-4419  3f94015d6ac2  lines=11
   <- docs-dev/openclaw-scanner.md:32  :: /// Probe Cursor's current global store and, when it cannot…
 crates/chat-stasher/src/schedule.rs:231-266  31cde3d34520  lines=36
   <- docs-dev/install.md:943  :: /// Resolve the executable that a persistent scheduler may …

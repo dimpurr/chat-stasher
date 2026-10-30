@@ -157,6 +157,9 @@ stays in the count. See [Codex](sources/codex.md).
 | WorkBuddy | macOS | `~/.workbuddy/projects/` | jsonl | measured-locally | supported | - |
 | WorkBuddy | Linux | `$HOME/.workbuddy/projects/` | jsonl | unascertained | not supported | - |
 | WorkBuddy | Windows | `%USERPROFILE%\.workbuddy\projects\` | jsonl | unascertained | not supported | - |
+| CodeBuddy | macOS | `~/.codebuddy/projects/` | jsonl | measured-locally | supported | - |
+| CodeBuddy | Linux | `$HOME/.codebuddy/projects/` | jsonl | unascertained | not supported | - |
+| CodeBuddy | Windows | `%USERPROFILE%\.codebuddy\projects\` | jsonl | unascertained | not supported | - |
 
 ### Web AI chats (browser extension)
 
@@ -193,6 +196,7 @@ stays in the count. See [Codex](sources/codex.md).
 | Local | DeepSeek Harness | 2026-10-06 | normal | measured on one machine against a developer preview (app 0.2.0-rc.2, session format 4); attachments are not archived yet |
 | Local | Codebuff / Freebuff | - | normal | attachment bytes are not archived and per-message times stay unknown; sessions render through the reader, attachments stay in the raw transcript only |
 | Agent platform | WorkBuddy | - | normal | no official transcript schema exists, only third-party reverse-engineering; every read censuses the top-level event types and a new or vanished type is named as drift, never silently folded away |
+| Agent platform | CodeBuddy | - | normal | the transcript event core is shared with the WorkBuddy desktop app and read by that same reader, so the no-official-schema caveat is shared too: every read censuses the top-level event types, and version drift between the two surfaces' builds is named as census drift, never silently folded away |
 | Web | deepseek | 2026-09-24 | normal | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | perplexity | - | low | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | chatgpt | 2026-09-24 | high | a workspace switch is not yet pinned to the run scope: the new workspace list ids can land in the old scope (see issue #4) |

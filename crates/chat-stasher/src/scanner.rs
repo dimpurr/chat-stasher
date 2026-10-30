@@ -2885,6 +2885,11 @@ fn probe_harness_single(
                 base, confidence, root, env_note, source, machine, report,
             );
         }
+        if h.id == "codebuddy" {
+            return probe_codebuddy_harness(
+                base, confidence, root, env_note, source, machine, report,
+            );
+        }
         if h.id == "github-copilot-cli" {
             return probe_github_copilot_cli_harness(
                 base, confidence, root, env_note, source, machine, report,
@@ -3030,25 +3035,73 @@ fn probe_grok_bot_harness(
     }
 }
 
-/// One WorkBuddy transcript file below `projects/`: the session id — the
-/// file name's stem, measured equal to `sessions.id` on every installation
-/// this entry was measured from — together with the file's own metadata.
-/// Never its bytes; a scan reads names, sizes and times only.
-struct WorkBuddyTranscript {
+/// One `*.jsonl` transcript file below a cbc-family `projects/` root: the
+/// session id — the file name's stem, measured equal to the store key on
+/// every installation this family was measured from — together with the
+/// file's own metadata. Never its bytes; a scan reads names, sizes and
+/// times only.
+struct CbcTranscript {
     path: PathBuf,
     mtime: SystemTime,
     byte_size: u64,
 }
 
-/// Walk the WorkBuddy transcript locator,
-/// `~/.workbuddy/projects/<project-slug>/<session-id>.jsonl`. Only `*.jsonl`
-/// files exactly two levels below the root are transcripts; the neighbours
-/// the app writes beside them are excluded by name wherever they appear —
-/// `*.file-rollback.ndjson` (a rollback journal) and the `tool-results/`
-/// directory (a derivative tool-result cache the renderer reads) are never
-/// sessions, never archived, and never counted as candidates. Every other
-/// subdirectory or non-jsonl file is measured and skipped, the same
-/// three-state rule every scanner walk keeps.
+/// Which layouts one cbc-family `projects/` root walks (W1047): both
+/// products in the family are builds of the same `cbc` CLI core, and the
+/// layout is the one fact their transcript roots do not share.
+enum CbcRootLayout {
+    /// WorkBuddy desktop app (W1046, measured): transcripts live only at
+    /// `projects/<project-slug>/<session-id>.jsonl`. A flat
+    /// `projects/<id>.jsonl` file is measured and skipped, and a matched
+    /// name whose metadata could not be read stays an unreadable directory
+    /// entry — the sqlite store beside the root remains the source of
+    /// recognized truth, so a session is joined through its store row and
+    /// an unreadable file never invents one.
+    SlugOnly,
+    /// CodeBuddy CLI (W1047, measured): the flat `projects/<session-id>.jsonl`
+    /// layout and the `projects/<project-slug>/<session-id>.jsonl` layout
+    /// both exist on one installation. The CLI keeps no sqlite session
+    /// store, so a matched file name is the only record that a session
+    /// exists at all — a name the layout accepts whose metadata could not
+    /// be read is therefore a recognized session this build cannot hand
+    /// out, kept in [`CbcTranscriptWalk::recognized_unrecorded`] so the
+    /// recognized-vs-archived difference becomes an archive gap and collect
+    /// reports PARTIAL exit 3, never 0 — the same rule the desktop probe
+    /// gets from its store rows. The `history` stem is the per-machine
+    /// input log the CLI writes beside `projects/` (declared as a machine
+    /// log on the registry entry), never a session.
+    FlatAndSlug,
+}
+
+/// What one cbc-family transcript walk observed, all metadata only.
+struct CbcTranscriptWalk {
+    /// The readable transcripts, keyed by session id (the file name's
+    /// stem), the newest copy per id.
+    transcripts: BTreeMap<String, CbcTranscript>,
+    /// Transcripts seen directly under the root — the flat CLI layout.
+    /// Always 0 for [`CbcRootLayout::SlugOnly`], which skips those files.
+    flat_files: u64,
+    /// Transcripts seen under a `<project-slug>/` directory.
+    slug_files: u64,
+    /// Copies of an id already kept at a newer (mtime, path).
+    stale_duplicates: u64,
+    /// Directory entries whose type, listing or metadata could not be
+    /// inspected: each is an untaken tally entry, never a zero.
+    unreadable_entries: u64,
+    /// Matched names whose metadata could not be read — recognized
+    /// sessions with no record, the exit-3 arm of the CLI layout. Always 0
+    /// for [`CbcRootLayout::SlugOnly`].
+    recognized_unrecorded: u64,
+}
+
+/// Walk a cbc-family transcript root, `~/<product>/projects/`. Only
+/// `*.jsonl` files the layout accepts are transcripts; the neighbours the
+/// core writes beside them are excluded by name wherever they appear —
+/// `*.file-rollback.ndjson` (a rollback journal) and any subdirectory
+/// inside a project slug (the `tool-results/` derivative cache the
+/// renderer reads) are never sessions, never archived, and never counted as
+/// candidates. Every other subdirectory or non-jsonl file is measured and
+/// skipped, the same three-state rule every scanner walk keeps.
 ///
 /// The same session id can appear under more than one project slug — the
 /// app moves projects and community tooling reports the stale copy that
@@ -3058,37 +3111,61 @@ struct WorkBuddyTranscript {
 /// only: the bytes of every observed copy stay on disk untouched, and
 /// appends a skipped copy would later gain are picked up the day its mtime
 /// makes it the newest.
-fn workbuddy_transcripts(root: &Path) -> (BTreeMap<String, WorkBuddyTranscript>, u64, u64) {
-    let mut transcripts = BTreeMap::new();
-    let mut unreadable_entries = 0u64;
-    let mut stale_duplicates = 0u64;
-    let slug_dirs = match fs::read_dir(root) {
+fn cbc_transcript_walk(root: &Path, layout: CbcRootLayout) -> CbcTranscriptWalk {
+    let accept_flat = matches!(layout, CbcRootLayout::FlatAndSlug);
+    // On the CLI layout the accepted name itself is the record that a
+    // session exists, so an unreadable one is a recognized session without
+    // a record; on the desktop layout the store stays the source of
+    // recognized truth, so it is a plain unreadable entry.
+    let name_recognized = accept_flat;
+    let mut walk = CbcTranscriptWalk {
+        transcripts: BTreeMap::new(),
+        flat_files: 0,
+        slug_files: 0,
+        stale_duplicates: 0,
+        unreadable_entries: 0,
+        recognized_unrecorded: 0,
+    };
+    let root_entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         // The root exists (the caller checked) but cannot be listed: every
         // candidate below it is one untaken tally entry, not zero.
-        Err(_) => return (transcripts, 1, stale_duplicates),
+        Err(_) => {
+            walk.unreadable_entries += 1;
+            return walk;
+        }
     };
-    for slug in slug_dirs {
-        let slug = match slug {
+    for entry in root_entries {
+        let entry = match entry {
             Ok(entry) => entry,
             Err(_) => {
-                unreadable_entries += 1;
+                walk.unreadable_entries += 1;
                 continue;
             }
         };
-        match slug.file_type() {
+        match entry.file_type() {
             Ok(kind) if kind.is_dir() => {}
-            // A non-directory is measured and skipped.
-            Ok(_) => continue,
+            // A flat file is a transcript only on the CLI layout; the
+            // desktop app writes its `*.jsonl` sessions one level deeper,
+            // so on the slug-only walk a root-level file — whatever its
+            // name — is measured and skipped.
+            Ok(_) => {
+                if accept_flat {
+                    cbc_accept_file(&entry, &mut walk, true, name_recognized);
+                }
+                continue;
+            }
             Err(_) => {
-                unreadable_entries += 1;
+                walk.unreadable_entries += 1;
                 continue;
             }
         }
-        let files = match fs::read_dir(slug.path()) {
+        // A directory is a project slug: its own entries are the slug
+        // layout's transcripts, and anything deeper is unmeasured.
+        let files = match fs::read_dir(entry.path()) {
             Ok(entries) => entries,
             Err(_) => {
-                unreadable_entries += 1;
+                walk.unreadable_entries += 1;
                 continue;
             }
         };
@@ -3096,7 +3173,7 @@ fn workbuddy_transcripts(root: &Path) -> (BTreeMap<String, WorkBuddyTranscript>,
             let file = match file {
                 Ok(entry) => entry,
                 Err(_) => {
-                    unreadable_entries += 1;
+                    walk.unreadable_entries += 1;
                     continue;
                 }
             };
@@ -3106,60 +3183,111 @@ fn workbuddy_transcripts(root: &Path) -> (BTreeMap<String, WorkBuddyTranscript>,
                 Ok(kind) if kind.is_dir() => continue,
                 Ok(_) => {}
                 Err(_) => {
-                    unreadable_entries += 1;
+                    walk.unreadable_entries += 1;
                     continue;
                 }
             }
-            let name = file.file_name().to_string_lossy().into_owned();
-            // A rollback journal beside the transcripts: excluded by name.
-            if name.ends_with(".file-rollback.ndjson") {
-                continue;
-            }
-            if !name.ends_with(".jsonl") {
-                continue;
-            }
-            let stem = match Path::new(&name).file_stem().and_then(|stem| stem.to_str()) {
-                Some(stem) => stem.to_string(),
-                None => continue,
-            };
-            let (byte_size, mtime) = match file.metadata() {
-                Ok(metadata) => match (metadata.len(), metadata.modified()) {
-                    (byte_size, Ok(mtime)) => (byte_size, mtime),
-                    _ => {
-                        unreadable_entries += 1;
-                        continue;
-                    }
-                },
-                Err(_) => {
-                    unreadable_entries += 1;
-                    continue;
-                }
-            };
-            let keep_newest = match transcripts.get(&stem) {
-                Some(existing) => (existing.mtime, &existing.path) < (mtime, &file.path()),
-                None => true,
-            };
-            if transcripts.contains_key(&stem) {
-                stale_duplicates += 1;
-            }
-            if keep_newest {
-                transcripts.insert(
-                    stem,
-                    WorkBuddyTranscript {
-                        path: file.path(),
-                        mtime,
-                        byte_size,
-                    },
-                );
-            }
+            cbc_accept_file(&file, &mut walk, false, name_recognized);
         }
     }
-    (transcripts, unreadable_entries, stale_duplicates)
+    walk
 }
 
-/// The canonical WorkBuddy session id for one native id (`sessions.id`, or
-/// the transcript file name's stem when the store says nothing about it).
-fn workbuddy_session_id(source: HarnessSource, machine: &str, native_id: &str) -> String {
+/// Classify one `*.jsonl`-named file the walk accepted by type and record
+/// it — a readable one under its stem, an unreadable one as the layout's
+/// unknown arm. Only cbc-family exclusion rules apply: the rollback
+/// journal suffix, and on the CLI layout the `history` input-log stem.
+fn cbc_accept_file(
+    file: &fs::DirEntry,
+    walk: &mut CbcTranscriptWalk,
+    flat: bool,
+    name_recognized: bool,
+) {
+    let name = file.file_name().to_string_lossy().into_owned();
+    // A rollback journal beside the transcripts: excluded by name.
+    if name.ends_with(".file-rollback.ndjson") {
+        return;
+    }
+    if !name.ends_with(".jsonl") {
+        return;
+    }
+    let stem = match Path::new(&name).file_stem().and_then(|stem| stem.to_str()) {
+        Some(stem) => stem.to_string(),
+        None => return,
+    };
+    // The CLI's per-typed-line input log, which the registry entry
+    // declares as a machine log: its lines are prompts the person typed on
+    // this machine, not a conversation this walk can ever archive, and its
+    // stem is never a session id. The desktop entry measured no file of
+    // this name, so the slug-only walk keeps accepting it (nothing there
+    // writes one into `projects/`).
+    if flat && stem == "history" {
+        return;
+    }
+    let (byte_size, mtime) = match file.metadata() {
+        Ok(metadata) => match (metadata.len(), metadata.modified()) {
+            (byte_size, Ok(mtime)) => (byte_size, mtime),
+            _ => return cbc_unreadable_name(walk, name_recognized),
+        },
+        Err(_) => return cbc_unreadable_name(walk, name_recognized),
+    };
+    let keep_newest = match walk.transcripts.get(&stem) {
+        Some(existing) => (existing.mtime, &existing.path) < (mtime, &file.path()),
+        None => true,
+    };
+    if walk.transcripts.contains_key(&stem) {
+        walk.stale_duplicates += 1;
+    }
+    if keep_newest {
+        walk.transcripts.insert(
+            stem,
+            CbcTranscript {
+                path: file.path(),
+                mtime,
+                byte_size,
+            },
+        );
+    }
+    if flat {
+        walk.flat_files += 1;
+    } else {
+        walk.slug_files += 1;
+    }
+}
+
+/// A file the layout accepted by name whose metadata could not be taken.
+/// One counted observation either way, never a zero: on the CLI layout the
+/// name itself is the session's record, so the count joins the recognized
+/// set and the recognized-vs-archived difference becomes collect's
+/// PARTIAL exit-3 gap; on the desktop layout an unreadable entry stays an
+/// entry, because the store beside the root — not the file name — carries
+/// the recognized truth there.
+fn cbc_unreadable_name(walk: &mut CbcTranscriptWalk, name_recognized: bool) {
+    if name_recognized {
+        walk.recognized_unrecorded += 1;
+    } else {
+        walk.unreadable_entries += 1;
+    }
+}
+
+/// The WorkBuddy desktop app's transcript walk (W1046), the slug-only
+/// layout: `~/.workbuddy/projects/<project-slug>/<session-id>.jsonl`.
+fn workbuddy_transcripts(root: &Path) -> CbcTranscriptWalk {
+    cbc_transcript_walk(root, CbcRootLayout::SlugOnly)
+}
+
+/// The CodeBuddy CLI's transcript walk (W1047), the both-layouts walk:
+/// flat `~/.codebuddy/projects/<session-id>.jsonl` and
+/// `~/.codebuddy/projects/<project-slug>/<session-id>.jsonl` — measured
+/// to coexist on one installation.
+fn codebuddy_transcripts(root: &Path) -> CbcTranscriptWalk {
+    cbc_transcript_walk(root, CbcRootLayout::FlatAndSlug)
+}
+
+/// The canonical cbc-family session id for one native id (the store row's
+/// `id`, or the transcript file name's stem when no store says anything
+/// about it).
+fn cbc_session_id(source: HarnessSource, machine: &str, native_id: &str) -> String {
     crate::id::SessionIdentity {
         source_short: source.short(),
         machine: machine.to_string(),
@@ -3170,15 +3298,15 @@ fn workbuddy_session_id(source: HarnessSource, machine: &str, native_id: &str) -
 
 /// Push one transcript file record — a plain append-only jsonl session whose
 /// bytes the ordinary file reader collects under the shared id.
-fn push_workbuddy_transcript_record(
+fn push_cbc_transcript_record(
     records: &mut Vec<SessionRecord>,
     source: HarnessSource,
     machine: &str,
     native_id: &str,
-    transcript: &WorkBuddyTranscript,
+    transcript: &CbcTranscript,
 ) {
     records.push(SessionRecord {
-        id: workbuddy_session_id(source, machine, native_id),
+        id: cbc_session_id(source, machine, native_id),
         absolute_path: transcript.path.clone(),
         byte_size: transcript.byte_size,
         mtime: transcript.mtime,
@@ -3241,7 +3369,13 @@ fn probe_workbuddy_harness(
 ) -> HarnessProbe {
     base.root = Some(root.clone());
     base.confidence = confidence;
-    let (transcripts, walk_unreadable, stale_duplicates) = workbuddy_transcripts(&root);
+    // The slug-only walk never recognizes a name it could not read (the
+    // store carries the recognized truth), so this probe's
+    // recognized-vs-archived arithmetic runs on the store rows below.
+    let walk = workbuddy_transcripts(&root);
+    let transcripts = walk.transcripts;
+    let walk_unreadable = walk.unreadable_entries;
+    let stale_duplicates = walk.stale_duplicates;
     let transcript_count = transcripts.len() as u64;
     let recognized_files = transcripts
         .values()
@@ -3275,13 +3409,7 @@ fn probe_workbuddy_harness(
             // only recognized set, and an untakeable tally stays unknown.
             let walk_clean = !(transcripts.is_empty() && walk_unreadable > 0);
             for (stem, transcript) in &transcripts {
-                push_workbuddy_transcript_record(
-                    &mut report.records,
-                    source,
-                    machine,
-                    stem,
-                    transcript,
-                );
+                push_cbc_transcript_record(&mut report.records, source, machine, stem, transcript);
             }
             let walk_note = if walk_unreadable > 0 {
                 format!(
@@ -3327,7 +3455,7 @@ fn probe_workbuddy_harness(
                 // sessions beyond them is exactly what this error leaves
                 // unread, so the session count is unknown and stays so.
                 for (stem, transcript) in &transcripts {
-                    push_workbuddy_transcript_record(
+                    push_cbc_transcript_record(
                         &mut report.records,
                         source,
                         machine,
@@ -3389,7 +3517,7 @@ fn probe_workbuddy_harness(
                         }
                     };
                     report.records.push(SessionRecord {
-                        id: workbuddy_session_id(source, machine, &row.id),
+                        id: cbc_session_id(source, machine, &row.id),
                         absolute_path: db.clone(),
                         byte_size: 0,
                         mtime,
@@ -3404,7 +3532,7 @@ fn probe_workbuddy_harness(
                         tombstoned += 1;
                     }
                     if let Some(transcript) = transcript {
-                        push_workbuddy_transcript_record(
+                        push_cbc_transcript_record(
                             &mut report.records,
                             source,
                             machine,
@@ -3419,7 +3547,7 @@ fn probe_workbuddy_harness(
                     if !known_ids.contains(stem) {
                         known_ids.insert(stem.clone());
                         orphan_transcripts += 1;
-                        push_workbuddy_transcript_record(
+                        push_cbc_transcript_record(
                             &mut report.records,
                             source,
                             machine,
@@ -3459,6 +3587,115 @@ fn probe_workbuddy_harness(
             }
         },
     }
+}
+
+/// Probe the CodeBuddy CLI transcript root (W1047): the CLI is the other
+/// build of the same `cbc` core the WorkBuddy desktop app wraps (the
+/// ruling CS-WB-2 records the same event schema on both, with the CLI the
+/// one that adds `summary` and `turn-metrics` lines the W1046 reader
+/// already handles), and its sessions live one whole per
+/// `*.jsonl` transcript below the registry root — the flat
+/// `projects/<session-id>.jsonl` layout and the
+/// `projects/<slug>/<session-id>.jsonl` layout both measured on this
+/// machine. There is no sqlite sessions store to read, so there is no
+/// tombstone arm (the CLI keeps no deletion marker this build can observe)
+/// and no row-join: each transcript archives on its own file-name stem
+/// through the ordinary append-only jsonl reader.
+///
+/// The unknown arm is the walk itself, with the file name standing in for
+/// the role the store row plays on the desktop side. A `*.jsonl` name the
+/// layout accepted whose metadata could not be read is a session this
+/// source recognizes and this build cannot hand out: the walk counts it,
+/// no record is emitted for it, and the recognized-vs-archived difference
+/// the report computes becomes an archive gap, so `collect` reports
+/// PARTIAL exit 3 — never 0. Directory entries that could not be typed or
+/// listed stay the same unreadable-entry tallies every scanner walk keeps,
+/// and the `history` input log (a machine log this registry entry
+/// declares) is excluded by name, never a session.
+fn probe_codebuddy_harness(
+    mut base: HarnessProbe,
+    confidence: Confidence,
+    root: PathBuf,
+    env_note: String,
+    source: HarnessSource,
+    machine: &str,
+    report: &mut ScanReport,
+) -> HarnessProbe {
+    base.root = Some(root.clone());
+    base.confidence = confidence;
+    let walk = codebuddy_transcripts(&root);
+    let transcripts = &walk.transcripts;
+    for (stem, transcript) in transcripts {
+        push_cbc_transcript_record(&mut report.records, source, machine, stem, transcript);
+    }
+    codebuddy_probe_accounting(base, walk, env_note)
+}
+
+/// Assemble the CodeBuddy probe's counts and note from one walk. Split from
+/// the probe because the walk's arms are worth pinning beyond what a
+/// filesystem can be made to produce: on POSIX the stat of a file inside a
+/// readable directory succeeds whatever the file's own mode bits say, so
+/// the state the real walker hands back when an accepted name gives no
+/// metadata is produced directly by the internal test instead.
+fn codebuddy_probe_accounting(
+    mut base: HarnessProbe,
+    walk: CbcTranscriptWalk,
+    env_note: String,
+) -> HarnessProbe {
+    let transcripts = walk.transcripts;
+    let transcript_count = transcripts.len() as u64;
+    let recognized_files = transcripts
+        .values()
+        .map(|transcript| transcript.path.clone())
+        .collect::<Vec<_>>();
+    let transcript_bytes = transcripts
+        .values()
+        .map(|transcript| transcript.byte_size)
+        .sum::<u64>();
+    let mut earliest = None;
+    let mut latest = None;
+    for transcript in transcripts.values() {
+        widen_time_span(&mut earliest, &mut latest, transcript.mtime);
+    }
+    // The recognized set: every stem the walk accepted, readable or not.
+    let known_sessions = transcript_count + walk.recognized_unrecorded;
+    // A walk that listed nothing and could not read an entry — with no
+    // recognized names at all — proves no clean zero: the session count
+    // stays unknown rather than the measured emptiness a readable walk
+    // earns.
+    let walk_clean =
+        !(transcripts.is_empty() && walk.recognized_unrecorded == 0 && walk.unreadable_entries > 0);
+    let mut note = format!(
+        "{env_note}CodeBuddy transcript store: {known_sessions} session file(s) in the flat and project-directory layouts (flat={}, under a project directory={}), no sqlite session store beside them; stale duplicates skipped={}",
+        walk.flat_files, walk.slug_files, walk.stale_duplicates
+    );
+    if !walk_clean {
+        note = format!(
+            "{env_note}CodeBuddy transcript store: the walk could not read every entry below the projects root, so the session count is unknown, not 0 — nothing was recognized as a session and nothing is claimed as archivable"
+        );
+    } else if walk.recognized_unrecorded > 0 {
+        note.push_str(&format!(
+            "; {unrecorded} transcript file(s) present but unreadable — recognized, not archived, not 0",
+            unrecorded = walk.recognized_unrecorded
+        ));
+    }
+    if walk.unreadable_entries > 0 {
+        note.push_str(&format!(
+            "; transcript walk incomplete: {walk_unreadable} unreadable directory entries",
+            walk_unreadable = walk.unreadable_entries
+        ));
+    }
+    base.state = ProbeState::Scanned;
+    base.record_count = walk_clean.then_some(known_sessions);
+    base.candidate_count = walk_clean.then_some(known_sessions);
+    base.unreadable_count = walk_clean.then_some(walk.recognized_unrecorded);
+    base.unreadable_entry_count = Some(walk.unreadable_entries);
+    base.bytes = Some(transcript_bytes);
+    base.earliest = earliest;
+    base.latest = latest;
+    base.recognized_files = recognized_files;
+    base.note = note;
+    base
 }
 
 /// GitHub Copilot CLI keeps its persisted sessions in one SQLite store,
@@ -9095,5 +9332,96 @@ mod tests {
         assert_eq!(probe.record_count, None);
         assert!(probe.note.contains("un-enumerable"));
         assert!(report.records.is_empty());
+    }
+
+    /// The W1047 recognized-by-name arm: a `*.jsonl` file the CodeBuddy CLI
+    /// walk accepted by name whose metadata could not be taken is a
+    /// recognized session without a record — collect's PARTIAL exit-3 gap,
+    /// never an unreadable entry and never zero. POSIX cannot be made to
+    /// fail that stat portably (a readable parent directory makes stat
+    /// succeed whatever the file's own mode bits say), so this pins the
+    /// walk's accounting directly: the walk built below is exactly the
+    /// state the real walker hands back for one accepted name that gave no
+    /// metadata, and the report arithmetic reads the probe that accounting
+    /// assembles.
+    #[test]
+    fn a_codebuddy_name_without_metadata_is_a_recognized_gap_never_an_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let walk = CbcTranscriptWalk {
+            transcripts: [(
+                "synthetic-session-701".to_string(),
+                CbcTranscript {
+                    path: dir.path().join("synthetic-session-701.jsonl"),
+                    mtime: SystemTime::UNIX_EPOCH,
+                    byte_size: 84,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            flat_files: 2,
+            slug_files: 0,
+            stale_duplicates: 0,
+            unreadable_entries: 0,
+            recognized_unrecorded: 1,
+        };
+        let base = HarnessProbe {
+            id: "codebuddy".to_string(),
+            display_name: "CodeBuddy".to_string(),
+            root: None,
+            confidence: Confidence::Unascertained,
+            state: ProbeState::Scanned,
+            unverified_roots: Vec::new(),
+            source_roots: Vec::new(),
+            record_count: None,
+            candidate_count: None,
+            unreadable_count: None,
+            unreadable_entry_count: None,
+            earliest: None,
+            latest: None,
+            bytes: None,
+            recognized_files: Vec::new(),
+            note: String::new(),
+        };
+        let probe = codebuddy_probe_accounting(base, walk, String::new());
+        assert_eq!(probe.record_count, Some(2), "readable and name-only alike");
+        assert_eq!(
+            probe.unreadable_count,
+            Some(1),
+            "a recognized session without a record"
+        );
+        assert_eq!(
+            probe.unreadable_entry_count,
+            Some(0),
+            "a matched name is never reported as a directory entry"
+        );
+        assert!(probe.note.contains(
+            "1 transcript file(s) present but unreadable — recognized, not archived, not 0"
+        ));
+
+        // The report arithmetic collect reads: recognized two, one record —
+        // the named gap that turns the run partial, exit 3 never 0.
+        let mut report = ScanReport::default();
+        report.records.push(SessionRecord {
+            id: cbc_session_id(
+                HarnessSource::CodeBuddy,
+                "synthetic-machine",
+                "synthetic-session-701",
+            ),
+            absolute_path: dir.path().join("synthetic-session-701.jsonl"),
+            byte_size: 84,
+            mtime: SystemTime::UNIX_EPOCH,
+            source: HarnessSource::CodeBuddy,
+            compressed: false,
+            sqlite_layout: None,
+            provenance: Default::default(),
+            session_dir: None,
+            movable_root: false,
+        });
+        report.probes.push(probe);
+        let gaps = report.archive_gaps();
+        assert_eq!(gaps.len(), 1, "collect reports PARTIAL: exit 3, never 0");
+        assert_eq!(gaps[0].harness_id, "codebuddy");
+        assert_eq!(gaps[0].recognized_sessions, Some(2));
+        assert_eq!(gaps[0].session_records, 1);
     }
 }

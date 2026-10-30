@@ -227,11 +227,17 @@ pub fn normalize(harness: &str, body: &str) -> Conversation {
         codebuff::normalize_body(body, &mut conversation);
         return conversation;
     }
-    if harness == "workbuddy" {
-        // A WorkBuddy body mixes two producers under one session id (W1046):
-        // the sqlite metadata lines (or a bare tombstone) and the raw
-        // transcript events — and a tool call finds its result only by
-        // pairing `callId`s across lines, so the harness owns its line walk.
+    if harness == "workbuddy" || harness == "codebuddy" {
+        // The same-core readers (W1046/W1047): the WorkBuddy desktop app and
+        // the CodeBuddy CLI are two builds of one `cbc` core and write the
+        // same nine-type event schema. A body mixes the collector's
+        // metadata lines (or a bare tombstone) with the raw transcript
+        // events — and a tool call finds its result only by pairing
+        // `callId`s across lines, so the shared reader owns its line walk.
+        // No per-harness branch exists: the ruling's measurement (CS-WB-2)
+        // found the CLI only *adds* `summary` and `turn-metrics`, which the
+        // desktop reader already counts, so a fork would be a second way to
+        // say the same facts.
         workbuddy::normalize_body(body, &mut conversation);
         return conversation;
     }
@@ -328,6 +334,7 @@ fn harness_has_a_reader(harness: &str) -> bool {
             | "claude"
             | "codebuff"
             | "workbuddy"
+            | "codebuddy"
             | ""
     ) || is_web_bundle(harness)
 }

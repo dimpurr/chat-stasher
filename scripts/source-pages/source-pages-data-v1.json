@@ -20,7 +20,8 @@
     "kimi-code": "cli",
     "deepseek-harness": "cli, desktop app, web",
     "codebuff": "cli",
-    "workbuddy": "desktop app"
+    "workbuddy": "desktop app",
+    "codebuddy": "cli"
   },
   "import_surfaces_note": "Official-export sources carry the fixed surface word `export`; their ids and parser states are read from crates/chat-stasher/src/import.rs at check time, never from this file.",
   "import_sources": [

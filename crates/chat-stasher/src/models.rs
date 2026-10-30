@@ -33,6 +33,9 @@ pub enum HarnessSource {
     /// WorkBuddy desktop app: sqlite session metadata plus JSONL transcripts
     /// under one `~/.workbuddy` root (W1046).
     WorkBuddy,
+    /// CodeBuddy CLI: the other build of the same `cbc` core; JSONL
+    /// transcripts below `~/.codebuddy/projects/`, no sqlite store (W1047).
+    CodeBuddy,
 }
 
 /// Layout of a virtual session backed by a structured, read-only local source.
@@ -82,6 +85,7 @@ impl HarnessSource {
             HarnessSource::DeepSeekHarness => "deepseek-harness",
             HarnessSource::Codebuff => "codebuff",
             HarnessSource::WorkBuddy => "workbuddy",
+            HarnessSource::CodeBuddy => "codebuddy",
         }
     }
 
@@ -109,6 +113,7 @@ impl HarnessSource {
             "deepseek-harness" => Some(HarnessSource::DeepSeekHarness),
             "codebuff" => Some(HarnessSource::Codebuff),
             "workbuddy" => Some(HarnessSource::WorkBuddy),
+            "codebuddy" => Some(HarnessSource::CodeBuddy),
             _ => None,
         }
     }
