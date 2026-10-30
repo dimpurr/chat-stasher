@@ -228,8 +228,11 @@ it is never quietly replaced from the remote mid-read.
   closure-complete, and how many orphan files the mirror still carries.
   These are the settled four: the same sentence family, with one
   wording, appears in `status`, in `doctor` and in the menu bar app. A
-  first sync reads as exactly that (`first sync … in progress: X% (bytes
-  downloaded of the total)`), never as a red, while `reclaim` holds the
+  first sync reads as exactly that (`first sync … in progress:
+  downloaded A of X (a%), of which B (b%) hash-verified` — the two
+  numbers a fill has: everything of the listing already on disk, and
+  the subset a hash has vouched for, downloaded ≥ verified always),
+  never as a red, while `reclaim` holds the
   sessions it would cover — and that hold-back is a code gate, not a
   promise: `reclaim-stage` refuses a session — `not-mirrored` — until the
   copy's completed-round record holds that session's proof snapshot

@@ -1110,6 +1110,8 @@ mod tests {
                 mirror_files: 1,
                 orphan_files: None,
                 orphan_bytes: None,
+                downloaded_bytes: None,
+                downloaded_files: None,
                 torn_files: 0,
                 torn_bytes: 0,
             };

@@ -10,6 +10,9 @@
 //!
 //! The other named fixtures:
 //!   * tampered file (47 §3.2): `tampered_mirror_files_are_re_downloaded`
+//!   * the first fill's two numbers, downloaded and verified (W1044):
+//!     `on_disk_unverified_bytes_make_the_two_fill_numbers_diverge` and
+//!     `a_complete_mirrors_two_fill_numbers_converge`
 //!   * a round cut mid-fill — the budget-cut shape C2 says must resume and
 //!     not count as failure: `budget_cut_resumes_across_rounds_and_states_only_on_completion`
 //!   * disk-floor pause: `disk_floor_pauses_the_round_without_failing_it`
@@ -698,6 +701,181 @@ fn missing_pack_un_covers_and_the_next_sync_heals() {
     }
 }
 
+// ------------------------------------------- the fill's two numbers (W1044)
+// The first fill reports two measures as one pair: bytes of the listing on
+// disk (downloaded — a presence fact from the directory walk, untrusted as
+// proof of anything) and the hash-verified subset. `downloaded ≥ verified`
+// always — that invariant is the pair's meaning: the gap is exactly the
+// on-disk bytes the hashes have not vouched for yet, never a second total.
+// Two fixtures pin the pair end to end, divergence and convergence.
+
+/// Bytes on disk no hash has verified — the in-place tamper, paused before
+/// its re-copy — make the two fill numbers diverge in the invariant's
+/// direction on every surface that words them: the record carries both
+/// measures, the row words both (downloaded first as the headline a watch
+/// on the mirror directory reconciles with, verified as its "of which"
+/// subset), `--json` rides the pair in the tagged shape the mirror family
+/// uses — and the next round's verified re-copy closes the gap, converging
+/// the pair again.
+#[test]
+fn on_disk_unverified_bytes_make_the_two_fill_numbers_diverge() {
+    let rig = build_rig(None);
+    let (filled, outcome) = run_round(&rig, &NeverStops);
+    assert!(matches!(outcome, mirror::SyncOutcome::Completed));
+    let total = filled.remote_total_bytes;
+    let total_files = filled.remote_files;
+
+    // Tamper one pack in place — same length, wrong bytes: the disk still
+    // holds every file the listing names, while the hash-verified half
+    // must lose exactly this file.
+    let mirror_root = rig.mirror_root();
+    let mut pack_rel = String::new();
+    for rel in inventory(&mirror_root) {
+        if rel.starts_with("data/") {
+            pack_rel = rel;
+            break;
+        }
+    }
+    assert!(!pack_rel.is_empty(), "the fixture repo has packs");
+    let pack_path = mirror_root.join(&pack_rel);
+    let mut pack = fs::read(&pack_path).unwrap();
+    let mid = pack.len() / 2;
+    pack[mid] ^= 0xff;
+    fs::write(&pack_path, &pack).unwrap();
+    let tampered_bytes = fs::metadata(&pack_path).unwrap().len();
+
+    // The round pauses before its re-copy: the sweep's re-hash already
+    // excludes the tampered file from the verified half, the queue's first
+    // claim ends the round, and the record words where the fill actually
+    // stands — both measures, from the post-copy directory walk.
+    let (_stopped, outcome) = run_round(
+        &rig,
+        &EndAfter {
+            asked: AtomicUsize::new(0),
+            limit: 0,
+        },
+    );
+    assert!(
+        matches!(outcome, mirror::SyncOutcome::Stopped(RoundEnd::BudgetSpent)),
+        "a mid-check tamper round pauses rather than fails: {outcome:?}"
+    );
+    let record = match mirror::load_progress(&rig.state_dir) {
+        MirrorProgressRead::Present(record) => record,
+        other => panic!("the paused round writes its record, got {other:?}"),
+    };
+    let verified = total - tampered_bytes;
+    assert_eq!(
+        record.mirror_bytes, verified,
+        "the sweep excludes the tampered file from the verified half"
+    );
+    assert_eq!(
+        record.downloaded_bytes,
+        Some(total),
+        "every listing file is still on disk, verified or not — the on-disk \
+         half counts them all"
+    );
+    assert_eq!(
+        record.downloaded_files,
+        Some(total_files),
+        "no file left the disk either"
+    );
+    assert!(
+        record.downloaded_bytes.unwrap_or_default() > record.mirror_bytes,
+        "the pair diverges: downloaded > verified while unverified bytes sit on disk"
+    );
+
+    // The row words both numbers, in the one spelling every surface shares
+    // (ruling 8): downloaded first, verified as its "of which" subset, so
+    // the two can never read as two competing totals. Severity stays info:
+    // a mid-check fill is progress, never a red (C2).
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(status.rows.len(), 1, "one mirror row while the fill paused");
+    assert_eq!(status.rows[0].severity, mirror::MirrorRowSeverity::Info);
+    let line = &status.rows[0].sentence;
+    assert!(line.contains("first sync"), "{line}");
+    let numbers = mirror::first_fill_numbers(Some(total), verified, total, "unused tail");
+    assert!(
+        line.contains(&numbers),
+        "the row words the pair, downloaded headline first: {line}"
+    );
+    assert!(
+        line.contains("of which") && line.contains("hash-verified"),
+        "the verified half words as the subset of the downloaded half: {line}"
+    );
+
+    // `--json` rides the same pair beside the verified fields, in the same
+    // tagged-`kind` shape `size` and `orphans` keep.
+    let json = status_json(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(
+        json["first_sync"]["downloaded"],
+        serde_json::json!({"kind": "known", "files": total_files, "bytes": total})
+    );
+
+    // The heal: the next round re-verifies the tampered file's bytes, and
+    // with nothing left on disk the hashes have not vouched for, the pair
+    // converges again.
+    let (_healed, outcome) = run_round(&rig, &NeverStops);
+    assert!(
+        matches!(outcome, mirror::SyncOutcome::Completed),
+        "the tamper heal completes: {outcome:?}"
+    );
+    let record = match mirror::load_progress(&rig.state_dir) {
+        MirrorProgressRead::Present(record) => record,
+        other => panic!("the healed round rewrites the record, got {other:?}"),
+    };
+    assert!(record.complete);
+    assert_eq!(
+        record.downloaded_bytes,
+        Some(record.mirror_bytes),
+        "a healed fill has nothing on disk the hashes have not verified"
+    );
+}
+
+/// A complete mirror converges the two numbers into one: nothing of the
+/// fill is on disk that a round's hashes have not verified, so the
+/// downloaded half equals the verified half in the round's report, in the
+/// record and on `--json` — the pair's invariant with a zero gap.
+#[test]
+fn a_complete_mirrors_two_fill_numbers_converge() {
+    let rig = build_rig(None);
+    let (report, outcome) = run_round(&rig, &NeverStops);
+    assert!(matches!(outcome, mirror::SyncOutcome::Completed));
+    assert_eq!(
+        report.downloaded_bytes_on_disk,
+        Some(report.remote_total_bytes),
+        "a completed fill holds the whole listing on disk"
+    );
+    assert_eq!(
+        report.present_bytes + report.downloaded_bytes,
+        report.remote_total_bytes,
+        "and verified all of it"
+    );
+    let record = match mirror::load_progress(&rig.state_dir) {
+        MirrorProgressRead::Present(record) => record,
+        other => panic!("the completed round writes its record, got {other:?}"),
+    };
+    assert_eq!(
+        record.downloaded_bytes,
+        Some(record.mirror_bytes),
+        "the record's pair converges on completion"
+    );
+    assert_eq!(record.mirror_bytes, record.remote_total_bytes);
+    assert_eq!(record.downloaded_files, Some(record.mirror_files));
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let json = status_json(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    assert_eq!(
+        json["first_sync"]["downloaded"],
+        serde_json::json!({
+            "kind": "known",
+            "files": record.mirror_files,
+            "bytes": record.mirror_bytes
+        }),
+        "the wire carries the converged pair beside the verified fields"
+    );
+}
+
 // ------------------------------------------------- (b) one machine synced
 // C1 fixture (b): machine-b's snapshot and the whole shared pack set are in
 // the mirror, machine-a's snapshot file is not ⇒ machine-a's session is
@@ -1216,6 +1394,8 @@ fn the_steady_row_words_behindness_orphans_and_age_from_the_records() {
             mirror_files: 9,
             orphan_files: Some(1),
             orphan_bytes: Some(1_234),
+            downloaded_bytes: Some(4_096),
+            downloaded_files: Some(9),
             torn_files: 0,
             torn_bytes: 0,
         },
@@ -1332,6 +1512,80 @@ fn a_progress_record_from_before_orphan_accounting_reads_orphans_as_unknown() {
     let row = &status.rows[0].sentence;
     assert!(row.contains("orphans unknown"), "{row}");
     assert!(row.contains("0 snapshot(s) behind"), "{row}");
+}
+
+/// A progress record written before the downloaded measure existed still
+/// parses (the fields are additive, the orphan pair's own `serde(default)`
+/// family) and the half it cannot answer words that honestly on the row
+/// and on `--json`: unknown with its why, verified with its numbers —
+/// never a zero that reads as an empty disk.
+#[test]
+fn a_progress_record_from_before_downloaded_accounting_words_unknown() {
+    let sb = tempfile::TempDir::new().unwrap();
+    let state_dir = sb.path().join("state");
+    let data_root = sb.path().join("data");
+    fs::create_dir_all(&state_dir).unwrap();
+    let mirror_root = mirror_dir(&data_root, "storagebox");
+    fs::create_dir_all(mirror_root.join("keys")).unwrap();
+    fs::write(mirror_root.join("config"), [0_u8; 4096]).unwrap();
+    fs::write(mirror_root.join("keys").join("k"), [0_u8; 1234]).unwrap();
+
+    // The pre-W1044 shape: no downloaded fields at all, still mid-fill.
+    fs::write(
+        mirror::mirror_progress_path(&state_dir),
+        r#"{
+  "version": 1,
+  "mirror_of": "storagebox",
+  "round_finished_at_unix": 1800000000,
+  "complete": false,
+  "outcome": "stopped",
+  "remote_total_bytes": 10000,
+  "mirror_bytes": 4000,
+  "remote_files": 90,
+  "mirror_files": 36
+}"#,
+    )
+    .unwrap();
+
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    let status = mirror_status(&config, &data_root, &state_dir, 1_800_000_000);
+    assert_eq!(
+        status.rows.len(),
+        1,
+        "one mirror row while a fill is on record"
+    );
+    let row = &status.rows[0].sentence;
+    assert!(
+        row.contains("first sync"),
+        "the fill family still words the state: {row}"
+    );
+    assert!(
+        row.contains(
+            "downloaded unknown (the round that wrote the progress record did not measure \
+             the bytes on disk)"
+        ),
+        "the unmeasured half words unknown with its why: {row}"
+    );
+    assert!(
+        row.contains(&mirror::first_fill_numbers(
+            None,
+            4_000,
+            10_000,
+            "the round that wrote the progress record did not measure the bytes on disk"
+        )),
+        "the known half keeps its numbers in the same one spelling: {row}"
+    );
+
+    let json = status_json(&config, &data_root, &state_dir, 1_800_000_000);
+    assert_eq!(json["first_sync"]["kind"], "known");
+    assert_eq!(
+        json["first_sync"]["downloaded"],
+        serde_json::json!({
+            "kind": "unknown",
+            "why": "the round that wrote the progress record did not measure the bytes on disk"
+        })
+    );
+    assert_eq!(json["first_sync"]["percent"], serde_json::json!(40));
 }
 
 /// Orphan files a remote cleanup leaves behind appear in the next round's
@@ -1566,6 +1820,8 @@ fn a_gone_mirror_directory_with_records_reads_absent_not_healthy_empty() {
             mirror_files: 9,
             orphan_files: Some(0),
             orphan_bytes: Some(0),
+            downloaded_bytes: Some(4_096),
+            downloaded_files: Some(9),
             torn_files: 0,
             torn_bytes: 0,
         },
@@ -1645,6 +1901,8 @@ fn the_gone_copy_row_carries_the_hold_back_count_too() {
             mirror_files: 9,
             orphan_files: Some(0),
             orphan_bytes: Some(0),
+            downloaded_bytes: Some(4_096),
+            downloaded_files: Some(9),
             torn_files: 0,
             torn_bytes: 0,
         },
@@ -1884,6 +2142,8 @@ fn a_record_whose_halves_disagree_words_behindness_unknown_not_clamped() {
             mirror_files: 9,
             orphan_files: Some(0),
             orphan_bytes: Some(0),
+            downloaded_bytes: Some(4_096),
+            downloaded_files: Some(9),
             torn_files: 0,
             torn_bytes: 0,
         },
@@ -2098,6 +2358,8 @@ fn an_unwalkable_mirror_directory_words_size_unknown_without_a_path() {
             mirror_files: 9,
             orphan_files: Some(0),
             orphan_bytes: Some(0),
+            downloaded_bytes: Some(4_096),
+            downloaded_files: Some(9),
             torn_files: 0,
             torn_bytes: 0,
         },
