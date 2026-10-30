@@ -9542,13 +9542,6 @@ fn mirror_step_after_push(
         min_free_bytes,
         round_ends: &round_ends,
     };
-    let percent_done = |present: u64, total: u64| {
-        if total == 0 {
-            100
-        } else {
-            present.saturating_mul(100) / total
-        }
-    };
     match chat_stasher::mirror::sync_once(&request) {
         Ok((report, outcome)) => match outcome {
             chat_stasher::mirror::SyncOutcome::Completed => println!(
@@ -9562,8 +9555,14 @@ fn mirror_step_after_push(
             chat_stasher::mirror::SyncOutcome::Stopped(end) => match end {
                 chat_stasher::mirror::RoundEnd::BudgetSpent => println!(
                     "[run-once] mirror-sync: paused — this pass's round budget is \
-                             spent, {}% mirrored; the next pass resumes",
-                    percent_done(
+                             spent, {}; the next pass resumes",
+                    chat_stasher::mirror::first_fill_numbers(
+                        // The pair as one drawn tri-state — the very state
+                        // the record this round already wrote
+                        // (`write_progress` runs inside `sync_once`)
+                        // carries, so the result line and the record
+                        // behind it cannot disagree (rev1 ②/L5).
+                        &chat_stasher::mirror::report_downloaded_state(&report),
                         report.present_bytes + report.downloaded_bytes,
                         report.remote_total_bytes
                     )
@@ -13541,17 +13540,23 @@ fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode
         chat_stasher::mirror::SyncOutcome::Stopped(end) => {
             match &end {
                 chat_stasher::mirror::RoundEnd::BudgetSpent => {
-                    let have = report.present_bytes + report.downloaded_bytes;
-                    let percent = if report.remote_total_bytes == 0 {
-                        100
-                    } else {
-                        have.saturating_mul(100) / report.remote_total_bytes
-                    };
+                    // The fill's two numbers, one spelling, downloaded
+                    // first (ADR-062 C2): the on-disk half is the number
+                    // a watch on the mirror directory reconciles with;
+                    // the verified half rides as its "of which" subset so
+                    // a mid-fill pause can never read as two competing
+                    // totals. An unmeasured walk words unknown, never 0,
+                    // and the downloaded half arrives as the one drawn
+                    // tri-state (rev1 ②/L5) — the very state the record
+                    // this round wrote already carries.
+                    let numbers = chat_stasher::mirror::first_fill_numbers(
+                        &chat_stasher::mirror::report_downloaded_state(&report),
+                        report.present_bytes + report.downloaded_bytes,
+                        report.remote_total_bytes,
+                    );
                     println!(
                         "[mirror] result       : paused — this round's budget is spent; \
-                         {} of {} ({percent}%) verified in the mirror, the next round resumes",
-                        fmt_bytes(have),
-                        fmt_bytes(report.remote_total_bytes)
+                         {numbers}, the next round resumes"
                     );
                 }
                 chat_stasher::mirror::RoundEnd::DiskBelowThreshold {

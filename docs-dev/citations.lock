@@ -829,33 +829,33 @@ crates/chat-stasher/src/main.rs:7499-7507  bc0056c35062  lines=9
   <- docs-dev/threat-model.md:882  :: );
 crates/chat-stasher/src/main.rs:8688-8743  e2a80b1d797b  lines=56
   <- docs-dev/install.md:965  :: // this machine, so `run-once` narrates it the way it narra…
-crates/chat-stasher/src/main.rs:9900-9905  b76086ba166e  lines=6
+crates/chat-stasher/src/main.rs:9899-9904  b76086ba166e  lines=6
   <- docs-dev/privacy.md:1217  :: Ok(path) => path,
-crates/chat-stasher/src/main.rs:10035-10040  e3326b7ac7fd  lines=6
+crates/chat-stasher/src/main.rs:10034-10039  e3326b7ac7fd  lines=6
   <- docs-dev/privacy.md:850  :: /// The wording lives in [`chat_stasher::destdiag::install_…
-crates/chat-stasher/src/main.rs:10518-10521  b98db7ea7e0d  lines=4
+crates/chat-stasher/src/main.rs:10517-10520  b98db7ea7e0d  lines=4
   <- docs-dev/install.md:611  :: }
-crates/chat-stasher/src/main.rs:10743-10759  66f4a2e262d2  lines=17
+crates/chat-stasher/src/main.rs:10742-10758  66f4a2e262d2  lines=17
   <- SECURITY.md:70, docs-dev/threat-model.md:871  :: /// host of this run. No-op when `--keep-ssh-masters` is se…
-crates/chat-stasher/src/main.rs:10871-10876  13896e8d543a  lines=6
+crates/chat-stasher/src/main.rs:10870-10875  13896e8d543a  lines=6
   <- SECURITY.md:70, docs-dev/threat-model.md:869  :: eprintln!("push: cannot check stage metadata: {e:#}");
-crates/chat-stasher/src/main.rs:11309-11495  b256db959826  lines=187
+crates/chat-stasher/src/main.rs:11308-11494  b256db959826  lines=187
   <- docs-dev/threat-model.md:933  :: let destination = destination.or_else(|| {
-crates/chat-stasher/src/main.rs:16146-16197  eb6db4f4050d  lines=52
+crates/chat-stasher/src/main.rs:16151-16202  eb6db4f4050d  lines=52
   <- docs-dev/install.md:306  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:16146-16157  8f911ffc9cf6  lines=12
+crates/chat-stasher/src/main.rs:16151-16162  8f911ffc9cf6  lines=12
   <- docs-dev/install.md:1037  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:16926-16940  da484ba556b2  lines=15
+crates/chat-stasher/src/main.rs:16931-16945  da484ba556b2  lines=15
   <- docs-dev/install.md:630  :: `dest-init`) — the destination block itself does not have t…
-crates/chat-stasher/src/main.rs:17363-17370  c5ec574f3326  lines=8
+crates/chat-stasher/src/main.rs:17368-17375  c5ec574f3326  lines=8
   <- docs-dev/install.md:629  :: )
-crates/chat-stasher/src/main.rs:20237-20244  9cd8be148a6b  lines=8
+crates/chat-stasher/src/main.rs:20242-20249  9cd8be148a6b  lines=8
   <- docs-dev/install.md:1027  :: render_status(report, false)
-crates/chat-stasher/src/main.rs:20262-20263  d745898fe057  lines=2
+crates/chat-stasher/src/main.rs:20267-20268  d745898fe057  lines=2
   <- docs-dev/install.md:998  :: // would answer "is my timer healthy?" from a machine the t…
-crates/chat-stasher/src/main.rs:20770-20771  f5217dab38af  lines=2
+crates/chat-stasher/src/main.rs:20775-20776  f5217dab38af  lines=2
   <- docs-dev/install.md:993  :: // them. `destinations` and `reclaim` are the machine-reada…
-crates/chat-stasher/src/main.rs:20862-20869  7df1b5962a59  lines=8
+crates/chat-stasher/src/main.rs:20867-20874  7df1b5962a59  lines=8
   <- docs-dev/install.md:1014  :: };
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:440, docs-dev/threat-model.md:722  :: //! ADR-022: content-addressed hash tracking for stage meta…
@@ -863,7 +863,7 @@ crates/chat-stasher/src/mirror.rs:1-16  fe152090ebb3  lines=16
   <- docs-dev/privacy.md:1156  :: //! The local mirror (ADR-062, LM-2): one declared remote d…
 crates/chat-stasher/src/mirror.rs:48-50  f48b2aff1d75  lines=3
   <- docs-dev/privacy.md:1156  :: //! Privacy: ids, byte counts, times and the declared desti…
-crates/chat-stasher/src/mirror.rs:1771-1774  3a13a0bc6bb2  lines=4
+crates/chat-stasher/src/mirror.rs:1854-1857  3a13a0bc6bb2  lines=4
   <- docs-dev/privacy.md:1156  :: pub remote_files: u64,
 crates/chat-stasher/src/mirrorstate.rs:30-31  3f1c0e8f18cc  lines=2
   <- docs-dev/privacy.md:1156  :: //! Privacy: a destination name, a unix time, byte counts a…

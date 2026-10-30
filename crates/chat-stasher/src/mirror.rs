@@ -612,6 +612,29 @@ pub struct SyncReport {
     pub downloaded_bytes: u64,
     /// Byte size the mirror still lacks relative to this listing.
     pub missing_bytes_remaining: u64,
+    /// What the mirror holds **for this listing** on disk at the moment the
+    /// round's outcome is reported — the downloaded half of the fill's two
+    /// numbers, from the same directory walk that measures the orphans: a
+    /// size read of each listed path, presence only. The walk claims
+    /// nothing about content — a file being on disk is a progress fact,
+    /// (bytes arrived), never a proof (of hash-verified correctness); the
+    /// proof half is `present_* + downloaded_*` above, which stays
+    /// hash-gated. On a round that copies, this is measured *after* the
+    /// copy loop joins, so the number words the directory the round
+    /// leaves behind; on a refused round it is the walk before the
+    /// refusal (nothing is copied), and on a round that copies nothing it
+    /// is that same pre-estimate walk's measurement, reused — a round
+    /// that copies no file cannot change what sits at the listing's own
+    /// paths, every change a round makes there being the rename of a
+    /// copy it counted, so the second walk would re-read identical bytes
+    /// (rev1 ④: the no-op hourly pass walks the tree once, not twice).
+    /// `None` means the walk failed — an
+    /// unmeasured count, never a zero. Paired with
+    /// [`Self::downloaded_files_on_disk`], which is `None` exactly when
+    /// this is.
+    pub downloaded_bytes_on_disk: Option<u64>,
+    /// [`Self::downloaded_bytes_on_disk`]'s file count.
+    pub downloaded_files_on_disk: Option<u64>,
     /// Snapshot files in the listing (the closure candidates).
     pub snapshots_remote: u64,
     /// Snapshots whose closure the completed round could claim.
@@ -824,9 +847,17 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
         .iter()
         .map(|file| local_path(&mirror_root, file))
         .collect();
-    let (orphan_files, orphan_bytes) = match count_unlisted(&mirror_root, &listed_paths) {
-        Ok(unlisted) => (Some(unlisted.files), Some(unlisted.bytes)),
-        Err(_) => (None, None),
+    // Kept as the whole walk (not just its three tuples) so the round's
+    // end can reuse it when the round copied nothing (rev1 ④, the reuse
+    // [`SyncReport::downloaded_bytes_on_disk`]'s doc states).
+    let refusal_walk = count_unlisted(&mirror_root, &listed_paths);
+    let (orphan_files, orphan_bytes, downloaded_at_refusal) = match &refusal_walk {
+        Ok(walk) => (
+            Some(walk.files),
+            Some(walk.bytes),
+            Some((walk.listed_files, walk.listed_bytes)),
+        ),
+        Err(_) => (None, None, None),
     };
 
     // ---- C3 pre-estimate: refuse before the first byte moves ----
@@ -850,6 +881,8 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
             snapshots_remote: snapshot_ids.len() as u64,
             orphan_files,
             orphan_bytes,
+            downloaded_bytes_on_disk: downloaded_at_refusal.map(|(_, bytes)| bytes),
+            downloaded_files_on_disk: downloaded_at_refusal.map(|(files, _)| files),
             ..SyncReport::default()
         };
         write_progress(
@@ -958,6 +991,28 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
     let torn_files = counters.torn.load(Ordering::SeqCst);
     let torn_bytes = counters.torn_bytes.load(Ordering::SeqCst);
     let ended = stop.into_inner().ok().flatten();
+    // The downloaded measure, taken once both copy phases are joined: the
+    // same walk that counted the orphans re-reads the directory the round
+    // leaves behind, so the listed bucket words the fill's looser half —
+    // bytes of the listing that are physically on disk, whatever state
+    // their content is in. It runs after the join because that is the
+    // moment the directory stops changing inside the round; a walk that
+    // fails records `None` (unmeasured, never a zero) and nothing about
+    // the round's outcome depends on it. rev1 ④: a round that copied no
+    // file leaves the listed bucket exactly as the refusal walk measured
+    // it — every change a round makes to a listed path is the rename of a
+    // copy it counted — so that measurement is reused and the second full
+    // walk only happens when the round actually wrote (the no-op hourly
+    // pass walks the tree once, not twice; both walks sit outside the
+    // round budget either way). A failed refusal walk is not reused: the
+    // second walk gets to retry what the first could not finish.
+    let (downloaded_files_on_disk, downloaded_bytes_on_disk) = match refusal_walk {
+        Ok(walk) if downloaded_files == 0 => (Some(walk.listed_files), Some(walk.listed_bytes)),
+        _ => match count_unlisted(&mirror_root, &listed_paths) {
+            Ok(walk) => (Some(walk.listed_files), Some(walk.listed_bytes)),
+            Err(_) => (None, None),
+        },
+    };
     let hard_report =
         |downloaded_files: u64, downloaded_bytes: u64, torn_files, torn_bytes| SyncReport {
             mirror_of: req.settings.mirror_of.clone(),
@@ -971,6 +1026,8 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
             snapshots_remote: snapshot_ids.len() as u64,
             orphan_files,
             orphan_bytes,
+            downloaded_bytes_on_disk,
+            downloaded_files_on_disk,
             torn_files,
             torn_bytes,
             ..SyncReport::default()
@@ -1048,6 +1105,8 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
         covered_snapshots,
         orphan_files,
         orphan_bytes,
+        downloaded_bytes_on_disk,
+        downloaded_files_on_disk,
         torn_files,
         torn_bytes,
     };
@@ -1079,11 +1138,18 @@ fn sha256_file(path: &Path) -> anyhow::Result<String> {
 }
 
 /// Count the mirror-directory files this round's listing does not name,
-/// with their bytes (ADR-062 D2 / 47 §4 C). The directories the backend
-/// layout uses are bounded (`config`, `keys/`, `index/`, `snapshots/`,
-/// `data/xx/`), so the walk is a plain recursion; anything regular it
-/// meets that the listing does not claim lands in one of two buckets:
+/// with their bytes (ADR-062 D2 / 47 §4 C), and — the third bucket the same
+/// walk measures almost for free — the bytes the mirror holds *for* the
+/// listing. The directories the backend layout uses are bounded (`config`,
+/// `keys/`, `index/`, `snapshots/`, `data/xx/`), so the walk is a plain
+/// recursion; everything regular it meets lands in one of three buckets:
 ///
+/// * **listed** — a file at a path this round's listing claims: the
+///   downloaded measure's half of the fill's two numbers, read from disk
+///   size only. Presence is a progress fact, never a proof: nothing about
+///   these bytes has been hash-checked by this walk, and no consumer of
+///   the count may treat it as one (the verified half of the pair is
+///   [`MirrorProgress::mirror_bytes`] and stays hash-gated);
 /// * **orphan** — residue a deliberate remote cleanup left behind: never
 ///   deleted automatically, reported reclaimable, what the doctor's
 ///   cleanup advice is about;
@@ -1098,24 +1164,35 @@ fn sha256_file(path: &Path) -> anyhow::Result<String> {
 /// A tree that cannot be walked is an error, not a partial count: a lower
 /// bound worded as a measurement is the exact lie the tri-state rule
 /// exists against, so the caller records `None` and rounds that follow
-/// re-measure.
+/// re-measure. Three things end a walk: a directory that cannot be read,
+/// an entry that cannot be classified, and — the case the listed bucket
+/// widened — a regular file whose size cannot be read, because it is
+/// unreadable or vanished between the read and the metadata. The size
+/// read sits before the listing check (the listed bucket needs it too),
+/// where the pre-listed-bucket walk skipped a listed path unsized, so
+/// one bad listed file used to survive as an orphan verdict and now
+/// fails the walk, taking every count it carried to unknown. Kept:
+/// counting the other sizes while wording the unread one as nothing
+/// would be exactly the lower-bound lie named above.
 #[derive(Default)]
-struct Unlisted {
+struct MirrorWalk {
     files: u64,
     bytes: u64,
     tmp_files: u64,
     tmp_bytes: u64,
+    listed_files: u64,
+    listed_bytes: u64,
 }
 
-/// [`Unlisted`]'s own temp name: [`write_atomic`]'s `.<name>.tmp` shape,
+/// [`MirrorWalk`]'s own temp name: [`write_atomic`]'s `.<name>.tmp` shape,
 /// the torn write of an interrupted round.
 fn is_torn_write_tmp(name: &std::ffi::OsStr) -> bool {
     let name = name.to_string_lossy();
     name.starts_with('.') && name.ends_with(".tmp")
 }
 
-fn count_unlisted(mirror_root: &Path, listed: &BTreeSet<PathBuf>) -> anyhow::Result<Unlisted> {
-    let mut out = Unlisted::default();
+fn count_unlisted(mirror_root: &Path, listed: &BTreeSet<PathBuf>) -> anyhow::Result<MirrorWalk> {
+    let mut out = MirrorWalk::default();
     let mut stack = vec![mirror_root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries =
@@ -1129,9 +1206,6 @@ fn count_unlisted(mirror_root: &Path, listed: &BTreeSet<PathBuf>) -> anyhow::Res
             if file_type.is_dir() {
                 stack.push(path);
             } else if file_type.is_file() {
-                if listed.contains(&path) {
-                    continue;
-                }
                 // reason: the metadata read is inside the loop, so its
                 // `with_context` names the one entry that failed, on the
                 // terminal, while the state-file story counts keep their
@@ -1140,6 +1214,15 @@ fn count_unlisted(mirror_root: &Path, listed: &BTreeSet<PathBuf>) -> anyhow::Res
                     .metadata()
                     .with_context(|| format!("size {}", path.display()))?
                     .len();
+                if listed.contains(&path) {
+                    // The downloaded measure: the listing's own bytes as
+                    // they sit on disk, untrusted size and all — the walk
+                    // claims nothing about their content, only that they
+                    // are there.
+                    out.listed_files += 1;
+                    out.listed_bytes += len;
+                    continue;
+                }
                 if is_torn_write_tmp(&entry.file_name()) {
                     out.tmp_files += 1;
                     out.tmp_bytes += len;
@@ -1798,18 +1881,233 @@ pub struct MirrorProgress {
     /// [`Self::torn_files`]'s bytes, from the round's own listing.
     #[serde(default)]
     pub torn_bytes: u64,
+    /// Bytes of the round's listing that were on the mirror's disk at the
+    /// end of the round — the downloaded half of the fill's two numbers,
+    /// measured by the same directory walk that counts
+    /// [`Self::orphan_files`] ([`MirrorWalk`]'s listed bucket): a size
+    /// read of each listed path, presence only. It is a progress fact
+    /// (the bytes arrived), never a proof (of hash-verified content) —
+    /// nothing that reads this number may treat it as one, and the
+    /// proof half stays [`Self::mirror_bytes`], hash-gated. `None` means
+    /// the round that wrote this record measured none — its directory
+    /// walk failed, or it predates downloaded accounting — which is
+    /// unknown, never zero; a measured empty is `Some(0)`
+    /// (`serde(default)`: the field is additive, so records written
+    /// before it existed still parse).
+    ///
+    /// The invariant the two numbers keep: **downloaded ≥ verified,
+    /// always.** Every byte the verified half counts sits at a listing
+    /// path — the copy verifies before it writes and never renames a
+    /// partial file ([`write_atomic`]), so a hash-verified file's whole
+    /// bytes are on disk — and the same honesty the listing's own sizes
+    /// already rest on (a declared size is the size the source serves,
+    /// the assumption [`Self::mirror_bytes`] sums) makes those bytes the
+    /// downloaded walk's bytes too. The gap between the two numbers is
+    /// therefore exactly the on-disk bytes no round has hash-verified
+    /// yet: in-flight work the next round still has to check, never a
+    /// second competing total.
+    ///
+    /// The one citizen outside that argument is a listed path replaced
+    /// by a symlink: the walk counts only what it can speak for —
+    /// regular files, which is all this tool ever writes (see
+    /// [`MirrorWalk`]) — while the verifying hash opens whatever sits at
+    /// the path, so such a path's verified bytes never reach the
+    /// downloaded half and the pair can invert. That is why every surface
+    /// derives this half through one guarded tri-state
+    /// ([`record_downloaded_state`]/[`report_downloaded_state`])
+    /// instead of trusting the invariant: a record that breaks it words
+    /// the half unknown, never a clamped pair.
+    #[serde(default)]
+    pub downloaded_bytes: Option<u64>,
+    /// [`Self::downloaded_bytes`]'s file count; `None` exactly when that
+    /// is.
+    #[serde(default)]
+    pub downloaded_files: Option<u64>,
 }
 
 impl MirrorProgress {
-    /// The first-fill percentage, 0..=100 — "already downloaded ÷ remote
-    /// total", cross-round (C2). Unrepresentable denominators stay honest:
-    /// an empty listing is 100 of nothing, not 0%.
+    /// The first-fill percentage, 0..=100 — the **hash-verified** half of
+    /// the round's progress: bytes of the listing present and verified in
+    /// the mirror ([`Self::mirror_bytes`]) ÷ the listing's total bytes
+    /// ([`Self::remote_total_bytes`]), cross-round (C2). The denominator is
+    /// the total of *that listing*, torn debris included; the numerator is
+    /// deliberately not the looser on-disk half
+    /// ([`Self::downloaded_bytes`]) — a percentage a hash has to vouch
+    /// for. Unrepresentable denominators stay honest: an empty listing is
+    /// 100 of nothing, not 0%.
     #[must_use]
     pub fn percent(&self) -> u64 {
-        if self.remote_total_bytes == 0 {
-            return 100;
+        percent_of(self.mirror_bytes, self.remote_total_bytes)
+    }
+}
+
+/// `part ÷ total` as a percentage, with the empty-listing edge kept honest:
+/// a total of zero is 100% of nothing — a listing that holds no bytes is
+/// complete the moment it is listed, not a divide — and the multiply
+/// saturates so a pair of large byte counts cannot overflow on the way to
+/// the small percentage they make.
+fn percent_of(part: u64, total: u64) -> u64 {
+    if total == 0 {
+        return 100;
+    }
+    part.saturating_mul(100) / total
+}
+
+/// The unmeasured-walk sentence for the first fill's downloaded half on the
+/// record-reading surfaces: the why `--json`'s `first_sync.downloaded`
+/// unknown-kind and the first-sync rows' unknown fragment share, spelled
+/// once so the two cannot drift (the same family
+/// [`MirrorProgress::orphan_files`]'s unknown wording keeps).
+const DOWNLOADS_UNMEASURED_WHY: &str =
+    "the round that wrote the progress record did not measure the bytes on disk";
+
+/// The same unmeasured case spelled for the surface that *is* the round —
+/// the paused result lines `mirror sync` and run-once print straight from
+/// the report, where the walk that did not measure belongs to the round
+/// printing the line. Named beside the record-side
+/// [`DOWNLOADS_UNMEASURED_WHY`] (one spelling per family, ruling 8) so the
+/// two live call sites in `main.rs` cannot drift into copies of it.
+pub const ROUND_WALK_UNMEASURED_WHY: &str =
+    "this round's directory walk did not measure the bytes on disk";
+
+/// The downloaded half of the fill's two numbers, derived once as the one
+/// tri-state every surface then renders — rev0 ⑤'s shape (one state, the
+/// row fragment and `--json` both), so two surfaces reading the same
+/// record cannot word it differently. `known` needs both: a round
+/// measured the half, *and* the pair keeps the invariant its wording
+/// rests on (downloaded ≥ verified, stated and justified on
+/// [`MirrorProgress::downloaded_bytes`]). A measured half below the
+/// verified half inverts that invariant — a self-disagreement reachable
+/// without a hand-edited record, the symlink case that field's doc names,
+/// not a curiosity — so it words `unknown` with a why that carries both
+/// numbers, never a clamped pair a subset-larger-than-its-whole sentence
+/// would repeat (the same honesty `mirror_status` keeps for behindness's
+/// own record self-disagreement). An unmeasured or half-measured pair
+/// words the caller's family's unmeasured why instead.
+fn downloaded_state(
+    downloaded_files: Option<u64>,
+    downloaded_bytes: Option<u64>,
+    verified_bytes: u64,
+    unmeasured_why: &str,
+) -> MirrorUsageState {
+    match (downloaded_files, downloaded_bytes) {
+        (Some(files), Some(bytes)) if bytes >= verified_bytes => {
+            MirrorUsageState::Known { files, bytes }
         }
-        self.mirror_bytes.saturating_mul(100) / self.remote_total_bytes
+        (Some(_), Some(bytes)) => MirrorUsageState::Unknown {
+            // reason: both numbers are carried in the why — a bare
+            // "unknown" beside a record the reader can open would hide
+            // which half inverted, and the next reader of the record
+            // should see the pair exactly as the guard saw it.
+            why: format!(
+                "the pair disagrees with itself (its downloaded half, {bytes} B, is below its \
+                 verified half, {verified_bytes} B, which the two measures' invariant forbids); \
+                 the next round re-measures them"
+            ),
+        },
+        _ => MirrorUsageState::Unknown {
+            why: unmeasured_why.to_string(),
+        },
+    }
+}
+
+/// The record-reading family's derivation — every surface that words the
+/// fill's pair off a progress record gets its downloaded half here:
+/// `mirror_status`'s first-sync and failed rows, `status --json`'s
+/// `first_sync.downloaded` field, and `mirror_read`'s behindness
+/// sentences. One function, one record, so the row the menu bar decodes
+/// and the JSON object next to it cannot disagree about it.
+pub(crate) fn record_downloaded_state(record: &MirrorProgress) -> MirrorUsageState {
+    downloaded_state(
+        record.downloaded_files,
+        record.downloaded_bytes,
+        record.mirror_bytes,
+        DOWNLOADS_UNMEASURED_WHY,
+    )
+}
+
+/// The live-round family's: the two paused result lines that word the
+/// pair straight from the round's own [`SyncReport`] — the pair
+/// [`write_progress`] records in the same breath, so the line a round
+/// prints and the record it wrote describe the same state of the same
+/// mirror (the verified half is the same sum `write_progress` records as
+/// `mirror_bytes`).
+pub fn report_downloaded_state(report: &SyncReport) -> MirrorUsageState {
+    downloaded_state(
+        report.downloaded_files_on_disk,
+        report.downloaded_bytes_on_disk,
+        report.present_bytes + report.downloaded_bytes,
+        ROUND_WALK_UNMEASURED_WHY,
+    )
+}
+
+/// The first fill's two numbers, one spelling everywhere they are worded
+/// (ruling 8's one-vocabulary family, shared by `mirror sync`'s and
+/// run-once's paused result lines, `status`'s and `doctor`'s first-sync
+/// and failed rows, and `mirror_read`'s behindness sentences):
+/// `downloaded {X} of {Y} ({P}%), of which {V} ({Q}%) hash-verified` —
+/// the on-disk half first, as C2's "X% of the first fill" headline: it is
+/// the number a watch on the mirror directory's own size reconciles with,
+/// so the tool and the disk stop disagreeing by wording different
+/// measures as one percentage; the verified half then reads as the
+/// subset of it a hash has vouched for ("of which"), so the pair can
+/// never read as two competing totals. The downloaded half arrives as
+/// the one tri-state its family derives ([`record_downloaded_state`] /
+/// [`report_downloaded_state`]), so it is worded as that subset only
+/// while the pair keeps the invariant the wording rests on; every other
+/// state words the half unknown **with its why**, never a zero that
+/// would read as an empty disk and never a clamped pair. An on-disk half
+/// above the listing's own total gets its own word — {X} of {Y} with X
+/// over Y is the disk outgrowing the listing, not progress beyond
+/// complete — rather than a percentage figure above 100. The
+/// `not_applicable` state is not one a current caller passes (the
+/// switch-off states answer the whole first fill `not applicable`, not a
+/// per-number breakdown), but it keeps its own wording so a future
+/// caller cannot print a half it never answered.
+#[must_use]
+pub fn first_fill_numbers(
+    downloaded: &MirrorUsageState,
+    verified_bytes: u64,
+    remote_total_bytes: u64,
+) -> String {
+    let known_tail = format!(
+        "{} ({}%)",
+        crate::destdiag::fmt_bytes(verified_bytes),
+        percent_of(verified_bytes, remote_total_bytes)
+    );
+    // The unknown and not-applicable halves still name the total beside
+    // the verified bytes — their "of {Y}" is shipped wording the rows and
+    // the read surfaces pin.
+    let subset_tail = format!(
+        "{} of {} ({}%)",
+        crate::destdiag::fmt_bytes(verified_bytes),
+        crate::destdiag::fmt_bytes(remote_total_bytes),
+        percent_of(verified_bytes, remote_total_bytes)
+    );
+    match downloaded {
+        MirrorUsageState::Known { bytes: on_disk, .. } if *on_disk > remote_total_bytes => {
+            format!(
+                "downloaded {} of {} (the on-disk bytes at the listing's own paths exceed the \
+                 sizes the listing declares), of which {known_tail} hash-verified",
+                crate::destdiag::fmt_bytes(*on_disk),
+                crate::destdiag::fmt_bytes(remote_total_bytes)
+            )
+        }
+        MirrorUsageState::Known { bytes: on_disk, .. } => format!(
+            "downloaded {} of {} ({}%), of which {known_tail} hash-verified",
+            crate::destdiag::fmt_bytes(*on_disk),
+            crate::destdiag::fmt_bytes(remote_total_bytes),
+            percent_of(*on_disk, remote_total_bytes)
+        ),
+        // The unknown and not-applicable halves keep the shipped tail that
+        // names the total — with no worded whole there is no subset to
+        // claim, so no "of which".
+        MirrorUsageState::Unknown { why } => {
+            format!("downloaded unknown ({why}), {subset_tail} hash-verified")
+        }
+        MirrorUsageState::NotApplicable { why } => {
+            format!("downloaded not applicable ({why}), {subset_tail} hash-verified")
+        }
     }
 }
 
@@ -1893,6 +2191,8 @@ fn write_progress(
         mirror_files: report.present_files + report.downloaded_files,
         orphan_files: report.orphan_files,
         orphan_bytes: report.orphan_bytes,
+        downloaded_bytes: report.downloaded_bytes_on_disk,
+        downloaded_files: report.downloaded_files_on_disk,
         torn_files: report.torn_files,
         torn_bytes: report.torn_bytes,
     };
@@ -2432,12 +2732,14 @@ pub fn mirror_status(
                 rows.push(MirrorRow {
                     severity: MirrorRowSeverity::Info,
                     sentence: format!(
-                        "[mirror] first sync of `{}` in progress: {}% ({} of {}) — reclaim holds \
+                        "[mirror] first sync of `{}` in progress: {} — reclaim holds \
                          sessions back until it completes; the state record is also unreadable ({why})",
                         progress.mirror_of,
-                        progress.percent(),
-                        progress.mirror_bytes,
-                        progress.remote_total_bytes
+                        first_fill_numbers(
+                            &record_downloaded_state(progress),
+                            progress.mirror_bytes,
+                            progress.remote_total_bytes,
+                        )
                     ),
                 });
             }
@@ -2458,25 +2760,29 @@ pub fn mirror_status(
                 rows.push(MirrorRow {
                     severity: MirrorRowSeverity::Yellow,
                     sentence: format!(
-                        "[mirror] the last mirror round failed at {}% ({} of {}): {note} — the \
+                        "[mirror] the last mirror round failed — {}: {note} — the \
                          next round resumes only after the cause is fixed; reclaim holds \
                          sessions back until a round completes",
-                        progress.percent(),
-                        progress.mirror_bytes,
-                        progress.remote_total_bytes
+                        first_fill_numbers(
+                            &record_downloaded_state(progress),
+                            progress.mirror_bytes,
+                            progress.remote_total_bytes,
+                        )
                     ),
                 });
             } else if !progress.complete {
                 rows.push(MirrorRow {
                     severity: MirrorRowSeverity::Info,
                     sentence: format!(
-                        "[mirror] first sync of `{}` in progress: {}% ({} of {}) — reclaim holds \
+                        "[mirror] first sync of `{}` in progress: {} — reclaim holds \
                          sessions back until it completes; rounds end by budget, disk floor or \
                          reachability, none of which is a failure",
                         progress.mirror_of,
-                        progress.percent(),
-                        progress.mirror_bytes,
-                        progress.remote_total_bytes
+                        first_fill_numbers(
+                            &record_downloaded_state(progress),
+                            progress.mirror_bytes,
+                            progress.remote_total_bytes,
+                        )
                     ),
                 });
             } else if state_names_other {
@@ -2781,6 +3087,15 @@ pub fn status_json(
                 "complete": progress.complete,
                 "mirror_bytes": progress.mirror_bytes,
                 "remote_total_bytes": progress.remote_total_bytes,
+                // The downloaded half of the fill's two numbers, one drawn
+                // tri-state (`record_downloaded_state`, rev1 ②/rev0 ⑤'s
+                // shape) the first-sync rows render too — the unknown
+                // kinds below include the record's own self-disagreement,
+                // so the `rows` this object also carries can never word a
+                // clamped pair beside an `unknown` here; an unmeasured
+                // walk is `kind: unknown` with its why, never a zero or
+                // a null that reads as an empty disk.
+                "downloaded": record_downloaded_state(&progress),
                 "outcome": progress.outcome,
                 // Torn debris the round skipped (ISSUE-006 step A), straight
                 // from the record: zero is a measured zero, and an unknown
@@ -2969,10 +3284,12 @@ mod tests {
         assert_eq!(local_path(root, &config), root.join("config"));
     }
 
-    /// The progress percentage is "downloaded ÷ total" and stays honest on
-    /// the edges: an empty listing is complete (100), never a divide.
+    /// The progress percentage is the **verified** half over the total
+    /// (`mirror_bytes`: present and hash-verified, the doc on `percent`
+    /// states) and stays honest on the edges: an empty listing is complete
+    /// (100), never a divide.
     #[test]
-    fn progress_percent_is_download_over_total() {
+    fn progress_percent_is_verified_over_total() {
         let progress = MirrorProgress {
             version: MIRROR_PROGRESS_VERSION,
             mirror_of: "storagebox".to_string(),
@@ -2986,6 +3303,8 @@ mod tests {
             mirror_files: 0,
             orphan_files: None,
             orphan_bytes: None,
+            downloaded_bytes: None,
+            downloaded_files: None,
             torn_files: 0,
             torn_bytes: 0,
         };
@@ -2996,6 +3315,222 @@ mod tests {
             ..progress
         };
         assert_eq!(partial.percent(), 25);
+    }
+
+    /// The two-number wording words the pair in one direction only:
+    /// downloaded first (the headline), verified as its "of which"
+    /// subset, an unmeasured walk as unknown — never a zero — and a pair
+    /// that converged on a complete fill says so in the same one spelling
+    /// every surface shares. rev1 ②/L2: the on-disk half above the
+    /// listing's total gets its own divergence word, never a percentage
+    /// above 100.
+    #[test]
+    fn the_first_fills_two_numbers_word_both_halves_once() {
+        let known = |bytes: u64| MirrorUsageState::Known { files: 3, bytes };
+        let diverged = first_fill_numbers(&known(7_500), 3_500, 7_900);
+        assert!(
+            diverged.starts_with("downloaded "),
+            "the headline is the on-disk half: {diverged}"
+        );
+        assert!(
+            diverged.contains(&crate::destdiag::fmt_bytes(7_500))
+                && diverged.contains(&crate::destdiag::fmt_bytes(7_900)),
+            "both fill numbers appear worded: {diverged}"
+        );
+        assert!(
+            diverged.contains("of which") && diverged.contains("hash-verified"),
+            "the verified half words as the subset: {diverged}"
+        );
+        let unmeasured = first_fill_numbers(
+            &MirrorUsageState::Unknown {
+                why: "the walk did not run".to_string(),
+            },
+            3_500,
+            7_900,
+        );
+        assert!(
+            unmeasured.contains("downloaded unknown (the walk did not run)"),
+            "an unmeasured walk words unknown with its why: {unmeasured}"
+        );
+        assert!(
+            unmeasured.contains(&crate::destdiag::fmt_bytes(3_500))
+                && unmeasured.contains(&crate::destdiag::fmt_bytes(7_900)),
+            "the verified half keeps its numbers beside the total: {unmeasured}"
+        );
+        assert!(
+            !unmeasured.contains("of which"),
+            "with no worded whole there is no subset to claim: {unmeasured}"
+        );
+        assert!(
+            !unmeasured.contains("0 B"),
+            "unknown never words as a zero: {unmeasured}"
+        );
+        let converged = first_fill_numbers(&known(7_900), 7_900, 7_900);
+        assert_eq!(
+            converged,
+            format!(
+                "downloaded {} of {} (100%), of which {} (100%) hash-verified",
+                crate::destdiag::fmt_bytes(7_900),
+                crate::destdiag::fmt_bytes(7_900),
+                crate::destdiag::fmt_bytes(7_900),
+            ),
+            "a complete fill's pair converges to one number, one spelling: {converged}"
+        );
+        // rev1 ②/L2: over-total is its own fact — the disk holding more
+        // than the listing declares — not progress beyond complete.
+        let over_total = first_fill_numbers(&known(9_000), 7_900, 7_900);
+        assert!(
+            over_total.contains("exceed the sizes the listing declares"),
+            "the over-total divergence gets its own word: {over_total}"
+        );
+        assert!(
+            !over_total.contains("(114%)"),
+            "a percentage above 100 is a divergence, not progress: {over_total}"
+        );
+        assert!(
+            over_total.contains("of which") && over_total.contains("hash-verified"),
+            "the verified half stays the subset it is (it cannot exceed the total): {over_total}"
+        );
+        // The not-yet-reached state still words itself honestly, so a
+        // future caller cannot print a half it never answered.
+        let not_applicable = first_fill_numbers(
+            &MirrorUsageState::NotApplicable {
+                why: "the [mirror] switch is off".to_string(),
+            },
+            3_500,
+            7_900,
+        );
+        assert!(
+            not_applicable.contains("downloaded not applicable (the [mirror] switch is off)"),
+            "not applicable words itself, never unknown: {not_applicable}"
+        );
+    }
+
+    /// rev1 ② (the review's Medium): the one derivation behind every
+    /// surface words a pair that inverts its own invariant unknown — a
+    /// why naming the self-disagreement and carrying both numbers —
+    /// never a clamped pair a subset-larger-than-its-whole sentence
+    /// would repeat. A pair that keeps the invariant stays known, a
+    /// half-measured mix is as unmeasured as a walk that never ran, and
+    /// each family spells the unmeasured why it passed.
+    #[test]
+    fn the_downloaded_tri_state_guards_the_pairs_own_invariant() {
+        match downloaded_state(Some(4), Some(1_000), 4_000, "unused why") {
+            MirrorUsageState::Unknown { why } => {
+                assert!(why.contains("disagrees with itself"), "{why}");
+                assert!(
+                    why.contains("1000 B") && why.contains("4000 B"),
+                    "the why carries both numbers it judged: {why}"
+                );
+                assert!(
+                    why.contains("which the two measures' invariant forbids"),
+                    "{why}"
+                );
+            }
+            other => panic!("an inverted pair words unknown, got {other:?}"),
+        }
+        assert!(matches!(
+            downloaded_state(Some(4), Some(4_000), 4_000, "unused why"),
+            MirrorUsageState::Known {
+                files: 4,
+                bytes: 4_000
+            }
+        ));
+        assert!(matches!(
+            downloaded_state(None, None, 4_000, "the why that rides"),
+            MirrorUsageState::Unknown { why } if why == "the why that rides"
+        ));
+        assert!(matches!(
+            downloaded_state(Some(4), None, 4_000, "the why that rides"),
+            MirrorUsageState::Unknown { why } if why == "the why that rides"
+        ));
+    }
+
+    /// The live-family wrapper sums the report's verified half exactly the
+    /// way `write_progress` records it, and spells the unmeasured why in
+    /// the round's own first person — so the line a paused round prints
+    /// and the record it wrote in the same breath describe one pair, and
+    /// the record-family rows a later `status` words from that record
+    /// draw the very same decision from it.
+    #[test]
+    fn the_report_tri_state_matches_the_record_it_writes() {
+        let known = SyncReport {
+            present_bytes: 1_000,
+            downloaded_files: 2,
+            downloaded_bytes: 2_000,
+            downloaded_files_on_disk: Some(3),
+            downloaded_bytes_on_disk: Some(3_000),
+            ..SyncReport::default()
+        };
+        assert!(matches!(
+            report_downloaded_state(&known),
+            MirrorUsageState::Known {
+                files: 3,
+                bytes: 3_000
+            }
+        ));
+        let unmeasured = SyncReport {
+            present_bytes: 1_000,
+            downloaded_bytes: 2_000,
+            ..SyncReport::default()
+        };
+        assert!(matches!(
+            report_downloaded_state(&unmeasured),
+            MirrorUsageState::Unknown { why } if why == ROUND_WALK_UNMEASURED_WHY
+        ));
+        // A report whose listed-bucket walk saw fewer bytes than its own
+        // verified sum inverts the pair too, and the result line the
+        // round is about to print must word the inversion the same way
+        // `status` will word the record it just wrote.
+        let inverted = SyncReport {
+            present_bytes: 1_000,
+            downloaded_bytes: 2_000,
+            downloaded_files_on_disk: Some(2),
+            downloaded_bytes_on_disk: Some(2_500),
+            ..SyncReport::default()
+        };
+        match report_downloaded_state(&inverted) {
+            MirrorUsageState::Unknown { why } => {
+                assert!(why.contains("disagrees with itself"), "{why}");
+            }
+            other => panic!("a live inversion words unknown too, got {other:?}"),
+        }
+    }
+
+    /// A record written before the downloaded fields existed still parses
+    /// (the fields are additive, `serde(default)` like the orphan pair)
+    /// and reads as what it is — unmeasured, unknown, never zero.
+    #[test]
+    fn a_progress_record_from_before_downloaded_accounting_parses_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(
+            mirror_progress_path(&state_dir),
+            r#"{
+  "version": 1,
+  "mirror_of": "storagebox",
+  "round_finished_at_unix": 1800000000,
+  "complete": false,
+  "outcome": "stopped",
+  "remote_total_bytes": 4096,
+  "mirror_bytes": 1000,
+  "remote_files": 9,
+  "mirror_files": 2
+}"#,
+        )
+        .unwrap();
+        match load_progress(&state_dir) {
+            MirrorProgressRead::Present(record) => {
+                assert_eq!(record.mirror_bytes, 1_000);
+                assert_eq!(
+                    record.downloaded_bytes, None,
+                    "a record from before the field is unknown, never zero"
+                );
+                assert_eq!(record.downloaded_files, None);
+            }
+            other => panic!("the old shape still parses, got {other:?}"),
+        }
     }
 
     /// The progress record round-trips and keeps its three read states.
@@ -3028,6 +3563,8 @@ mod tests {
             mirror_files: 3,
             orphan_files: Some(0),
             orphan_bytes: Some(0),
+            downloaded_bytes: Some(100),
+            downloaded_files: Some(3),
             torn_files: 0,
             torn_bytes: 0,
         };
@@ -3041,6 +3578,8 @@ mod tests {
             MirrorProgressRead::Present(read_back) => {
                 assert_eq!(read_back.percent(), 100);
                 assert_eq!(read_back.mirror_files, 3);
+                assert_eq!(read_back.downloaded_bytes, Some(100));
+                assert_eq!(read_back.downloaded_files, Some(3));
             }
             other => panic!("expected present progress, got {other:?}"),
         }
