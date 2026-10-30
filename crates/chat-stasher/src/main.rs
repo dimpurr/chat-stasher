@@ -7144,7 +7144,6 @@ impl chat_stasher::ui::ContentSource for MergedContent<'_> {
 
 fn cmd_doctor(json: bool) -> ExitCode {
     let mut report = chat_stasher::doctor::run();
-    let inboxes = chat_stasher::inbox_status::inspect_default();
     // ADR-023 — the one place `doctor` opens a real connection. Kept out of
     // `doctor::run()` because a dozen integration tests call that entry point
     // directly and a test may not reach the network; the CLI is where a real
@@ -7153,9 +7152,45 @@ fn cmd_doctor(json: bool) -> ExitCode {
     // Only when the config could be read at all: with none, there is no declared
     // destination to dial, and an empty probe list would read as "no destination
     // answered" — a claim about a destination list nobody managed to read.
-    if let Ok(config) = Config::load() {
-        report.destinations = chat_stasher::doctor::probe_destinations(&config);
+    //
+    // W1043: the CLI-side steps run through the same traced, deadlined harness
+    // the library's checks use, so the remote-inbox observation and every
+    // destination probe answer within their own budgets or leave a note in
+    // `report.timed_out` instead of freezing the command.
+    let mut cli_checks = chat_stasher::doctor::CheckRunner::new();
+    let inboxes = match cli_checks.run(
+        chat_stasher::doctor::INBOX_STATUS_CHECK,
+        chat_stasher::doctor::INBOX_BUDGET_SECS,
+        chat_stasher::inbox_status::inspect_default,
+    ) {
+        Some(report) => report,
+        // reason: the empty `Report` is the did-not-look shape —
+        // `inspect_default`'s own "declarations unknown" rendering and the
+        // `incomplete()` verdict below word it; the `timed_out` note that
+        // replaces this section's numbers rides in `cli_checks`.
+        None => chat_stasher::inbox_status::Report {
+            state: "unknown",
+            inboxes: Vec::new(),
+        },
+    };
+    // W1043f: the probes reuse the config `doctor::run()` already read behind
+    // its own deadline — `DoctorReport::config` — instead of issuing a second
+    // `Config::load()`. That second read had no deadline, no thread and no
+    // cache: a config file that had just been reported as timed out got a
+    // fresh, unbounded chance to hang the command (the rev0 review's High),
+    // and a file edited mid-run could disagree with the rest of the report.
+    // Reusing the one config keeps the surfaces telling one story: with no
+    // usable config there is nothing to probe, so `destinations` stays empty
+    // exactly when `config_error` says nothing config-derived was inspected.
+    let probed = report
+        .config
+        .as_ref()
+        .map(chat_stasher::doctor::probe_destinations);
+    if let Some((probes, timed_out)) = probed {
+        report.destinations = probes;
+        report.timed_out.extend(timed_out);
     }
+    report.timed_out.extend(cli_checks.notes().to_vec());
     if json {
         let mut value = chat_stasher::doctor::report_to_json(&report);
         value["remote_inboxes"] = serde_json::json!(&inboxes);
@@ -7163,6 +7198,19 @@ fn cmd_doctor(json: bool) -> ExitCode {
     } else {
         chat_stasher::doctor::print_report(&report);
         inboxes.print();
+    }
+    // W1043: one line per timed-out check, naming the culprit the trace
+    // already named before it hung. Printed before every exit-3 branch
+    // below, because the states can coexist — a config that never answered
+    // and a settings read that wedged beside it each owe their own line,
+    // and a reader of either kind of run sees every wedged check named
+    // (W1043f).
+    for note in &report.timed_out {
+        eprintln!(
+            "doctor: INCOMPLETE exit_code=3 — the {} check did not answer within {}s, so its \
+             section is UNKNOWN, not zero; the other checks' printed results stand.",
+            note.check, note.budget_secs
+        );
     }
     if let Some(error) = &report.config_error {
         // The one command that does not refuse on an unusable config, because
@@ -7176,6 +7224,16 @@ fn cmd_doctor(json: bool) -> ExitCode {
              reads it was NOT performed (those are listed above and in `not_checked` under `--json`). \
              Absent results there are unknown, not zero."
         );
+        return ExitCode::from(3);
+    }
+    // W1043: a check that outlived its own deadline is the same family as an
+    // unreadable config — "did not finish", the 3 this tool's exit-code
+    // table gives to a diagnosis that did not complete — never exit 0 for a
+    // machine only half of which was inspected, and never a generic
+    // failure that hides the sections that did answer: they are printed
+    // above and stand. The per-check INCOMPLETE lines above already carry
+    // the details, so this branch only decides the exit code.
+    if !report.timed_out.is_empty() {
         return ExitCode::from(3);
     }
     if inboxes.incomplete() {

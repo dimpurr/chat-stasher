@@ -60,7 +60,7 @@ apps/extension/entrypoints/background.ts:2118-2127  81c8835aa616  lines=10
 apps/extension/entrypoints/background.ts:2181-2193  b33c134498db  lines=13
   <- docs-dev/privacy.md:721, docs-dev/privacy.md:1037, docs-dev/threat-model.md:335  :: * of the user's current conversation.
 apps/extension/entrypoints/background.ts:2418-2519  71143749edb1  lines=102
-  <- docs-dev/install.md:1229, docs-dev/privacy.md:812, docs-dev/privacy.md:828  :: async function resolveScopeForTick(
+  <- docs-dev/install.md:1231, docs-dev/privacy.md:812, docs-dev/privacy.md:828  :: async function resolveScopeForTick(
 apps/extension/entrypoints/background.ts:3003-3073  9e45b4752f20  lines=71
   <- docs-dev/privacy.md:657  :: let pendingOutboxAlarmDrain: Promise<unknown> | null = null;
 apps/extension/entrypoints/background.ts:3033-3098  d310f0e4bb7c  lines=66
@@ -104,7 +104,7 @@ apps/extension/lib/backfill/account-lease.ts:161-226  aab2291adcda  lines=66
 apps/extension/lib/backfill/alarm.ts:16-18  96f2d93f9819  lines=3
   <- docs-dev/privacy.md:1103  :: * In Chrome's permission-warning list, `alarms` — like `sto…
 apps/extension/lib/backfill/alarm.ts:123-124  f33c73ac87e1  lines=2
-  <- docs-dev/install.md:1151  :: export const BACKFILL_TICK_DELAY_MIN_MINUTES = 1;
+  <- docs-dev/install.md:1153  :: export const BACKFILL_TICK_DELAY_MIN_MINUTES = 1;
 apps/extension/lib/backfill/alarm.ts:244-245  426ffa0205af  lines=2
   <- docs-dev/privacy.md:648  :: export const BACKFILL_TARGETS_KEY = 'cs_backfill_targets_v1…
 apps/extension/lib/backfill/alarm.ts:729-744  b33fc25414e2  lines=16
@@ -148,7 +148,7 @@ apps/extension/lib/backfill/claude-org.ts:219-236  b1aa615ec026  lines=18
 apps/extension/lib/backfill/claude-org.ts:219-273  042cd322b76d  lines=55
   <- docs-dev/privacy.md:795, docs-dev/threat-model.md:338, docs-dev/threat-model.md:996  :: export function resolveClaudeOrg(input: OrgResolutionInput)…
 apps/extension/lib/backfill/claude-page.ts:71-158  74c521ddd738  lines=88
-  <- docs-dev/install.md:1222, docs-dev/privacy.md:784, docs-dev/threat-model.md:1008  :: export function createClaudePageScope(deps: ClaudePageScope…
+  <- docs-dev/install.md:1224, docs-dev/privacy.md:784, docs-dev/threat-model.md:1008  :: export function createClaudePageScope(deps: ClaudePageScope…
 apps/extension/lib/backfill/claude-page.ts:97-116  9dc3a96cb85a  lines=20
   <- docs-dev/privacy.md:779  :: const fetchOrganizations = async (): Promise<string> => {
 apps/extension/lib/backfill/day-slow.ts:91  0d9fb0635f12  lines=1
@@ -178,7 +178,7 @@ apps/extension/lib/backfill/engine.ts:2183-2192  5c1eb9e0130f  lines=10
 apps/extension/lib/backfill/engine.ts:2218-2230  5219b1d1d80d  lines=13
   <- docs-dev/privacy.md:758, docs-dev/threat-model.md:515  :: const requestIdentity = await accountCheckOf(url, res.text,…
 apps/extension/lib/backfill/engine.ts:2287-2405  3cabbf6305df  lines=119
-  <- docs-dev/install.md:1323, docs-dev/threat-model.md:336  :: /**
+  <- docs-dev/install.md:1325, docs-dev/threat-model.md:336  :: /**
 apps/extension/lib/backfill/engine.ts:2288-2406  54449125b5ec  lines=119
   <- docs-dev/privacy.md:1059  :: * 🔴 W21 · **The repeat-page guard** (opaque-token paging on…
 apps/extension/lib/backfill/engine.ts:2641-2668  da8114c7f034  lines=28
@@ -204,7 +204,7 @@ apps/extension/lib/backfill/engine.ts:3126-3130  5a26d5ad9d2f  lines=5
 apps/extension/lib/backfill/engine.ts:3249-3256  a2bee8d8f1a7  lines=8
   <- docs-dev/privacy.md:764, docs-dev/threat-model.md:521  :: const detailAccount = await accountCheckOf(deliveredUrl, de…
 apps/extension/lib/backfill/engine.ts:3295-3329  4ccc7369de6b  lines=35
-  <- docs-dev/install.md:126, docs-dev/install.md:1326, docs-dev/privacy.md:1038, docs-dev/threat-model.md:336  :: * 🔴 W22 · **A real body that is explicitly incomplete.**
+  <- docs-dev/install.md:126, docs-dev/install.md:1328, docs-dev/privacy.md:1038, docs-dev/threat-model.md:336  :: * 🔴 W22 · **A real body that is explicitly incomplete.**
 apps/extension/lib/backfill/engine.ts:3296-3330  2416829f69ab  lines=35
   <- docs-dev/privacy.md:1054, docs-dev/threat-model.md:1013  :: *
 apps/extension/lib/backfill/engine.ts:3372-3392  7cedaa51ec6b  lines=21
@@ -212,7 +212,7 @@ apps/extension/lib/backfill/engine.ts:3372-3392  7cedaa51ec6b  lines=21
 apps/extension/lib/backfill/enumerate.ts:332-402  2e2442b648f1  lines=71
   <- docs-dev/privacy.md:724, docs-dev/privacy.md:1037, docs-dev/threat-model.md:335  :: export interface ChatGptProjectPage {
 apps/extension/lib/backfill/enumerate.ts:1506-1574  88844e1a94e6  lines=69
-  <- docs-dev/install.md:1322, docs-dev/privacy.md:689  :: const SHAPE_DEPTH = 2;
+  <- docs-dev/install.md:1324, docs-dev/privacy.md:689  :: const SHAPE_DEPTH = 2;
 apps/extension/lib/backfill/enumerate.ts:2450-2494  e19b9f15deb3  lines=45
   <- docs-dev/install.md:126, docs-dev/install.md:204, docs-dev/privacy.md:1039, docs-dev/threat-model.md:337, docs-dev/threat-model.md:348, docs-dev/threat-model.md:1023  :: *    `detail-paged-unsupported` — real content, explicitly …
 apps/extension/lib/backfill/enumerate.ts:2965-2979  ffe4f02c7973  lines=15
@@ -220,21 +220,21 @@ apps/extension/lib/backfill/enumerate.ts:2965-2979  ffe4f02c7973  lines=15
 apps/extension/lib/backfill/enumerate.ts:3013-3014  e0ad04fbfb87  lines=2
   <- docs-dev/install.md:126  :: *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_m…
 apps/extension/lib/backfill/enumerate.ts:3013-3029  aea0d3e5786c  lines=17
-  <- docs-dev/install.md:1325  :: *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_m…
+  <- docs-dev/install.md:1327  :: *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_m…
 apps/extension/lib/backfill/enumerate.ts:3029-3056  bf7a44d7622d  lines=28
-  <- docs-dev/install.md:180, docs-dev/install.md:1325, docs-dev/privacy.md:1038, docs-dev/threat-model.md:336, docs-dev/threat-model.md:984  :: *  · 🔴 W42 · **Whether this endpoint pages or truncates a l…
+  <- docs-dev/install.md:180, docs-dev/install.md:1327, docs-dev/privacy.md:1038, docs-dev/threat-model.md:336, docs-dev/threat-model.md:984  :: *  · 🔴 W42 · **Whether this endpoint pages or truncates a l…
 apps/extension/lib/backfill/enumerate.ts:3103-3155  d8a084086d48  lines=53
-  <- docs-dev/install.md:1322  :: provenance:
+  <- docs-dev/install.md:1324  :: provenance:
 apps/extension/lib/backfill/enumerate.ts:3160-3161  e38fc9483af6  lines=2
   <- docs-dev/install.md:126, docs-dev/install.md:195, docs-dev/privacy.md:1039, docs-dev/threat-model.md:337  :: /** 🔴 W84 · The body endpoint: `GET /rest/thread/{id}`, the…
 apps/extension/lib/backfill/enumerate.ts:3190-3196  f2ff5637b5a5  lines=7
   <- docs-dev/install.md:126  :: export const PERPLEXITY_DETAIL_QUERY: readonly { readonly k…
 apps/extension/lib/backfill/enumerate.ts:3275-3296  72e20ad4d004  lines=22
-  <- docs-dev/install.md:1322  :: provenance:
+  <- docs-dev/install.md:1324  :: provenance:
 apps/extension/lib/backfill/enumerate.ts:3339-3404  512252f85fe0  lines=66
   <- docs-dev/install.md:126  :: *
 apps/extension/lib/backfill/enumerate.ts:3391-3458  8ac1d506298f  lines=68
-  <- docs-dev/install.md:1322, docs-dev/install.md:1323, docs-dev/install.md:1324, docs-dev/privacy.md:1038, docs-dev/threat-model.md:336  :: export const GROK_PLAN: BackfillEnumPlan = {
+  <- docs-dev/install.md:1324, docs-dev/install.md:1325, docs-dev/install.md:1326, docs-dev/privacy.md:1038, docs-dev/threat-model.md:336  :: export const GROK_PLAN: BackfillEnumPlan = {
 apps/extension/lib/backfill/enumerate.ts:3413-3424  ede2c17a7ae3  lines=12
   <- docs-dev/install.md:126, docs-dev/privacy.md:910  :: detailStep2: {
 apps/extension/lib/backfill/enumerate.ts:3428-3496  f46ca349f32d  lines=69
@@ -242,7 +242,7 @@ apps/extension/lib/backfill/enumerate.ts:3428-3496  f46ca349f32d  lines=69
 apps/extension/lib/backfill/enumerate.ts:3430-3457  8c1404d326ef  lines=28
   <- docs-dev/threat-model.md:979  :: provenance:
 apps/extension/lib/backfill/enumerate.ts:3482-3544  584fb75ba557  lines=63
-  <- docs-dev/install.md:1326  :: * 🔴 W22 · Kimi's conversation list **and** its conversation…
+  <- docs-dev/install.md:1328  :: * 🔴 W22 · Kimi's conversation list **and** its conversation…
 apps/extension/lib/backfill/enumerate.ts:3615-3618  edf469f1853d  lines=4
   <- docs-dev/threat-model.md:979  :: + '🔴 Unverified and handled, not guessed: whether a LONG co…
 apps/extension/lib/backfill/enumerate.ts:3881-4027  bf880adc6db8  lines=147
@@ -264,37 +264,37 @@ apps/extension/lib/backfill/enumerate.ts:4561-4592  0663964bc1bb  lines=32
 apps/extension/lib/backfill/enumerate.ts:4645-4698  f364e0e59079  lines=54
   <- docs-dev/threat-model.md:440  :: /**
 apps/extension/lib/backfill/enumerate.ts:4966-4997  3de94e683edf  lines=32
-  <- docs-dev/install.md:122, docs-dev/install.md:1232, docs-dev/privacy.md:899  :: export function unsupportedBackfillFor(platform: string): U…
+  <- docs-dev/install.md:122, docs-dev/install.md:1234, docs-dev/privacy.md:899  :: export function unsupportedBackfillFor(platform: string): U…
 apps/extension/lib/backfill/enumerate.ts:5018-5042  043d98acfa1d  lines=25
   <- docs-dev/privacy.md:1038, docs-dev/threat-model.md:336, docs-dev/threat-model.md:975  :: export const BACKFILL_SUPPORTED_PLATFORMS: readonly string[…
 apps/extension/lib/backfill/ledger.ts:768-779  649650412b1d  lines=12
   <- docs-dev/privacy.md:650  :: /**
 apps/extension/lib/backfill/pace.ts:109-119  ef52be5dc265  lines=11
-  <- docs-dev/install.md:1149  :: export const DEFAULT_ENUM_PACE: PacePlan = {
+  <- docs-dev/install.md:1151  :: export const DEFAULT_ENUM_PACE: PacePlan = {
 apps/extension/lib/backfill/pace.ts:121-132  1e65e383924f  lines=12
-  <- docs-dev/install.md:1148  :: export const DEFAULT_DETAIL_PACE: PacePlan = {
+  <- docs-dev/install.md:1150  :: export const DEFAULT_DETAIL_PACE: PacePlan = {
 apps/extension/lib/backfill/pace.ts:154-155  7848a0f0da9a  lines=2
-  <- docs-dev/install.md:1144  :: export const DAILY_CAP_MIN = 300;
+  <- docs-dev/install.md:1146  :: export const DAILY_CAP_MIN = 300;
 apps/extension/lib/backfill/pace.ts:158-159  bf7664c2e7e8  lines=2
-  <- docs-dev/install.md:1143  :: export const QUIET_DAILY_CAP_MIN = 150;
+  <- docs-dev/install.md:1145  :: export const QUIET_DAILY_CAP_MIN = 150;
 apps/extension/lib/backfill/schedule.ts:40  3f15d79a8fc9  lines=1
   <- docs-dev/privacy.md:647, docs-dev/privacy.md:877  :: export const BACKFILL_ENABLED_KEY = 'cs_backfill_enabled_v1…
 apps/extension/lib/backfill/schedule.ts:51  51bde443ef97  lines=1
-  <- docs-dev/install.md:1179  :: export const BACKFILL_DEFAULT_ENABLED = false;
+  <- docs-dev/install.md:1181  :: export const BACKFILL_DEFAULT_ENABLED = false;
 apps/extension/lib/backfill/schedule.ts:73  7fdb4078ad89  lines=1
-  <- docs-dev/install.md:1145  :: export const DEFAULT_TICK_DETAILS = 2;
+  <- docs-dev/install.md:1147  :: export const DEFAULT_TICK_DETAILS = 2;
 apps/extension/lib/backfill/schedule.ts:237  9a795cda6e5e  lines=1
   <- docs-dev/install.md:137  :: if (!gate.hasHttp) return 'no-http-port';
 apps/extension/lib/backfill/speed.ts:65  82a4bfe11f75  lines=1
-  <- docs-dev/install.md:1167  :: export const SPEED_PRESET_KEY = 'cs_backfill_speed_v1';
+  <- docs-dev/install.md:1169  :: export const SPEED_PRESET_KEY = 'cs_backfill_speed_v1';
 apps/extension/lib/backfill/speed.ts:71  8d47da83e8c2  lines=1
-  <- docs-dev/install.md:1142  :: export const DEFAULT_SPEED_PRESET: SpeedPreset = 'gentle';
+  <- docs-dev/install.md:1144  :: export const DEFAULT_SPEED_PRESET: SpeedPreset = 'gentle';
 apps/extension/lib/backfill/speed.ts:98-142  b33c1b3788e5  lines=45
-  <- docs-dev/install.md:1142  :: const GENTLE_BAND: DailyCapBand = { min: QUIET_DAILY_CAP_MI…
+  <- docs-dev/install.md:1144  :: const GENTLE_BAND: DailyCapBand = { min: QUIET_DAILY_CAP_MI…
 apps/extension/lib/backfill/store.ts:18-27  226502892fc8  lines=10
   <- docs-dev/privacy.md:1096  :: export interface BackfillStore {
 apps/extension/lib/backfill/store.ts:85-97  a2af158effd2  lines=13
-  <- docs-dev/install.md:336, docs-dev/install.md:1168, docs-dev/privacy.md:1096  :: function localArea(): LocalArea | null {
+  <- docs-dev/install.md:336, docs-dev/install.md:1170, docs-dev/privacy.md:1096  :: function localArea(): LocalArea | null {
 apps/extension/lib/backfill/tab-port.ts:181-184  81a2a6105e63  lines=4
   <- docs-dev/privacy.md:648  :: /** The registry of live platform tabs. Same cs_* prefix fa…
 apps/extension/lib/backfill/tab-port.ts:226-245  b276ba1d32f7  lines=20
@@ -460,9 +460,9 @@ apps/extension/lib/outbox.ts:110-127  ee92b756dc17  lines=18
 apps/extension/lib/outbox.ts:110-120  58237c6f3e36  lines=11
   <- docs-dev/privacy.md:369  :: export interface OutboxEntry {
 apps/extension/lib/outbox.ts:404-482  19d67ac19785  lines=79
-  <- docs-dev/install.md:1243, docs-dev/privacy.md:151, docs-dev/privacy.md:294, docs-dev/privacy.md:1182, docs-dev/threat-model.md:33, docs-dev/threat-model.md:113, docs-dev/threat-model.md:898  :: export async function enqueue(
+  <- docs-dev/install.md:1245, docs-dev/privacy.md:151, docs-dev/privacy.md:294, docs-dev/privacy.md:1182, docs-dev/threat-model.md:33, docs-dev/threat-model.md:113, docs-dev/threat-model.md:898  :: export async function enqueue(
 apps/extension/lib/outbox.ts:485-500  3319eb40bf8e  lines=16
-  <- docs-dev/install.md:70, docs-dev/install.md:1243, docs-dev/privacy.md:166, docs-dev/privacy.md:1147, docs-dev/threat-model.md:117, docs-dev/threat-model.md:898  :: /** 🔴 The only deletion in this module. Callers must hold a…
+  <- docs-dev/install.md:70, docs-dev/install.md:1245, docs-dev/privacy.md:166, docs-dev/privacy.md:1147, docs-dev/threat-model.md:117, docs-dev/threat-model.md:898  :: /** 🔴 The only deletion in this module. Callers must hold a…
 apps/extension/lib/outbox.ts:503-548  f80ee94ed0c0  lines=46
   <- docs-dev/privacy.md:393  :: export interface FailureInput {
 apps/extension/lib/outbox.ts:585-666  54e6b4f2dc67  lines=82
@@ -522,7 +522,7 @@ apps/extension/lib/platform-auth.ts:217  c921116f0678  lines=1
 apps/extension/lib/platform-auth.ts:303-357  67ffa624d938  lines=55
   <- docs-dev/threat-model.md:1011  :: + ' because the page\'s own bearer token is attached to thi…
 apps/extension/lib/platform-auth.ts:313-350  03784069e1a6  lines=38
-  <- docs-dev/install.md:126, docs-dev/install.md:1327, docs-dev/privacy.md:1038, docs-dev/threat-model.md:336  :: export function createKimiAuthorizedFetch(
+  <- docs-dev/install.md:126, docs-dev/install.md:1329, docs-dev/privacy.md:1038, docs-dev/threat-model.md:336  :: export function createKimiAuthorizedFetch(
 apps/extension/lib/platform-auth.ts:327-361  120cee5f8774  lines=35
   <- docs-dev/privacy.md:146, docs-dev/threat-model.md:289  :: if (token !== null) headers.authorization = `Bearer ${token…
 apps/extension/lib/platform-auth.ts:590-628  880efefc5a3c  lines=39
@@ -572,11 +572,11 @@ apps/extension/locales/en.yml:69-85  0506238227c4  lines=17
 apps/extension/locales/en.yml:488-489  62def469c931  lines=2
   <- docs-dev/privacy.md:945, docs-dev/threat-model.md:326  :: coordinationUnavailable: >-
 apps/extension/package.json:4  3aa57759f9e4  lines=1
-  <- docs-dev/install.md:1236  :: "private": true,
+  <- docs-dev/install.md:1238  :: "private": true,
 apps/extension/package.json:8-20  9028dab8df44  lines=13
-  <- docs-dev/install.md:422, docs-dev/install.md:1238  :: "dev": "wxt",
+  <- docs-dev/install.md:422, docs-dev/install.md:1240  :: "dev": "wxt",
 apps/extension/wxt.config.ts:78  8973cb78d41e  lines=1
-  <- docs-dev/install.md:1315  :: default_locale: 'en',
+  <- docs-dev/install.md:1317  :: default_locale: 'en',
 apps/extension/wxt.config.ts:89  c5961dc1034c  lines=1
   <- docs-dev/privacy.md:1102  :: // 🔴 W2 removed 'downloads'. The extension no longer downlo…
 apps/extension/wxt.config.ts:95-101  411bd7614c9a  lines=7
@@ -588,7 +588,7 @@ apps/extension/wxt.config.ts:115  e8b57cf64548  lines=1
 apps/extension/wxt.config.ts:122-125  10c3369ba7fc  lines=4
   <- docs-dev/install.md:131  :: // 🔴 Nothing else. No host permissions: the backfill leg fe…
 apps/extension/wxt.config.ts:125  bdb2678d0ca3  lines=1
-  <- docs-dev/install.md:56, docs-dev/install.md:495, docs-dev/install.md:1313, docs-dev/privacy.md:243, docs-dev/privacy.md:1091, docs-dev/privacy.md:1104, docs-dev/privacy.md:1121, docs-dev/threat-model.md:67  :: permissions: ['unlimitedStorage', 'storage', 'alarms', 'nat…
+  <- docs-dev/install.md:56, docs-dev/install.md:495, docs-dev/install.md:1315, docs-dev/privacy.md:243, docs-dev/privacy.md:1091, docs-dev/privacy.md:1104, docs-dev/privacy.md:1121, docs-dev/threat-model.md:67  :: permissions: ['unlimitedStorage', 'storage', 'alarms', 'nat…
 apps/extension/wxt.config.ts:126-132  2a2b23999f5f  lines=7
   <- docs-dev/threat-model.md:605  :: // 🔴 ADR-014: this pins the Chrome extension ID to
 apps/extension/wxt.config.ts:148  84787b717b3c  lines=1
@@ -671,20 +671,20 @@ crates/chat-stasher/src/destinit.rs:122-141  8546544e08a8  lines=20
   <- docs-dev/threat-model.md:878  :: /// How a run was able (or unable) to account for one exist…
 crates/chat-stasher/src/destinit.rs:391-399  d2438d975abb  lines=9
   <- docs-dev/threat-model.md:878  :: Ok(true) => continue,
-crates/chat-stasher/src/doctor.rs:1756-1771  b5116adb6d46  lines=16
-  <- docs-dev/install.md:1068, docs-dev/install.md:1077  :: /// What one read-only connection to a declared destination…
-crates/chat-stasher/src/doctor.rs:1884-1991  bbabec918aa9  lines=108
-  <- docs-dev/install.md:1072  :: /// Whether the activity indexes a destination carries were…
-crates/chat-stasher/src/doctor.rs:1988-2009  8166f8003396  lines=22
-  <- docs-dev/install.md:1068, docs-dev/install.md:1077  :: /// The answers a destination can give, kept apart for the …
-crates/chat-stasher/src/doctor.rs:2175-2250  3d64a92946e2  lines=76
-  <- docs-dev/install.md:1068, docs-dev/install.md:1077  :: /// Connect once to every declared destination, read-only.
-crates/chat-stasher/src/doctor.rs:2448-2503  236804c27b4c  lines=56
-  <- docs-dev/install.md:313  :: pub fn config_unreadable(error: String) -> DoctorReport {
-crates/chat-stasher/src/doctor.rs:2923-2924  c49d6fc9ccfa  lines=2
-  <- docs-dev/install.md:1075  :: // D10 — local-only, no repository connection and no docume…
-crates/chat-stasher/src/doctor.rs:3519-3581  0d89a3dbd659  lines=63
-  <- docs-dev/install.md:1075  :: /// D10 — inspect only local index files; this never opens …
+crates/chat-stasher/src/doctor.rs:2072-2087  b5116adb6d46  lines=16
+  <- docs-dev/install.md:1070, docs-dev/install.md:1079  :: /// What one read-only connection to a declared destination…
+crates/chat-stasher/src/doctor.rs:2200-2307  e6eb4c4fd100  lines=108
+  <- docs-dev/install.md:1074  :: /// Whether the activity indexes a destination carries were…
+crates/chat-stasher/src/doctor.rs:2305-2338  b03e670404fa  lines=34
+  <- docs-dev/install.md:1070, docs-dev/install.md:1079  :: /// of this file keeps its tri-states apart: "the host said…
+crates/chat-stasher/src/doctor.rs:2499-2618  6b78fc2d0e1f  lines=120
+  <- docs-dev/install.md:1070, docs-dev/install.md:1079  :: /// Connect once to every declared destination, read-only.
+crates/chat-stasher/src/doctor.rs:2815-2915  3e4b14228585  lines=101
+  <- docs-dev/install.md:313  :: /// The report for a config file that exists and cannot be …
+crates/chat-stasher/src/doctor.rs:3486-3487  1666bd35835b  lines=2
+  <- docs-dev/install.md:1077  :: // D10 — local-only, no repository connection and no docume…
+crates/chat-stasher/src/doctor.rs:4145-4207  0d89a3dbd659  lines=63
+  <- docs-dev/install.md:1077  :: /// D10 — inspect only local index files; this never opens …
 crates/chat-stasher/src/export.rs:974-991  bd664b7c0646  lines=18
   <- docs-dev/openclaw-scanner.md:99  :: // `.jsonl` is appended here, so this file name is one path…
 crates/chat-stasher/src/fts.rs:1-6  b20dd3f20d50  lines=6
@@ -752,11 +752,11 @@ crates/chat-stasher/src/letta.rs:236-246  72e855d41735  lines=11
 crates/chat-stasher/src/main.rs:114  51c934204980  lines=1
   <- docs-dev/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…
 crates/chat-stasher/src/main.rs:238-1891  47700f2b48ca  lines=1654
-  <- docs-dev/install.md:1124, docs-dev/privacy.md:1155, docs-dev/threat-model.md:929  :: enum Command {
+  <- docs-dev/install.md:1126, docs-dev/privacy.md:1155, docs-dev/threat-model.md:929  :: enum Command {
 crates/chat-stasher/src/main.rs:239-240  6f7da3119197  lines=2
   <- docs-dev/install.md:292  :: /// Write a commented default config if none exists (non-de…
 crates/chat-stasher/src/main.rs:316-357  459f45025eb7  lines=42
-  <- docs-dev/install.md:968, docs-dev/install.md:1283  :: /// Collect one pass, push only when configured and changed…
+  <- docs-dev/install.md:968, docs-dev/install.md:1285  :: /// Collect one pass, push only when configured and changed…
 crates/chat-stasher/src/main.rs:431-468  49a467a8c0be  lines=38
   <- docs-dev/privacy.md:169  :: /// reclaim-stage` performs.
 crates/chat-stasher/src/main.rs:435-472  8a0a2a9dbeae  lines=38
@@ -772,7 +772,7 @@ crates/chat-stasher/src/main.rs:499  5fd8a1cb5337  lines=1
 crates/chat-stasher/src/main.rs:529-532  d71492672ddf  lines=4
   <- docs-dev/threat-model.md:933  :: keep_ssh_masters: bool,
 crates/chat-stasher/src/main.rs:531-596  6cc057b77b60  lines=66
-  <- docs-dev/install.md:1129  :: /// Read one session from the repository (sequence-concaten…
+  <- docs-dev/install.md:1131  :: /// Read one session from the repository (sequence-concaten…
 crates/chat-stasher/src/main.rs:535-596  f49adc64c8b1  lines=62
   <- docs-dev/install.md:596  :: Read {
 crates/chat-stasher/src/main.rs:597-608  b3639ab631d6  lines=12
@@ -788,7 +788,7 @@ crates/chat-stasher/src/main.rs:770-774  47efaa2006bc  lines=5
 crates/chat-stasher/src/main.rs:808-904  58072b70ee79  lines=97
   <- docs-dev/privacy.md:496, docs-dev/privacy.md:1153  :: /// Keep the ssh ControlMaster processes open after this ru…
 crates/chat-stasher/src/main.rs:812-908  3017b0e6ec89  lines=97
-  <- docs-dev/install.md:1113, docs-dev/install.md:1127, docs-dev/threat-model.md:151, docs-dev/threat-model.md:936  :: /// Write every session the shared selector selects to file…
+  <- docs-dev/install.md:1115, docs-dev/install.md:1129, docs-dev/threat-model.md:151, docs-dev/threat-model.md:936  :: /// Write every session the shared selector selects to file…
 crates/chat-stasher/src/main.rs:962-1070  25a1b597cb27  lines=109
   <- docs-dev/threat-model.md:46  :: /// Two modes share this command.
 crates/chat-stasher/src/main.rs:1003  6847885f36b6  lines=1
@@ -817,45 +817,45 @@ crates/chat-stasher/src/main.rs:2883-2889  8fa007df76e5  lines=7
   <- docs-dev/install.md:484  :: // Before the manifests, because this is the half the host …
 crates/chat-stasher/src/main.rs:3262-3275  016136448a8d  lines=14
   <- docs-dev/privacy.md:509  :: /// The row's `session_provenance` stamp, written identical…
-crates/chat-stasher/src/main.rs:7313-7328  71bc360695ef  lines=16
+crates/chat-stasher/src/main.rs:7371-7386  71bc360695ef  lines=16
   <- docs-dev/install.md:662  :: println!("  - {rejection}");
-crates/chat-stasher/src/main.rs:7318-7343  12c435612440  lines=26
+crates/chat-stasher/src/main.rs:7376-7401  12c435612440  lines=26
   <- docs-dev/install.md:666  :: touched, and no observation of these conversations exists."
-crates/chat-stasher/src/main.rs:7318-7326  56d34c8a57e0  lines=9
+crates/chat-stasher/src/main.rs:7376-7384  56d34c8a57e0  lines=9
   <- docs-dev/install.md:701  :: touched, and no observation of these conversations exists."
-crates/chat-stasher/src/main.rs:7327-7339  96c3f3280cb5  lines=13
+crates/chat-stasher/src/main.rs:7385-7397  96c3f3280cb5  lines=13
   <- docs-dev/install.md:698  :: "newly archived"
-crates/chat-stasher/src/main.rs:7441-7449  bc0056c35062  lines=9
+crates/chat-stasher/src/main.rs:7499-7507  bc0056c35062  lines=9
   <- docs-dev/threat-model.md:882  :: );
-crates/chat-stasher/src/main.rs:8630-8685  e2a80b1d797b  lines=56
+crates/chat-stasher/src/main.rs:8688-8743  e2a80b1d797b  lines=56
   <- docs-dev/install.md:965  :: // this machine, so `run-once` narrates it the way it narra…
-crates/chat-stasher/src/main.rs:9842-9847  b76086ba166e  lines=6
+crates/chat-stasher/src/main.rs:9900-9905  b76086ba166e  lines=6
   <- docs-dev/privacy.md:1217  :: Ok(path) => path,
-crates/chat-stasher/src/main.rs:9977-9982  e3326b7ac7fd  lines=6
+crates/chat-stasher/src/main.rs:10035-10040  e3326b7ac7fd  lines=6
   <- docs-dev/privacy.md:850  :: /// The wording lives in [`chat_stasher::destdiag::install_…
-crates/chat-stasher/src/main.rs:10460-10463  b98db7ea7e0d  lines=4
+crates/chat-stasher/src/main.rs:10518-10521  b98db7ea7e0d  lines=4
   <- docs-dev/install.md:611  :: }
-crates/chat-stasher/src/main.rs:10685-10701  66f4a2e262d2  lines=17
+crates/chat-stasher/src/main.rs:10743-10759  66f4a2e262d2  lines=17
   <- SECURITY.md:70, docs-dev/threat-model.md:871  :: /// host of this run. No-op when `--keep-ssh-masters` is se…
-crates/chat-stasher/src/main.rs:10813-10818  13896e8d543a  lines=6
+crates/chat-stasher/src/main.rs:10871-10876  13896e8d543a  lines=6
   <- SECURITY.md:70, docs-dev/threat-model.md:869  :: eprintln!("push: cannot check stage metadata: {e:#}");
-crates/chat-stasher/src/main.rs:11251-11437  b256db959826  lines=187
+crates/chat-stasher/src/main.rs:11309-11495  b256db959826  lines=187
   <- docs-dev/threat-model.md:933  :: let destination = destination.or_else(|| {
-crates/chat-stasher/src/main.rs:16088-16139  eb6db4f4050d  lines=52
+crates/chat-stasher/src/main.rs:16146-16197  eb6db4f4050d  lines=52
   <- docs-dev/install.md:306  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:16088-16099  8f911ffc9cf6  lines=12
+crates/chat-stasher/src/main.rs:16146-16157  8f911ffc9cf6  lines=12
   <- docs-dev/install.md:1037  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:16868-16882  da484ba556b2  lines=15
+crates/chat-stasher/src/main.rs:16926-16940  da484ba556b2  lines=15
   <- docs-dev/install.md:630  :: `dest-init`) — the destination block itself does not have t…
-crates/chat-stasher/src/main.rs:17305-17312  c5ec574f3326  lines=8
+crates/chat-stasher/src/main.rs:17363-17370  c5ec574f3326  lines=8
   <- docs-dev/install.md:629  :: )
-crates/chat-stasher/src/main.rs:20179-20186  9cd8be148a6b  lines=8
+crates/chat-stasher/src/main.rs:20237-20244  9cd8be148a6b  lines=8
   <- docs-dev/install.md:1027  :: render_status(report, false)
-crates/chat-stasher/src/main.rs:20204-20205  d745898fe057  lines=2
+crates/chat-stasher/src/main.rs:20262-20263  d745898fe057  lines=2
   <- docs-dev/install.md:998  :: // would answer "is my timer healthy?" from a machine the t…
-crates/chat-stasher/src/main.rs:20712-20713  f5217dab38af  lines=2
+crates/chat-stasher/src/main.rs:20770-20771  f5217dab38af  lines=2
   <- docs-dev/install.md:993  :: // them. `destinations` and `reclaim` are the machine-reada…
-crates/chat-stasher/src/main.rs:20804-20811  7df1b5962a59  lines=8
+crates/chat-stasher/src/main.rs:20862-20869  7df1b5962a59  lines=8
   <- docs-dev/install.md:1014  :: };
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:440, docs-dev/threat-model.md:722  :: //! ADR-022: content-addressed hash tracking for stage meta…
@@ -870,7 +870,7 @@ crates/chat-stasher/src/mirrorstate.rs:30-31  3f1c0e8f18cc  lines=2
 crates/chat-stasher/src/nativehost.rs:155-168  b160255bd493  lines=14
   <- docs-dev/privacy.md:1095, docs-dev/threat-model.md:604  :: pub const HOST_NAME: &str = "com.chat_stasher.host";
 crates/chat-stasher/src/nativehost.rs:415-626  695d9c4b44f3  lines=212
-  <- docs-dev/install.md:1314  :: /// Default discovery root for a platform, derived from `ho…
+  <- docs-dev/install.md:1316  :: /// Default discovery root for a platform, derived from `ho…
 crates/chat-stasher/src/nativehost.rs:488-491  ea46ecf35e4c  lines=4
   <- docs-dev/install.md:466, docs-dev/threat-model.md:686  :: /// * **Windows** — the manifest may live anywhere and the …
 crates/chat-stasher/src/nativehost.rs:499-612  7c2c0c3a86f8  lines=114
@@ -994,11 +994,11 @@ crates/chat-stasher/src/remote_err.rs:548-577  59ae8290fc6f  lines=30
 crates/chat-stasher/src/remote_err.rs:597-630  c531f63130e8  lines=34
   <- docs-dev/install.md:699  :: pub fn trust_host(cfg: &StoreConfig, known_hosts: &Path) ->…
 crates/chat-stasher/src/runstate.rs:1-11  04391d8ccc80  lines=11
-  <- docs-dev/install.md:1292  :: //! Timer-visibility state: what happened on the last `run-…
+  <- docs-dev/install.md:1294  :: //! Timer-visibility state: what happened on the last `run-…
 crates/chat-stasher/src/runstate.rs:436-522  502605d7d0f4  lines=87
   <- docs-dev/install.md:999  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:443-451  109067636f30  lines=9
-  <- docs-dev/install.md:1295  :: }
+  <- docs-dev/install.md:1297  :: }
 crates/chat-stasher/src/scanner.rs:3456-3516  9db74cb60f65  lines=61
   <- docs-dev/privacy.md:1155  :: /// through the ordinary whole-file collector.
 crates/chat-stasher/src/scanner.rs:3518-3579  d8480d0822d0  lines=62
@@ -1010,7 +1010,7 @@ crates/chat-stasher/src/schedule.rs:231-266  31cde3d34520  lines=36
 crates/chat-stasher/src/schedule.rs:310-414  0146bafd68ef  lines=105
   <- docs-dev/install.md:945  :: /// Render the templates for one scheduled job. `unit` pick…
 crates/chat-stasher/src/schedule.rs:621-1042  a3de767913be  lines=422
-  <- docs-dev/install.md:953, docs-dev/install.md:1257  :: /// One agent file [`install_launchd_agents`] changed, and …
+  <- docs-dev/install.md:953, docs-dev/install.md:1259  :: /// One agent file [`install_launchd_agents`] changed, and …
 crates/chat-stasher/src/schedule.rs:1095-1589  ece609d656a4  lines=495
   <- docs-dev/install.md:958  :: /// The state of one scheduled job on this machine, from th…
 crates/chat-stasher/src/search.rs:16-38  b967cd30c55b  lines=23
@@ -1046,7 +1046,7 @@ crates/chat-stasher/src/store.rs:813-830  a29fcdd26643  lines=18
 crates/chat-stasher/src/store.rs:1404-1407  3624df839067  lines=4
   <- docs-dev/openclaw-scanner.md:100  :: /// `<stage>/sessions/<machine>/<session_id>` — the partiti…
 crates/chat-stasher/src/store.rs:2511-2513  df67f1e3fcff  lines=3
-  <- docs-dev/install.md:601, docs-dev/install.md:1136, docs-dev/privacy.md:850, docs-dev/privacy.md:1206, docs-dev/threat-model.md:85, docs-dev/threat-model.md:911  :: /// Serialise a `MasterKey` (it is `serde.Deserialize`d fro…
+  <- docs-dev/install.md:601, docs-dev/install.md:1138, docs-dev/privacy.md:850, docs-dev/privacy.md:1206, docs-dev/threat-model.md:85, docs-dev/threat-model.md:911  :: /// Serialise a `MasterKey` (it is `serde.Deserialize`d fro…
 crates/chat-stasher/src/store.rs:2552-2562  f81d9c9dfae6  lines=11
   <- docs-dev/threat-model.md:129  :: /// Write the masterkey to `cfg.key_file`, owner-readable o…
 crates/chat-stasher/src/store.rs:2553-2560  652f49c633e5  lines=8
