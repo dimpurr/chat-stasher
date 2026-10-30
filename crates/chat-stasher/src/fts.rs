@@ -694,6 +694,9 @@ const HARNESS_SOURCE_FORMATS: &[(&str, &str)] = &[
     // (`chat-messages.json`). The sidecar is the same format but never
     // reaches fts: it seals beside the body under the same identity.
     ("codebuff", FORMAT_JSON),
+    // W1046: the registered half the transcripts live in is jsonl; the
+    // metadata lines seal under the same session id as part of that body.
+    ("workbuddy", FORMAT_JSONL),
 ];
 
 fn declared_format(harness: &str) -> Option<&'static str> {
@@ -777,6 +780,7 @@ fn export_reader(raw: &str) -> Option<String> {
         "chat-stasher.hermes-agent.session.v1" => Some("hermes-agent".to_string()),
         "chat-stasher.cursor.legacy.session.v1" => Some("cursor".to_string()),
         "chat-stasher.github-copilot-cli.session.v1" => Some("github-copilot-cli".to_string()),
+        "chat-stasher.workbuddy.session.v1" => Some("workbuddy".to_string()),
         "chat-stasher.sqlite.session.v1" => {
             match value.get("table").and_then(serde_json::Value::as_str) {
                 Some("cursorDiskKV") => Some("cursor".to_string()),
@@ -2841,6 +2845,14 @@ mod tests {
                 "codebuff",
                 br#"[{"variant":"user","content":"synthetic codebuff question"}]"#,
                 Expected::Text("synthetic codebuff question"),
+            ),
+            (
+                // A WorkBuddy body mixes the collector's metadata lines with
+                // the raw transcript events (W1046); the reader takes the
+                // speech half, so one user_query turn makes it indexable.
+                "workbuddy",
+                br#"{"type":"message","role":"user","content":[{"type":"input_text","text":"<user_query>synthetic workbuddy question</user_query>"}],"timestamp":1780000000000}"#,
+                Expected::Text("synthetic workbuddy question"),
             ),
         ];
 

@@ -30,6 +30,9 @@ pub enum HarnessSource {
     /// Codebuff / Freebuff (`manicode`): one product, one on-disk layout,
     /// two npm names (ADR-054 D1).
     Codebuff,
+    /// WorkBuddy desktop app: sqlite session metadata plus JSONL transcripts
+    /// under one `~/.workbuddy` root (W1046).
+    WorkBuddy,
 }
 
 /// Layout of a virtual session backed by a structured, read-only local source.
@@ -47,6 +50,10 @@ pub enum SqliteSessionLayout {
     Zed,
     GrokBot,
     GitHubCopilotCli,
+    /// A WorkBuddy session row joined to its `projects/<slug>/<id>.jsonl`
+    /// transcript at collection time (W1046): the row exports its metadata
+    /// (or its tombstone), the transcript file appends under the same id.
+    WorkBuddy,
 }
 
 impl HarnessSource {
@@ -74,6 +81,7 @@ impl HarnessSource {
             // chat platform, a different harness from this local agent.
             HarnessSource::DeepSeekHarness => "deepseek-harness",
             HarnessSource::Codebuff => "codebuff",
+            HarnessSource::WorkBuddy => "workbuddy",
         }
     }
 
@@ -100,6 +108,7 @@ impl HarnessSource {
             "kimi-code" => Some(HarnessSource::KimiCode),
             "deepseek-harness" => Some(HarnessSource::DeepSeekHarness),
             "codebuff" => Some(HarnessSource::Codebuff),
+            "workbuddy" => Some(HarnessSource::WorkBuddy),
             _ => None,
         }
     }

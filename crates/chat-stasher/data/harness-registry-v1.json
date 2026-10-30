@@ -1254,6 +1254,45 @@
       "notes": "Codebuff (formerly Manicode) CLI and its free/sponsored freebuff flavour: one product, one on-disk layout, legacy directory name manicode, three channel roots (prod, -dev, -staging) that are builds of the same tool and never surfaces. The native id is <project-basename>.<chat-id>, composed from the session directory path: the chat id IS the session start time in ISO-8601 with ':' -> '-', so the id's trailing component is a millisecond timestamp, not a UUID, and the basename keeps same-timestamp chats under different project basenames distinct. The start time itself is recorded at capture as its own field and must never be re-read from the id: a long project basename gets the id bounded at the tail, and the timestamp goes with it. The basename is lossy and is identity, not a container: never parse it as a cwd (the authoritative cwd lives in run-state.json, which is excluded); the container dimension stays empty. Whitelist: only chat-messages.json and chat-meta.json are captured (run-state.json, log.jsonl and in-flight *.tmp files are deliberately ignored), sealed whole-file as raw bytes, one full generation per changed pass. A transcript that does not read whole and validate as a JSON array skips its session for the pass: nothing is sealed, a bounded skip observation is recorded, and the run reports it. FREEBUFF_CONFIG_DIR replaces the whole base directory for every build and is therefore entry-wide: when set, the primary root reads the override value and the default-only dev/staging roots are not scanned; when unset, all three roots scan. message-history.json is a per-machine input log, not a session, and is not part of this capture. dimensions: none recorded (the artifacts carry no surface, tenant, container or status field).",
       "seal_policy": "no-rename",
       "seal_source": "upstream cli/src/utils/write-file-atomic.ts:8-39 — the transcript is written temp-then-rename in its own directory on every checkpoint (~5 s while a session is live), so a copy-only seal observes a complete generation and the source is never renamed or moved; a torn file the atomic write left behind is skipped, never half-sealed"
+    },
+    {
+      "id": "workbuddy",
+      "display_name": "WorkBuddy",
+      "product_group": "agent-platforms",
+      "dev_priority": "normal",
+      "known_issue": "no official transcript schema exists, only third-party reverse-engineering; every read censuses the top-level event types and a new or vanished type is named as drift, never silently folded away",
+      "paths": {
+        "macos": {
+          "template": "~/.workbuddy/projects/",
+          "format": "jsonl",
+          "confidence": "measured-locally",
+          "source": "measured locally (CS-WB-1, 2026-10-30): transcripts at ~/.workbuddy/projects/<slug>/<session-uuid>.jsonl with sessionId matching the file name on 3/3 sessions, plus the sibling sqlite store ~/.workbuddy/workbuddy.db whose sessions table (id, transport, deleted_at, created_at, last_activity_at and companions) was read read-only with mode=ro and never written; the projects path is also source-confirmed by the shipped app's own bundled constant WORKBUDDY_PLATFORM_OWNED_PROJECT_FILE_PATTERNS in app.asar",
+          "sql_table": "sessions",
+          "sql_id_column": "id",
+          "sql_required_columns": [
+            "id",
+            "transport",
+            "deleted_at",
+            "created_at",
+            "last_activity_at"
+          ]
+        },
+        "linux": {
+          "template": "$HOME/.workbuddy/projects/",
+          "format": "jsonl",
+          "confidence": "unascertained",
+          "source": "no Linux install measured; the scanner refuses unmeasured paths"
+        },
+        "windows": {
+          "template": "%USERPROFILE%\\.workbuddy\\projects\\",
+          "format": "jsonl",
+          "confidence": "unascertained",
+          "source": "no Windows install measured; the scanner refuses unmeasured paths"
+        }
+      },
+      "notes": "Read-only dual-store adapter for the WorkBuddy desktop app (W1046): sqlite session metadata plus JSONL transcripts, one session id shared by both halves. The registry root is the projects/ directory; the sessions store is the sibling workbuddy.db, opened strictly as mode=ro (never immutable=1; a WAL store whose -shm sidecar is absent is read through a copied db, -wal and -shm trio in a temporary directory that is deleted after the read). Rows enumerate from the sessions table; a row with deleted_at IS NOT NULL is a tombstone: it exports a bare tombstone line that carries no row payload, so a session the source deleted is recorded as deleted while its earlier archived bytes stay in the archive. A live row without a matching *.jsonl transcript (a transport this machine does not hold local transcripts for, or the community-observed rows whose jsonl is gone) is a recognized session this build cannot archive: the scan names the difference as a gap and collect reports it and exits 3, never 0. The transcript walk globs only *.jsonl below projects/, excluding *.file-rollback.ndjson files and tool-results/ subdirectories by name; a session whose transcripts exist under more than one project slug is archived from the newest-mtime copy and the stale copies are named in the scan note. ~/.workbuddy/models.json is never opened or read. The reader handles nine top-level transcript types (session-meta, message, reasoning, function_call, function_call_result, file-history-snapshot, ai-title, summary, turn-metrics); the final two were measured on the sibling CodeBuddy CLI, which writes the same event core the desktop app uses.",
+      "seal_policy": "not-applicable",
+      "seal_source": "sqlite metadata source plus append-only JSONL transcripts, following the hermes-agent entry: neither half ever renames its files (the app appends each session into the same <id>.jsonl for its whole life), so there is no rename window for a seal to catch"
     }
   ],
   "browsers": [

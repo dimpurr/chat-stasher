@@ -612,6 +612,265 @@ fn hermes_sqlite_value_to_json(value: ValueRef<'_>) -> Value {
     }
 }
 
+/// Columns the WorkBuddy `sessions` table must carry before this build claims
+/// it can enumerate the store's sessions: identity, the transport a session's
+/// local transcripts hinge on, the soft-delete tombstone flag, and the two
+/// timestamps every observed installation fills in. A store without any of
+/// them is refused by name, never counted as zero sessions.
+pub const EXPECTED_WORKBUDDY_SESSION_COLUMNS: [&str; 5] = [
+    "id",
+    "transport",
+    "deleted_at",
+    "created_at",
+    "last_activity_at",
+];
+
+/// The schema tag of one exported WorkBuddy session line: the full metadata
+/// row, or the bare tombstone for a session the source soft-deleted.
+pub const WORKBUDDY_SESSION_SCHEMA: &str = "chat-stasher.workbuddy.session.v1";
+
+/// Metadata-only row of the WorkBuddy `sessions` table (W1046). The row body
+/// (title, model, cwd and every companion column) is not carried during
+/// scanning; it is exported only after `collect` has decided that this
+/// session's logical cursor changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkBuddySessionRow {
+    /// `sessions.id`; measured to equal the `.jsonl` transcript file name's
+    /// stem, and the row wins over any file name disagreement.
+    pub id: String,
+    /// `deleted_at IS NOT NULL` (any non-null value, including the `-1` the
+    /// store's cloud-sort index implies is a sentinel): the source
+    /// soft-deleted this session, so the reader exports a tombstone.
+    pub deleted: bool,
+    /// `None` when the row does not spell its transport; an unstated
+    /// transport stays unknown and is never local-by-guesswork.
+    pub transport: Option<String>,
+    /// `last_activity_at`, falling back to `created_at` — epoch milliseconds.
+    /// `None` when neither column reads as an integer; a row without a
+    /// readable time is never stamped with a fake epoch.
+    pub time_ms: Option<i64>,
+}
+
+/// One WorkBuddy export: the session row's metadata (or its tombstone) as a
+/// single JSON line, plus the content-hash cursor that decides when the line
+/// counts as changed.
+#[derive(Debug, Clone)]
+pub struct WorkBuddySessionSnapshot {
+    pub cursor: OpenCodeCursor,
+    pub json_line: Vec<u8>,
+}
+
+/// Where a WorkBuddy read opens from: either the live store itself, or a
+/// copied `db` + `-wal` + `-shm` trio in a temporary directory this hold keeps
+/// alive (and removes on drop) while connections read the copy.
+struct WorkBuddyRead {
+    db_path: PathBuf,
+    _copy: Option<tempfile::TempDir>,
+}
+
+impl WorkBuddyRead {
+    /// Resolve the read source for `db`. WorkBuddy is the deliberate
+    /// exception to this module's `mode=ro&immutable=1` fallback: its
+    /// uncheckpointed WAL holds live session content that an immutable open
+    /// would silently skip, so `immutable=1` is never used here. A WAL store
+    /// whose `-shm` sidecar is absent (a store whose writer is gone) is read
+    /// through a copied trio instead, which keeps the no-write guarantee —
+    /// any sidecar SQLite needs is created beside the copy, never beside the
+    /// user's store — without losing the WAL's content. Everything else
+    /// opens in place with plain `mode=ro`.
+    fn resolve(db: &Path) -> Result<WorkBuddyRead, String> {
+        if db_is_wal(db) && sidecar(db, "-wal").exists() && !sidecar(db, "-shm").exists() {
+            let copy = copy_wal_trio(db)?;
+            let db_path = copy.path().join("workbuddy.db");
+            Ok(WorkBuddyRead {
+                db_path,
+                _copy: Some(copy),
+            })
+        } else {
+            Ok(WorkBuddyRead {
+                db_path: db.to_path_buf(),
+                _copy: None,
+            })
+        }
+    }
+
+    fn open(&self) -> Result<Connection, String> {
+        // Never `immutable=1`: see [`WorkBuddyRead::resolve`].
+        let uri = format!("file:{}?mode=ro", self.db_path.display());
+        let conn = Connection::open_with_flags(
+            &uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|error| format!("read-only open failed: {error}"))?;
+        conn.busy_timeout(Duration::from_secs(2))
+            .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
+        Ok(conn)
+    }
+}
+
+/// Copy `db` and whichever sidecars exist into a fresh temporary directory,
+/// all three members of the trio taken as one unit so the copy observes one
+/// snapshot of the store's bytes.
+fn copy_wal_trio(db: &Path) -> Result<tempfile::TempDir, String> {
+    let dir = tempfile::tempdir()
+        .map_err(|error| format!("failed to create a temporary read directory: {error}"))?;
+    for path in sqlite_store_files(db) {
+        if !path.exists() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .ok_or_else(|| "store trio member has no file name".to_string())?
+            .to_str()
+            .ok_or_else(|| "store trio member name is not UTF-8".to_string())?;
+        // The main db is renamed to a fixed stem so [`WorkBuddyRead::resolve`]
+        // can recompute the copy's db path; the sidecars must keep their
+        // derived names or SQLite will not see them.
+        let to_name = if path == db { "workbuddy.db" } else { name };
+        fs::copy(&path, dir.path().join(to_name))
+            .map_err(|error| format!("failed to copy {name} for a read-only snapshot: {error}"))?;
+    }
+    Ok(dir)
+}
+
+fn ensure_workbuddy_schema(conn: &Connection) -> Result<(), String> {
+    let mut statement = conn
+        .prepare("PRAGMA table_info(\"sessions\")")
+        .map_err(|error| format!("failed to inspect WorkBuddy sessions schema: {error}"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("failed to inspect WorkBuddy sessions schema: {error}"))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("failed to inspect WorkBuddy sessions schema: {error}"))?;
+    if EXPECTED_WORKBUDDY_SESSION_COLUMNS
+        .iter()
+        .any(|column| !columns.iter().any(|actual| actual == column))
+    {
+        return Err(format!(
+            "WorkBuddy schema mismatch: table=sessions columns={}",
+            columns.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Enumerate WorkBuddy session rows without touching the row bodies (title,
+/// model and companions stay in the store until a pass decides to export
+/// them). Every read goes through [`WorkBuddyRead`]: `mode=ro` in place, or a
+/// copied trio when a WAL store's `-shm` is absent — `immutable=1` is never
+/// used, because the uncheckpointed WAL holds live session content.
+pub fn enumerate_workbuddy_sessions(db: &Path) -> Result<Vec<WorkBuddySessionRow>, String> {
+    let read = WorkBuddyRead::resolve(db)?;
+    let conn = read.open()?;
+    ensure_workbuddy_schema(&conn)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT \"id\", \"transport\", \"deleted_at\", \"last_activity_at\", \"created_at\"
+             FROM \"sessions\" ORDER BY \"id\"",
+        )
+        .map_err(|error| format!("failed to read WorkBuddy session rows: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            let id = row.get::<_, String>(0)?;
+            let transport = match row.get_ref(1)? {
+                ValueRef::Null => None,
+                ValueRef::Text(value) => Some(String::from_utf8_lossy(value).into_owned()),
+                // reason: a transport that is not text is a value this
+                // enumerator cannot name; unknown, never local-by-guesswork.
+                _ => None,
+            };
+            let deleted = !matches!(row.get_ref(2)?, ValueRef::Null);
+            let time_ms = match row.get_ref(3)? {
+                ValueRef::Integer(value) => Some(value),
+                ValueRef::Null => match row.get_ref(4)? {
+                    ValueRef::Integer(value) => Some(value),
+                    // reason: a non-integer timestamp column is a value this
+                    // enumerator cannot name; the row keeps db-mtime fallback
+                    // instead of a fake epoch.
+                    _ => None,
+                },
+                _ => None,
+            };
+            Ok(WorkBuddySessionRow {
+                id,
+                deleted,
+                transport,
+                time_ms,
+            })
+        })
+        .map_err(|error| format!("failed to enumerate WorkBuddy session rows: {error}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("failed to read WorkBuddy session rows: {error}"))
+}
+
+/// Read one WorkBuddy session row and export it as one JSON line, live or
+/// tombstoned. A live row exports its full metadata (every column, read
+/// read-only); a row whose `deleted_at` is not null exports a bare tombstone
+/// carrying the session's identity and the deletion marker and nothing else —
+/// tombstones mask, they do not archive the deleted session's content, which
+/// stays in whatever earlier passes delivered.
+pub fn read_workbuddy_session(
+    db: &Path,
+    session_id: &str,
+) -> Result<WorkBuddySessionSnapshot, String> {
+    let read = WorkBuddyRead::resolve(db)?;
+    let conn = read.open()?;
+    ensure_workbuddy_schema(&conn)?;
+    let row = conn
+        .query_row(
+            "SELECT * FROM sessions WHERE id = ?1",
+            [session_id],
+            |row| {
+                let deleted = sqlite_column_is_not_null(row, "deleted_at")?;
+                let exported = if deleted {
+                    None
+                } else {
+                    Some(hermes_row_to_json_object(row)?)
+                };
+                Ok(exported)
+            },
+        )
+        .optional()
+        .map_err(|error| format!("failed to read WorkBuddy session row: {error}"))?;
+    let exported = row.ok_or_else(|| {
+        "WorkBuddy session row is not in the store the scan saw; nothing was archived for it"
+            .to_string()
+    })?;
+    let json_line = match exported {
+        Some(session) => {
+            let envelope =
+                serde_json::json!({ "schema": WORKBUDDY_SESSION_SCHEMA, "session": session });
+            serde_json::to_vec(&envelope)
+                .map_err(|error| format!("failed to serialize WorkBuddy session: {error}"))?
+        }
+        None => {
+            let tombstone = serde_json::json!({
+                "schema": WORKBUDDY_SESSION_SCHEMA,
+                "session": session_id,
+                "deleted": true,
+            });
+            serde_json::to_vec(&tombstone)
+                .map_err(|error| format!("failed to serialize WorkBuddy tombstone: {error}"))?
+        }
+    };
+    let cursor = OpenCodeCursor {
+        session_time_updated: None,
+        content_sha256: Some(hex_digest(&Sha256::digest(&json_line))),
+        row_count: 1,
+        row_high_water: None,
+        message_count: 0,
+        message_high_water: None,
+        part_count: 0,
+        part_high_water: None,
+    };
+    Ok(WorkBuddySessionSnapshot { cursor, json_line })
+}
+
+/// Whether the named column of `row`'s SELECT holds a non-null value.
+fn sqlite_column_is_not_null(row: &rusqlite::Row<'_>, column: &str) -> rusqlite::Result<bool> {
+    Ok(!matches!(row.get_ref(column)?, ValueRef::Null))
+}
+
 /// Metadata-only row returned by a registry-declared SQLite session table.
 /// The row body is not carried during scanning; it is loaded only after
 /// `collect` has decided that this session's logical cursor changed.

@@ -154,6 +154,9 @@ stays in the count. See [Codex](sources/codex.md).
 | Codebuff / Freebuff (codebuff-staging) | macOS | `~/.config/manicode-staging/` | json | source-confirmed | supported | - |
 | Codebuff / Freebuff (codebuff-staging) | Linux | `$HOME/.config/manicode-staging/` | json | unascertained | not supported | - |
 | Codebuff / Freebuff (codebuff-staging) | Windows | `%USERPROFILE%\.config\manicode-staging\` | json | unascertained | not supported | - |
+| WorkBuddy | macOS | `~/.workbuddy/projects/` | jsonl | measured-locally | supported | - |
+| WorkBuddy | Linux | `$HOME/.workbuddy/projects/` | jsonl | unascertained | not supported | - |
+| WorkBuddy | Windows | `%USERPROFILE%\.workbuddy\projects\` | jsonl | unascertained | not supported | - |
 
 ### Web AI chats (browser extension)
 
@@ -189,6 +192,7 @@ stays in the count. See [Codex](sources/codex.md).
 | Local | Kimi Code | 2026-10-03 | normal | Activity bounds are inferred and partial when unrecognised wire operation types occur. |
 | Local | DeepSeek Harness | 2026-10-06 | normal | measured on one machine against a developer preview (app 0.2.0-rc.2, session format 4); attachments are not archived yet |
 | Local | Codebuff / Freebuff | - | normal | attachment bytes are not archived and per-message times stay unknown; sessions render through the reader, attachments stay in the raw transcript only |
+| Agent platform | WorkBuddy | - | normal | no official transcript schema exists, only third-party reverse-engineering; every read censuses the top-level event types and a new or vanished type is named as drift, never silently folded away |
 | Web | deepseek | 2026-09-24 | normal | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | perplexity | - | low | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | chatgpt | 2026-09-24 | high | a workspace switch is not yet pinned to the run scope: the new workspace list ids can land in the old scope (see issue #4) |

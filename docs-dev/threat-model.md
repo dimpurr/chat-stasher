@@ -838,10 +838,19 @@ machine:
 - **Harness session stores are opened read-only.** Every SQLite connection uses
   `SQLITE_OPEN_READ_ONLY` with a `mode=ro` URI, falling back to
   `mode=ro&immutable=1` when a WAL store has no `-shm`
-  (`crates/chat-stasher/src/sqlite_probe.rs:2300-2319`). The module states the
+  (`crates/chat-stasher/src/sqlite_probe.rs:2559-2578`). The WorkBuddy reader
+  is the one deliberate exception to the fallback (W1046): its live sessions
+  can sit in the uncheckpointed WAL, so `immutable=1` is never used for its
+  store — a WAL store without a `-shm` is read through a copied db, `-wal` and
+  `-shm` trio in a temporary directory (`crates/chat-stasher/src/sqlite_probe.rs:663-733`)
+  — which keeps the no-sidecars guarantee below while still reading the WAL's
+  content. The module states the
   intent that a read-only probe never creates or touches `-wal`/`-shm` sidecars
   (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
-  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:3141-3189`).
+  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:3400-3448`).
+  The WorkBuddy half is pinned by its own test, which copies a live WAL
+  store without the `-shm` and proves the uncheckpointed rows still read and
+  no sidecar appears beside the original (`crates/chat-stasher/tests/workbuddy_scanner_test.rs:641-678`).
   `status` and `doctor` are likewise declared read-only
   (`crates/chat-stasher/src/main.rs:499,597-598`).
 - **`seal` refuses to rename files it cannot justify renaming.** It is gated by
@@ -945,7 +954,7 @@ a real limitation of the current code.
    changed session payloads and stores user/assistant text and titles in a local
    SQLite index in the operating-system cache directory. The index is mode 0600
    on Unix and can be removed with `index clear`
-   (`crates/chat-stasher/src/fts.rs:1-6,1473-1693,1695-1710,2144-2153`). One qualification, because the
+   (`crates/chat-stasher/src/fts.rs:1-6,1477-1697,1699-1714,2148-2157`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go
