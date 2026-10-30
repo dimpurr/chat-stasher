@@ -3051,7 +3051,7 @@ context      crates/chat-stasher/src/remote_inbox_archive.rs:112  "sealed proof 
 context      crates/chat-stasher/src/remote_inbox_archive.rs:114  "sealed proof record unreadable"
 with_context crates/chat-stasher/src/runstate.rs:373  "create state dir {}"
 context      crates/chat-stasher/src/runstate.rs:376  "serialise run state"
-eprintln     crates/chat-stasher/src/scanner.rs:4819  "warning: cannot expand path `{p}`: {e}"
+eprintln     crates/chat-stasher/src/scanner.rs:4816  "warning: cannot expand path `{p}`: {e}"
 bail         crates/chat-stasher/src/schedule.rs:240  "binary path must be an installed path outside Cargo build directories: {}"
 anyhow       crates/chat-stasher/src/schedule.rs:262  "current executable is a build artifact at {}; pass --binary with an installed path or install chat-stasher under ~/.local/bin or Homebrew"
 bail         crates/chat-stasher/src/schedule.rs:305  "backup_interval_secs must be greater than zero"

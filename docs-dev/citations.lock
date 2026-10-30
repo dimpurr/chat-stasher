@@ -999,11 +999,11 @@ crates/chat-stasher/src/runstate.rs:436-522  502605d7d0f4  lines=87
   <- docs-dev/install.md:999  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:443-451  109067636f30  lines=9
   <- docs-dev/install.md:1297  :: }
-crates/chat-stasher/src/scanner.rs:3895-3955  9db74cb60f65  lines=61
+crates/chat-stasher/src/scanner.rs:3892-3952  9db74cb60f65  lines=61
   <- docs-dev/privacy.md:1155  :: /// through the ordinary whole-file collector.
-crates/chat-stasher/src/scanner.rs:3957-4018  d8480d0822d0  lines=62
+crates/chat-stasher/src/scanner.rs:3954-4015  d8480d0822d0  lines=62
   <- docs-dev/privacy.md:1155  :: /// The native Grok CLI transcripts — `chat_history.jsonl`,…
-crates/chat-stasher/src/scanner.rs:4175-4185  3f94015d6ac2  lines=11
+crates/chat-stasher/src/scanner.rs:4172-4182  3f94015d6ac2  lines=11
   <- docs-dev/openclaw-scanner.md:32  :: /// Probe Cursor's current global store and, when it cannot…
 crates/chat-stasher/src/schedule.rs:231-266  31cde3d34520  lines=36
   <- docs-dev/install.md:943  :: /// Resolve the executable that a persistent scheduler may …
@@ -1025,13 +1025,13 @@ crates/chat-stasher/src/sqlite_probe.rs:23-29  fa32ad6c5dbc  lines=7
   <- SECURITY.md:67, docs-dev/threat-model.md:849  :: //! Read-only guarantee: every connection opens with `mode=…
 crates/chat-stasher/src/sqlite_probe.rs:417-472  27ac04014952  lines=56
   <- docs-dev/openclaw-scanner.md:96  :: /// Filesystem-safe, collision-resistant native ID for an O…
-crates/chat-stasher/src/sqlite_probe.rs:666-741  75b27199889c  lines=76
-  <- docs-dev/threat-model.md:845  :: struct WorkBuddyRead {
-crates/chat-stasher/src/sqlite_probe.rs:2555-2574  d338fba0d9ba  lines=20
+crates/chat-stasher/src/sqlite_probe.rs:663-733  13e362c9fb7c  lines=71
+  <- docs-dev/threat-model.md:845  :: /// Where a WorkBuddy read opens from: either the live stor…
+crates/chat-stasher/src/sqlite_probe.rs:2559-2566  6cca8c4cb8a3  lines=8
+  <- SECURITY.md:68  :: /// SQLite's read-only WAL access needs the store's `-shm` …
+crates/chat-stasher/src/sqlite_probe.rs:2559-2578  d338fba0d9ba  lines=20
   <- docs-dev/threat-model.md:841  :: /// SQLite's read-only WAL access needs the store's `-shm` …
-crates/chat-stasher/src/sqlite_probe.rs:2559-2566  ae091c19ff12  lines=8
-  <- SECURITY.md:68  :: /// so:
-crates/chat-stasher/src/sqlite_probe.rs:3396-3444  0dfae1a37b9a  lines=49
+crates/chat-stasher/src/sqlite_probe.rs:3400-3448  0dfae1a37b9a  lines=49
   <- docs-dev/threat-model.md:850  :: fn wal_store_without_shm_probes_immutable_and_creates_no_si…
 crates/chat-stasher/src/store.rs:168-171  f2781c197162  lines=4
   <- docs-dev/install.md:650, docs-dev/install.md:740  :: /// Extra backend options (e.g. `endpoint`/`user`/`key`/`ro…
@@ -1085,7 +1085,7 @@ crates/chat-stasher/tests/w242_interrupted_push_test.rs:520-540  a77a9dd780e5  l
   <- docs-dev/node-metadata.md:174  :: let second = sb.push();
 crates/chat-stasher/tests/w245_interrupted_push_test.rs:637-648  a195fcf736a3  lines=12
   <- docs-dev/orphan-packs.md:92  :: /// The fix, at test scale: packs that reached the reposito…
-crates/chat-stasher/tests/workbuddy_scanner_test.rs:583-620  b752e52ac2c6  lines=38
+crates/chat-stasher/tests/workbuddy_scanner_test.rs:641-678  68b7322ccb0d  lines=38
   <- docs-dev/threat-model.md:853  :: fn wal_content_without_an_shm_sidecar_reads_through_a_copie…
 scripts/dev/cdp-keep-platform-tabs.mjs:25-36  eea8699af63b  lines=12
   <- docs-dev/install.md:155  :: // What one pass does:
