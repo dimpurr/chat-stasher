@@ -81,7 +81,8 @@ use crate::scanner;
 use crate::sqlite_probe::{
     cursor_global_schema, grok_schema, opencode_session_cursor, read_cursor_legacy_session,
     read_github_copilot_session, read_hermes_session, read_openclaw_session, read_sqlite_session,
-    read_zed_session, sqlite_session_cursor, sqlite_store_fingerprint, zed_schema, OpenCodeCursor,
+    read_workbuddy_session, read_zed_session, sqlite_session_cursor, sqlite_store_fingerprint,
+    zed_schema, OpenCodeCursor,
 };
 use crate::store;
 use anyhow::{anyhow, bail, Context};
@@ -2517,6 +2518,28 @@ fn process_sqlite(
             let session_id = native_session_id(record, "Hermes Agent")?;
             let snapshot = read_hermes_session(&record.absolute_path, &session_id)
                 .map_err(|error| anyhow!("failed to read Hermes session snapshot: {error}"))?;
+            process_sqlite_snapshot(
+                record,
+                old,
+                force_reset,
+                stage,
+                machine,
+                bucket_cap,
+                snapshot.cursor,
+                snapshot.json_line,
+                &store_fingerprint,
+                Default::default(),
+                manifest_facts,
+            )
+        }
+        SqliteSessionLayout::WorkBuddy => {
+            let session_id = native_session_id(record, "WorkBuddy")?;
+            // Live or tombstoned is the row's own current state, read fresh
+            // every pass: a session the source soft-deleted since the last
+            // pass exports a bare tombstone here, and a cursor whose content
+            // hash equals the tombstone's keeps that line sealed exactly once.
+            let snapshot = read_workbuddy_session(&record.absolute_path, &session_id)
+                .map_err(|error| anyhow!("failed to read WorkBuddy session snapshot: {error}"))?;
             process_sqlite_snapshot(
                 record,
                 old,

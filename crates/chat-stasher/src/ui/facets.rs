@@ -142,7 +142,7 @@ const CODING_AGENT_HARNESSES: &[&str] = &[
 
 /// Product agent platforms. This category describes the product, not the
 /// mechanism used to read or archive its local persistence.
-const AGENT_PLATFORM_HARNESSES: &[&str] = &["grok-bot"];
+const AGENT_PLATFORM_HARNESSES: &[&str] = &["grok-bot", "workbuddy"];
 
 /// Classify a harness id. Web platforms are matched **first**: `grok` lives
 /// in both lists' worlds and its group is the web one by design. Everything

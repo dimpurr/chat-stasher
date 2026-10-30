@@ -2880,6 +2880,11 @@ fn probe_harness_single(
                 base, confidence, root, env_note, source, machine, report,
             );
         }
+        if h.id == "workbuddy" {
+            return probe_workbuddy_harness(
+                base, confidence, root, env_note, source, machine, report,
+            );
+        }
         if h.id == "github-copilot-cli" {
             return probe_github_copilot_cli_harness(
                 base, confidence, root, env_note, source, machine, report,
@@ -3022,6 +3027,437 @@ fn probe_grok_bot_harness(
             base.note = format!("{env_note}local replica read failed; count unknown ({error})");
             base
         }
+    }
+}
+
+/// One WorkBuddy transcript file below `projects/`: the session id — the
+/// file name's stem, measured equal to `sessions.id` on every installation
+/// this entry was measured from — together with the file's own metadata.
+/// Never its bytes; a scan reads names, sizes and times only.
+struct WorkBuddyTranscript {
+    path: PathBuf,
+    mtime: SystemTime,
+    byte_size: u64,
+}
+
+/// Walk the WorkBuddy transcript locator,
+/// `~/.workbuddy/projects/<project-slug>/<session-id>.jsonl`. Only `*.jsonl`
+/// files exactly two levels below the root are transcripts; the neighbours
+/// the app writes beside them are excluded by name wherever they appear —
+/// `*.file-rollback.ndjson` (a rollback journal) and the `tool-results/`
+/// directory (a derivative tool-result cache the renderer reads) are never
+/// sessions, never archived, and never counted as candidates. Every other
+/// subdirectory or non-jsonl file is measured and skipped, the same
+/// three-state rule every scanner walk keeps.
+///
+/// The same session id can appear under more than one project slug — the
+/// app moves projects and community tooling reports the stale copy that
+/// stays behind — and one archive session answers for one id, so the walk
+/// keeps one copy per id, the newest by (mtime, path), and returns how many
+/// stale duplicates it skipped. Keeping one copy is a scan-side decision
+/// only: the bytes of every observed copy stay on disk untouched, and
+/// appends a skipped copy would later gain are picked up the day its mtime
+/// makes it the newest.
+fn workbuddy_transcripts(root: &Path) -> (BTreeMap<String, WorkBuddyTranscript>, u64, u64) {
+    let mut transcripts = BTreeMap::new();
+    let mut unreadable_entries = 0u64;
+    let mut stale_duplicates = 0u64;
+    let slug_dirs = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        // The root exists (the caller checked) but cannot be listed: every
+        // candidate below it is one untaken tally entry, not zero.
+        Err(_) => return (transcripts, 1, stale_duplicates),
+    };
+    for slug in slug_dirs {
+        let slug = match slug {
+            Ok(entry) => entry,
+            Err(_) => {
+                unreadable_entries += 1;
+                continue;
+            }
+        };
+        match slug.file_type() {
+            Ok(kind) if kind.is_dir() => {}
+            // A non-directory is measured and skipped.
+            Ok(_) => continue,
+            Err(_) => {
+                unreadable_entries += 1;
+                continue;
+            }
+        }
+        let files = match fs::read_dir(slug.path()) {
+            Ok(entries) => entries,
+            Err(_) => {
+                unreadable_entries += 1;
+                continue;
+            }
+        };
+        for file in files {
+            let file = match file {
+                Ok(entry) => entry,
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            };
+            match file.file_type() {
+                // `tool-results/` and any other subdirectory never hold
+                // transcripts: the glob is `*.jsonl` files only.
+                Ok(kind) if kind.is_dir() => continue,
+                Ok(_) => {}
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            }
+            let name = file.file_name().to_string_lossy().into_owned();
+            // A rollback journal beside the transcripts: excluded by name.
+            if name.ends_with(".file-rollback.ndjson") {
+                continue;
+            }
+            if !name.ends_with(".jsonl") {
+                continue;
+            }
+            let stem = match Path::new(&name).file_stem().and_then(|stem| stem.to_str()) {
+                Some(stem) => stem.to_string(),
+                None => continue,
+            };
+            let (byte_size, mtime) = match file.metadata() {
+                Ok(metadata) => match (metadata.len(), metadata.modified()) {
+                    (byte_size, Ok(mtime)) => (byte_size, mtime),
+                    _ => {
+                        unreadable_entries += 1;
+                        continue;
+                    }
+                },
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            };
+            let keep_newest = match transcripts.get(&stem) {
+                Some(existing) => (existing.mtime, &existing.path) < (mtime, &file.path()),
+                None => true,
+            };
+            if transcripts.contains_key(&stem) {
+                stale_duplicates += 1;
+            }
+            if keep_newest {
+                transcripts.insert(
+                    stem,
+                    WorkBuddyTranscript {
+                        path: file.path(),
+                        mtime,
+                        byte_size,
+                    },
+                );
+            }
+        }
+    }
+    (transcripts, unreadable_entries, stale_duplicates)
+}
+
+/// The canonical WorkBuddy session id for one native id (`sessions.id`, or
+/// the transcript file name's stem when the store says nothing about it).
+fn workbuddy_session_id(source: HarnessSource, machine: &str, native_id: &str) -> String {
+    crate::id::SessionIdentity {
+        source_short: source.short(),
+        machine: machine.to_string(),
+        native_id: native_id.to_string(),
+    }
+    .id()
+}
+
+/// Push one transcript file record — a plain append-only jsonl session whose
+/// bytes the ordinary file reader collects under the shared id.
+fn push_workbuddy_transcript_record(
+    records: &mut Vec<SessionRecord>,
+    source: HarnessSource,
+    machine: &str,
+    native_id: &str,
+    transcript: &WorkBuddyTranscript,
+) {
+    records.push(SessionRecord {
+        id: workbuddy_session_id(source, machine, native_id),
+        absolute_path: transcript.path.clone(),
+        byte_size: transcript.byte_size,
+        mtime: transcript.mtime,
+        source,
+        compressed: false,
+        sqlite_layout: None,
+        provenance: Default::default(),
+        session_dir: None,
+        movable_root: false,
+    });
+}
+
+/// Widen an (earliest, latest) span with one more observed time.
+fn widen_time_span(
+    earliest: &mut Option<SystemTime>,
+    latest: &mut Option<SystemTime>,
+    time: SystemTime,
+) {
+    *earliest = Some(match *earliest {
+        Some(earliest) => earliest.min(time),
+        None => time,
+    });
+    *latest = Some(match *latest {
+        Some(latest) => latest.max(time),
+        None => time,
+    });
+}
+
+/// Probe the WorkBuddy dual store (W1046): sessions enumerate from the
+/// `sessions` table of the `workbuddy.db` that sits beside the registry
+/// root, and each row joins to its `*.jsonl` transcript below the root. One
+/// session id is carried by up to two `SessionRecord`s, exactly the grok
+/// row/history shape: a virtual sqlite record whose `absolute_path` is the
+/// db (its cursor is keyed `path\0id`, so it never collides with the
+/// transcript file's own byte-offset cursor), plus the transcript file
+/// record that the ordinary append-only jsonl reader collects.
+///
+/// * a row with `deleted_at IS NOT NULL` is a tombstone: the virtual record
+///   exports a bare tombstone line, and a still-present transcript keeps
+///   being archived beside it — both facts stay, neither invented, neither
+///   dropped;
+/// * a live row without a matching transcript jsonl (a transport this
+///   machine holds no local transcript for, or the rows whose jsonl a
+///   project move left behind) is a recognized session with no archivable
+///   bytes: no record is emitted for it, the recognized-vs-archived
+///   difference the report computes becomes an archive gap, and `collect`
+///   reports PARTIAL exit 3 — never 0;
+/// * a transcript whose id has no store row archives under its own id: the
+///   union of store rows and transcript ids is the recognized set, so such
+///   an orphan is recognized *and* archived, never a gap and never hidden
+///   behind the rows that are.
+fn probe_workbuddy_harness(
+    mut base: HarnessProbe,
+    confidence: Confidence,
+    root: PathBuf,
+    env_note: String,
+    source: HarnessSource,
+    machine: &str,
+    report: &mut ScanReport,
+) -> HarnessProbe {
+    base.root = Some(root.clone());
+    base.confidence = confidence;
+    let (transcripts, walk_unreadable, stale_duplicates) = workbuddy_transcripts(&root);
+    let transcript_count = transcripts.len() as u64;
+    let recognized_files = transcripts
+        .values()
+        .map(|transcript| transcript.path.clone())
+        .collect::<Vec<_>>();
+    let transcript_bytes = transcripts
+        .values()
+        .map(|transcript| transcript.byte_size)
+        .sum::<u64>();
+    let mut earliest = None;
+    let mut latest = None;
+    for transcript in transcripts.values() {
+        widen_time_span(&mut earliest, &mut latest, transcript.mtime);
+    }
+    let db = match root.parent().map(|parent| parent.join("workbuddy.db")) {
+        Some(db) => db,
+        None => {
+            base.state = ProbeState::Indeterminate;
+            base.note = format!(
+                "{env_note}the registry root has no parent directory, so the sibling store is unresolvable — session count unknown, not 0"
+            );
+            return base;
+        }
+    };
+    match fs::metadata(&db) {
+        // Measured absence of the sqlite half: the transcripts below the
+        // root still archive, each under its own file-name id.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            // A walk that listed nothing and could not read an entry proves
+            // no clean zero: without the store, the transcripts are the
+            // only recognized set, and an untakeable tally stays unknown.
+            let walk_clean = !(transcripts.is_empty() && walk_unreadable > 0);
+            for (stem, transcript) in &transcripts {
+                push_workbuddy_transcript_record(
+                    &mut report.records,
+                    source,
+                    machine,
+                    stem,
+                    transcript,
+                );
+            }
+            let walk_note = if walk_unreadable > 0 {
+                format!(
+                    "; transcript walk incomplete: {walk_unreadable} unreadable directory entries"
+                )
+            } else {
+                String::new()
+            };
+            base.state = ProbeState::Scanned;
+            base.record_count = walk_clean.then_some(transcript_count);
+            base.candidate_count = walk_clean.then_some(transcript_count);
+            base.unreadable_count = walk_clean.then_some(0);
+            base.unreadable_entry_count = Some(walk_unreadable);
+            base.bytes = Some(transcript_bytes);
+            base.earliest = earliest;
+            base.latest = latest;
+            base.recognized_files = recognized_files;
+            base.note = format!(
+                "{env_note}workbuddy.db is not present beside the projects root; {transcript_count} transcript file(s) archived from files only — the store's session count is unknown, not 0{walk_note}"
+            );
+            base
+        }
+        Err(e) => {
+            report.indeterminate_roots.push(db.clone());
+            base.state = ProbeState::Indeterminate;
+            base.note = format!(
+                "{env_note}workbuddy.db unreadable, existence unknown ({e}) — not 'absent'"
+            );
+            base
+        }
+        Ok(md) if !md.is_file() => {
+            report.indeterminate_roots.push(db.clone());
+            base.state = ProbeState::Indeterminate;
+            base.note = format!(
+                "{env_note}workbuddy.db exists but is not a file ({}) — session count unknown, not 0",
+                path_kind(&md)
+            );
+            base
+        }
+        Ok(_) => match crate::sqlite_probe::enumerate_workbuddy_sessions(&db) {
+            Err(error) => {
+                // The transcripts still archive; whether the store holds
+                // sessions beyond them is exactly what this error leaves
+                // unread, so the session count is unknown and stays so.
+                for (stem, transcript) in &transcripts {
+                    push_workbuddy_transcript_record(
+                        &mut report.records,
+                        source,
+                        machine,
+                        stem,
+                        transcript,
+                    );
+                }
+                base.state = ProbeState::Scanned;
+                base.unreadable_entry_count = Some(walk_unreadable);
+                base.bytes = Some(transcript_bytes);
+                base.earliest = earliest;
+                base.latest = latest;
+                base.recognized_files = recognized_files;
+                base.note = format!(
+                    "{env_note}WorkBuddy store enumeration failed: {error}; session count unknown, not 0; {transcript_count} transcript file(s) archived from files only"
+                );
+                base
+            }
+            Ok(rows) => {
+                let row_count = rows.len() as u64;
+                let db_modified = fs::metadata(&db)
+                    .and_then(|metadata| metadata.modified())
+                    .ok();
+                let db_bytes = crate::sqlite_probe::sqlite_store_bytes(&db).ok();
+                let mut tombstoned = 0u64;
+                let mut without_transcript = 0u64;
+                let mut unnamed_rows = 0u64;
+                let mut known_ids: BTreeSet<String> = BTreeSet::new();
+                for row in rows {
+                    if row.id.is_empty() {
+                        // A row the store cannot name is still a recognized
+                        // session; it is never guessed an id from neighbours.
+                        unnamed_rows += 1;
+                        continue;
+                    }
+                    known_ids.insert(row.id.clone());
+                    let transcript = transcripts.get(&row.id);
+                    if !row.deleted && transcript.is_none() {
+                        // The unknown arm: a live store row this machine
+                        // holds no transcript bytes for. No record is
+                        // emitted; the recognized-vs-archived difference is
+                        // what `collect` turns into PARTIAL exit 3, never 0.
+                        without_transcript += 1;
+                        continue;
+                    }
+                    // An unrepresentable row time falls back to the store
+                    // file's own mtime, the hermes precedent; a row with
+                    // neither is not archived — a named gap, never a fake
+                    // epoch.
+                    let mtime = match row
+                        .time_ms
+                        .and_then(sqlite_millis_to_system_time)
+                        .or(db_modified)
+                    {
+                        Some(mtime) => mtime,
+                        None => {
+                            without_transcript += 1;
+                            continue;
+                        }
+                    };
+                    report.records.push(SessionRecord {
+                        id: workbuddy_session_id(source, machine, &row.id),
+                        absolute_path: db.clone(),
+                        byte_size: 0,
+                        mtime,
+                        source,
+                        compressed: false,
+                        sqlite_layout: Some(SqliteSessionLayout::WorkBuddy),
+                        provenance: Default::default(),
+                        session_dir: None,
+                        movable_root: false,
+                    });
+                    if row.deleted {
+                        tombstoned += 1;
+                    }
+                    if let Some(transcript) = transcript {
+                        push_workbuddy_transcript_record(
+                            &mut report.records,
+                            source,
+                            machine,
+                            &row.id,
+                            transcript,
+                        );
+                    }
+                    widen_time_span(&mut earliest, &mut latest, mtime);
+                }
+                let mut orphan_transcripts = 0u64;
+                for (stem, transcript) in &transcripts {
+                    if !known_ids.contains(stem) {
+                        known_ids.insert(stem.clone());
+                        orphan_transcripts += 1;
+                        push_workbuddy_transcript_record(
+                            &mut report.records,
+                            source,
+                            machine,
+                            stem,
+                            transcript,
+                        );
+                    }
+                }
+                let known_sessions = (known_ids.len() as u64).saturating_add(unnamed_rows);
+                let walk_note = if walk_unreadable > 0 {
+                    format!(
+                        "; transcript walk incomplete: {walk_unreadable} unreadable directory entries"
+                    )
+                } else {
+                    String::new()
+                };
+                base.state = ProbeState::Scanned;
+                base.record_count = Some(known_sessions);
+                base.candidate_count = Some(known_sessions);
+                base.unreadable_count = Some(without_transcript + unnamed_rows);
+                base.unreadable_entry_count = Some(walk_unreadable);
+                // reason: the sqlite byte tally already failed open once
+                // here; the transcripts' bytes are measured, the store's are
+                // a live-only reading and zero is not an honest fallback
+                // for it — the probe either counted all three files or
+                // reports the transcripts' half alone.
+                base.bytes = db_bytes.map_or(Some(transcript_bytes), |db_bytes| {
+                    Some(db_bytes + transcript_bytes)
+                });
+                base.earliest = earliest;
+                base.latest = latest;
+                base.recognized_files = recognized_files;
+                base.note = format!(
+                    "{env_note}WorkBuddy dual store: {row_count} session row(s) in the sqlite store (tombstoned={tombstoned}); {transcript_count} transcript file(s) (stale duplicates skipped={stale_duplicates}, without a store row={orphan_transcripts}); live rows without a local transcript jsonl={without_transcript} — recognized, not archived, not 0{walk_note}"
+                );
+                base
+            }
+        },
     }
 }
 

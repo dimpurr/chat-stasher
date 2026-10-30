@@ -20,6 +20,7 @@
 | Local | Kimi Code | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | DeepSeek Harness | verified end-to-end (2026-10-06) | 2026-10-06 |
 | Local | Codebuff / Freebuff | supported | - |
+| Agent platform | WorkBuddy | supported | - |
 | Web | deepseek | verified end-to-end (2026-09-24) | 2026-09-24 |
 | Web | perplexity | experimental | - |
 | Web | chatgpt | verified end-to-end (2026-09-24) | 2026-09-24 |
