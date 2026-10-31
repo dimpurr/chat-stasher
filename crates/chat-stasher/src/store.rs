@@ -1037,6 +1037,12 @@ impl BackupStore {
     /// without a holder: "not in any snapshot I could read" and "not in any
     /// snapshot" are different answers, and only the second is a negative.
     ///
+    /// One carve-out, bounded: a snapshot tree that is not in the index the
+    /// open loaded — a read racing a push, the READ-RACE gate in
+    /// [`crate::readback`] — first costs one bounded wait, one index reload
+    /// and one re-read before that `Err` stands. The re-read is the same
+    /// walk, never an older snapshot: B is not the fallback here.
+    ///
     /// Payload tier: this is the one call that fetches and decrypts conversation
     /// bytes. A session no snapshot holds is an `Err`, never an empty result.
     pub fn read_session_concat(
@@ -1057,7 +1063,27 @@ impl BackupStore {
     /// raw shard-set identity the caller can also get stays a function of
     /// the raw bytes (D3: the raw triple remains the proof, the assembled
     /// body is the projection, and they differ by design).
+    ///
+    /// The READ-RACE gate sits over this read
+    /// ([`crate::readback::reread_plain_once_on_index_race`]): a snapshot
+    /// tree the open's index cannot resolve first costs one bounded wait,
+    /// one index reload and one re-read, and only then becomes the `Err`
+    /// below.
     pub fn read_session_concat_with_view(
+        &self,
+        machine: &str,
+        session_id: &str,
+        mk: &MasterKey,
+        view: BodyView,
+    ) -> anyhow::Result<(Vec<u8>, Vec<(String, String)>)> {
+        crate::readback::reread_plain_once_on_index_race(move || {
+            self.read_session_concat_attempt(machine, session_id, mk, view)
+        })
+    }
+
+    /// [`Self::read_session_concat_with_view`]'s single attempt: one
+    /// repository open, one cumulative walk of the machine's snapshots.
+    fn read_session_concat_attempt(
         &self,
         machine: &str,
         session_id: &str,
@@ -1150,8 +1176,24 @@ impl BackupStore {
     }
 
     /// [`Self::read_selected_sessions`] with the ADR-061 body view chosen —
-    /// see [`Self::read_session_concat_with_view`].
+    /// see [`Self::read_session_concat_with_view`]. The READ-RACE gate sits
+    /// over the whole batch (see [`Self::read_session_concat_with_view`]):
+    /// one bounded wait and one re-read for a batch whose walk hit a
+    /// not-in-index snapshot tree.
     pub fn read_selected_sessions_with_view(
+        &self,
+        mk: &MasterKey,
+        wanted: &BTreeSet<(String, String)>,
+        view: BodyView,
+    ) -> anyhow::Result<BTreeMap<(String, String), (Vec<u8>, Vec<(String, String)>)>> {
+        crate::readback::reread_plain_once_on_index_race(move || {
+            self.read_selected_sessions_attempt(mk, wanted, view)
+        })
+    }
+
+    /// [`Self::read_selected_sessions_with_view`]'s single attempt: one
+    /// repository open, the batch walked.
+    fn read_selected_sessions_attempt(
         &self,
         mk: &MasterKey,
         wanted: &BTreeSet<(String, String)>,

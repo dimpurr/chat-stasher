@@ -4,7 +4,7 @@
 use crate::message_audit::{self, BodyMetadata, JoinPolicy, MetadataSource, Projection};
 use anyhow::{ensure, Context, Result};
 use serde_json::Value;
-use std::{fs, io::Write, path::Path};
+use std::{collections::BTreeSet, fs, io::Write, path::Path};
 
 pub const KEY_FILE_ENV: &str = "CHAT_STASHER_AUDIT_KEY_FILE";
 
@@ -357,11 +357,21 @@ pub fn backfill_archive(
     key: &JoinPolicy,
 ) -> Result<BackfillReport> {
     let mut report = BackfillReport::default();
+    // The archive walk may re-run whole once on a READ-RACE index-miss,
+    // re-delivering sessions the raced attempt already backfilled. The
+    // sidecar commits reconcile on identity, so re-running a session
+    // writes nothing new — but the report's counters count sessions, so a
+    // re-delivered session is skipped: one session must report as one
+    // scanned, not two.
+    let mut backfilled_sessions = BTreeSet::new();
     store.for_each_archived_session_shards_with_policy(
         masterkey,
         machine,
         crate::store::DuplicateShardPolicy::KeepAll,
         |session, shards| {
+            if !backfilled_sessions.insert(session.to_string()) {
+                return Ok(());
+            }
             // ADR-061: snapshot-source sessions hand the audit backfill the
             // assembled current-state body, not the raw shard set — a
             // multi-copy or increment-era session would otherwise audit

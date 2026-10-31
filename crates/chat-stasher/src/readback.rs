@@ -37,6 +37,14 @@
 //! the questions that really are about the latest backup run, such as the
 //! reclaim proof, whose candidates are all still on the stage.
 //!
+//! Every traversal can list a snapshot whose tree packs the index its own
+//! open loaded does not hold — a read racing a push on the same append-only
+//! repository. The READ-RACE gate (see it below, above `impl BackupStore`)
+//! reloads the index once and re-reads once, bounded, and otherwise keeps
+//! the outcome an unknown; this file's readers inherit it at their entry
+//! points, together with the two session-body readers in
+//! [`crate::store`] that walk through the same rules.
+//!
 //! Tree layout reality (measured): a rustic dir-backup's tree mirrors the full
 //! source path (`snapshot.paths` minus the leading `/`), so `sessions/` sits
 //! at `stage-relative` depth and *not* at the tree root, and `repo.ls` on the
@@ -277,6 +285,251 @@ pub struct ArchivedWriters {
     pub unreadable: BTreeSet<String>,
 }
 
+/// The READ-RACE gate: one index reload and one re-read, bounded (A→C).
+///
+/// What was observed, reproducibly: a read-back can list a snapshot whose
+/// tree packs the *loaded* index does not hold. The index is read once at
+/// open time, a push commits index files before its snapshot file, and the
+/// snapshot listing happens after both — so between an open and a snapshot
+/// listing a push can land that the in-memory index predates. The read then
+/// stops with `Tree ID … not found in index`: a "did not finish" answer,
+/// never a count. On 2026-10-28 a 50-session read-back hit exactly this at
+/// sample 31 of 50; a re-read from a fresh open resolved it and the session
+/// was ruled matched, which is also the whole shape of the fix.
+///
+/// The approved handling, in the product:
+///
+/// * **A — reload once, then re-read.** When a read-back's attempt fails
+///   because a snapshot tree or a shard blob is not in the index that
+///   attempt loaded — [`index_race_in`], over the `I001`/`I002`/`I003`
+///   codes the pinned reader attaches to its index-miss errors — wait
+///   first, then run the attempt a second time. Every attempt re-opens the
+///   repository itself, so the second attempt *is* the reload: it re-reads
+///   the index files from the repository before it judges the same
+///   snapshots again. The wait is the bound the read-back drivers already
+///   used (one retry after a 300 s wait), so composing the product gate
+///   with an ops-driver gate stays inside one budget shape.
+/// * **C — otherwise keep the unknown.** If the second attempt hits the
+///   same miss, the outcome is the established unknown semantics: `Err`
+///   for the strict readers (the CLI's exit 3, "did not finish"), a
+///   warning and an incomplete report for the cumulative ones. It is never
+///   a match, and never a shard count: the proof-of-absence wording of
+///   [`crate::store::BackupStore::read_session_concat`] stays reserved
+///   for a walk that read every snapshot and found nothing.
+/// * **B — neither fallback nor override.** A read that cannot resolve the
+///   newest snapshot does not fall back to an older one to answer anyway —
+///   an older copy could stand in for a superseded body and the drift
+///   between them would never surface — and there is no switch to make it
+///   do so, because masking a genuinely broken archive is the use such a
+///   switch would find.
+///
+/// The gate is per *call*, not per snapshot: one classified failure spends
+/// the budget, and a retry restarts that read from its own repository
+/// open. That is the same granularity the driver-level gate had, so
+/// behaviour the ops scripts already rely on does not change shape under
+/// them.
+///
+/// The two test hooks are process environment, production unset: the wait
+/// bound and a rendezvous directory, following [`crate::orphans`]' hold
+/// hooks. Production waits the fixed 300 s cap once.
+const INDEX_RACE_RELOAD_WAIT_SECONDS: u64 = 300;
+
+/// Test hook: while set, the READ-RACE gate's wait is bounded to this many
+/// milliseconds instead of the production cap. Unset in production; the
+/// unit tests of this module set it so the retry arithmetic can be pinned
+/// without sleeping for real.
+const TEST_RACE_WAIT_MS_ENV: &str = "CHAT_STASHER_TEST_INDEX_RACE_WAIT_MS";
+
+/// Test hook: a directory for the read-back wait rendezvous. While set, the
+/// wait writes `reached` into it when the gate is about to park, and then
+/// polls for `go` instead of sleeping blind, so an integration test can fix
+/// the repository up *between* the two attempts — the one window an outside
+/// process cannot reach any other way. Unset in production.
+const TEST_RACE_WAIT_DIR_ENV: &str = "CHAT_STASHER_TEST_HOLD_INDEX_RACE_WAIT";
+
+/// The three `rustic_core` error codes that mark an index-miss: the reader
+/// could not resolve a tree or a blob id in the in-memory index. Structural,
+/// the same [`rustic_core::RusticError::is_code`] pin `repofile/keyfile.rs`
+/// uses for its own codes — the rendered text is never matched, so a reworded
+/// message cannot silently widen or narrow what this gate retries.
+const INDEX_RACE_ERROR_CODES: [&str; 3] = ["I001", "I002", "I003"];
+
+/// Whether a `rustic_core` error is an index-miss (`I001`/`I002`/`I003`).
+fn index_race_rustic(error: &rustic_core::RusticError) -> bool {
+    INDEX_RACE_ERROR_CODES
+        .iter()
+        .any(|code| error.is_code(code))
+}
+
+/// Whether an `anyhow` chain carries an index-miss.
+///
+/// The pinned reader's errors reach the read-back wrapped as `Box<
+/// RusticError>` — which is itself the chain root, per how `anyhow` keeps
+/// the boxed type — so the downcast targets the box first and the bare
+/// error second. Context layers above it never hide the root.
+fn index_race_in(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let rustic = match cause.downcast_ref::<Box<rustic_core::RusticError>>() {
+            Some(boxed) => boxed.as_ref(),
+            None => match cause.downcast_ref::<rustic_core::RusticError>() {
+                Some(bare) => bare,
+                None => return false,
+            },
+        };
+        index_race_rustic(rustic)
+    })
+}
+
+/// The wait before the one re-read.
+///
+/// Production sleeps the fixed cap from [`INDEX_RACE_RELOAD_WAIT_SECONDS`]
+/// exactly once, mirroring the gate the read-back drivers already ran: the
+/// miss is one a concurrent push typically resolves, and a backend whose
+/// listing lags is given time to converge before the single retry spends
+/// itself. The test-env forms shrink the bound and add the
+/// `reached`/`go` rendezvous described on [`TEST_RACE_WAIT_DIR_ENV`].
+fn index_race_wait() {
+    let bound_ms = std::env::var(TEST_RACE_WAIT_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    let Some(dir) = std::env::var(TEST_RACE_WAIT_DIR_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        std::thread::sleep(std::time::Duration::from_millis(
+            bound_ms.unwrap_or(INDEX_RACE_RELOAD_WAIT_SECONDS * 1000),
+        ));
+        return;
+    };
+    let dir = Path::new(&dir);
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "A rendezvous that cannot be staged leaves its test to report the miss, which is the failure shape the test exists to surface."
+    )]
+    let _ = std::fs::create_dir_all(dir);
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "As above: the test that did not reach the gate is the report itself."
+    )]
+    let _ = std::fs::write(dir.join("reached"), b"");
+    let go = dir.join("go");
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(
+            bound_ms.unwrap_or(INDEX_RACE_RELOAD_WAIT_SECONDS * 1000),
+        );
+    while !go.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+/// Whether the one re-read may be announced as a success: only an attempt
+/// whose own raced flag is `false`. The report-shaped readers answer `Ok`
+/// with a warning-plus-incomplete-report when they stay raced, and those
+/// must keep speaking their own unknown vocabulary — a success note over a
+/// still-warning report would tell the operator "succeeded" on a read
+/// that stayed unknown.
+///
+/// Unit-pinned next to the retry arithmetic: the flag-true → flag-true
+/// case returns the second report, and this predicate is what keeps its
+/// note silent.
+fn reread_resolved_without_miss(second_raced: bool) -> bool {
+    !second_raced
+}
+
+/// The one re-read of the READ-RACE gate over an attempt that re-opens the
+/// repository itself.
+///
+/// `attempt` returns its value together with a `bool`: `true` when this
+/// attempt recorded a not-in-index condition into its own unknown
+/// vocabulary — a warning plus an incomplete report — instead of an `Err`.
+/// The first branch of the gate is symmetric over both shapes; the strict
+/// readers return plain values and pass `false` through
+/// [`reread_plain_once_on_index_race`].
+///
+/// Exactly one retry, ever:
+///
+/// * first attempt clean (`(value, false)` or an unclassified `Err`) —
+///   returned as-is; the gate did not fire;
+/// * first attempt raced — wait ([`index_race_wait`]), re-run once, return the
+///   second attempt's outcome whatever it is;
+/// * the second attempt is never retried again, and its still-raced result
+///   is the unknown the caller already records (the report's warnings, or
+///   the `Err` carrying the walk's own did-not-finish wording).
+///
+/// A `visit`-shaped attempt re-runs *whole* on that one retry: the
+/// callback runs again for sessions the raced attempt already delivered,
+/// because the re-loaded open cannot resume a half-finished walk. The one
+/// wrapper with such an attempt
+/// ([`BackupStore::for_each_archived_session_shards_with_policy`]) carries
+/// that contract for its callers in its own doc.
+///
+/// The only mutation on the outcome is one context line on a *classified*
+/// second failure, stating that the reload already happened — so an
+/// operator reading a still-racing read knows the product gate spent its
+/// one retry and the two-attempt budget is not still available.
+pub(crate) fn reread_once_on_index_race<T>(
+    mut attempt: impl FnMut() -> anyhow::Result<(T, bool)>,
+) -> anyhow::Result<T> {
+    let first = attempt();
+    let raced = match &first {
+        Ok((_, raced)) => *raced,
+        Err(error) => index_race_in(error),
+    };
+    if !raced {
+        return first.map(|(value, _)| value);
+    }
+    eprintln!(
+        "[read-back] a snapshot tree this read resolves was not in the index this open \
+         loaded — the usual cause is a read racing a push writing to the same archive, \
+         and an archive that genuinely lacks that tree in its index reads the same \
+         from here; waiting {} s, then reloading the index and reading again once",
+        bound_ms().unwrap_or(INDEX_RACE_RELOAD_WAIT_SECONDS * 1000) / 1000
+    );
+    index_race_wait();
+    match attempt() {
+        Ok((value, second_raced)) => {
+            // The note is earned by this second attempt alone: a
+            // report-shaped reader that stays flagged answers `Ok` with a
+            // warning-laden report, and a success line over it would
+            // contradict the warning it still prints. The gate stays
+            // silent there, and the report's own unknown vocabulary keeps
+            // the last word.
+            if reread_resolved_without_miss(second_raced) {
+                eprintln!("[read-back] the re-read after the index reload succeeded");
+            }
+            Ok(value)
+        }
+        Err(second) => {
+            if index_race_in(&second) {
+                Err(second.context(
+                    "the index was reloaded once and the read retried; a snapshot tree \
+                     was still not in the index the reloaded open loaded",
+                ))
+            } else {
+                Err(second)
+            }
+        }
+    }
+}
+
+/// [`reread_once_on_index_race`] for the strict readers, whose attempts
+/// return plain values: a raced attempt is one whose `Err` classifies.
+pub(crate) fn reread_plain_once_on_index_race<T>(
+    mut attempt: impl FnMut() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    reread_once_on_index_race(move || attempt().map(|value| (value, false)))
+}
+
+/// The wait bound this process will actually use, in milliseconds — the
+/// production cap unless the test hook narrows it. The printed note says
+/// the real number, not the constant, so the test form never lies about
+/// waiting five minutes.
+fn bound_ms() -> Option<u64> {
+    std::env::var(TEST_RACE_WAIT_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
 impl BackupStore {
     /// Read the newest archived provenance observation sidecar for one
     /// machine. The match is by the archived trailing `meta/<machine>/`
@@ -354,8 +607,22 @@ impl BackupStore {
 
     /// Read only the newest snapshot per machine.
     ///
-    /// Used by `stagereclaim` to prove candidates that are still currently on stage.
+    /// Used by `stagereclaim` to prove candidates that are still currently on
+    /// stage. A snapshot tree that is not in the index this read's open
+    /// loaded first goes through the READ-RACE gate above — one index
+    /// reload and one re-read — and only then lands in the warning below,
+    /// which keeps the answer unknown rather than complete.
     pub fn read_latest_per_machine(&self, mk: &MasterKey) -> anyhow::Result<ReadAllReport> {
+        reread_once_on_index_race(|| self.read_latest_per_machine_attempt(mk))
+    }
+
+    /// [`Self::read_latest_per_machine`]'s single attempt: one repository
+    /// open, one walk. The `bool` reports whether a snapshot tree the walk
+    /// could not resolve is a READ-RACE index-miss (see [`reread_once_on_index_race`]).
+    fn read_latest_per_machine_attempt(
+        &self,
+        mk: &MasterKey,
+    ) -> anyhow::Result<(ReadAllReport, bool)> {
         let backends = self.backends()?;
         let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
             .context("open repository for read-all")?;
@@ -369,6 +636,7 @@ impl BackupStore {
 
         let mut report = ReadAllReport::default();
         report.snapshots_in_repo = snapshots_in_repo;
+        let mut raced_index = false;
 
         // Machine-log generations, accumulated across the snapshots this read
         // walks. Kept out of `buckets`/`sessions` entirely (ADR-053 D4).
@@ -384,6 +652,7 @@ impl BackupStore {
             let root = match repo.node_from_snapshot_and_path(&snap, "") {
                 Ok(n) => n,
                 Err(e) => {
+                    raced_index = raced_index || index_race_rustic(&e);
                     report.warnings.push(format!(
                         "host `{hostname}` snapshot {snapshot_id}: cannot read tree root: {e}"
                     ));
@@ -489,7 +758,7 @@ impl BackupStore {
         // unchanged.
         report.machine_logs = materialize_machine_logs(&repo, machine_log_shards)?;
         report.machines = merges;
-        Ok(report)
+        Ok((report, raced_index))
     }
 
     /// Cumulative cross-machine read-back merge (`read --all-machines` and `verify` L3).
@@ -525,6 +794,23 @@ impl BackupStore {
         shard_policy: DuplicateShardPolicy,
         apply_control_policy: bool,
     ) -> anyhow::Result<ReadAllReport> {
+        reread_once_on_index_race(move || {
+            self.read_cumulative_sessions_attempt(mk, wanted, shard_policy, apply_control_policy)
+        })
+    }
+
+    /// [`read_cumulative_sessions_inner`]'s single attempt: one repository
+    /// open, one cumulative walk. The `bool` reports whether any snapshot
+    /// tree the walk could not resolve is a READ-RACE index-miss (see
+    /// [`reread_once_on_index_race`]); the walk's own `Err`s classify
+    /// directly at the gate.
+    fn read_cumulative_sessions_attempt(
+        &self,
+        mk: &MasterKey,
+        wanted: Option<&BTreeSet<(String, String)>>,
+        shard_policy: DuplicateShardPolicy,
+        apply_control_policy: bool,
+    ) -> anyhow::Result<(ReadAllReport, bool)> {
         let backends = self.backends()?;
         let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
             .context("open repository for read-all")?;
@@ -535,6 +821,7 @@ impl BackupStore {
 
         let mut report = ReadAllReport::default();
         report.snapshots_in_repo = snapshots_in_repo;
+        let mut raced_index = false;
 
         // ADR-046 (draft) Phase 1: the *user-asking* walks fold the effective
         // control stream — each host's newest snapshot's copy, unioned across
@@ -600,6 +887,7 @@ impl BackupStore {
                 let root = match repo.node_from_snapshot_and_path(snap, "") {
                     Ok(n) => n,
                     Err(e) => {
+                        raced_index = raced_index || index_race_rustic(&e);
                         report.incomplete_machines.insert(hostname.clone());
                         report.warnings.push(format!(
                             "host `{hostname}` snapshot {}: cannot read tree root: {e}",
@@ -613,6 +901,7 @@ impl BackupStore {
                     Ok(it) => match it.collect::<rustic_core::RusticResult<Vec<_>>>() {
                         Ok(e) => e,
                         Err(e) => {
+                            raced_index = raced_index || index_race_rustic(&e);
                             report.incomplete_machines.insert(hostname.clone());
                             report.warnings.push(format!(
                                 "host `{hostname}` snapshot {}: cannot collect entries: {e}",
@@ -622,6 +911,7 @@ impl BackupStore {
                         }
                     },
                     Err(e) => {
+                        raced_index = raced_index || index_race_rustic(&e);
                         report.incomplete_machines.insert(hostname.clone());
                         report.warnings.push(format!(
                             "host `{hostname}` snapshot {}: cannot ls tree: {e}",
@@ -796,7 +1086,7 @@ impl BackupStore {
         // unchanged.
         report.machine_logs = materialize_machine_logs(&repo, machine_log_shards)?;
         report.machines = merges;
-        Ok(report)
+        Ok((report, raced_index))
     }
 
     /// Cross-machine read-back merge (`read --all-machines`).
@@ -822,6 +1112,20 @@ impl BackupStore {
     /// absent from the result — the caller must treat "asked for, not
     /// returned" as a failure to copy, never as "there was nothing to copy".
     pub fn dump_machine_sessions(
+        &self,
+        mk: &MasterKey,
+        machine: &str,
+        wanted: &std::collections::BTreeSet<String>,
+    ) -> anyhow::Result<BTreeMap<String, Vec<Vec<u8>>>> {
+        reread_plain_once_on_index_race(move || {
+            self.dump_machine_sessions_attempt(mk, machine, wanted)
+        })
+    }
+
+    /// [`Self::dump_machine_sessions`]'s single attempt: one repository open,
+    /// one walk of the newest snapshot per machine. A READ-RACE index-miss
+    /// is classified and retried at the wrapper.
+    fn dump_machine_sessions_attempt(
         &self,
         mk: &MasterKey,
         machine: &str,
@@ -907,6 +1211,11 @@ impl BackupStore {
     /// complete answer (invariant 2 — exit 3, not a short count). The same
     /// holds when the machine has no snapshots at all: "this repository does
     /// not hold that machine" is an error, not an empty result.
+    ///
+    /// `visit` may run more than once for a session the raced attempt
+    /// already delivered — the READ-RACE gate re-runs the whole walk once;
+    /// see [`Self::for_each_archived_session_shards_with_policy`] for that
+    /// contract.
     pub fn for_each_archived_session<F>(
         &self,
         mk: &MasterKey,
@@ -930,7 +1239,10 @@ impl BackupStore {
 
     /// [`Self::for_each_archived_session`] with the shard-joining policy named
     /// directly, so a caller (or a test) can decide it without a process-wide
-    /// environment change.
+    /// environment change. `visit` may run more than once for a session the
+    /// raced attempt already delivered — the READ-RACE gate re-runs the whole
+    /// walk once; see [`Self::for_each_archived_session_shards_with_policy`]
+    /// for that contract.
     pub fn for_each_archived_session_with_policy<F>(
         &self,
         mk: &MasterKey,
@@ -958,12 +1270,44 @@ impl BackupStore {
     /// Shard-preserving archive walk for consumers that need provenance body
     /// bindings. The callback receives shards with optional parsed sequence
     /// numbers, after applying the same duplicate policy as the concatenated reader.
+    ///
+    /// The walk runs behind the READ-RACE gate
+    /// ([`reread_once_on_index_race`]): on a classified index-miss it re-runs
+    /// the whole walk once against the reloaded open, because the reloaded
+    /// open has no way to resume the raced attempt's half-finished walk —
+    /// so `visit` **may run more than once for a session the raced attempt
+    /// already delivered**. The returned [`CumulativeSessionRead`] counts
+    /// one attempt (the last, which is the one that stands), but any
+    /// caller-side counting of its own callback must tolerate the
+    /// re-visit or keep a one-per-session guard, as the two in-tree
+    /// callers do: a session the gate re-hands is one session, not two.
     pub fn for_each_archived_session_shards_with_policy<F>(
         &self,
         mk: &MasterKey,
         machine: &str,
         shard_policy: DuplicateShardPolicy,
-        mut visit: F,
+        visit: F,
+    ) -> anyhow::Result<CumulativeSessionRead>
+    where
+        F: FnMut(&str, &[(Option<u64>, Vec<u8>)]) -> anyhow::Result<()>,
+    {
+        let mut visit = visit;
+        reread_plain_once_on_index_race(move || {
+            self.for_each_archived_session_shards_attempt(mk, machine, shard_policy, &mut visit)
+        })
+    }
+
+    /// [`Self::for_each_archived_session_shards_with_policy`]'s single
+    /// attempt: one repository open, one machine walk. A snapshot tree this
+    /// attempt cannot resolve — including a READ-RACE index-miss — is the
+    /// `Err` naming the snapshot the walk's contract already requires,
+    /// classified by the READ-RACE gate at the wrapper.
+    fn for_each_archived_session_shards_attempt<F>(
+        &self,
+        mk: &MasterKey,
+        machine: &str,
+        shard_policy: DuplicateShardPolicy,
+        visit: &mut F,
     ) -> anyhow::Result<CumulativeSessionRead>
     where
         F: FnMut(&str, &[(Option<u64>, Vec<u8>)]) -> anyhow::Result<()>,
@@ -1423,5 +1767,216 @@ mod tests {
         let mut bad = payload.clone();
         bad[7] ^= 0x02;
         assert!(!good.sha_matches(&bad));
+    }
+
+    // -- the READ-RACE gate (W1050). These unit tests pin the retry's own
+    // arithmetic and the classifier over the exact error shapes the pinned
+    // reader raises; the park-and-recover behaviour over a real repository is
+    // pinned by `tests/w1050_read_race_test.rs`, which drives the CLI. The
+    // wait bound is process env for the tests only, so the retry test sets and
+    // clears it itself — under the serial guard below, because `std::env` is
+    // one store per test process and the other threads of this binary's test
+    // run read it too.
+
+    /// Serializes every unit test that touches the READ-RACE gate's test
+    /// env (the wait bound and the rendezvous dir): they live in
+    /// `std::env`, which is shared by every test thread of this binary, so
+    /// two tests mutating/reading them concurrently would see half of one
+    /// another's mutations. Today that is the retry-arithmetic test below;
+    /// a future lib test that drives a gated reader or mutates either
+    /// hook takes this lock first.
+    static READ_RACE_TEST_ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Removes the wait-bound test env when dropped, so a failed assert
+    /// inside the guarded test cannot leave the narrowed bound set for
+    /// whatever runs afterwards in this process.
+    struct UnsetWaitEnvOnDrop(&'static str);
+    impl Drop for UnsetWaitEnvOnDrop {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
+    /// An index-miss exactly as the pinned reader's `tree.rs` raises it —
+    /// the same construction, the same code attachment.
+    fn index_miss() -> Box<rustic_core::RusticError> {
+        rustic_core::RusticError::new(
+            rustic_core::ErrorKind::Internal,
+            "Tree ID `{tree_id}` not found in index",
+        )
+        .attach_error_code("I002")
+        .attach_context("tree_id", "33c5514b")
+    }
+
+    #[test]
+    fn readback_index_miss_codes_classify_through_an_anyhow_context() {
+        // The three index-miss sites, built the way each site builds itself,
+        // must classify — through the `.with_context` wrapping the product
+        // puts around them, because that is how they reach the gate.
+        for (code, message) in [
+            ("I001", "Blob `{id}` with type `{type}` not found in index"),
+            ("I002", "Tree ID `{tree_id}` not found in index"),
+            ("I003", "Data Blob `{id}`  not found in index"),
+        ] {
+            let bare = rustic_core::RusticError::new(rustic_core::ErrorKind::Internal, message)
+                .attach_error_code(code);
+            let wrapped = Err::<(), Box<rustic_core::RusticError>>(bare).context(
+                "UNKNOWN: session `…` cannot be resolved for machine `m`: snapshot 33c5514b \
+                 tree root",
+            );
+            let err = wrapped.unwrap_err();
+            assert!(
+                index_race_in(&err),
+                "the {code} site must classify through the product's context wrapping"
+            );
+        }
+        // Nothing else does: a backend error, a bare bail, and the pinned
+        // reader's own password error all stay outside the gate, because
+        // retrying them cannot help and the budget must not spend itself.
+        let backend = rustic_core::RusticError::new(
+            rustic_core::ErrorKind::Backend,
+            "The destination object is unreachable.",
+        );
+        let backend = Err::<(), Box<rustic_core::RusticError>>(backend)
+            .context("the walk cannot reach the backend")
+            .unwrap_err();
+        assert!(!index_race_in(&backend), "a backend error is not a race");
+        let bail = anyhow::Error::msg("session directory not in newest snapshot");
+        assert!(!index_race_in(&bail), "a plain bail is not a race");
+        let password = rustic_core::RusticError::new(
+            rustic_core::ErrorKind::Credentials,
+            "Password is invalid for given key.",
+        )
+        .attach_error_code("C002");
+        let password = Err::<(), Box<rustic_core::RusticError>>(password)
+            .context("the key did not open the repository")
+            .unwrap_err();
+        assert!(
+            !index_race_in(&password),
+            "the C002 password error is not a race — a retry cannot refresh credentials"
+        );
+    }
+
+    #[test]
+    fn readback_index_race_gate_retries_exactly_once() {
+        let _guard = READ_RACE_TEST_ENV_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(TEST_RACE_WAIT_MS_ENV, "1");
+        let _unset_wait_env = UnsetWaitEnvOnDrop(TEST_RACE_WAIT_MS_ENV);
+
+        // Classified first attempt, recovered second: the value of the second
+        // attempt is returned, and exactly two attempts ran.
+        let mut attempts = 0;
+        let out = reread_once_on_index_race(|| {
+            attempts += 1;
+            match attempts {
+                1 => Err::<(usize, bool), anyhow::Error>(index_miss().into())
+                    .context("UNKNOWN: snapshot tree root"),
+                _ => Ok((7, false)),
+            }
+        });
+        assert_eq!(
+            out.expect("the re-read after the reload must answer"),
+            7,
+            "the second attempt's value is the answer"
+        );
+        assert_eq!(attempts, 2, "one reload, one re-read, never more");
+
+        // A classified second failure keeps the walk's own error and gains the
+        // gate's reload note — and is not retried again.
+        let mut attempts = 0;
+        let out = reread_once_on_index_race(|| {
+            attempts += 1;
+            Err::<(usize, bool), anyhow::Error>(index_miss().into())
+                .context("UNKNOWN: snapshot tree root")
+        });
+        let err = out.expect_err("a still-raced read must stay an Err");
+        assert_eq!(attempts, 2, "the second attempt is never retried");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("the index was reloaded once"),
+            "the operator must see that the product gate already spent its retry: {text}"
+        );
+        assert!(
+            text.contains("UNKNOWN: snapshot tree root"),
+            "the walk's own unknown wording must survive: {text}"
+        );
+
+        // An unclassified failure is returned untouched, with no retry: the
+        // gate exists for one race, not as a general retry loop.
+        let mut attempts = 0;
+        let out = reread_once_on_index_race(|| {
+            attempts += 1;
+            Err::<(usize, bool), anyhow::Error>(anyhow::anyhow!("backend refused"))
+        });
+        let err = out.expect_err("a non-race error must propagate");
+        assert_eq!(attempts, 1, "no wait and no reload for a non-race error");
+        assert_eq!(
+            format!("{err:#}"),
+            "backend refused",
+            "nothing was attached to it"
+        );
+
+        // A flagged first attempt — the cumulative readers' warning shape —
+        // retries once too, and the second attempt's report stands as-is.
+        let mut attempts = 0;
+        let out = reread_once_on_index_race(|| {
+            attempts += 1;
+            match attempts {
+                1 => Ok((1, true)),
+                _ => Ok((2, true)),
+            }
+        });
+        assert_eq!(
+            out.expect("the second flags-report is the answer"),
+            2,
+            "a still-raced report is returned, not looped on"
+        );
+        assert_eq!(attempts, 2);
+        // The success note is earned by the re-read's own outcome, not by
+        // the gate having run: the second report above still carries its
+        // not-in-index warnings, so announcing a success over it would tell
+        // the operator "succeeded" on a read that stayed unknown. Only a
+        // re-read that answered without another miss — the strict readers,
+        // or a recovered cumulative report — may carry the note.
+        assert!(
+            reread_resolved_without_miss(false),
+            "a re-read that answered without another miss is the shape the \
+             success note exists for"
+        );
+        assert!(
+            !reread_resolved_without_miss(true),
+            "a re-read that still recorded a not-in-index condition must not be \
+             announced as a success — the report it answers with still warns"
+        );
+
+        // A clean first attempt costs nothing.
+        let mut attempts = 0;
+        let out = reread_once_on_index_race(|| {
+            attempts += 1;
+            Ok((9, false))
+        });
+        assert_eq!(out.expect("a clean read is passed through"), 9);
+        assert_eq!(attempts, 1);
+
+        // The strict readers' plain wrapper does the same bookkeeping.
+        let mut attempts = 0;
+        let out = reread_plain_once_on_index_race(|| {
+            attempts += 1;
+            match attempts {
+                1 => Err::<usize, anyhow::Error>(index_miss().into()),
+                _ => Ok(3),
+            }
+        });
+        assert_eq!(
+            out.expect("the plain wrapper must reload and re-read too"),
+            3
+        );
+        assert_eq!(attempts, 2);
+
+        // The wait-bound env is cleared by `_unset_wait_env`'s Drop, which
+        // also runs when an assert above fails — the guarded mutation cannot
+        // outlive this test.
     }
 }

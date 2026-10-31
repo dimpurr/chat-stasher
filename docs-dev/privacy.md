@@ -874,7 +874,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:116`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:336-490,2511-2513,2553-2563`; `crates/chat-stasher/src/main.rs:10088-10093`).
+kept on your machine (`crates/chat-stasher/src/store.rs:336-490,2553-2555,2595-2605`; `crates/chat-stasher/src/main.rs:10098-10103`).
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
 
@@ -1231,10 +1231,10 @@ are plaintext in the stage exactly like a session's.
 is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
-archive (`crates/chat-stasher/src/store.rs:2511-2513`). The key file
+archive (`crates/chat-stasher/src/store.rs:2553-2555`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
-(`crates/chat-stasher/src/store.rs:2553-2623`).
+(`crates/chat-stasher/src/store.rs:2595-2665`).
 
 There is one key file per repository — `rustic_key_file` for the local archive,
 `key_file` per destination, defaulting to
@@ -1242,7 +1242,7 @@ There is one key file per repository — `rustic_key_file` for the local archive
 that copy alone, and a copy of one does not restore another. A second machine
 reads a destination with that destination's key and does not use the local one,
 which is why every key file has to be backed up
-(`crates/chat-stasher/src/main.rs:9953-9958`).
+(`crates/chat-stasher/src/main.rs:9963-9968`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin
