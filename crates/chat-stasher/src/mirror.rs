@@ -123,7 +123,9 @@ pub struct MirrorSettings {
     pub mirror_of: String,
     /// The free-space floor the mirror refuses to write below, in GiB, when
     /// the user pinned one. `None` = use the resolved default at use time
-    /// (ruling 6: max(10 GiB, 5% of the mirror volume's capacity)).
+    /// (ruling 6 with its percentage term capped at 20 GiB, the 2026-10-30
+    /// C3-CAP ruling: max(10 GiB, min(5% of the mirror volume's capacity,
+    /// 20 GiB))).
     pub min_free_gib: Option<f64>,
 }
 
@@ -150,17 +152,23 @@ impl MirrorSettings {
     /// The free-space floor in bytes for the volume holding `mirror_root`.
     ///
     /// The configured value wins when set. Otherwise the default is
-    /// max(10 GiB, 5% of the volume's capacity) (ruling 6): on the machines
-    /// this mirror targets the 5% term dominates large disks, while the 10
-    /// GiB floor keeps a small volume from computing a threshold no write
-    /// can respect. `mirror_root` need not exist yet — a caller resolves
-    /// the floor *before* the round creates the directory — so the
-    /// capacity is measured on [`capacity_of_volume`]'s nearest existing
-    /// ancestor, which is the volume the directory will be created on;
-    /// that keeps the caller's floor equal to the one the round itself
-    /// derives mid-copy. When no capacity can be queried the floor keeps
-    /// the documented GiB term rather than inventing a percentage of an
-    /// unknown size — never zero, which would read "unbounded".
+    /// max(10 GiB, min(5% of the volume's capacity, 20 GiB)) (ruling 6, its
+    /// percentage term capped at 20 GiB by the 2026-10-30 C3-CAP ruling):
+    /// the 5% term keeps the floor proportional on mid-range disks, the
+    /// 10 GiB floor keeps a small volume from computing a threshold no
+    /// write can respect, and the 20 GiB cap keeps a large disk from
+    /// demanding ever more permanent free headroom for what is usually a
+    /// small incremental mirror — uncapped, 5% of a 926 GiB volume is
+    /// 46.3 GiB, which refuses an 8 GiB mirror even though 40 GiB free
+    /// leaves ~32 GiB after the write. `mirror_root` need not exist yet —
+    /// a caller resolves the floor *before* the round creates the
+    /// directory — so the capacity is measured on
+    /// [`capacity_of_volume`]'s nearest existing ancestor, which is the
+    /// volume the directory will be created on; that keeps the caller's
+    /// floor equal to the one the round itself derives mid-copy. When no
+    /// capacity can be queried the floor keeps the documented GiB term
+    /// rather than inventing a percentage of an unknown size — never zero,
+    /// which would read "unbounded".
     #[must_use]
     pub fn min_free_bytes(&self, mirror_root: &Path) -> u64 {
         const GIB: f64 = 1_073_741_824.0;
@@ -169,13 +177,24 @@ impl MirrorSettings {
         }
         let floor = 10.0 * GIB;
         match capacity_of_volume(mirror_root) {
-            Ok(capacity) => {
-                let five_percent = 0.05 * capacity as f64;
-                floor.max(five_percent) as u64
-            }
+            Ok(capacity) => default_floor_bytes(capacity),
             Err(_) => floor as u64,
         }
     }
+}
+
+/// The default `[mirror] min_free_gib` floor for a volume of `capacity`
+/// bytes: max(10 GiB, min(5% of capacity, 20 GiB)) — ruling 6 with the
+/// 20 GiB cap the C3-CAP ruling (2026-10-30) added on top of ADR-062 C3.
+/// A pure function of the capacity so the three worked disk sizes
+/// (926/256/128 GiB) can be asserted without owning a volume of each
+/// size: the 20 GiB cap governs a 926 GiB disk (5% would be 46.3 GiB),
+/// the 5% term governs a 256 GiB disk (12.8 GiB), and the 10 GiB floor
+/// governs a 128 GiB disk (5% would be 6.4 GiB).
+fn default_floor_bytes(capacity: u64) -> u64 {
+    const GIB: f64 = 1_073_741_824.0;
+    let five_percent = 0.05 * capacity as f64;
+    (10.0 * GIB).max(five_percent.min(20.0 * GIB)) as u64
 }
 
 /// The capacity of the volume `path` names, where the volume is found by
@@ -3183,11 +3202,13 @@ mod tests {
         assert!(available_bytes(Path::new("/no/such/path/anywhere")).is_err());
     }
 
-    /// The default floor is max(10 GiB, 5% of capacity) — ruling 6 — and an
-    /// explicit value wins; a value below zero is clamped to 0.0 before the
-    /// multiply.
+    /// The default floor is max(10 GiB, min(5% of capacity, 20 GiB)) —
+    /// ruling 6 with the 20 GiB cap the C3-CAP ruling (2026-10-30) added —
+    /// and an explicit value wins in both directions: one above the
+    /// uncapped percentage term and one below the whole default. A value
+    /// below zero is clamped to 0.0 before the multiply.
     #[test]
-    fn min_free_default_is_ten_gib_or_five_percent() {
+    fn min_free_default_caps_the_five_percent_term_at_twenty_gib() {
         let (_dir, root) = temp_root();
         let unset = MirrorSettings {
             enabled: false,
@@ -3196,18 +3217,42 @@ mod tests {
         };
         let floor = unset.min_free_bytes(&root);
         let ten_gib = 10_u64 * 1_073_741_824;
+        let twenty_gib = 20_u64 * 1_073_741_824;
         let capacity = capacity_bytes(&root).unwrap();
-        let expected = ten_gib.max(capacity / 20);
+        let expected = ten_gib.max((capacity / 20).min(twenty_gib));
         assert_eq!(floor, expected);
 
-        let pinned = MirrorSettings {
+        let above = MirrorSettings {
             min_free_gib: Some(42.5),
+            ..unset.clone()
+        };
+        assert_eq!(above.min_free_bytes(&root), (42.5 * 1_073_741_824.0) as u64);
+        // The override also wins from below: a pin under even the 10 GiB
+        // floor arm is the user's stated headroom, not a minimum.
+        let below = MirrorSettings {
+            min_free_gib: Some(8.0),
             ..unset
         };
-        assert_eq!(
-            pinned.min_free_bytes(&root),
-            (42.5 * 1_073_741_824.0) as u64
-        );
+        assert_eq!(below.min_free_bytes(&root), 8_u64 * 1_073_741_824);
+    }
+
+    /// The three fixture disk sizes of the C3-CAP ruling (2026-10-30),
+    /// asserted on the pure default so no test has to own a volume of
+    /// each size: a 926 GiB disk shows the 20 GiB cap governing (5% would
+    /// be 46.3 GiB — the ruling's main fixture: 40 GiB free, an 8 GiB
+    /// mirror, refused before the cap, ~32 GiB headroom after the write
+    /// allowed by it), a 256 GiB disk the bare 5% arm (12.8 GiB), and a
+    /// 128 GiB disk the 10 GiB floor arm (5% would be 6.4 GiB). The
+    /// 256/128 rows pin the arms the cap leaves unchanged on purpose.
+    #[test]
+    fn default_floor_three_fixture_disks() {
+        const GIB: u64 = 1_073_741_824;
+        // 926 GiB: min(46.3, 20) = 20, max(10, 20) = 20.
+        assert_eq!(default_floor_bytes(926 * GIB), 20 * GIB);
+        // 256 GiB: 5% = 12.8 GiB is under the cap and over the floor.
+        assert_eq!(default_floor_bytes(256 * GIB), 13_743_895_347);
+        // 128 GiB: 5% = 6.4 GiB is under the floor, so 10 GiB governs.
+        assert_eq!(default_floor_bytes(128 * GIB), 10 * GIB);
     }
 
     /// A caller resolves the default floor *before* the round creates the
@@ -3217,12 +3262,16 @@ mod tests {
     /// and the pre-round floor equals the in-round one. Without this the
     /// first round enforced two floors: the flat 10 GiB mid-round (its
     /// caller could not query a path that did not exist yet) and the
-    /// documented max(10 GiB, 5% of capacity) at the pre-estimate.
+    /// documented max(10 GiB, min(5% of capacity, 20 GiB)) at the
+    /// pre-estimate.
     ///
     /// On a volume whose 5% is under the 10 GiB floor the two answers
-    /// coincide by arithmetic, so the capacity-relative assertion below
-    /// only bites on the large volumes the double floor actually
-    /// mis-floored.
+    /// coincide by arithmetic, and on one whose 5% is over the 20 GiB cap
+    /// the capped default coincides with the flat term the ancestor walk
+    /// would need a volume to beat, so the capacity-relative assertion
+    /// below only bites on the mid-range volumes (10 GiB < 5% < 20 GiB)
+    /// where a double floor actually mis-floored — the exact window the
+    /// cap narrows from above.
     #[test]
     fn the_floor_for_a_mirror_dir_that_does_not_exist_measures_its_future_volume() {
         let (_dir, root) = temp_root();
@@ -3240,8 +3289,9 @@ mod tests {
              its existing ancestor"
         );
         let ten_gib = 10_u64 * 1_073_741_824;
+        let twenty_gib = 20_u64 * 1_073_741_824;
         let five_percent = capacity_bytes(&root).unwrap() / 20;
-        if five_percent > ten_gib {
+        if five_percent > ten_gib && five_percent < twenty_gib {
             assert_eq!(unset.min_free_bytes(&future), five_percent);
         }
     }

@@ -751,7 +751,7 @@ crates/chat-stasher/src/letta.rs:236-246  72e855d41735  lines=11
   <- docs-dev/privacy.md:184, docs-dev/threat-model.md:55, docs-dev/threat-model.md:67  :: ) -> Result<Self> {
 crates/chat-stasher/src/main.rs:114  51c934204980  lines=1
   <- docs-dev/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…
-crates/chat-stasher/src/main.rs:238-1891  47700f2b48ca  lines=1654
+crates/chat-stasher/src/main.rs:238-1891  a571677fb226  lines=1654
   <- docs-dev/install.md:1127, docs-dev/privacy.md:1182, docs-dev/threat-model.md:938  :: enum Command {
 crates/chat-stasher/src/main.rs:239-240  6f7da3119197  lines=2
   <- docs-dev/install.md:292  :: /// Write a commented default config if none exists (non-de…
@@ -841,21 +841,21 @@ crates/chat-stasher/src/main.rs:10909-10914  13896e8d543a  lines=6
   <- SECURITY.md:70, docs-dev/threat-model.md:878  :: eprintln!("push: cannot check stage metadata: {e:#}");
 crates/chat-stasher/src/main.rs:11347-11533  b256db959826  lines=187
   <- docs-dev/threat-model.md:942  :: let destination = destination.or_else(|| {
-crates/chat-stasher/src/main.rs:16190-16241  eb6db4f4050d  lines=52
+crates/chat-stasher/src/main.rs:16191-16242  eb6db4f4050d  lines=52
   <- docs-dev/install.md:306  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:16190-16201  8f911ffc9cf6  lines=12
+crates/chat-stasher/src/main.rs:16191-16202  8f911ffc9cf6  lines=12
   <- docs-dev/install.md:1038  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:16970-16984  da484ba556b2  lines=15
+crates/chat-stasher/src/main.rs:16971-16985  da484ba556b2  lines=15
   <- docs-dev/install.md:630  :: `dest-init`) — the destination block itself does not have t…
-crates/chat-stasher/src/main.rs:17407-17414  c5ec574f3326  lines=8
+crates/chat-stasher/src/main.rs:17408-17415  c5ec574f3326  lines=8
   <- docs-dev/install.md:629  :: )
-crates/chat-stasher/src/main.rs:20281-20288  9cd8be148a6b  lines=8
+crates/chat-stasher/src/main.rs:20282-20289  9cd8be148a6b  lines=8
   <- docs-dev/install.md:1028  :: render_status(report, false)
-crates/chat-stasher/src/main.rs:20306-20307  d745898fe057  lines=2
+crates/chat-stasher/src/main.rs:20307-20308  d745898fe057  lines=2
   <- docs-dev/install.md:999  :: // would answer "is my timer healthy?" from a machine the t…
-crates/chat-stasher/src/main.rs:20814-20815  f5217dab38af  lines=2
+crates/chat-stasher/src/main.rs:20815-20816  f5217dab38af  lines=2
   <- docs-dev/install.md:994  :: // them. `destinations` and `reclaim` are the machine-reada…
-crates/chat-stasher/src/main.rs:20906-20913  7df1b5962a59  lines=8
+crates/chat-stasher/src/main.rs:20907-20914  7df1b5962a59  lines=8
   <- docs-dev/install.md:1015  :: };
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:447, docs-dev/threat-model.md:722  :: //! ADR-022: content-addressed hash tracking for stage meta…
@@ -863,7 +863,7 @@ crates/chat-stasher/src/mirror.rs:1-16  fe152090ebb3  lines=16
   <- docs-dev/privacy.md:1183  :: //! The local mirror (ADR-062, LM-2): one declared remote d…
 crates/chat-stasher/src/mirror.rs:48-50  f48b2aff1d75  lines=3
   <- docs-dev/privacy.md:1183  :: //! Privacy: ids, byte counts, times and the declared desti…
-crates/chat-stasher/src/mirror.rs:1854-1857  3a13a0bc6bb2  lines=4
+crates/chat-stasher/src/mirror.rs:1873-1876  3a13a0bc6bb2  lines=4
   <- docs-dev/privacy.md:1183  :: pub remote_files: u64,
 crates/chat-stasher/src/mirrorstate.rs:30-31  3f1c0e8f18cc  lines=2
   <- docs-dev/privacy.md:1183  :: //! Privacy: a destination name, a unix time, byte counts a…

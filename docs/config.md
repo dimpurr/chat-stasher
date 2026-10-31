@@ -214,7 +214,7 @@ it is never quietly replaced from the remote mid-read.
 |---|---|---|
 | `enabled` | `false` | The switch. A machine that declares no section, or sets this false, mirrors nothing and reads only the remote — the read behaviour above is the switch's, not a separate one. |
 | `mirror_of` | (required) | The declared destination to mirror, by name. One mirror per machine: repointing this key is safe — the old record is expired rather than inherited (the state file names the destination it was built for, and coverage answers only for that name). |
-| `min_free_gib` | `max(10, 5% of the volume's capacity)` | The free-space floor for the mirror's volume. Before a first fill starts, the remaining download plus this floor must fit in the free space, or the round refuses rather than write toward a full disk; mid-fill, free space falling below it pauses the copy. |
+| `min_free_gib` | `max(10, min(5% of the volume's capacity, 20))` | The free-space floor for the mirror's volume. Before a first fill starts, the remaining download plus this floor must fit in the free space, or the round refuses rather than write toward a full disk; mid-fill, free space falling below it pauses the copy. The 20 GiB cap keeps the percentage term of the default from demanding ever more headroom on a large disk; setting this key always wins over the default. |
 
 - The scheduled pass runs the copy after its push, inside the round's
   leftover budget; `mirror sync` runs the same round on demand. A first
