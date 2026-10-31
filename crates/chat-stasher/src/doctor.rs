@@ -8290,6 +8290,10 @@ mod w1009_doctor_desktop_tests {
             unreadable_count: Some(0),
             unreadable_entry_count: Some(0),
             total_bytes: (state == ProbeState::Scanned).then_some(23),
+            // The doctor prints a row's scope and measurement, not the
+            // registry's move semantics, so the fixture here stays false —
+            // the collector owns the one decision this fact feeds (W1049).
+            movable: false,
             note: String::new(),
         }
     }

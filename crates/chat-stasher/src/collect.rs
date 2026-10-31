@@ -1333,6 +1333,32 @@ pub struct CollectError {
     pub source_path_sha256: String,
 }
 
+/// W1049 (RUN-SOURCE-VANISH): a source that vanished mid-pass — present when
+/// this pass's scan enumerated it, absent when the collector read it — and
+/// whose **session identity** (for a movable store, the file's own name
+/// riding the session id; for codex that is the rollout filename's uuid)
+/// was found again inside a root this pass already collects. A confirmed
+/// relocation, not a read failure and not an absence: the same session is
+/// collected at its new location in this pass, when the recovery read
+/// succeeds, or in the next pass, whose ordinary scan enumerates the file
+/// wherever the store moved it. Never counted toward `collect_incomplete`
+/// ([`CollectReport::errors`] stays the incomplete-read surface; the
+/// unresolved vanish — identity found in no collected root — stays a
+/// [`CollectError`] exactly as before, exit code unchanged).
+///
+/// Deliberately metadata-only, the same boundary [`CollectError`] holds:
+/// prefixes and path digests, never a path, never content.
+#[derive(Debug, Clone)]
+pub struct MovedAwayNotice {
+    pub session_prefix: String,
+    /// Digest of the path the pass's scan enumerated the source at — the
+    /// path that vanished.
+    pub source_path_sha256: String,
+    /// Digest of the path the same session identity was confirmed at, inside
+    /// a root this pass already collects.
+    pub relocated_path_sha256: String,
+}
+
 /// A state/stage mismatch repaired by forcing this session through the normal
 /// reset read path. The reason is intentionally fixed metadata, never source
 /// content or a real harness path.
@@ -1432,6 +1458,12 @@ pub struct CollectReport {
     /// `lines_written` for the same reason.
     pub machine_log_lines_written: usize,
     pub errors: Vec<CollectError>,
+    /// W1049: sources that vanished mid-pass and were confirmed relocated by
+    /// session identity inside roots this pass already collects. A
+    /// relocation is a collected-or-next-pass session, never an incomplete
+    /// read: these rows are not in [`Self::errors`] and do not change any
+    /// exit code. Empty on every ordinary pass.
+    pub moved_away: Vec<MovedAwayNotice>,
     pub reconciliations: Vec<ReconcileNotice>,
     /// W880: registry scan wall time, in milliseconds. Measured by
     /// [`collect`]; zero when a test supplies its own scan report.
@@ -1703,8 +1735,29 @@ pub fn collect(
     let scan = scanner::scan_with_machine(config, machine).context("scan harness sessions")?;
     let scan_ms = scan_started.elapsed().as_millis() as u64;
     let collect_started = std::time::Instant::now();
-    let mut report =
-        collect_scan_report(&scan, stage, machine, state_dir, bucket_cap, destination)?;
+    // W1049: the fresh-identity rescan a vanished source triggers. Lazy on
+    // purpose — it reloads the registry and re-walks ONE harness family's
+    // roots, so a pass where nothing vanishes pays nothing — and re-derived
+    // from the same registry precedence the pass's own scan read, so the
+    // probe can never walk roots this build would not have collected.
+    let relocate = |harness_id: &str| -> anyhow::Result<scanner::ScanReport> {
+        let mut registry = scanner::load_registry_from_repo().with_context(|| {
+            format!("reload the harness registry to re-walk the {harness_id} store")
+        })?;
+        registry.harnesses.retain(|entry| entry.id == harness_id);
+        scanner::scan_with_registry_and_machine(config, &registry, machine).with_context(|| {
+            format!("re-walk the {harness_id} roots for a source that vanished mid-pass")
+        })
+    };
+    let mut report = collect_scan_report_with_relocation(
+        &scan,
+        stage,
+        machine,
+        state_dir,
+        bucket_cap,
+        destination,
+        Some(&relocate),
+    )?;
     report.scan_ms = scan_ms;
     report.collect_ms = collect_started.elapsed().as_millis() as u64;
     Ok(report)
@@ -1712,6 +1765,11 @@ pub fn collect(
 
 /// Collection entry point split out for tests: the scanner report is supplied
 /// by a synthetic registry, while the real CLI always calls [`collect`].
+/// A source that vanishes mid-pass keeps today's error here — with no
+/// [`RelocationScan`] there are no roots to re-walk for a recovery, and the
+/// same-scan sibling leg alone never invents a relocation ([`collect`]
+/// supplies the probe; tests that need one call
+/// [`collect_scan_report_with_relocation`] directly).
 pub fn collect_scan_report(
     scan: &scanner::ScanReport,
     stage: &Path,
@@ -1719,6 +1777,39 @@ pub fn collect_scan_report(
     state_dir: &Path,
     bucket_cap: usize,
     destination: &DestinationView<'_>,
+) -> anyhow::Result<CollectReport> {
+    collect_scan_report_with_relocation(
+        scan,
+        stage,
+        machine,
+        state_dir,
+        bucket_cap,
+        destination,
+        None,
+    )
+}
+
+/// W1049: how the vanish handling re-walks one harness family's roots. Given
+/// a registry harness id, the callback returns a fresh [`scanner::ScanReport`]
+/// for that family alone — records minted by the very machinery the pass's
+/// own scan used, so a session matched here is matched by identity, not by
+/// path (the path a store moved its file to was never known to this pass).
+pub type RelocationScan<'a> = &'a dyn Fn(&str) -> anyhow::Result<scanner::ScanReport>;
+
+/// [`collect_scan_report`] with the relocation half enabled: a source that
+/// vanishes mid-pass is probed by its session identity, and a finding inside
+/// a root this pass already collects is collected in this same pass when the
+/// read succeeds ([`MovedAwayNotice`] records the ones that were not). The
+/// unresolved vanish stays a `CollectError` — the exit ladder and
+/// `collect_incomplete` gain no new case here.
+pub fn collect_scan_report_with_relocation(
+    scan: &scanner::ScanReport,
+    stage: &Path,
+    machine: &str,
+    state_dir: &Path,
+    bucket_cap: usize,
+    destination: &DestinationView<'_>,
+    relocate: Option<RelocationScan<'_>>,
 ) -> anyhow::Result<CollectReport> {
     store::assert_stage_writer_audited(store::StageWriter::Collect)?;
     fs::create_dir_all(stage).with_context(|| format!("create stage {}", stage.display()))?;
@@ -1815,9 +1906,6 @@ pub fn collect_scan_report(
     } else {
         destination.facts(&wanted)
     };
-    // W880: deep counters the read functions can only reach through
-    // this handle; folded into the report once the pass ends.
-    let mut counters = CollectCounters::default();
     // ADR-054 D6: the run identity the pass's skip observations carry.
     // Minted once from the pass's own start and destination digest —
     // bounded, contentless, and distinct per pass without naming the
@@ -1835,19 +1923,163 @@ pub fn collect_scan_report(
         // reason: now_unix_seconds fails only on the same clock-before-epoch case the nanos line above names; a 1970 pass_ts is the epoch itself, so the observation still says "stamped by a broken clock" rather than showing a plausible time
         pass_ts: crate::manifest::now_unix_seconds().unwrap_or_default(),
     };
+    // The pass's one shared collector state. The report and the debt map
+    // move in here so the per-record read path and the W1049 vanish
+    // recovery that follows it run the very same machinery — a relocated
+    // sighting is collected exactly as an ordinary record is, not through
+    // a second write path that could drift from the first.
+    let mut collector = PassCollector {
+        stage,
+        machine,
+        state_dir,
+        state_path: &state_path,
+        state: &state,
+        destination_id: &destination_id,
+        bucket_cap,
+        remote_facts,
+        manifest_facts: manifest_facts.as_ref(),
+        pass: &pass,
+        counters: CollectCounters::default(),
+        report,
+        debts,
+    };
+    // W1049: sessions whose bytes this pass collected, by id → the path
+    // the collection read. A vanished source is resolved against this map
+    // first: the same identity already collected at another root is a
+    // relocation, not a loss, and needs no second read.
+    let mut collected_ok: BTreeMap<String, PathBuf> = BTreeMap::new();
+    // W1049: file-backed sources whose path was gone at read time. Held,
+    // not failed — resolution runs once at the end of the loop, when every
+    // sibling sighting of the same store has had its turn.
+    let mut vanished_sources: Vec<SessionRecord> = Vec::new();
     for mut record in records {
-        // W880: the whole iteration is this record's collect work, so
-        // the per-harness timer covers the cursor resolution and the
+        match collector.process_record(&mut record) {
+            Ok(RecordFate::Processed) => {
+                // W1049: by session id, the pass collected these bytes from
+                // this path — the fact the vanish resolution resolves a
+                // relocated sighting against.
+                collected_ok.insert(record.id.clone(), record.absolute_path.clone());
+            }
+            Ok(RecordFate::Skipped) => {}
+            Ok(RecordFate::Failed) => {
+                // Three states, kept three (CLAUDE.md invariant 1): a source
+                // whose path is gone at read time is a vanished source —
+                // held for the identity resolution below; a source that is
+                // still there and would not read is a read failure — today's
+                // collector error, unchanged. Only file-backed sources can
+                // vanish (a virtual SQLite session has no path to lose).
+                if record.sqlite_layout.is_none() && !record.absolute_path.exists() {
+                    vanished_sources.push(record);
+                } else {
+                    collector.record_error(&record);
+                }
+            }
+            // Bookkeeping around the read failed: abort the pass exactly as
+            // this code did when it lived inline.
+            Err(error) => return Err(error),
+        }
+    }
+    // W1049: settle every vanished source by identity, before the pass
+    // ends — the round either collected the session at its new location
+    // already, records the relocation, or keeps today's unknown as an
+    // error.
+    collector.resolve_vanished_sources(scan, relocate, vanished_sources, &mut collected_ok)?;
+    let PassCollector {
+        mut report,
+        counters,
+        ..
+    } = collector;
+    report.files_statted = counters.files_statted;
+    report.sqlite_sessions_queried = counters.sqlite_sessions_queried;
+    // Machine logs are collected after every session, and into their own
+    // report fields: a machine log is never a session outcome, never a session
+    // shard, and never a session line (ADR-053 D4).
+    collect_machine_logs(
+        scan,
+        stage,
+        machine,
+        state_dir,
+        bucket_cap,
+        destination,
+        &mut report,
+    )?;
+    Ok(report)
+}
+
+/// What one record's own read path decided — the [`ReadOutcome`] split
+/// flattened for the two call sites [`PassCollector::process_record`] has.
+/// The record loop folds every fate into the report; the vanish recovery
+/// additionally needs to know whether the sighting it re-read actually
+/// sealed anything.
+#[derive(Debug)]
+enum RecordFate {
+    Processed,
+    Skipped,
+    Failed,
+}
+
+/// The pass-shared collector state: everything one record's read needs
+/// besides the record itself. Extracted from the record loop (W1049) so the
+/// vanish recovery can collect a relocated sighting through the exact same
+/// machinery as an ordinary record — cursor proof, sealing, debt save,
+/// counters and the per-harness timer all included — instead of a second
+/// write path that could drift from the first.
+struct PassCollector<'a> {
+    stage: &'a Path,
+    machine: &'a str,
+    state_dir: &'a Path,
+    state_path: &'a Path,
+    state: &'a DebtState,
+    destination_id: &'a str,
+    bucket_cap: usize,
+    remote_facts: Option<&'a ArchiveFacts>,
+    manifest_facts: Option<&'a BTreeMap<String, ShardFact>>,
+    pass: &'a PassContext,
+    counters: CollectCounters,
+    report: CollectReport,
+    debts: BTreeMap<String, DebtEntry>,
+}
+
+impl<'a> PassCollector<'a> {
+    /// Collect one record, folding the whole read into the report. `Failed`
+    /// means the read itself failed — the caller decides whether that is a
+    /// read failure (a source that is still there) or a vanished source
+    /// (W1049). `Err` means a bookkeeping step around the read failed, and
+    /// aborts the pass exactly as this code did when it lived inline in the
+    /// loop.
+    fn process_record(&mut self, record: &mut SessionRecord) -> anyhow::Result<RecordFate> {
+        // W880: the whole call is this record's collect work, so the
+        // per-harness timer covers the cursor resolution and the
         // provenance bookkeeping too, not only the read.
         let record_started = std::time::Instant::now();
-        let key = state_key(&record);
-        let stored = debts.get(&key).cloned();
+        let fate = self.process_record_inner(record)?;
+        // W880: fold this record's wall time into its harness's
+        // bucket, keyed by the registry's public harness id.
+        *self
+            .report
+            .collect_harness_ms
+            .entry(record.source.short().to_string())
+            .or_default() += record_started.elapsed().as_millis() as u64;
+        Ok(fate)
+    }
+
+    fn process_record_inner(&mut self, record: &mut SessionRecord) -> anyhow::Result<RecordFate> {
+        let stage = self.stage;
+        let machine = self.machine;
+        let key = state_key(record);
+        let stored = self.debts.get(&key).cloned();
         // A stored cursor is a claim, not a fact. It is only reused once it has
         // discharged itself against the stage, the local reclaim manifest, or
         // this destination's own archive.
         let mut unverifiable = None;
         if let Some(entry) = stored.as_ref() {
-            match verify_debt(entry, machine, stage, remote_facts, manifest_facts.as_ref())? {
+            match verify_debt(
+                entry,
+                machine,
+                stage,
+                self.remote_facts,
+                self.manifest_facts,
+            )? {
                 DebtVerdict::OwedOnStage
                 | DebtVerdict::SettledInArchive
                 | DebtVerdict::SettledReclaimed => {}
@@ -1855,8 +2087,8 @@ pub fn collect_scan_report(
             }
         }
         if let Some(reason) = unverifiable {
-            report.unverified_cursors += 1;
-            report.reconciliations.push(ReconcileNotice {
+            self.report.unverified_cursors += 1;
+            self.report.reconciliations.push(ReconcileNotice {
                 session_prefix: id_prefix(&record.id),
                 reason,
             });
@@ -1869,15 +2101,33 @@ pub fn collect_scan_report(
         // this destination actually starts from. A stage that disagrees with
         // the source yields nothing here and the full read happens as before.
         let old = match stored.as_ref() {
-            Some(entry) => Some(cursor_or_stage_covered_position(
-                &record,
-                entry,
-                unverifiable.is_none(),
-                stage,
-                machine,
-                &mut counters,
-                manifest_facts.as_ref(),
-            )?),
+            Some(entry) => {
+                match cursor_or_stage_covered_position(
+                    record,
+                    entry,
+                    unverifiable.is_none(),
+                    stage,
+                    machine,
+                    &mut self.counters,
+                    self.manifest_facts,
+                ) {
+                    Ok(position) => Some(position),
+                    // W1049: the cursor resolution proves a stage-derived
+                    // position against the source itself (B95), so a source
+                    // that vanished mid-pass fails HERE too — before this
+                    // change the whole pass died on the stat instead of
+                    // classifying the vanish. NotFound with the path gone
+                    // now is the vanished source saying so; every other
+                    // failure (stage-side read, a present source that will
+                    // not read, anything else) still aborts the pass.
+                    Err(error) => {
+                        if absent_source_failure(record, &error) {
+                            return Ok(RecordFate::Failed);
+                        }
+                        return Err(error);
+                    }
+                }
+            }
             // One native UUID may appear in multiple source roots. Without a
             // persisted cursor for this exact scanned source, a matching
             // stage prefix cannot establish whether it is a replay or a new
@@ -1894,23 +2144,38 @@ pub fn collect_scan_report(
             // machine, not for this destination, and a session this
             // destination never pushed must be captured in full
             // (destination scoping, H1) — so its archive receives the body.
-            None => stage_prefix_entry(&record, stage, machine, &mut counters, None)?,
+            None => {
+                match stage_prefix_entry(record, stage, machine, &mut self.counters, None) {
+                    Ok(position) => position,
+                    // W1049: the same vanished-source classification as the
+                    // covered-position arm above, for the cursor-less leg —
+                    // a vanished source fails this probe's stat before its
+                    // read is ever reached.
+                    Err(error) => {
+                        if absent_source_failure(record, &error) {
+                            return Ok(RecordFate::Failed);
+                        }
+                        return Err(error);
+                    }
+                }
+            }
         };
         // The cursor is still handed down so the outcome can report this as a
         // reread rather than a first read; `force_reset` is what actually stops
         // it from being reused.
-        match collect_one(
-            &record,
+        let read = collect_one(
+            record,
             old.as_ref(),
             unverifiable.is_some(),
             stage,
-            state_dir,
+            self.state_dir,
             machine,
-            bucket_cap,
-            &mut counters,
-            &pass,
-            manifest_facts.as_ref(),
-        ) {
+            self.bucket_cap,
+            &mut self.counters,
+            self.pass,
+            self.manifest_facts,
+        );
+        match read {
             Ok(ReadOutcome::Processed(processed)) => {
                 crate::activity::record_session_provenance(
                     stage,
@@ -1941,29 +2206,29 @@ pub fn collect_scan_report(
                 // absent, and absent work must not be spelled "changed".
                 let changed = outcome.shard.is_some() || outcome.reset;
                 if changed {
-                    report.changed_records += 1;
+                    self.report.changed_records += 1;
                 } else {
-                    report.unchanged_records += 1;
+                    self.report.unchanged_records += 1;
                 }
                 if outcome.reset {
-                    report.reset_records += 1;
+                    self.report.reset_records += 1;
                 }
-                report.source_bytes_read += outcome.bytes_read;
-                report.delta_bytes_read += outcome.bytes_read;
-                report.prefix_bytes_validated += outcome.prefix_bytes_validated;
+                self.report.source_bytes_read += outcome.bytes_read;
+                self.report.delta_bytes_read += outcome.bytes_read;
+                self.report.prefix_bytes_validated += outcome.prefix_bytes_validated;
                 // W880: the committed prefix was read and SHA-256
                 // hashed to prove it still matches the stage — shard
                 // body bytes read and hashed.
-                report.shard_bytes_read_hashed += outcome.prefix_bytes_validated;
+                self.report.shard_bytes_read_hashed += outcome.prefix_bytes_validated;
                 // W880: a SQLite session is exported when this pass
                 // re-sealed its rows into the stage.
                 if record.sqlite_layout.is_some() && outcome.shard.is_some() {
-                    report.sqlite_sessions_exported += 1;
+                    self.report.sqlite_sessions_exported += 1;
                 }
                 if outcome.shard.is_some() {
-                    report.shards_written += 1;
+                    self.report.shards_written += 1;
                 }
-                report.lines_written += outcome.lines_written;
+                self.report.lines_written += outcome.lines_written;
 
                 // What the cursor is accountable for only ever grows with a
                 // shard. A pass that staged nothing keeps the fact it already
@@ -1985,12 +2250,17 @@ pub fn collect_scan_report(
                     shards,
                 };
                 if stored.as_ref() != Some(&entry) {
-                    debts.insert(key, entry);
-                    save_state(&state_path, &state, &destination_id, &debts)?;
+                    self.debts.insert(key, entry);
+                    save_state(
+                        self.state_path,
+                        self.state,
+                        self.destination_id,
+                        &self.debts,
+                    )?;
                     // W880: one durable collector state save.
-                    report.state_saves += 1;
+                    self.report.state_saves += 1;
                 }
-                report.outcomes.push(outcome);
+                self.report.outcomes.push(outcome);
                 // TICKET-4D-10: stamp what this read observed firsthand into
                 // the record's provenance so the observation below carries it.
                 // Merged, never assigned — a root's surface observation is
@@ -2021,35 +2291,126 @@ pub fn collect_scan_report(
                 // stream already holds the bounded record, and the run
                 // surfaces the length of this vector as its one reason to
                 // report incompleteness.
-                report.codebuff_torn_skips.push(skip);
+                self.report.codebuff_torn_skips.push(skip);
+                return Ok(RecordFate::Skipped);
             }
-            Err(_) => report.errors.push(CollectError {
-                session_prefix: id_prefix(&record.id),
-                source_path_sha256: path_digest(&record.absolute_path),
-            }),
+            Err(_) => return Ok(RecordFate::Failed),
         }
-        // W880: fold this record's wall time into its harness's
-        // bucket, keyed by the registry's public harness id.
-        *report
-            .collect_harness_ms
-            .entry(record.source.short().to_string())
-            .or_default() += record_started.elapsed().as_millis() as u64;
+        Ok(RecordFate::Processed)
     }
-    report.files_statted = counters.files_statted;
-    report.sqlite_sessions_queried = counters.sqlite_sessions_queried;
-    // Machine logs are collected after every session, and into their own
-    // report fields: a machine log is never a session outcome, never a session
-    // shard, and never a session line (ADR-053 D4).
-    collect_machine_logs(
-        scan,
-        stage,
-        machine,
-        state_dir,
-        bucket_cap,
-        destination,
-        &mut report,
-    )?;
-    Ok(report)
+
+    /// The failure a source that is still there but will not read reports —
+    /// today's collector error, word for word.
+    fn record_error(&mut self, record: &SessionRecord) {
+        self.report.errors.push(CollectError {
+            session_prefix: id_prefix(&record.id),
+            source_path_sha256: path_digest(&record.absolute_path),
+        });
+    }
+
+    /// W1049 (RUN-SOURCE-VANISH): settle every source that vanished
+    /// mid-pass, by **session identity** — never by path, which a move
+    /// necessarily changes — and in this order:
+    ///
+    /// 1. the same session id was already collected this pass at another
+    ///    root: the store moved the file between this scan's own root
+    ///    walks. The bytes are in; record the relocation
+    ///    ([`MovedAwayNotice`]) and read nothing again.
+    /// 2. a fresh re-walk of the family's roots (when a [`RelocationScan`]
+    ///    was supplied) finds the identity at a new location: collect it
+    ///    **in this pass** — "collect at the new location", never a skip —
+    ///    and leave no moved-away row at all. A recovery that skipped or
+    ///    failed its read records the relocation instead: the file is
+    ///    confirmed inside a collected root, so the next pass's ordinary
+    ///    scan enumerates it there, and a read that fails there reports
+    ///    itself as today's collector error.
+    /// 3. the identity is in no root this pass collects: today's unknown,
+    ///    unchanged — a collector error, and the pass stays
+    ///    `collect_incomplete`.
+    ///
+    /// Only a family whose registry declares a movable root may take steps
+    /// 1 and 2: "the same session id at another path is the same file" is
+    /// the store's own move rule (W1007), and the registry's `movable` flag
+    /// is what licenses this build to lean on it. Every other family keeps
+    /// today's error for a mid-pass vanish.
+    fn resolve_vanished_sources(
+        &mut self,
+        scan: &scanner::ScanReport,
+        relocate: Option<RelocationScan<'_>>,
+        vanished: Vec<SessionRecord>,
+        collected_ok: &mut BTreeMap<String, PathBuf>,
+    ) -> anyhow::Result<()> {
+        for record in vanished {
+            if !movable_store_family(scan, record.source) {
+                self.record_error(&record);
+                continue;
+            }
+            if let Some(relocation) = collected_ok.get(&record.id) {
+                self.report.moved_away.push(MovedAwayNotice {
+                    session_prefix: id_prefix(&record.id),
+                    source_path_sha256: path_digest(&record.absolute_path),
+                    relocated_path_sha256: path_digest(relocation),
+                });
+                continue;
+            }
+            let Some(relocate) = relocate else {
+                self.record_error(&record);
+                continue;
+            };
+            let fresh = relocate(record.source.short())?;
+            let Some(mut recovered) = fresh
+                .records
+                .into_iter()
+                .find(|candidate| candidate.id == record.id)
+            else {
+                self.record_error(&record);
+                continue;
+            };
+            let relocated_path = recovered.absolute_path.clone();
+            if matches!(self.process_record(&mut recovered)?, RecordFate::Processed) {
+                collected_ok.insert(record.id, relocated_path);
+            } else {
+                // The relocation stands — the identity was confirmed inside
+                // a collected root — but this pass sealed nothing for it.
+                // The next pass reads it there through its ordinary scan.
+                self.report.moved_away.push(MovedAwayNotice {
+                    session_prefix: id_prefix(&record.id),
+                    source_path_sha256: path_digest(&record.absolute_path),
+                    relocated_path_sha256: path_digest(&relocated_path),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether `source`'s family is a movable store — the registry declares at
+/// least one source root whose files the store moves between the roots of
+/// that family ([`scanner::SourceRootProbe::movable`], the fact the scan
+/// carries for exactly this question).
+fn movable_store_family(scan: &scanner::ScanReport, source: crate::models::HarnessSource) -> bool {
+    scan.probes
+        .iter()
+        .any(|probe| probe.id == source.short() && probe.source_roots.iter().any(|row| row.movable))
+}
+
+/// W1049: whether a cursor-resolution failure is the **vanished source**
+/// speaking — a `NotFound` in the error's chain while the record's own path
+/// is gone *now*. Both halves are required: the chain-half keeps a
+/// stage-side `NotFound` (a real failure of this pass's own bookkeeping)
+/// from being misread as a vanish when the source is merely gone, and the
+/// path-half keeps a `NotFound` from a source that came back (it was moved
+/// and moved home again inside the window — it exists, so its read failed
+/// for the reason it gave) out of the vanish classification. Everything
+/// else still aborts the pass.
+fn absent_source_failure(record: &SessionRecord, error: &anyhow::Error) -> bool {
+    record.sqlite_layout.is_none()
+        && !record.absolute_path.exists()
+        && error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+        })
 }
 
 #[derive(Debug)]
