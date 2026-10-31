@@ -126,6 +126,9 @@ fn unique_suffix() -> u64 {
 }
 
 struct Sandbox {
+    /// The fixture's own temp root, dropped — and so removed — with the
+    /// sandbox, so a run leaves no repository bytes behind anywhere.
+    root: tempfile::TempDir,
     dir: PathBuf,
     repo: PathBuf,
     key: PathBuf,
@@ -137,7 +140,11 @@ impl Sandbox {
     /// One session, one shard, pushed once: the parent snapshot every later
     /// state is measured against.
     fn new() -> Sandbox {
-        let dir = std::env::temp_dir().join(format!("w1050-read-race-{}", unique_suffix()));
+        let root = tempfile::Builder::new()
+            .prefix("w1050-read-race-")
+            .tempdir()
+            .expect("create the fixture's temp root");
+        let dir = root.path().to_path_buf();
         for sub in ["home", "config", "data", "state"] {
             fs::create_dir_all(dir.join(sub)).expect("create the sandbox homes");
         }
@@ -161,6 +168,7 @@ impl Sandbox {
             stage,
             sidelined: dir.join("sidelined"),
             dir,
+            root,
         };
         sandbox
             .push()
