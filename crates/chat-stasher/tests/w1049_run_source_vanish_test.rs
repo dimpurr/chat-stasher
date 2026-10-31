@@ -107,11 +107,22 @@ impl Fixture {
         // overrides — no `HOME` is rewritten, so no env lock is needed.
         let sessions_dir = root.join("codex-sessions");
         let archived_dir = root.join("codex-archived");
+        // One segment per `join`: a multi-segment literal such as
+        // `.join("2026/10/27")` is appended verbatim, so on Windows it
+        // leaves `/` inside a path whose natural spelling is `\` — while
+        // the scan's own walk (one `read_dir` entry at a time) writes the
+        // native separator. The vanished-path digests below compare those
+        // path *strings* byte for byte, so the fixture must name its
+        // paths the same way the walk will name them on every platform.
         let active = sessions_dir
-            .join("2026/10/27")
+            .join("2026")
+            .join("10")
+            .join("27")
             .join(format!("{STEM}.jsonl"));
         let archived = archived_dir
-            .join("2026/10/27")
+            .join("2026")
+            .join("10")
+            .join("27")
             .join(format!("{STEM}.jsonl"));
         for path in [&active, &archived] {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
