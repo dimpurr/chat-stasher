@@ -165,9 +165,9 @@ fn build_rig(min_free_gib: Option<f64>) -> Rig {
             // The engine fixtures pin a near-zero floor so the rounds answer
             // the question under test (copy, cut, heal) rather than this dev
             // machine's own occupancy: the ADR's default floor is a real
-            // max(10 GiB, 5% of capacity), which on a 95%-full build machine
-            // correctly refuses a first fill — the refusal has its own test
-            // below, and the default floor has its own unit test.
+            // max(10 GiB, min(5% of capacity, 20 GiB)), which on a 95%-full
+            // build machine can still refuse a first fill — the refusal has
+            // its own test below, and the default floor has its own unit test.
             min_free_gib: Some(min_free_gib.unwrap_or(0.0)),
         },
         snapshots,
@@ -2625,9 +2625,10 @@ fn mirror_sync_clones_a_repository_round_trip_over_the_cli() {
     let sb = tempfile::TempDir::new().unwrap();
     let sandbox = sb.path();
     cli_fixture_remote(sandbox);
-    // A pinned floor: the ADR's default (max(10 GiB, 5% of the volume)) is a
-    // real refusal on this 95%-full build machine, and the refusal has its
-    // own test — this one is about the copy.
+    // A pinned floor: the ADR's default (max(10 GiB, min(5% of the volume,
+    // 20 GiB))) would leave this round's refusal up to the build machine's
+    // current free space, and the refusal has its own test — this one is
+    // about the copy.
     write_config(
         sandbox,
         "enabled = true\nmirror_of = \"storagebox\"\nmin_free_gib = 1.0",
