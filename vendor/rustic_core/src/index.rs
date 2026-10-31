@@ -177,6 +177,7 @@ pub trait ReadIndex {
                     ErrorKind::Internal,
                     "Blob `{id}` with type `{type}` not found in index",
                 )
+                .attach_error_code("I001")
                 .attach_context("id", id.to_string())
                 .attach_context("type", tpe.to_string()))
             },

@@ -598,9 +598,9 @@ read the repository and key file you select in config or arguments
 🔴 **A key file is the only key to the repository it opens. Lose it and that
 repository can never be read again; there is no way to recover it.** The
 source's own words are "The masterkey is the repository's only key — losing it
-means the repo is unreadable forever" (`crates/chat-stasher/src/store.rs:2511-2513`).
+means the repo is unreadable forever" (`crates/chat-stasher/src/store.rs:2553-2555`).
 The key file is written with owner-only-readable permissions, on platforms that
-can express them (`crates/chat-stasher/src/store.rs:2553-2560`).
+can express them (`crates/chat-stasher/src/store.rs:2595-2602`).
 
 🔴 **And there is one key file per repository, not one per machine.** The local
 archive uses `rustic_key_file` (default `~/.local/share/chat-stasher/masterkey.json`);
@@ -647,7 +647,7 @@ that destination's own key — a second machine reads that copy with
 Skip this if your archive lives on a local path. It applies when `repo` names a
 remote backend such as `opendal:sftp` — the options you write under
 `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:168-171`, `:427-432`, `:2699-2704`; the config
+(`crates/chat-stasher/src/store.rs:168-171`, `:427-432`, `:2741-2746`; the config
 field itself is `crates/chat-stasher/src/config.rs:387-388`).
 
 **Why this step exists.** A remote destination is reached by running the system
@@ -737,7 +737,7 @@ warning is about.
 Skip this if your destination is a local path or an SSH host (§4.4). It applies
 when `repo` names an S3 backend, spelled `opendal:s3`. The options you write
 under `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:168-171`, `:2699-2704`; the field itself is
+(`crates/chat-stasher/src/store.rs:168-171`, `:2741-2746`; the field itself is
 `crates/chat-stasher/src/config.rs:387-388`), so the option names below belong
 to the backend, not to this tool.
 
@@ -1136,7 +1136,7 @@ confirmed in the code, not a temporary disclaimer.
   opens.** There is no recovery process, no recovery code, no customer service.
   There is one file per repository, so losing one loses that copy and no other;
   back up every one of them (section 4.3). The source's own
-  words are in section 4.3 (`crates/chat-stasher/src/store.rs:2511-2513`).
+  words are in section 4.3 (`crates/chat-stasher/src/store.rs:2553-2555`).
 
 - **History backfill takes days, not minutes, and never runs on a fixed beat.**
   Content is fetched under a **daily cap drawn once per local day**, and the cap

@@ -146,6 +146,7 @@ impl Tree {
                     ErrorKind::Internal,
                     "Tree ID `{tree_id}` not found in index",
                 )
+                .attach_error_code("I002")
                 .attach_context("tree_id", id.to_string())
             })?
             .read_data(be)?;
