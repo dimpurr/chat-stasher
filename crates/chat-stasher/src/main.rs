@@ -1236,10 +1236,10 @@ enum Command {
     ///
     /// Before a first fill starts it estimates whether the remaining
     /// download plus the free-disk floor (`[mirror] min_free_gib`, default
-    /// max(10 GiB, 5% of the volume's capacity)) fits the free space, and
-    /// refuses with both numbers when it does not. Mid-round, free space
-    /// falling below the floor pauses the copy instead of writing toward a
-    /// full disk.
+    /// max(10 GiB, min(5% of the volume's capacity, 20 GiB))) fits the
+    /// free space, and refuses with both numbers when it does not.
+    /// Mid-round, free space falling below the floor pauses the copy
+    /// instead of writing toward a full disk.
     ///
     /// Exit codes: 0 = the mirror holds everything the remote listed;
     /// 3 = the round stopped or refused and made no progress it did not
@@ -13451,8 +13451,9 @@ fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode
     // engine's pre-estimate share this value, and `min_free_bytes` measures
     // the nearest existing ancestor when the mirror directory does not
     // exist yet — so a first round's mid-copy floor is the documented
-    // max(10 GiB, 5% of capacity), not the flat 10 GiB the unmeasurable
-    // path used to fall back to while the pre-estimate promised more.
+    // max(10 GiB, min(5% of capacity, 20 GiB)), not the flat 10 GiB the
+    // unmeasurable path used to fall back to while the pre-estimate
+    // promised more.
     let min_free_bytes = settings.min_free_bytes(&mirror_root);
     let round_ends = chat_stasher::mirror::DeadlineAndDisk::new(
         Some(deadline),

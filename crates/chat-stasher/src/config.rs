@@ -2072,8 +2072,8 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # enabled = true
 # mirror_of = "storagebox"
 # Free-disk floor for the mirror's volume, in GiB. Default:
-# max(10, 5% of the volume's capacity). Below it the copy pauses rather
-# than writing toward a full disk.
+# max(10, min(5% of the volume's capacity, 20)). Below it the copy
+# pauses rather than writing toward a full disk.
 # min_free_gib = 10
 "#;
 
@@ -3940,9 +3940,9 @@ pub struct MirrorSectionConfig {
     pub mirror_of: Option<String>,
     /// Free-disk floor for the mirror's volume, in GiB (ADR-062 ruling 6).
     ///
-    /// Default: max(10, 5% of the volume's capacity). Below the floor the
-    /// copy pauses instead of writing on — never writing the disk full is
-    /// a rule, not a best effort.
+    /// Default: max(10, min(5% of the volume's capacity, 20)). Below the
+    /// floor the copy pauses instead of writing on — never writing the
+    /// disk full is a rule, not a best effort.
     pub min_free_gib: Option<f64>,
 }
 
