@@ -6,8 +6,10 @@
 //! recognized session without a record — the transcripts-only counterpart
 //! of the desktop store's live-row-without-transcript rule, a named gap
 //! that turns `collect` partial (exit 3), never a zero; the `history`
-//! input log is a declared machine log, never a session; and the read side
-//! reuses the W1046 reader with no harness-specific branch.
+//! input log is a declared machine log — measured at both levels of
+//! projects, never a session, and with its body capture gated pending the
+//! owner's ruling (W1047f High 1); and the read side reuses the W1046
+//! reader with no harness-specific branch.
 //!
 //! All fixtures are synthetic; no real conversation text, ids or names.
 
@@ -337,17 +339,21 @@ fn duplicate_copies_across_the_two_layouts_keep_the_newest_and_name_the_stale() 
     assert!(scan.archive_gaps().is_empty());
 }
 
-/// What the walk is not: the input log's own name inside projects/ is
-/// excluded by stem (the registry declares that file a machine log), the
-/// journals and caches the core writes beside transcripts are excluded by
-/// glob and name, and a subdirectory inside a project directory never
-/// holds transcripts.
+/// What the walk is not: the input log's own name inside projects/ — flat or
+/// under a project slug, both levels the CLI layout accepts — is excluded by
+/// stem (the registry declares that file a machine log), the journals and
+/// caches the core writes beside transcripts are excluded by glob and name,
+/// and a subdirectory inside a project directory never holds transcripts.
 #[test]
 fn the_input_log_journals_caches_and_subdirectories_are_never_sessions() {
     let fixture = CodeBuddyFixture::new();
     fixture.write_flat("synthetic-session-030", &format!("{USER_TURN}\n"));
 
     let input_log_twin = fixture.write_root_file("history.jsonl", "{}\n");
+    // The slug-level twin (W1047f Medium 3): the same stem one directory
+    // deeper, the exact file the registry note's "inside projects/" covers
+    // — its stem is never minted as the session id `history`.
+    let slug_history_twin = fixture.write_slug_file("synthetic-slug", "history.jsonl", "{}\n");
     let rollback = fixture.write_root_file(
         "state.file-rollback.ndjson",
         r#"{"ca":"synthetic","commitSeq":1}"#,
@@ -373,7 +379,13 @@ fn the_input_log_journals_caches_and_subdirectories_are_never_sessions() {
     fs::write(&nested, "{}\n").unwrap();
 
     let scan = fixture.scan(false);
-    for excluded in [&input_log_twin, &rollback, &render, &nested] {
+    for excluded in [
+        &input_log_twin,
+        &slug_history_twin,
+        &rollback,
+        &render,
+        &nested,
+    ] {
         assert!(
             scan.records
                 .iter()
@@ -381,6 +393,13 @@ fn the_input_log_journals_caches_and_subdirectories_are_never_sessions() {
             "{excluded:?} is not a session"
         );
     }
+    assert!(
+        !scan
+            .records
+            .iter()
+            .any(|record| record.id.ends_with(".history") || record.id.contains(".history.")),
+        "no `history` stem was ever minted into a session id, at either level"
+    );
     assert!(
         scan.records
             .iter()
@@ -393,11 +412,16 @@ fn the_input_log_journals_caches_and_subdirectories_are_never_sessions() {
     assert!(scan.archive_gaps().is_empty());
 }
 
-/// The `history` machine log the registry entry declares is collected by
-/// the machine-log machinery on its own namespace, never as a session and
-/// never inside the session counts.
+/// The `history` machine log the registry entry declares: the scan half
+/// measures it — presence, byte size, the `doctor` machine-log row — and
+/// never lets it near a session count; the collect half is what W1047f
+/// High 1 gates while the owner's ruling is open. Both branches of the
+/// flag assert, so the one-flag reversal cannot quietly strand the
+/// pin: sealing withheld means measured-and-sealed-nothing (never a log
+/// found empty), and an approving flip restores the full ADR-053 capture
+/// the claude-code log already gets.
 #[test]
-fn the_input_log_collects_as_a_machine_log_not_a_session() {
+fn the_input_log_is_measured_never_a_session_and_gated_pending_the_ruling() {
     let _lock = ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -436,23 +460,18 @@ fn the_input_log_collects_as_a_machine_log_not_a_session() {
         scan.machine_logs[0].absolute_path, log_path,
         "the log resolved through the sandbox home, not the real one"
     );
+    assert_eq!(
+        scan.machine_logs[0].byte_size,
+        history.len() as u64,
+        "presence and bytes are measured whatever the sealing gate does"
+    );
 
     let (stage, report) = fixture.collect_first(&scan);
     assert_eq!(report.machine_logs.len(), 1);
     let outcome = &report.machine_logs[0];
     assert_eq!(outcome.harness, "codebuddy");
     assert_eq!(outcome.log_id, "history");
-    assert_eq!(outcome.lines_written, 2);
-    assert_eq!(outcome.generations, 1);
     assert_eq!(report.changed_records, 1, "one session record");
-    let sealed = store::concat_shards_in_dir(&store::machine_log_shard_dir(
-        &stage,
-        MACHINE,
-        "codebuddy",
-        "history",
-    ))
-    .unwrap();
-    assert_eq!(String::from_utf8(sealed).unwrap(), history);
     let body = body_string(&stage, &session_id("synthetic-session-040"));
     assert!(body.contains("synthetic genuine question"));
     assert!(
@@ -460,12 +479,61 @@ fn the_input_log_collects_as_a_machine_log_not_a_session() {
         "the input log never reaches a session body"
     );
 
-    // A quiet pass: neither half has new bytes, so both count zero.
-    let scan = fixture.scan(true);
-    let report = fixture.collect(&scan, &stage);
-    assert_eq!(report.machine_logs[0].lines_written, 0);
-    assert_eq!(report.machine_logs[0].generations, 1);
-    assert_eq!(report.changed_records, 0);
+    let log_dir = store::machine_log_shard_dir(&stage, MACHINE, "codebuddy", "history");
+    if collect::CODEBUDDY_HISTORY_BODY_CAPTURE {
+        // The ruling-approved state: full ADR-053 capture, the W1047 shape.
+        assert!(!outcome.content_withheld);
+        assert_eq!(outcome.lines_written, 2);
+        assert_eq!(outcome.generations, 1);
+        let sealed = store::concat_shards_in_dir(&log_dir).unwrap();
+        assert_eq!(String::from_utf8(sealed).unwrap(), history);
+        // A quiet pass: neither half has new bytes, so both count zero.
+        let scan = fixture.scan(true);
+        let report = fixture.collect(&scan, &stage);
+        assert_eq!(report.machine_logs[0].lines_written, 0);
+        assert_eq!(report.machine_logs[0].generations, 1);
+        assert_eq!(report.changed_records, 0);
+    } else {
+        // The withheld state (W1047f High 1): measured, sealed nothing —
+        // a counted fact beside honest zeros, never a log found empty and
+        // never an obstacle to the session half.
+        assert!(
+            outcome.content_withheld,
+            "the one log whose body capture is withheld says so in the outcome"
+        );
+        assert_eq!(outcome.lines_written, 0);
+        assert_eq!(outcome.generations, 0);
+        assert_eq!(outcome.shard, None);
+        assert_eq!(
+            outcome.source_bytes,
+            history.len() as u64,
+            "the withheld outcome reports the scan's measurement"
+        );
+        let sealed_any = match fs::read_dir(&log_dir) {
+            Ok(entries) => entries.count() > 0,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => panic!("read the machine-log namespace: {error}"),
+        };
+        assert!(
+            !sealed_any,
+            "nothing from the input log's content was sealed anywhere"
+        );
+        // A second pass is identical: no cursor was written, so the
+        // withheld log neither accretes state nor changes its story.
+        let scan = fixture.scan(true);
+        let report = fixture.collect(&scan, &stage);
+        assert!(
+            report.machine_logs[0].content_withheld,
+            "a second withheld pass reads identically"
+        );
+        assert_eq!(report.machine_logs[0].lines_written, 0);
+        assert_eq!(report.machine_logs[0].generations, 0);
+        assert_eq!(report.changed_records, 0);
+        assert_eq!(
+            body_string(&stage, &session_id("synthetic-session-040")),
+            body
+        );
+    }
 }
 
 /// The read side: a collected body renders through the W1046 reader with
@@ -517,7 +585,14 @@ fn the_read_reuses_the_workbuddy_reader_with_no_codebuddy_branch() {
 }
 
 /// A projects root the walker could not list at all: unknown, not zero,
-/// and never a claimed count.
+/// and never a claimed count. The collect half (W1047f Medium 5) pins the
+/// chain the cross-family review described: a `record_count` of `None`
+/// never becomes an archive gap (`archive_gaps` maps the None count to
+/// prose), so the pass neither fails nor reports PARTIAL — the printed
+/// report's `scan partial` line is where the entry-level unknown lives
+/// (the unreadable-entry tally is what the report narrates), and the exit
+/// the ladder answers is 0. The exit ladder itself is pinned directly in
+/// the bin's own tests beside `cmd_collect`.
 #[test]
 #[cfg(unix)]
 fn an_unlistable_root_keeps_the_count_unknown_never_zero() {
@@ -538,6 +613,18 @@ fn an_unlistable_root_keeps_the_count_unknown_never_zero() {
         "the note says unknown rather than claiming emptiness"
     );
     assert_eq!(probe.unreadable_entry_count, Some(1));
+
+    let (_, report) = fixture.collect_first(&scan);
+    assert!(
+        report.archive_gaps.is_empty(),
+        "an entry-level unknown is prose, not an archive gap"
+    );
+    assert!(report.errors.is_empty());
+    assert!(report.codebuff_torn_skips.is_empty());
+    assert_eq!(
+        report.scanner_unreadable_entry_count, 1,
+        "the printed report's scan-partial line carries exactly this tally"
+    );
 
     fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
 }

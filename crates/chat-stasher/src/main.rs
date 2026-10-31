@@ -8512,10 +8512,21 @@ fn cmd_collect(
     };
 
     print_collect_report(&report, stage, &state_dir, &machine);
-    // Precedence is deliberate: a session we tried to read and failed on (1)
-    // outranks a harness this build cannot archive at all (3). The first says
-    // "this pass failed", the second says "this pass did not fail — and it did
-    // not finish either".
+    collect_exit_code(&report)
+}
+
+/// The `collect` exit ladder, split from `cmd_collect` (W1047f Medium 5) so
+/// the precedence itself is pinnable by a test. Precedence is deliberate: a
+/// session we tried to read and failed on (1) outranks a harness this build
+/// cannot archive at all (3). The first says "this pass failed", the second
+/// says "this pass did not fail — and it did not finish either". An
+/// entry-level unknown — a source whose recognized-session count could not be
+/// taken (`record_count = None`) — is in neither bucket: `archive_gaps`
+/// keeps it out (its `None` arm is prose, never a gap), the printed report
+/// narrates it ([`collect_narrates_unknown`]), and the exit code stays 0:
+/// the pass finished, said what it could not measure, and no absence it
+/// carries proves an attempt failed.
+fn collect_exit_code(report: &chat_stasher::collect::CollectReport) -> ExitCode {
     if !report.errors.is_empty() {
         return ExitCode::FAILURE;
     }
@@ -8554,6 +8565,28 @@ fn cmd_collect(
         return ExitCode::from(3);
     }
     ExitCode::SUCCESS
+}
+
+/// The prose marker the collect report appends to a machine-log line whose
+/// body capture is withheld pending an owner ruling (W1047f High 1). A
+/// counted fact next to counted zeros: the source exists and was measured by
+/// the scan, the pass sealed none of it, and nothing about that is a
+/// read failure or an absence.
+const MACHINE_LOG_CONTENT_WITHHELD: &str =
+    " content_withheld=true (measured, not sealed: body capture pending review)";
+
+/// The scan tallies that make the printed collect report carry an unknown:
+/// any one of them turns the report's own prose into the `scan partial` line
+/// below, and none of them enters the exit ladder — W1047f Medium 5 pins
+/// the two halves together. This is the fleet-wide convention that keeps
+/// "the count could not be taken" out of the success/failure axis: the report
+/// above already says the run is incomplete, so the exit code says only what
+/// the pass proved about what it did archive.
+fn collect_narrates_unknown(report: &chat_stasher::collect::CollectReport) -> bool {
+    report.scanner_unreadable_count > 0
+        || report.scanner_unreadable_unknown > 0
+        || report.scanner_unreadable_entry_count > 0
+        || report.scanner_unlooked_harnesses > 0
 }
 
 fn print_collect_report(
@@ -8620,11 +8653,7 @@ fn print_collect_report(
     // B82: `unlooked_harnesses` joins the same line rather than getting one of
     // its own — and, like the other two, only when it is non-zero, so a clean
     // pass prints exactly what it printed before.
-    if report.scanner_unreadable_count > 0
-        || report.scanner_unreadable_unknown > 0
-        || report.scanner_unreadable_entry_count > 0
-        || report.scanner_unlooked_harnesses > 0
-    {
+    if collect_narrates_unknown(report) {
         // B90: `unreadable_sessions` is a sum over the tallies that exist, so
         // when one of them could not be taken the sum is a floor, not a total.
         // The extra field says how many harnesses that applies to; it stays
@@ -8687,8 +8716,17 @@ fn print_collect_report(
     // into the session counters above. One line per declared log that exists on
     // this machine, so `run-once` narrates it the way it narrates a session.
     for outcome in &report.machine_logs {
+        // W1047f High 1: a log whose body capture is withheld says so on its
+        // own line, so a measured-but-not-sealed log can never read as one
+        // that was found empty. One constant so the sentence exists in one
+        // place only.
+        let withheld = if outcome.content_withheld {
+            MACHINE_LOG_CONTENT_WITHHELD
+        } else {
+            ""
+        };
         println!(
-            "[collect] machine log      : {} {} lines={} generations={} read_bytes={} prefix_bytes={} sealed={} reset={} unproven={}",
+            "[collect] machine log      : {} {} lines={} generations={} read_bytes={} prefix_bytes={} sealed={} reset={} unproven={}{}",
             outcome.harness,
             outcome.log_id,
             outcome.sealed_lines,
@@ -8698,6 +8736,7 @@ fn print_collect_report(
             outcome.shard.as_deref().unwrap_or("none"),
             outcome.reset,
             outcome.unproven.unwrap_or("none"),
+            withheld,
         );
     }
     if report.machine_logs_unlooked > 0
@@ -23328,5 +23367,78 @@ fn cli_command_on_worker_stack() -> clap::Command {
     match handle.join() {
         Ok(command) => command,
         Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// W1047f Medium 5: the entry-level unknown a source can hand `collect` — a
+/// source whose recognized-session count could not be taken at all
+/// (`record_count = None`, e.g. a CodeBuddy projects root that exists but
+/// cannot be listed) — is carried as prose and tallies in the printed report
+/// and in nothing else. The chain this pins end to end, from the decision
+/// functions' own inputs: `archive_gaps` keeps a `None` count out of the gap
+/// vector, the printed report narrates the unknown
+/// ([`collect_narrates_unknown`]), and the exit ladder answers 0 — the pass
+/// finished and no absence it carries proves an attempt failed. The
+/// integration half (a real unlistable CodeBuddy root producing exactly this
+/// report shape) lives beside the codebuddy scanner suite.
+#[cfg(test)]
+mod collect_exit_tests {
+    use super::*;
+
+    #[test]
+    fn an_entry_level_unknown_narrates_and_exits_zero() {
+        let report = chat_stasher::collect::CollectReport {
+            // The one field the scanner realistically fills for an
+            // unlistable root: the unreadable-entry tally; every read,
+            // gap and error field stays empty because nothing was
+            // recognized and nothing failed.
+            scanner_unreadable_entry_count: 1,
+            ..chat_stasher::collect::CollectReport::default()
+        };
+        assert!(
+            collect_narrates_unknown(&report),
+            "the printed report's scan-partial line carries the unknown"
+        );
+        assert!(report.archive_gaps.is_empty());
+        assert_eq!(
+            collect_exit_code(&report),
+            ExitCode::SUCCESS,
+            "no gap, no failure, no skip: the pass finished — the unknown rides the prose"
+        );
+    }
+
+    #[test]
+    fn the_exit_ladder_keeps_its_precedence_pinnable() {
+        // A recognized-but-unrecorded shortfall is 3; a session that was
+        // tried and failed outranks it as 1.
+        let partial = chat_stasher::collect::CollectReport {
+            archive_gaps: vec![chat_stasher::scanner::ArchiveGap {
+                harness_id: "codebuddy".to_string(),
+                display_name: "CodeBuddy".to_string(),
+                recognized_sessions: Some(2),
+                session_records: 1,
+            }],
+            ..chat_stasher::collect::CollectReport::default()
+        };
+        assert_eq!(collect_exit_code(&partial), ExitCode::from(3));
+        let failed = chat_stasher::collect::CollectReport {
+            errors: vec![chat_stasher::collect::CollectError {
+                session_prefix: "synthetic-prefix".to_string(),
+                source_path_sha256: "synthetic-digest".to_string(),
+            }],
+            ..partial.clone()
+        };
+        assert_eq!(
+            collect_exit_code(&failed),
+            ExitCode::FAILURE,
+            "a failed read outranks an archive gap"
+        );
+        // An entry-level unknown beside the gap changes neither arm's code.
+        let partial_with_unknown = chat_stasher::collect::CollectReport {
+            scanner_unreadable_entry_count: 1,
+            ..partial
+        };
+        assert_eq!(collect_exit_code(&partial_with_unknown), ExitCode::from(3));
+        assert!(collect_narrates_unknown(&partial_with_unknown));
     }
 }

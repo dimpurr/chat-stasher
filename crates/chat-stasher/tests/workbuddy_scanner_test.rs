@@ -292,6 +292,54 @@ fn a_deleted_row_exports_a_tombstone_record_without_its_payload() {
     assert_eq!(body_string(&stage, &id), body);
 }
 
+/// The `-1` sentinel (W1047f L5): the row doc records that the store
+/// soft-deletes with any non-null `deleted_at` — the column's cloud-sort
+/// index implies `-1` marks a deleted row — so a sentinel-shaped marker
+/// exports the same bare tombstone a timestamp-shaped one does, and never
+/// a live row that carries a negative deletion "time" as its moment.
+#[test]
+fn a_deleted_at_sentinel_of_minus_one_is_still_a_tombstone() {
+    let fixture = WorkBuddyFixture::new();
+    fixture.add_row_with("synthetic-session-005", Some(-1), None);
+
+    let scan = fixture.scan();
+    let id = session_id("synthetic-session-005");
+    let records: Vec<_> = scan
+        .records
+        .iter()
+        .filter(|record| record.id == id)
+        .collect();
+    assert_eq!(
+        records.len(),
+        1,
+        "the sentinel tombstone is the session's one record, and it is the row"
+    );
+    assert!(records[0].sqlite_layout.is_some());
+    let probe = scan.probes.iter().find(|p| p.id == "workbuddy").unwrap();
+    assert_eq!(probe.record_count, Some(1));
+    assert!(probe.note.contains("tombstoned=1"));
+    assert!(
+        scan.archive_gaps().is_empty(),
+        "a session the source deleted with a sentinel is recorded, not a gap"
+    );
+
+    let stage = fixture.collect_first(&scan);
+    let body = body_string(&stage, &id);
+    let tombstone: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+    assert_eq!(tombstone["schema"], "chat-stasher.workbuddy.session.v1");
+    assert_eq!(tombstone["session"], "synthetic-session-005");
+    assert_eq!(tombstone["deleted"], true);
+    assert_eq!(
+        tombstone.as_object().unwrap().len(),
+        3,
+        "the sentinel reads as a tombstone, not a row with a timestamp-shaped deletion time"
+    );
+    assert!(
+        !body.contains("synthetic store title"),
+        "a sentinel tombstone never archives the deleted session's metadata"
+    );
+}
+
 #[test]
 fn a_live_row_without_a_transcript_is_a_named_gap_and_never_a_zero() {
     let fixture = WorkBuddyFixture::new();

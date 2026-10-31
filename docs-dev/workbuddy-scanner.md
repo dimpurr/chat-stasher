@@ -36,7 +36,7 @@ surface ← project slug (cwd-derived, lowercase-drive + `\`→`-` rules per com
 
 ## 5. Drift detection (format changes with app upgrades)
 
-Per collect run: census event `type` values + top-level key sets against the §3 inventory; any new type/key or removed type ⇒ collect continues (unknown-leaning) + `known_issue` gains a dated line + 90-day clock restarts. WAL: open `mode=ro` (never `immutable=1` — forensics + hermes precedent: WAL holds live sessions); read the db trio as one unit.
+Per collect run: census event `type` values + top-level key sets against the §3 inventory; any new type/key or removed type ⇒ collect continues (unknown-leaning) + `known_issue` gains a dated line + 90-day clock restarts. WAL: open `mode=ro` (never `immutable=1` — forensics + hermes precedent: WAL holds live sessions); copy the db trio member by member and rely on the WAL's per-frame checksums/salts, not on the copy being one atomic snapshot of the store (W1047f L4 fixed the comment that over-promised this).
 
 ## 6. Effort vs hermes baseline (f984aa11 = 22 files / +632 −34)
 

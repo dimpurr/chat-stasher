@@ -3116,8 +3116,10 @@ fn cbc_transcript_walk(root: &Path, layout: CbcRootLayout) -> CbcTranscriptWalk 
     // On the CLI layout the accepted name itself is the record that a
     // session exists, so an unreadable one is a recognized session without
     // a record; on the desktop layout the store stays the source of
-    // recognized truth, so it is a plain unreadable entry.
-    let name_recognized = accept_flat;
+    // recognized truth, so it is a plain unreadable entry. The same flag is
+    // also where the CLI layout's `history` machine-log exclusion applies
+    // (`cbc_accept_file`), so it is named for the layout it carries.
+    let cli_layout = accept_flat;
     let mut walk = CbcTranscriptWalk {
         transcripts: BTreeMap::new(),
         flat_files: 0,
@@ -3151,7 +3153,7 @@ fn cbc_transcript_walk(root: &Path, layout: CbcRootLayout) -> CbcTranscriptWalk 
             // name — is measured and skipped.
             Ok(_) => {
                 if accept_flat {
-                    cbc_accept_file(&entry, &mut walk, true, name_recognized);
+                    cbc_accept_file(&entry, &mut walk, true, cli_layout);
                 }
                 continue;
             }
@@ -3187,7 +3189,7 @@ fn cbc_transcript_walk(root: &Path, layout: CbcRootLayout) -> CbcTranscriptWalk 
                     continue;
                 }
             }
-            cbc_accept_file(&file, &mut walk, false, name_recognized);
+            cbc_accept_file(&file, &mut walk, false, cli_layout);
         }
     }
     walk
@@ -3201,7 +3203,7 @@ fn cbc_accept_file(
     file: &fs::DirEntry,
     walk: &mut CbcTranscriptWalk,
     flat: bool,
-    name_recognized: bool,
+    cli_layout: bool,
 ) {
     let name = file.file_name().to_string_lossy().into_owned();
     // A rollback journal beside the transcripts: excluded by name.
@@ -3218,18 +3220,20 @@ fn cbc_accept_file(
     // The CLI's per-typed-line input log, which the registry entry
     // declares as a machine log: its lines are prompts the person typed on
     // this machine, not a conversation this walk can ever archive, and its
-    // stem is never a session id. The desktop entry measured no file of
-    // this name, so the slug-only walk keeps accepting it (nothing there
-    // writes one into `projects/`).
-    if flat && stem == "history" {
+    // stem is never a session id — at either level the CLI layout accepts
+    // files, flat and under a project slug, because both are inside
+    // `projects/` and the registry note says exactly that. The desktop
+    // entry measured no file of this name, so the slug-only walk keeps
+    // accepting it (nothing there writes one into `projects/`).
+    if cli_layout && stem == "history" {
         return;
     }
     let (byte_size, mtime) = match file.metadata() {
         Ok(metadata) => match (metadata.len(), metadata.modified()) {
             (byte_size, Ok(mtime)) => (byte_size, mtime),
-            _ => return cbc_unreadable_name(walk, name_recognized),
+            _ => return cbc_unreadable_name(walk, cli_layout),
         },
-        Err(_) => return cbc_unreadable_name(walk, name_recognized),
+        Err(_) => return cbc_unreadable_name(walk, cli_layout),
     };
     let keep_newest = match walk.transcripts.get(&stem) {
         Some(existing) => (existing.mtime, &existing.path) < (mtime, &file.path()),
@@ -3262,8 +3266,8 @@ fn cbc_accept_file(
 /// PARTIAL exit-3 gap; on the desktop layout an unreadable entry stays an
 /// entry, because the store beside the root — not the file name — carries
 /// the recognized truth there.
-fn cbc_unreadable_name(walk: &mut CbcTranscriptWalk, name_recognized: bool) {
-    if name_recognized {
+fn cbc_unreadable_name(walk: &mut CbcTranscriptWalk, cli_layout: bool) {
+    if cli_layout {
         walk.recognized_unrecorded += 1;
     } else {
         walk.unreadable_entries += 1;
@@ -3333,6 +3337,142 @@ fn widen_time_span(
         Some(latest) => latest.max(time),
         None => time,
     });
+}
+
+/// The counters one `fold_workbuddy_store_rows` pass produced. Every field
+/// is a counted recognition or a counted miss, never an inferred one.
+struct WorkBuddyRowFold {
+    /// Rows that exported a tombstone record.
+    tombstoned: u64,
+    /// Live rows this machine holds no transcript bytes for.
+    without_transcript: u64,
+    /// Rows the store cannot name; recognized, never guessed an id.
+    unnamed_rows: u64,
+    /// Rows whose time could not be taken at all — the row's own columns
+    /// unreadable as a time and the store file's own mtime absent — whether
+    /// live with a transcript or already deleted: recognized, never archived,
+    /// never stamped with a fake epoch, and never silently filed under the
+    /// live-rows-without-a-transcript count (W1047f L3).
+    untimeable_rows: u64,
+    /// The recognized set: distinct row ids plus transcript ids plus unnamed
+    /// rows, exactly what `record_count` earns as a measurement.
+    known_sessions: u64,
+    /// Transcripts whose id no store row carries; archived as orphans.
+    orphan_transcripts: u64,
+}
+
+/// The probe-note segment that names untimed rows. Kept beside the fold so
+/// the honest line is pinned with the bucket it reports (W1047f L3): a row
+/// dropped for lack of a readable time is its own named count, never a
+/// `without_transcript` mislabel — a deleted row with its transcript still on
+/// disk is not a live row without a local transcript, and the printed note
+/// must not say it is.
+fn workbuddy_untimed_rows_note(untimed: u64) -> String {
+    if untimed == 0 {
+        String::new()
+    } else {
+        format!(
+            "; {untimed} store row(s) without a readable time — recognized, not archived, not 0"
+        )
+    }
+}
+
+/// Fold the store's enumerated `sessions` rows against the transcript walk
+/// (W1046): push the row/tombstone and transcript records, count the orphans,
+/// and hand back the probe's tallies. Split from `probe_workbuddy_harness`
+/// (W1047f L3) for the same reason the codebuddy accounting is split from its
+/// probe: the arm a filesystem cannot be made to produce on POSIX — a row
+/// with neither a readable row time nor a readable store-file time, because a
+/// unix stat of a live sqlite file always supplies a modified time — is worth
+/// pinning directly against the fold's own accounting.
+#[allow(clippy::too_many_arguments)]
+fn fold_workbuddy_store_rows(
+    rows: Vec<crate::sqlite_probe::WorkBuddySessionRow>,
+    transcripts: &BTreeMap<String, CbcTranscript>,
+    db: &std::path::Path,
+    db_modified: Option<SystemTime>,
+    source: HarnessSource,
+    machine: &str,
+    records: &mut Vec<SessionRecord>,
+    earliest: &mut Option<SystemTime>,
+    latest: &mut Option<SystemTime>,
+) -> WorkBuddyRowFold {
+    let mut tombstoned = 0u64;
+    let mut without_transcript = 0u64;
+    let mut unnamed_rows = 0u64;
+    let mut untimeable_rows = 0u64;
+    let mut known_ids: BTreeSet<String> = BTreeSet::new();
+    for row in rows {
+        if row.id.is_empty() {
+            // A row the store cannot name is still a recognized
+            // session; it is never guessed an id from neighbours.
+            unnamed_rows += 1;
+            continue;
+        }
+        known_ids.insert(row.id.clone());
+        let transcript = transcripts.get(&row.id);
+        if !row.deleted && transcript.is_none() {
+            // The unknown arm: a live store row this machine
+            // holds no transcript bytes for. No record is
+            // emitted; the recognized-vs-archived difference is
+            // what `collect` turns into PARTIAL exit 3, never 0.
+            without_transcript += 1;
+            continue;
+        }
+        // An unrepresentable row time falls back to the store
+        // file's own mtime, the hermes precedent; a row with
+        // neither is not archived — a named gap, never a fake
+        // epoch, and never counted as a live row without a
+        // transcript (W1047f L3): it is the row's time that is
+        // missing, live or deleted, transcript or none.
+        let mtime = match row
+            .time_ms
+            .and_then(sqlite_millis_to_system_time)
+            .or(db_modified)
+        {
+            Some(mtime) => mtime,
+            None => {
+                untimeable_rows += 1;
+                continue;
+            }
+        };
+        records.push(SessionRecord {
+            id: cbc_session_id(source, machine, &row.id),
+            absolute_path: db.to_path_buf(),
+            byte_size: 0,
+            mtime,
+            source,
+            compressed: false,
+            sqlite_layout: Some(SqliteSessionLayout::WorkBuddy),
+            provenance: Default::default(),
+            session_dir: None,
+            movable_root: false,
+        });
+        if row.deleted {
+            tombstoned += 1;
+        }
+        if let Some(transcript) = transcript {
+            push_cbc_transcript_record(records, source, machine, &row.id, transcript);
+        }
+        widen_time_span(earliest, latest, mtime);
+    }
+    let mut orphan_transcripts = 0u64;
+    for (stem, transcript) in transcripts {
+        if !known_ids.contains(stem) {
+            known_ids.insert(stem.clone());
+            orphan_transcripts += 1;
+            push_cbc_transcript_record(records, source, machine, stem, transcript);
+        }
+    }
+    let known_sessions = (known_ids.len() as u64).saturating_add(unnamed_rows);
+    WorkBuddyRowFold {
+        tombstoned,
+        without_transcript,
+        unnamed_rows,
+        untimeable_rows,
+        known_sessions,
+        orphan_transcripts,
+    }
 }
 
 /// Probe the WorkBuddy dual store (W1046): sessions enumerate from the
@@ -3480,83 +3620,17 @@ fn probe_workbuddy_harness(
                     .and_then(|metadata| metadata.modified())
                     .ok();
                 let db_bytes = crate::sqlite_probe::sqlite_store_bytes(&db).ok();
-                let mut tombstoned = 0u64;
-                let mut without_transcript = 0u64;
-                let mut unnamed_rows = 0u64;
-                let mut known_ids: BTreeSet<String> = BTreeSet::new();
-                for row in rows {
-                    if row.id.is_empty() {
-                        // A row the store cannot name is still a recognized
-                        // session; it is never guessed an id from neighbours.
-                        unnamed_rows += 1;
-                        continue;
-                    }
-                    known_ids.insert(row.id.clone());
-                    let transcript = transcripts.get(&row.id);
-                    if !row.deleted && transcript.is_none() {
-                        // The unknown arm: a live store row this machine
-                        // holds no transcript bytes for. No record is
-                        // emitted; the recognized-vs-archived difference is
-                        // what `collect` turns into PARTIAL exit 3, never 0.
-                        without_transcript += 1;
-                        continue;
-                    }
-                    // An unrepresentable row time falls back to the store
-                    // file's own mtime, the hermes precedent; a row with
-                    // neither is not archived — a named gap, never a fake
-                    // epoch.
-                    let mtime = match row
-                        .time_ms
-                        .and_then(sqlite_millis_to_system_time)
-                        .or(db_modified)
-                    {
-                        Some(mtime) => mtime,
-                        None => {
-                            without_transcript += 1;
-                            continue;
-                        }
-                    };
-                    report.records.push(SessionRecord {
-                        id: cbc_session_id(source, machine, &row.id),
-                        absolute_path: db.clone(),
-                        byte_size: 0,
-                        mtime,
-                        source,
-                        compressed: false,
-                        sqlite_layout: Some(SqliteSessionLayout::WorkBuddy),
-                        provenance: Default::default(),
-                        session_dir: None,
-                        movable_root: false,
-                    });
-                    if row.deleted {
-                        tombstoned += 1;
-                    }
-                    if let Some(transcript) = transcript {
-                        push_cbc_transcript_record(
-                            &mut report.records,
-                            source,
-                            machine,
-                            &row.id,
-                            transcript,
-                        );
-                    }
-                    widen_time_span(&mut earliest, &mut latest, mtime);
-                }
-                let mut orphan_transcripts = 0u64;
-                for (stem, transcript) in &transcripts {
-                    if !known_ids.contains(stem) {
-                        known_ids.insert(stem.clone());
-                        orphan_transcripts += 1;
-                        push_cbc_transcript_record(
-                            &mut report.records,
-                            source,
-                            machine,
-                            stem,
-                            transcript,
-                        );
-                    }
-                }
-                let known_sessions = (known_ids.len() as u64).saturating_add(unnamed_rows);
+                let fold = fold_workbuddy_store_rows(
+                    rows,
+                    &transcripts,
+                    &db,
+                    db_modified,
+                    source,
+                    machine,
+                    &mut report.records,
+                    &mut earliest,
+                    &mut latest,
+                );
                 let walk_note = if walk_unreadable > 0 {
                     format!(
                         "; transcript walk incomplete: {walk_unreadable} unreadable directory entries"
@@ -3565,9 +3639,10 @@ fn probe_workbuddy_harness(
                     String::new()
                 };
                 base.state = ProbeState::Scanned;
-                base.record_count = Some(known_sessions);
-                base.candidate_count = Some(known_sessions);
-                base.unreadable_count = Some(without_transcript + unnamed_rows);
+                base.record_count = Some(fold.known_sessions);
+                base.candidate_count = Some(fold.known_sessions);
+                base.unreadable_count =
+                    Some(fold.without_transcript + fold.unnamed_rows + fold.untimeable_rows);
                 base.unreadable_entry_count = Some(walk_unreadable);
                 // reason: the sqlite byte tally already failed open once
                 // here; the transcripts' bytes are measured, the store's are
@@ -3581,7 +3656,11 @@ fn probe_workbuddy_harness(
                 base.latest = latest;
                 base.recognized_files = recognized_files;
                 base.note = format!(
-                    "{env_note}WorkBuddy dual store: {row_count} session row(s) in the sqlite store (tombstoned={tombstoned}); {transcript_count} transcript file(s) (stale duplicates skipped={stale_duplicates}, without a store row={orphan_transcripts}); live rows without a local transcript jsonl={without_transcript} — recognized, not archived, not 0{walk_note}"
+                    "{env_note}WorkBuddy dual store: {row_count} session row(s) in the sqlite store (tombstoned={tombstoned}); {transcript_count} transcript file(s) (stale duplicates skipped={stale_duplicates}, without a store row={orphan_transcripts}); live rows without a local transcript jsonl={without_transcript} — recognized, not archived, not 0{untimed_note}{walk_note}",
+                    tombstoned = fold.tombstoned,
+                    orphan_transcripts = fold.orphan_transcripts,
+                    without_transcript = fold.without_transcript,
+                    untimed_note = workbuddy_untimed_rows_note(fold.untimeable_rows),
                 );
                 base
             }
@@ -3610,8 +3689,9 @@ fn probe_workbuddy_harness(
 /// the report computes becomes an archive gap, so `collect` reports
 /// PARTIAL exit 3 — never 0. Directory entries that could not be typed or
 /// listed stay the same unreadable-entry tallies every scanner walk keeps,
-/// and the `history` input log (a machine log this registry entry
-/// declares) is excluded by name, never a session.
+/// and the `history` input log (a machine log this registry entry declares)
+/// is excluded by name at either level this layout accepts files, flat and
+/// under a project slug, never a session.
 fn probe_codebuddy_harness(
     mut base: HarnessProbe,
     confidence: Confidence,
@@ -9423,5 +9503,94 @@ mod tests {
         assert_eq!(gaps[0].harness_id, "codebuddy");
         assert_eq!(gaps[0].recognized_sessions, Some(2));
         assert_eq!(gaps[0].session_records, 1);
+    }
+
+    /// The W1047f L3 arm: a store row whose time cannot be taken at all —
+    /// the row's own columns do not read as a time, and the store file's own
+    /// mtime is absent too — is dropped without a fake epoch, and until this
+    /// fix it was dropped *into the `without_transcript` bucket*, which
+    /// printed it as a live row without a local transcript. A deleted row
+    /// whose transcript is still on disk, and a live row whose transcript is
+    /// still on disk, are never that, and the note must not say they are.
+    /// POSIX cannot stage this state through the filesystem (a stat of a
+    /// live sqlite file always supplies a modified time), so the fold is
+    /// pinned directly against fabricated rows — the same precedent as the
+    /// codebuddy accounting test above.
+    #[test]
+    fn a_row_without_any_readable_time_is_named_not_mislabeled() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("workbuddy.db");
+        let mut transcripts = std::collections::BTreeMap::new();
+        transcripts.insert(
+            "synthetic-session-801".to_string(),
+            CbcTranscript {
+                path: dir.path().join("synthetic-session-801.jsonl"),
+                mtime: SystemTime::UNIX_EPOCH,
+                byte_size: 64,
+            },
+        );
+        transcripts.insert(
+            "synthetic-session-802".to_string(),
+            CbcTranscript {
+                path: dir.path().join("synthetic-session-802.jsonl"),
+                mtime: SystemTime::UNIX_EPOCH,
+                byte_size: 64,
+            },
+        );
+        let rows = vec![
+            // The review's exact case: a tombstoned row whose transcript is
+            // still present, with no time any column can name.
+            crate::sqlite_probe::WorkBuddySessionRow {
+                id: "synthetic-session-801".to_string(),
+                deleted: true,
+                transport: None,
+                time_ms: None,
+            },
+            // The live twin of the same failure: transcript present, no
+            // readable time — no more a "live row without a transcript".
+            crate::sqlite_probe::WorkBuddySessionRow {
+                id: "synthetic-session-802".to_string(),
+                deleted: false,
+                transport: Some("local".to_string()),
+                time_ms: None,
+            },
+        ];
+        let mut records = Vec::new();
+        let mut earliest = None;
+        let mut latest = None;
+        let fold = fold_workbuddy_store_rows(
+            rows,
+            &transcripts,
+            &db,
+            // The store-file fallback is absent: the one input POSIX cannot
+            // take away from a real run, so the only honest states left to
+            // the fold are the row's own columns — both unreadable here.
+            None,
+            HarnessSource::WorkBuddy,
+            "synthetic-machine",
+            &mut records,
+            &mut earliest,
+            &mut latest,
+        );
+        assert_eq!(fold.untimeable_rows, 2, "both rows are the untimed arm");
+        assert_eq!(
+            fold.without_transcript, 0,
+            "neither row is a live row without a local transcript"
+        );
+        assert_eq!(fold.tombstoned, 0, "neither row reached the tombstone arm");
+        assert_eq!(fold.orphan_transcripts, 0);
+        assert_eq!(fold.known_sessions, 2, "both rows stay recognized");
+        assert!(
+            records.is_empty(),
+            "no record was emitted: never a fake epoch, neither the rows' \
+             virtual records nor their transcripts'"
+        );
+        // The named gap: the probe's note segment is the honest line, and it
+        // is neither the without-transcript count nor silence.
+        let note = workbuddy_untimed_rows_note(fold.untimeable_rows);
+        assert!(note
+            .contains("2 store row(s) without a readable time — recognized, not archived, not 0"));
+        assert!(!note.contains("without a local transcript"));
+        assert_eq!(workbuddy_untimed_rows_note(0), String::new());
     }
 }
