@@ -8760,6 +8760,21 @@ fn print_collect_report(
             );
         }
     }
+    // W1049: a mid-pass relocation the pass itself resolved, bounded like
+    // the errors above — prefixes and digests, never a path. Printed only
+    // when one exists, so an ordinary pass prints what it printed before.
+    if !report.moved_away.is_empty() {
+        println!(
+            "[collect] moved away     : {} source(s) vanished mid-pass and were found by session identity inside roots this pass already collects; collected at the new location this pass or the next, never counted toward collect_incomplete",
+            report.moved_away.len()
+        );
+        for notice in &report.moved_away {
+            println!(
+                "  ! session={} path_sha256={} relocated_path_sha256={} moved_away=true",
+                notice.session_prefix, notice.source_path_sha256, notice.relocated_path_sha256
+            );
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

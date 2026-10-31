@@ -933,6 +933,17 @@ pub struct SourceRootProbe {
     /// that holds nothing (a measured empty); `None` when no walk produced
     /// records for this root.
     pub total_bytes: Option<u64>,
+    /// W1049: this row's root belongs to a store that MOVES its files between
+    /// the roots of the same registry entry ([`RegistrySourceRoot::movable`];
+    /// W1007, ADR-059 draft D4). `true` on the movable root's own row and on
+    /// the primary's row of that family (the store's moves run in both
+    /// directions, so the movability is the pairing's fact, not one root's).
+    /// The collector reads this to decide which vanished sources may be
+    /// probed for a same-identity relocation: only a store that itself moves
+    /// files between already-collected roots licenses "same session id at a
+    /// new path is the same file", so every other family keeps today's
+    /// `source_not_collected` error unchanged.
+    pub movable: bool,
     pub note: String,
 }
 
@@ -2040,12 +2051,24 @@ fn probe_harness(
     // platform cell for its primary store (antigravity, codebuff) keeps the
     // all-roots shape it has always had — nothing below changes for it.
     let primary_probeable = h.paths.cell_for(platform).is_some();
+    // W1049: the family's movability for every row of this entry. A store
+    // that moves files between the roots of one registry entry moves them
+    // both ways — codex's `thread/archive` into `codex-archived` and its
+    // `thread/unarchive` back — so the primary row carries the same fact
+    // any declared movable root does.
+    let family_movable = h.source_roots.iter().any(|root| root.movable);
     if primary_probeable {
         let mut one = h.clone();
         one.source_roots.clear();
         let mut local = ScanReport::default();
         let probe = probe_harness_single(config, &one, platform, machine, &mut local);
-        source_rows.push(source_root_row(h.id.clone(), true, &probe, &local));
+        source_rows.push(source_root_row(
+            h.id.clone(),
+            true,
+            family_movable,
+            &probe,
+            &local,
+        ));
         total.records.extend(local.records);
         total.missing_roots.extend(local.missing_roots);
         total.indeterminate_roots.extend(local.indeterminate_roots);
@@ -2150,7 +2173,13 @@ fn probe_harness(
         let mut local = ScanReport::default();
         let probe = probe_harness_single(&root_config, &one, platform, machine, &mut local);
         if primary_probeable {
-            source_rows.push(source_root_row(root.id.clone(), false, &probe, &local));
+            source_rows.push(source_root_row(
+                root.id.clone(),
+                false,
+                root.movable,
+                &probe,
+                &local,
+            ));
         }
         for record in &mut local.records {
             // The cell's declared observation joins whatever the record's own
@@ -2386,6 +2415,7 @@ fn probe_harness(
 fn source_root_row(
     id: String,
     primary: bool,
+    movable: bool,
     probe: &HarnessProbe,
     local: &ScanReport,
 ) -> SourceRootProbe {
@@ -2402,6 +2432,7 @@ fn source_root_row(
     SourceRootProbe {
         id,
         primary,
+        movable,
         state: probe.state,
         root: probe.root.clone(),
         record_count: probe.record_count,
