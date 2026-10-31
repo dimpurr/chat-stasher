@@ -4666,12 +4666,22 @@ fn rebuild_activity_index_from_archive(
     // once the walk is over. The walk keeps going so the message names the
     // first failure rather than the last.
     let mut write_error: Option<String> = None;
+    // The archive walk may re-run whole once on a READ-RACE index-miss (the
+    // reloaded open cannot resume the raced attempt), and with it this
+    // callback for sessions the raced attempt already delivered. The derived
+    // index is one row per session and the counters below count sessions, so
+    // a re-delivered session is skipped: re-writing its row would publish the
+    // session twice and re-counting it would report one session as two.
+    let mut sessions_answered: BTreeSet<String> = BTreeSet::new();
     let walk = store.for_each_archived_session_shards_with_policy(
         mk,
         machine,
         store::DuplicateShardPolicy::from_env(),
         |session_id, shard_bodies| {
             if write_error.is_some() {
+                return Ok(());
+            }
+            if !sessions_answered.insert(session_id.to_string()) {
                 return Ok(());
             }
             let harness = sidecar::infer_harness(session_id).unwrap_or_else(|| {

@@ -608,7 +608,7 @@ each declared destination has its own, defaulting to
 `~/.local/share/chat-stasher/masterkey-<destination>.json` and settable with that
 destination's `key_file` (`crates/chat-stasher/src/config.rs:373-402`, and the
 per-destination default that synthesises that path rather than reusing the local
-one, `crates/chat-stasher/src/main.rs:10571-10574`). A second
+one, `crates/chat-stasher/src/main.rs:10581-10584`). A second
 machine reads a destination with **that destination's** key and does not use the
 local one at all — so a backup that copies only the local key cannot read the
 off-site copies. Measured on a real second machine: restoring only the local key
@@ -659,11 +659,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:7371-7386`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:7381-7396`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:7376-7401`). An
+it does anything else (`crates/chat-stasher/src/main.rs:7386-7411`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -695,10 +695,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:7385-7397`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:7395-7407`;
 `crates/chat-stasher/src/remote_err.rs:597-630`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:7376-7384`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:7386-7394`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -963,7 +963,7 @@ and the refusal points at the manual Task Scheduler steps in
 `docs/schedule.md`, which carry a copy-pasteable `schtasks /Create` command and
 the logon caveat that keeps a per-user task from looking scheduled while it
 sleeps, and cites the refusal and its exit code where the build decides them
-(`crates/chat-stasher/src/main.rs:9728-9758`).
+(`crates/chat-stasher/src/main.rs:9738-9768`).
 
 `run-once` is one complete collect-and-push pass; it exits when done, and
 repeated invocation is safe (`crates/chat-stasher/src/main.rs:316-357`).

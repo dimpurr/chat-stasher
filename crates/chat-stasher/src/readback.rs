@@ -422,6 +422,20 @@ fn index_race_wait() {
     }
 }
 
+/// Whether the one re-read may be announced as a success: only an attempt
+/// whose own raced flag is `false`. The report-shaped readers answer `Ok`
+/// with a warning-plus-incomplete-report when they stay raced, and those
+/// must keep speaking their own unknown vocabulary — a success note over a
+/// still-warning report would tell the operator "succeeded" on a read
+/// that stayed unknown.
+///
+/// Unit-pinned next to the retry arithmetic: the flag-true → flag-true
+/// case returns the second report, and this predicate is what keeps its
+/// note silent.
+fn reread_resolved_without_miss(second_raced: bool) -> bool {
+    !second_raced
+}
+
 /// The one re-read of the READ-RACE gate over an attempt that re-opens the
 /// repository itself.
 ///
@@ -442,6 +456,13 @@ fn index_race_wait() {
 ///   is the unknown the caller already records (the report's warnings, or
 ///   the `Err` carrying the walk's own did-not-finish wording).
 ///
+/// A `visit`-shaped attempt re-runs *whole* on that one retry: the
+/// callback runs again for sessions the raced attempt already delivered,
+/// because the re-loaded open cannot resume a half-finished walk. The one
+/// wrapper with such an attempt
+/// ([`BackupStore::for_each_archived_session_shards_with_policy`]) carries
+/// that contract for its callers in its own doc.
+///
 /// The only mutation on the outcome is one context line on a *classified*
 /// second failure, stating that the reload already happened — so an
 /// operator reading a still-racing read knows the product gate spent its
@@ -459,14 +480,23 @@ pub(crate) fn reread_once_on_index_race<T>(
     }
     eprintln!(
         "[read-back] a snapshot tree this read resolves was not in the index this open \
-         loaded — this happens when a read races a push writing to the same archive; \
-         waiting {} s, then reloading the index and reading again once",
+         loaded — the usual cause is a read racing a push writing to the same archive, \
+         and an archive that genuinely lacks that tree in its index reads the same \
+         from here; waiting {} s, then reloading the index and reading again once",
         bound_ms().unwrap_or(INDEX_RACE_RELOAD_WAIT_SECONDS * 1000) / 1000
     );
     index_race_wait();
     match attempt() {
-        Ok((value, _)) => {
-            eprintln!("[read-back] the re-read after the index reload succeeded");
+        Ok((value, second_raced)) => {
+            // The note is earned by this second attempt alone: a
+            // report-shaped reader that stays flagged answers `Ok` with a
+            // warning-laden report, and a success line over it would
+            // contradict the warning it still prints. The gate stays
+            // silent there, and the report's own unknown vocabulary keeps
+            // the last word.
+            if reread_resolved_without_miss(second_raced) {
+                eprintln!("[read-back] the re-read after the index reload succeeded");
+            }
             Ok(value)
         }
         Err(second) => {
@@ -1181,6 +1211,11 @@ impl BackupStore {
     /// complete answer (invariant 2 — exit 3, not a short count). The same
     /// holds when the machine has no snapshots at all: "this repository does
     /// not hold that machine" is an error, not an empty result.
+    ///
+    /// `visit` may run more than once for a session the raced attempt
+    /// already delivered — the READ-RACE gate re-runs the whole walk once;
+    /// see [`Self::for_each_archived_session_shards_with_policy`] for that
+    /// contract.
     pub fn for_each_archived_session<F>(
         &self,
         mk: &MasterKey,
@@ -1204,7 +1239,10 @@ impl BackupStore {
 
     /// [`Self::for_each_archived_session`] with the shard-joining policy named
     /// directly, so a caller (or a test) can decide it without a process-wide
-    /// environment change.
+    /// environment change. `visit` may run more than once for a session the
+    /// raced attempt already delivered — the READ-RACE gate re-runs the whole
+    /// walk once; see [`Self::for_each_archived_session_shards_with_policy`]
+    /// for that contract.
     pub fn for_each_archived_session_with_policy<F>(
         &self,
         mk: &MasterKey,
@@ -1232,6 +1270,17 @@ impl BackupStore {
     /// Shard-preserving archive walk for consumers that need provenance body
     /// bindings. The callback receives shards with optional parsed sequence
     /// numbers, after applying the same duplicate policy as the concatenated reader.
+    ///
+    /// The walk runs behind the READ-RACE gate
+    /// ([`reread_once_on_index_race`]): on a classified index-miss it re-runs
+    /// the whole walk once against the reloaded open, because the reloaded
+    /// open has no way to resume the raced attempt's half-finished walk —
+    /// so `visit` **may run more than once for a session the raced attempt
+    /// already delivered**. The returned [`CumulativeSessionRead`] counts
+    /// one attempt (the last, which is the one that stands), but any
+    /// caller-side counting of its own callback must tolerate the
+    /// re-visit or keep a one-per-session guard, as the two in-tree
+    /// callers do: a session the gate re-hands is one session, not two.
     pub fn for_each_archived_session_shards_with_policy<F>(
         &self,
         mk: &MasterKey,
@@ -1725,8 +1774,28 @@ mod tests {
     // reader raises; the park-and-recover behaviour over a real repository is
     // pinned by `tests/w1050_read_race_test.rs`, which drives the CLI. The
     // wait bound is process env for the tests only, so the retry test sets and
-    // clears it itself; nothing else in this binary can walk far enough to
-    // classify an index-miss, so no other test can be parked by it.
+    // clears it itself — under the serial guard below, because `std::env` is
+    // one store per test process and the other threads of this binary's test
+    // run read it too.
+
+    /// Serializes every unit test that touches the READ-RACE gate's test
+    /// env (the wait bound and the rendezvous dir): they live in
+    /// `std::env`, which is shared by every test thread of this binary, so
+    /// two tests mutating/reading them concurrently would see half of one
+    /// another's mutations. Today that is the retry-arithmetic test below;
+    /// a future lib test that drives a gated reader or mutates either
+    /// hook takes this lock first.
+    static READ_RACE_TEST_ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Removes the wait-bound test env when dropped, so a failed assert
+    /// inside the guarded test cannot leave the narrowed bound set for
+    /// whatever runs afterwards in this process.
+    struct UnsetWaitEnvOnDrop(&'static str);
+    impl Drop for UnsetWaitEnvOnDrop {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
 
     /// An index-miss exactly as the pinned reader's `tree.rs` raises it —
     /// the same construction, the same code attachment.
@@ -1790,7 +1859,11 @@ mod tests {
 
     #[test]
     fn readback_index_race_gate_retries_exactly_once() {
+        let _guard = READ_RACE_TEST_ENV_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::env::set_var(TEST_RACE_WAIT_MS_ENV, "1");
+        let _unset_wait_env = UnsetWaitEnvOnDrop(TEST_RACE_WAIT_MS_ENV);
 
         // Classified first attempt, recovered second: the value of the second
         // attempt is returned, and exactly two attempts ran.
@@ -1861,6 +1934,22 @@ mod tests {
             "a still-raced report is returned, not looped on"
         );
         assert_eq!(attempts, 2);
+        // The success note is earned by the re-read's own outcome, not by
+        // the gate having run: the second report above still carries its
+        // not-in-index warnings, so announcing a success over it would tell
+        // the operator "succeeded" on a read that stayed unknown. Only a
+        // re-read that answered without another miss — the strict readers,
+        // or a recovered cumulative report — may carry the note.
+        assert!(
+            reread_resolved_without_miss(false),
+            "a re-read that answered without another miss is the shape the \
+             success note exists for"
+        );
+        assert!(
+            !reread_resolved_without_miss(true),
+            "a re-read that still recorded a not-in-index condition must not be \
+             announced as a success — the report it answers with still warns"
+        );
 
         // A clean first attempt costs nothing.
         let mut attempts = 0;
@@ -1886,6 +1975,8 @@ mod tests {
         );
         assert_eq!(attempts, 2);
 
-        std::env::remove_var(TEST_RACE_WAIT_MS_ENV);
+        // The wait-bound env is cleared by `_unset_wait_env`'s Drop, which
+        // also runs when an assert above fails — the guarded mutation cannot
+        // outlive this test.
     }
 }

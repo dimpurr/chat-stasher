@@ -115,6 +115,37 @@ fn collect_relative(root: &Path, dir: &Path, out: &mut BTreeSet<String>) {
     }
 }
 
+/// Whether a repository-relative path names a file under the given top-level
+/// directory, compared by path component: `relative_files` renders its paths
+/// with the platform's own separator, so a literal `"snapshots/"` prefix
+/// only matches on a platform that spells separators that way — the
+/// Windows-CI red this replaces, where the parent snapshot was present and
+/// spelled `snapshots\…` and the precondition failed anyway. Splitting on
+/// both separator spellings matches the repository walk's own
+/// separator-agnostic view of the tree, while the comparison stays a whole
+/// top component and never a byte prefix (`snapshots-x/<id>` is still no
+/// snapshot).
+fn in_top_dir(relative: &str, top: &str) -> bool {
+    let mut segments = relative.split(['/', '\\']);
+    segments.next() == Some(top) && segments.next().is_some()
+}
+
+/// Pins the fixture's top-directory checks to both separator spellings, so
+/// the parent-snapshot precondition it guards holds on every platform: the
+/// repository walk itself is separator-agnostic, and only the fixture's
+/// rendering differs.
+#[test]
+fn relative_top_dir_checks_match_both_separator_spellings() {
+    assert!(in_top_dir("snapshots/13579bdf", "snapshots"));
+    assert!(in_top_dir("snapshots\\13579bdf", "snapshots"));
+    assert!(in_top_dir("data/13/1359", "data"));
+    assert!(in_top_dir("data\\13\\1359", "data"));
+    assert!(in_top_dir("index/13579bdf", "index"));
+    assert!(in_top_dir("index\\13579bdf", "index"));
+    assert!(!in_top_dir("index-files/13579bdf", "index"));
+    assert!(!in_top_dir("index-files\\13579bdf", "index"));
+}
+
 /// A suffix that keeps parallel fixtures out of one another's temp roots.
 fn unique_suffix() -> u64 {
     SystemTime::now()
@@ -236,7 +267,7 @@ impl Sandbox {
     fn push_race_lands(&self, who: &str) {
         let before = relative_files(&self.repo);
         assert!(
-            before.iter().any(|path| path.starts_with("snapshots/")),
+            before.iter().any(|path| in_top_dir(path, "snapshots")),
             "{who}: the fixture must have a parent snapshot before the second push"
         );
         let session_dir = self
@@ -257,16 +288,13 @@ impl Sandbox {
         let added: Vec<String> = after.difference(&before).cloned().collect();
         let snapshot_files = added
             .iter()
-            .filter(|path| path.starts_with("snapshots/"))
+            .filter(|path| in_top_dir(path, "snapshots"))
             .count();
         let index_files = added
             .iter()
-            .filter(|path| path.starts_with("index/"))
+            .filter(|path| in_top_dir(path, "index"))
             .count();
-        let pack_files = added
-            .iter()
-            .filter(|path| path.starts_with("data/"))
-            .count();
+        let pack_files = added.iter().filter(|path| in_top_dir(path, "data")).count();
         assert_eq!(
             snapshot_files, 1,
             "{who}: the second push adds exactly one snapshot file"
@@ -281,7 +309,7 @@ impl Sandbox {
              already-present bytes are the parent's whole first shard"
         );
         for path in &added {
-            if path.starts_with("snapshots/") {
+            if in_top_dir(path, "snapshots") {
                 continue;
             }
             let source = self.repo.join(path);
@@ -389,6 +417,11 @@ fn read_race_reload_recovers_and_keeps_unknown() {
         stderr.contains("[read-back]"),
         "the gate must announce itself and its bounded wait on stderr, or \
          operators cannot tell a race from a stall:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("the re-read after the index reload succeeded"),
+        "the recovery must come from the gate's own re-read — the one shape \
+         that earns the success note:\n{stderr}"
     );
     assert!(
         stdout.contains("000001.jsonl") && stdout.contains("000002.jsonl"),
