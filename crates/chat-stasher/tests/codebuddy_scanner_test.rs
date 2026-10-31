@@ -414,14 +414,16 @@ fn the_input_log_journals_caches_and_subdirectories_are_never_sessions() {
 
 /// The `history` machine log the registry entry declares: the scan half
 /// measures it — presence, byte size, the `doctor` machine-log row — and
-/// never lets it near a session count; the collect half is what W1047f
-/// High 1 gates while the owner's ruling is open. Both branches of the
-/// flag assert, so the one-flag reversal cannot quietly strand the
-/// pin: sealing withheld means measured-and-sealed-nothing (never a log
-/// found empty), and an approving flip restores the full ADR-053 capture
-/// the claude-code log already gets.
+/// never lets it near a session count; the collect half is what the
+/// W1047f gate holds, and the owner's ruling (W1047f2) approved the
+/// capture, so the flag is `true` and the ruling-approved branch is the
+/// branch this build takes. Both branches of the flag assert, so neither
+/// state of the one-flag reversal can quietly strand the pin: sealing
+/// withheld means measured-and-sealed-nothing (never a log found
+/// empty), and the ruling-approved state is the full ADR-053 capture the
+/// claude-code log already gets.
 #[test]
-fn the_input_log_is_measured_never_a_session_and_gated_pending_the_ruling() {
+fn the_input_log_is_measured_never_a_session_and_seal_gated_by_the_ruling() {
     let _lock = ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -485,6 +487,10 @@ fn the_input_log_is_measured_never_a_session_and_gated_pending_the_ruling() {
         assert!(!outcome.content_withheld);
         assert_eq!(outcome.lines_written, 2);
         assert_eq!(outcome.generations, 1);
+        assert!(
+            outcome.sealed_lines > 0,
+            "the ruling-approved flip seals the log's lines, not zeros"
+        );
         let sealed = store::concat_shards_in_dir(&log_dir).unwrap();
         assert_eq!(String::from_utf8(sealed).unwrap(), history);
         // A quiet pass: neither half has new bytes, so both count zero.

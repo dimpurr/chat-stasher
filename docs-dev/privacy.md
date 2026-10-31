@@ -75,18 +75,21 @@ that document is the honest one.
   window. See [Known weaknesses](#known-weaknesses). Separately, `export --out`
   writes archived sessions back out decrypted into a directory you name; that
   copy is yours to delete and nothing of ours moves it on (section 9).
-- **The CLI also reads the harnesses' own prompt-history files.** Claude Code keeps
-  `~/.claude/history.jsonl` (relocated by `CLAUDE_CONFIG_DIR`) — what you typed
-  on this machine, with a timestamp, the project path and any pasted text — and
-  `collect` seals it into the same encrypted archive as a session, under
-  `machine-logs/<machine>/claude-code/history/`. It is captured whole
-  (slash-command lines such as `/usage` included) and it is **body tier**: your
-  words, not metadata. It is never counted as a session and never enters the
-  session counts a `status` line or a coverage page prints. A second such file
-  — the CodeBuddy CLI's `~/.codebuddy/history.jsonl` — is declared the same
-  way and measured by the scanner, but this build seals none of its content
-  into the archive yet: that capture is pending review (see section 3, which
-  also names these two as the complete set).
+- **The CLI also reads the harnesses' own prompt-history files — one per
+  harness.** Claude Code keeps `~/.claude/history.jsonl` (relocated by
+  `CLAUDE_CONFIG_DIR`) and the CodeBuddy CLI keeps
+  `~/.codebuddy/history.jsonl` — what you typed on this machine, with a
+  timestamp, the project path and any pasted text — and `collect` seals
+  both into the same encrypted archive as a session, under
+  `machine-logs/<machine>/claude-code/history/` and
+  `machine-logs/<machine>/codebuddy/history/`. Both are captured whole
+  (slash-command lines such as `/usage` included) and both are **body
+  tier**: your words, not metadata. Neither is ever counted as a session
+  and neither ever enters the session counts a `status` line or a
+  coverage page prints. These two are the complete set; the CodeBuddy
+  one's capture was ruled on and approved (2026-10-31) after a
+  re-verification that it is the same kind of source the Claude Code one
+  is (see section 3).
 - **Contact: `work@team.iopho.com`.**
 
 ## Contents
@@ -593,12 +596,13 @@ paths and ids above.
 ### The harnesses' own prompt-history files (`machine-logs/`)
 
 Besides session transcripts, `collect` reads the prompt-history files that
-harness CLIs keep for themselves. Two exist in the registry, and this is the
-complete set — no other harness's own log is declared on any platform.
+harness CLIs keep for themselves. Two exist in the registry, one per
+harness, and this is the complete set — no other harness's own log is
+declared on any platform.
 
 - **Claude Code's `~/.claude/history.jsonl`** (relocated by `CLAUDE_CONFIG_DIR`,
   which the official `.claude`-directory documentation says moves every
-  `~/.claude` path) is the sealed one. It is declared in the path registry as a
+  `~/.claude` path) is declared in the path registry as a
   **machine log** — a per-machine input log, not a session: it has no native
   session id, no session id is minted for it, and it is stored in a namespace of
   its own, `<stage>/machine-logs/<machine>/<harness>/<log-id>/`, beside
@@ -608,29 +612,32 @@ complete set — no other harness's own log is declared on any platform.
   `crates/chat-stasher/src/store.rs`).
 - **The CodeBuddy CLI's `~/.codebuddy/history.jsonl`** is declared by its
   registry entry as the same kind of machine log, with the same role — what
-  you typed on that machine — and this build stops at measuring it: the scan
-  reports its presence and size as its own machine-log row, and **no content
-  line of it is read into or sealed into the archive**. That capture is held
-  back until its review is settled; it is one flag in
-  `crates/chat-stasher/src/collect.rs`, and an approving review flips the
-  entry to the same sealed collection the Claude Code log gets — raw and
-  append-only under `machine-logs/<machine>/codebuddy/history/`, on the next
-  pass, with no cursor having been written while the flag held it back.
+  you typed on that machine — and gets the same collection: measured by the
+  scan and reported by `doctor` as its own machine-log row, then sealed
+  raw and append-only under `machine-logs/<machine>/codebuddy/history/`,
+  in a namespace of its own beside `sessions/` and `ext-status/`, never
+  inside either and never under a session id. W1047f held this capture
+  back for an owner ruling; the ruling approved it (2026-10-31,
+  W1047f2) after re-verifying the file is the same kind of source the
+  Claude Code log is — the same one-object-per-typed-prompt JSONL shape
+  and the same field names, one key (`sessionId`) short of the Claude
+  Code file's five.
 
-**What the sealed one holds, and what tier it is.** One JSON object per line
-you typed, with the text you typed, any pasted content, a millisecond
-timestamp, the working directory and the session id. That is **your prose**:
-the capture is body tier, exactly like a session transcript. It is sealed into
-the encrypted archive like any other capture, and its plaintext copies are the
-same ones disclosed above — the local stage, a triggered `export --out`, and
-the destination-scoped index cache — plus the harness's own file, which we only
-read (`crates/chat-stasher/src/collect.rs`). Nothing is filtered out at
-capture, so the slash-command lines (the `/usage` a usage poller wrote 10,000+
-times on one machine) are sealed too; hiding them is a read-side default, and
-the raw copy keeps them (`crates/chat-stasher/src/collect.rs`). The CodeBuddy
-log's lines hold the same kind of prose, which is exactly why this build seals
-none of them yet; if the review approves, what is said about the sealed one in
-this section applies to it too.
+**What the sealed ones hold, and what tier they are.** One JSON object per
+line you typed, with the text you typed, any pasted content, a millisecond
+timestamp, the working directory and — in the Claude Code file only — the
+session id the CLI attributed the prompt to; the CodeBuddy file carries
+the same four keys and no session id at all. That is **your prose**: the
+captures are body tier, exactly like a session transcript. Both are
+sealed into the encrypted archive like any other capture, and their
+plaintext copies are the same ones disclosed above — the local stage, a
+triggered `export --out`, and the destination-scoped index cache — plus
+each harness's own file, which we only read
+(`crates/chat-stasher/src/collect.rs`). Nothing is filtered out at
+capture, so the slash-command lines (the `/usage` a usage poller wrote
+10,000+ times on one machine) are sealed too; hiding them is a read-side
+default, and the raw copy keeps them
+(`crates/chat-stasher/src/collect.rs`).
 
 **What is *not* in the metadata-only tier.** No prompt text and no pasted text
 reach an activity-index row, an `ext-status` file, the snapshot cache, stage

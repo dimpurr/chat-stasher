@@ -8568,10 +8568,10 @@ fn collect_exit_code(report: &chat_stasher::collect::CollectReport) -> ExitCode 
 }
 
 /// The prose marker the collect report appends to a machine-log line whose
-/// body capture is withheld pending an owner ruling (W1047f High 1). A
-/// counted fact next to counted zeros: the source exists and was measured by
-/// the scan, the pass sealed none of it, and nothing about that is a
-/// read failure or an absence.
+/// body capture a build flag holds back (W1047f High 1). A counted fact
+/// beside counted zeros: the source exists and was measured by the scan,
+/// the pass sealed none of it, and nothing about that is a read failure or
+/// an absence. No declared log is held back in this build (W1047f2).
 const MACHINE_LOG_CONTENT_WITHHELD: &str =
     " content_withheld=true (measured, not sealed: body capture pending review)";
 
