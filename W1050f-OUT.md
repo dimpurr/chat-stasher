@@ -1,5 +1,5 @@
-DONE 0713471b9e05ac64d28f01f0e032681a666cd48a (Condition the read-race re-read claims on what the re-read found)
-Branch `w1050-read-race` (one fix commit, replayed at 0713471b by the 2026-10-31 deputy rebase onto 89af630d — was eaa5bdbe on tip fcf2afd7 over base 7cbeab1c; no new branch). Revision verdict FIX-FIRST, all four findings (2 Medium + 2 Low) fixed plus the windows-only CI red; full text below. Deputy round state: rebased, recordings regenerated, force-pushed, CI dispatched; windows green to be read from the dispatched run.
+DONE 272e6f583c6094e1bc2bea610409d1e2666b3958 (Condition the read-race re-read claims on what the re-read found)
+Branch `w1050-read-race` (one fix commit, now replayed at 272e6f58 after the two 2026-10-31 rebases — first onto 89af630d as 0713471b, was eaa5bdbe on tip fcf2afd7 over base 7cbeab1c, then onto 55c1e1fa; no new branch). Revision verdict FIX-FIRST, all four findings (2 Medium + 2 Low) fixed plus the windows-only CI red; full text below. Deputy round state: rebased, recordings regenerated, force-pushed, CI dispatched; windows green to be read from the dispatched run.
 
 # W1050f OUT — rev0 findings fixed, fixture's Windows spelling fixed
 
@@ -181,8 +181,9 @@ after the last test run).
 - No cross-builds, no exes transferred; mid-run CI log copy kept outside the repo was
   deleted (bytes: one 386 KB text file under the operator tmp area; two /tmp inventory
   scratch files).
-- Commit: one fix commit, now 0713471b after the 2026-10-31 rebase (was eaa5bdbe
-  on the pre-rebase branch; English, hook-checked). This OUT now travels
+- Commit: one fix commit, now 272e6f58 after the 2026-10-31 rebases (first
+  eaa5bdbe pre-rebase, then 0713471b on base 89af630d, now on base 55c1e1fa;
+  English, hook-checked). This OUT now travels
   committed with the deputy round's regeneration commit, its SHA references
   remapped to the replayed commits; the deputy records/pushes.
 
