@@ -923,11 +923,14 @@ fn doctor_with_planted_config(
 /// measured or wedged, on the same footing the nine W1043f sections got.
 /// The fixture wedges the scan (registry FIFO) *and* the key inventory (a
 /// FIFO at the declarations store only `key_inventory` opens), so one run
-/// pins both halves: a measured D12/D13 keeps its heading, and a wedged
-/// Keys keeps its heading plus the one UNKNOWN line naming the check and
-/// its budget — the `print_timed_out_section` text M1 shipped, asserted
-/// here in stderr rather than only in `--json` (rev1's L3: reverting the
-/// printer wirings kept every JSON-only gate green).
+/// pins both halves: a measured D12/D13 keeps its heading beside a line
+/// only the measured branch prints (a heading alone is also the first
+/// line `print_timed_out_section` prints, so it cannot tell a measured
+/// section from a wedged one), and a wedged Keys keeps its heading plus
+/// the one UNKNOWN line naming the check and its budget, with no measured
+/// row set printed beside it — the `print_timed_out_section` text M1
+/// shipped, asserted here in stderr rather than only in `--json` (rev1's
+/// L3: reverting the printer wirings kept every JSON-only gate green).
 #[test]
 #[cfg(unix)]
 fn doctor_keeps_the_sections_a_wedged_scan_does_not_gate() {
@@ -1001,9 +1004,13 @@ fn doctor_keeps_the_sections_a_wedged_scan_does_not_gate() {
     assert!(
         run.text.contains(
             "D12 · Declared destinations vs installed timers — push coverage, credentials, last push, reclaim"
-        ),
-        "a measured destination reconciliation keeps its heading on the scan-failed \
-         path — the vanishing section rev1 found: {run}",
+        ) && run
+            .text
+            .contains("read-only: reads the timer files, the reclaim/push state records"),
+        "a measured destination reconciliation keeps its heading and its measured \
+         read-only line on the scan-failed path — the heading alone is also the \
+         first line a section that timed out prints, so only the pair tells \
+         measured from wedged: {run}",
         run = run.text,
     );
     assert!(
@@ -1021,9 +1028,12 @@ fn doctor_keeps_the_sections_a_wedged_scan_does_not_gate() {
             "Keys · one file per archive copy — each opens only its own copy — 🔴 UNKNOWN: \
              the key inventory check did not answer within {budget}s, so which key files \
              this machine holds is unknown, not empty."
-        )),
+        )) && !run
+            .text
+            .contains("A second machine reads a copy with that copy's key. Back up every one."),
         "a wedged key inventory keeps its heading and one UNKNOWN line naming the check \
-         and the budget — the M1 text half, pinned in text rather than JSON only: {run}",
+         and the budget, and prints no measured row set beside it — the M1 text half, \
+         pinned in text rather than JSON only: {run}",
         run = run.text,
     );
 }

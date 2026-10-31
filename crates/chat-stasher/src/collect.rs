@@ -1318,6 +1318,11 @@ pub struct MachineLogOutcome {
     /// archive. A reset caused by a real source rewrite reports `None` here —
     /// the two are different facts and are never merged into one word.
     pub unproven: Option<&'static str>,
+    /// W1047f High 1: a build flag held this log's body capture back, so
+    /// the pass measured the source and sealed nothing — honest zeros for
+    /// a log that was neither empty nor unread. No declared log sets this
+    /// in this build ([`CODEBUDDY_HISTORY_BODY_CAPTURE`] is `true`).
+    pub content_withheld: bool,
 }
 
 /// A source that could not be collected. Its path is represented only by a
@@ -1335,6 +1340,32 @@ pub struct CollectError {
 pub struct ReconcileNotice {
     pub session_prefix: String,
     pub reason: &'static str,
+}
+
+/// Whether this build seals the CodeBuddy CLI's `history` machine log
+/// (body tier) into the archive. W1047 collected it through this module's
+/// ADR-053 machinery — raw, append-only, under
+/// `machine-logs/<machine>/codebuddy/history/`; W1047f held that capture
+/// behind this one constant while its owner ruled; the ruling (recorded
+/// 2026-10-31, W1047f2) approved it after the file was re-verified as the
+/// same kind of source the claude-code history log is — the same
+/// per-typed-line JSONL shape and field names, one key (`sessionId`) short
+/// — so the flag is `true` and the machinery seals as it did in W1047:
+/// never a session, never counted as one, no session id ever minted from
+/// it at either level inside projects/. The reverse still works and stays
+/// safe: `false` holds the capture again (the scan keeps measuring presence
+/// and byte size, no content line is read or sealed, no cursor is
+/// written), and nothing sealed before or between holds is ever unwritten,
+/// because the archive is append-only.
+pub const CODEBUDDY_HISTORY_BODY_CAPTURE: bool = true;
+
+/// Whether this pass may seal this machine log's content (ADR-053 D2) or
+/// must stop at the measurement the scan already took. The CodeBuddy
+/// `history` input log is the one log this gate knows, behind
+/// [`CODEBUDDY_HISTORY_BODY_CAPTURE`]: `true` since the approving ruling
+/// (W1047f2), so this build seals it and no declared log is held back.
+fn machine_log_body_capture_withheld(harness: &str, log_id: &str) -> bool {
+    harness == "codebuddy" && log_id == "history" && !CODEBUDDY_HISTORY_BODY_CAPTURE
 }
 
 /// Complete metadata-only summary of one `collect` pass.
@@ -3479,6 +3510,37 @@ fn collect_machine_logs(
     let mut counters = CollectCounters::default();
     for record in &records {
         let record_started = std::time::Instant::now();
+        // W1047f High 1: while a build holds a log's body capture back
+        // ([`CODEBUDDY_HISTORY_BODY_CAPTURE`] — `true` since the ruling,
+        // W1047f2, so no declared log takes this arm here), the log is
+        // measured, never read: no line taken from the source, nothing
+        // sealed, no cursor written — yet the outcome still reports the
+        // scan's measurement, so it can never read as a log found empty.
+        if machine_log_body_capture_withheld(&record.harness, &record.log_id) {
+            let (generations, sealed_lines) =
+                machine_log_stage_state(stage, machine, &record.harness, &record.log_id)?;
+            report.machine_logs.push(MachineLogOutcome {
+                harness: record.harness.clone(),
+                log_id: record.log_id.clone(),
+                source_bytes: record.byte_size,
+                bytes_read: 0,
+                prefix_bytes_validated: 0,
+                lines_written: 0,
+                generations,
+                sealed_lines,
+                shard: None,
+                reset: false,
+                unproven: None,
+                content_withheld: true,
+            });
+            // W880: the wall-time bucket fills the same way — counting a
+            // withheld log is still work this pass did. Counts only.
+            *report
+                .collect_harness_ms
+                .entry(record.harness.clone())
+                .or_default() += record_started.elapsed().as_millis() as u64;
+            continue;
+        }
         let key = machine_log_state_key(&record.harness, &record.log_id);
         let stored = logs.get(&key).cloned();
         // A stored cursor is a claim, not a fact. It is reused only once it has
@@ -3622,6 +3684,7 @@ fn collect_machine_logs(
             shard: processed.shard,
             reset: processed.reset,
             unproven,
+            content_withheld: false,
         });
         // W880: this machine log's wall time joins its harness's bucket, the
         // same way a session's does. Counts only.

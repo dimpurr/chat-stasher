@@ -838,19 +838,19 @@ machine:
 - **Harness session stores are opened read-only.** Every SQLite connection uses
   `SQLITE_OPEN_READ_ONLY` with a `mode=ro` URI, falling back to
   `mode=ro&immutable=1` when a WAL store has no `-shm`
-  (`crates/chat-stasher/src/sqlite_probe.rs:2559-2578`). The WorkBuddy reader
+  (`crates/chat-stasher/src/sqlite_probe.rs:2567-2586`). The WorkBuddy reader
   is the one deliberate exception to the fallback (W1046): its live sessions
   can sit in the uncheckpointed WAL, so `immutable=1` is never used for its
   store — a WAL store without a `-shm` is read through a copied db, `-wal` and
-  `-shm` trio in a temporary directory (`crates/chat-stasher/src/sqlite_probe.rs:663-733`)
+  `-shm` trio in a temporary directory (`crates/chat-stasher/src/sqlite_probe.rs:663-742`)
   — which keeps the no-sidecars guarantee below while still reading the WAL's
   content. The module states the
   intent that a read-only probe never creates or touches `-wal`/`-shm` sidecars
   (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
-  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:3400-3448`).
+  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:3408-3456`).
   The WorkBuddy half is pinned by its own test, which copies a live WAL
   store without the `-shm` and proves the uncheckpointed rows still read and
-  no sidecar appears beside the original (`crates/chat-stasher/tests/workbuddy_scanner_test.rs:641-678`).
+  no sidecar appears beside the original (`crates/chat-stasher/tests/workbuddy_scanner_test.rs:689-726`).
   `status` and `doctor` are likewise declared read-only
   (`crates/chat-stasher/src/main.rs:499,597-598`).
 - **`seal` refuses to rename files it cannot justify renaming.** It is gated by
@@ -875,9 +875,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:10870-10875`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:10909-10914`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:10742-10758`).
+  (`crates/chat-stasher/src/main.rs:10781-10797`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -939,7 +939,7 @@ a real limitation of the current code.
    back into a harness's own directories does not exist**. `read` reports
    **one session at a time** with its length and SHA-256, without printing
    conversation content
-   (`crates/chat-stasher/src/main.rs:529-532,11308-11494`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:529-532,11347-11533`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:812-908`) — see exposure 5
@@ -954,7 +954,7 @@ a real limitation of the current code.
    changed session payloads and stores user/assistant text and titles in a local
    SQLite index in the operating-system cache directory. The index is mode 0600
    on Unix and can be removed with `index clear`
-   (`crates/chat-stasher/src/fts.rs:1-6,1477-1697,1699-1714,2148-2157`). One qualification, because the
+   (`crates/chat-stasher/src/fts.rs:1-6,1480-1700,1702-1717,2151-2160`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go

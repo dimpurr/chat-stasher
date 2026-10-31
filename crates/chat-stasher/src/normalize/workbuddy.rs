@@ -5,6 +5,13 @@
 //! classify instead of guessing, and a record type it has never seen is
 //! counted as drift rather than treated as a failure.
 //!
+//! One reader, two registry harnesses (W1047): the `workbuddy` desktop app
+//! and the `codebuddy` CLI both dispatch here — they are builds of the same
+//! `cbc` core, and the CLI only adds the `summary` and `turn-metrics` types
+//! the census already holds. The `SESSION_SCHEMA` metadata lines below are
+//! the desktop side's collector envelopes; a CLI body never carries one,
+//! and the reader's schema check simply never fires for it.
+//!
 //! One archived body holds two producers under the same session id: the
 //! sqlite metadata lines the collector exports (a live row, or the bare
 //! tombstone a soft-deleted row exports) and the raw `*.jsonl` transcript

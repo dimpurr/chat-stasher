@@ -709,8 +709,16 @@ impl WorkBuddyRead {
 }
 
 /// Copy `db` and whichever sidecars exist into a fresh temporary directory,
-/// all three members of the trio taken as one unit so the copy observes one
-/// snapshot of the store's bytes.
+/// one member at a time — three separate byte runs, not an atomic snapshot of
+/// the store. A copy that straddles a writer relies for its honesty on the
+/// WAL format itself, not on this copy being one instant of the store's
+/// bytes: every WAL frame carries its own checksum under the salts of the
+/// header that opened the log, so SQLite never replays a half-written frame
+/// as if it were committed — a torn copy opens to the frames that
+/// checksummed whole, and never invents a row the store never wrote. That
+/// per-frame integrity is the real guarantee the read-path arrangement
+/// documents; snapshot atomicity is not, and this comment must not promise
+/// it (W1047f L4).
 fn copy_wal_trio(db: &Path) -> Result<tempfile::TempDir, String> {
     let dir = tempfile::tempdir()
         .map_err(|error| format!("failed to create a temporary read directory: {error}"))?;
@@ -728,7 +736,7 @@ fn copy_wal_trio(db: &Path) -> Result<tempfile::TempDir, String> {
         // derived names or SQLite will not see them.
         let to_name = if path == db { "workbuddy.db" } else { name };
         fs::copy(&path, dir.path().join(to_name))
-            .map_err(|error| format!("failed to copy {name} for a read-only snapshot: {error}"))?;
+            .map_err(|error| format!("failed to copy {name} for a read-only copy: {error}"))?;
     }
     Ok(dir)
 }
