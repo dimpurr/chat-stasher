@@ -80,7 +80,7 @@ that document is the honest one.
   `CLAUDE_CONFIG_DIR`) and the CodeBuddy CLI keeps
   `~/.codebuddy/history.jsonl` — what you typed on this machine, with a
   timestamp, the project path and any pasted text — and `collect` seals
-  both into the same encrypted archive as a session, under
+  both into the same encrypted archive as machine logs, under
   `machine-logs/<machine>/claude-code/history/` and
   `machine-logs/<machine>/codebuddy/history/`. Both are captured whole
   (slash-command lines such as `/usage` included) and both are **body
@@ -1223,9 +1223,9 @@ running as you can read the plaintext bundles in the extension's outbox, the
 staged shards, your config, and — with your archive — decrypt everything. On a
 single-user desktop this is the normal situation; on a shared machine it is the
 dominant risk. This includes the harnesses' own prompt-history files described
-in section 3: they were already readable by anything running as you, and the
-sealed copy `collect` makes of the Claude Code one is plaintext in the stage
-exactly like a session's.
+in section 3 — one per harness, the complete set: they were already readable
+by anything running as you, and the sealed copies `collect` makes of both
+are plaintext in the stage exactly like a session's.
 
 **3. A master key file is the only key to the repository it opens, and losing it
 is unrecoverable.** There is

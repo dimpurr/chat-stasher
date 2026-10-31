@@ -7,9 +7,9 @@
 //! of the desktop store's live-row-without-transcript rule, a named gap
 //! that turns `collect` partial (exit 3), never a zero; the `history`
 //! input log is a declared machine log — measured at both levels of
-//! projects, never a session, and with its body capture gated pending the
-//! owner's ruling (W1047f High 1); and the read side reuses the W1046
-//! reader with no harness-specific branch.
+//! projects, never a session, and with its body capture approved by
+//! the owner's ruling (held by W1047f, approved 2026-10-31); and the
+//! read side reuses the W1046 reader with no harness-specific branch.
 //!
 //! All fixtures are synthetic; no real conversation text, ids or names.
 
