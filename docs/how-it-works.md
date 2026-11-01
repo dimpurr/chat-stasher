@@ -69,11 +69,23 @@ decrypting conversation content. See [Privacy and security](privacy-security.md#
 and [mirror configuration](config.md#mirror).
 
 One sync round lists those file types at the destination, compares the listing
-with the local copy, downloads missing or mismatched files, and verifies
-content-addressed files against their names before writing them. The `config`
+with the local copy, downloads missing or mismatched files, and checks
+content-addressed files against their names. The `config`
 file is compared by bytes because it has no content address. A scheduled
 `run-once` gives the mirror the time left in its pass budget; a stopped round
 can resume on a later pass. `chat-stasher mirror sync` runs a round on demand.
+
+With the mirror enabled, `read`, `search`, `export`, `index build` and the `ui`
+dashboard read the local copy first and ask the destination only for files the
+copy lacks. `read`, `export` and `verify` also take `--offline`, which never
+contacts the destination at all and answers only from the copy, the body cache
+and the local metadata cache; the output says `served from mirror`. Offline,
+anything the copy does not hold ends the run with exit `3`, "did not finish".
+That is unknown, not proof of absence: the copy may be behind, and the
+destination was not asked. `verify --offline` certifies the copy, not the
+destination; online `verify` never reads the copy. Details:
+[`read`](cli.md#read), [`mirror`](cli.md#mirror) and
+[mirror configuration](config.md#mirror).
 
 ## Two tiers: metadata and content
 

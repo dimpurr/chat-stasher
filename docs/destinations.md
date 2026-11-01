@@ -39,7 +39,9 @@ switch, disk floor, read behaviour and sync progress. Run
 `chat-stasher mirror sync` to start a round on demand and check
 `chat-stasher status` for progress.
 The mirror can serve reads while the destination is unavailable, subject to
-what the copy already holds.
+what the copy already holds. `read`, `export` and `verify` accept
+`--offline` to use the copy only; a session the copy lacks then exits `3`
+(unknown, not proof that the destination lacks it).
 
 To check an archive's integrity at any time:
 
