@@ -271,6 +271,11 @@ impl World {
             .env("XDG_DATA_HOME", self.path().join("data"))
             .env("XDG_STATE_HOME", self.path().join("state"))
             .env("XDG_CACHE_HOME", self.path().join("cache"))
+            // Windows keeps the search index under %LOCALAPPDATA% (not XDG);
+            // without this the recovery world would inherit the first world's
+            // index by sharing its repo path, and "no index yet" would be false.
+            .env("LOCALAPPDATA", self.path().join("localappdata"))
+            .env("APPDATA", self.path().join("appdata"))
             .env("CHAT_STASHER_REGISTRY", self.path().join("registry.json"))
             .env_remove("CODEX_HOME")
             .env_remove("RUSTIC_REPO")
