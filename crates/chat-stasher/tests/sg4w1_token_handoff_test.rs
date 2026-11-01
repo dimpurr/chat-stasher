@@ -13,7 +13,6 @@ use chat_stasher::store::{self, CountedStageShards};
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime};
 
 /// The walk counter is process-wide; serialize the tests that read it.
 static LOCK: Mutex<()> = Mutex::new(());
@@ -25,7 +24,7 @@ fn seal(stage: &Path, machine: &str, session: &str, seq: &str) {
 }
 
 #[cfg(unix)]
-fn set_mtime(path: &Path, when: SystemTime) {
+fn set_mtime(path: &Path, when: std::time::SystemTime) {
     use std::os::unix::ffi::OsStrExt;
     use std::time::UNIX_EPOCH;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
@@ -37,10 +36,6 @@ fn set_mtime(path: &Path, when: SystemTime) {
     let rc = unsafe { libc::utimes(c_path.as_ptr(), [t, t].as_ptr()) };
     assert_eq!(rc, 0);
 }
-
-/// NTFS timestamps are fine-grained, so the write itself moves the mtime.
-#[cfg(not(unix))]
-fn set_mtime(_path: &Path, _when: SystemTime) {}
 
 struct Fx {
     _d: tempfile::TempDir,
@@ -118,6 +113,14 @@ fn full_check_still_walks_the_tree() {
 }
 
 /// A new machine directory moves the sessions root: the handoff recounts.
+///
+/// Unix-only: the property needs the sessions root's mtime to move when a
+/// child directory is created, and NTFS updates a parent directory's
+/// timestamp lazily (not on child creation), with no std way to set it. The
+/// root-changed => recount rule is still asserted on every platform by
+/// `vanished_sessions_root_is_not_trusted` and
+/// `absent_root_then_appearing_root`, which change the root's presence.
+#[cfg(unix)]
 #[test]
 fn moved_sessions_root_forces_a_recount() {
     let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -132,7 +135,7 @@ fn moved_sessions_root_forces_a_recount() {
     );
     set_mtime(
         &f.stage.join("sessions"),
-        SystemTime::now() + Duration::from_secs(3600),
+        std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
     );
     assert_eq!(counted.handed_off_count(&f.stage), None);
 
