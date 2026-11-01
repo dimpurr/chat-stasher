@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dimpurr/chat-stasher/contracts/paseo-agent-observation.schema.json",
+  "title": "chat-stasher Paseo agent observation",
+  "description": "One row of meta/<machine>/paseo-agents-v1.jsonl (ADR-056 D5): what one daemon's own agent record said about one agent, and what the archive can prove about the native body that agent points at. It is not a transcript and not a body identity — the native body keeps <harness>.<machine>.<native-id> (ADR-056 D2), which is why an archived body carries a canonical_session_id rather than minting an id of its own. Rust parsing is crate::paseo and it is stricter than this file in four ways, listed at the bottom of this description. (1) observation_id must equal the SHA-256 of the row's semantic content excluding observed_at, which no JSON Schema can state. (2) body.shard_sequences must be strictly increasing as well as unique: it is the exact ordered set of shards that concatenates to body_sha256, so a reordered list would give one body two identities. (3) Recorded strings may not contain control characters, and id- or reason-shaped values may not be shaped like a file locator (a path separator, a '~' home shortcut, a '$' environment reference, or a drive-letter prefix), because ADR-056 D5 archives no source-file locator. (4) observed_at and every recorded lifecycle time must actually parse as RFC 3339; 'format' below is declarative, because chat-stasher compiles schemas with format validation off, as it does for contracts/inbox.schema.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "observation_id",
+    "daemon_key",
+    "agent_id",
+    "provider",
+    "projection",
+    "body",
+    "observed_at"
+  ],
+  "properties": {
+    "schema": {
+      "const": "chat-stasher/paseo-agent-observation@1",
+      "description": "Part of the hashed semantic payload, so a future @2 can never collide with an @1 row."
+    },
+    "observation_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 over schema + daemon_key + agent_id + provider + native_session_id + projection + body, with object keys in byte order and observed_at excluded. Idempotent: re-observing unchanged facts yields the id already in the file, so nothing appends. Two spellings of one fact (an omitted field and that field present as null) hash the same, because both deserialize to 'absent'."
+    },
+    "daemon_key": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,127}$",
+      "description": "Stable namespace key for one daemon, derived from its own stable server identifier. Lowercase-only so one daemon cannot be split across two namespaces by spelling. It is not the server-id bytes, not a digest of a source path, and not a locator."
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "Complete agent UUID as the source spelled it (ADR-056 D2). A prefix is refused: a shortened id can be silently re-expanded to the wrong agent."
+    },
+    "provider": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+      "description": "Bounded lowercase label, deliberately not a closed enum: ADR-056 D9 promises no fixed provider set, so a new provider is a new label rather than a schema change."
+    },
+    "native_session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._~-]{1,255}$",
+      "description": "The native session id the agent's own record carried, spelled by its own harness (a Codex rollout filename stem, a Grok session directory name). Deliberately not required to look like a UUID: reshaping it is the second body identity ADR-056 D2 forbids. Absent means the source recorded no handle, which is not a claim that no body exists."
+    },
+    "projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The whitelist ADR-056 D5 allows. additionalProperties:false is what makes it a whitelist: a config value, an environment value or a credential cannot ride along because a newer source version began writing it. Every key is optional; absent means the source recorded nothing, which is never read as a claim that the thing is absent.",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,255}$",
+          "description": "The workspace the source recorded, spelled as the source spelled it. An identifier, not a directory."
+        },
+        "parent_agent_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "description": "The recorded parent, as a complete UUID."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "A label, capped at 100 characters. The cap is enforced as a rejection, not as a truncation: shortening an archived label would rewrite a recorded fact. An empty title is absent, never \"\"."
+        },
+        "status": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+          "description": "The lifecycle status the source recorded, verbatim and unmapped (ADR-056 D6): absence is not active, closed is not deleted, and a status this build has not seen is still a fact."
+        },
+        "created_at": { "type": "string", "minLength": 1, "format": "date-time" },
+        "updated_at": { "type": "string", "minLength": 1, "format": "date-time" },
+        "last_activity_at": { "type": "string", "minLength": 1, "format": "date-time" },
+        "archived_at": {
+          "type": "string",
+          "minLength": 1,
+          "format": "date-time",
+          "description": "When the source recorded the agent as archived. Distinct from body.state \"missing\": the agent's own record and the archive's holdings are different statements."
+        }
+      }
+    },
+    "body": {
+      "description": "What the archive can say about the native body. Five states kept separate because they mean different things to a reader: proved present, provably not there, and three ways of not knowing. The three unknown states are not evidence of absence and must never be counted as sessions.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "canonical_session_id", "shard_sequences", "body_sha256"],
+          "properties": {
+            "state": { "const": "archived" },
+            "canonical_session_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._~-]{1,255}$",
+              "description": "<harness>.<machine>.<native-id> as crate::id spells it. The Rust validator additionally requires at least three dot-separated components."
+            },
+            "shard_sequences": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "integer", "minimum": 1 },
+              "description": "The exact shard sequences that concatenate, in this order, to body_sha256. Empty is not \"unknown\": which shards make up a body is a measurement. The stage numbers its first shard 1."
+            },
+            "body_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": { "state": { "const": "missing" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reason"],
+          "properties": {
+            "state": { "const": "unreadable" },
+            "reason": { "$ref": "#/$defs/boundedReason" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reason"],
+          "properties": {
+            "state": { "const": "unsupported" },
+            "reason": { "$ref": "#/$defs/boundedReason" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reason"],
+          "properties": {
+            "state": { "const": "ambiguous" },
+            "reason": {
+              "$ref": "#/$defs/boundedReason",
+              "description": "More than one candidate and the evidence does not choose. Never resolved by picking the first one."
+            }
+          }
+        }
+      ]
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time",
+      "minLength": 1,
+      "description": "When this was observed. Excluded from the identity, so it is the one field that may change without producing a new row. A reader describes an agent as last observed at this instant, never as currently online (ADR-056 D6)."
+    }
+  },
+  "$defs": {
+    "boundedReason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[^/\\\\~$\\x00-\\x1f]+$",
+      "description": "A short privacy-safe explanation. Bounded, and barred by pattern from carrying a path separator, a '~' home shortcut or a '$' environment reference: a reason is a fact about a state, not a locator for a file. The Rust validator also bars a drive-letter prefix."
+    }
+  }
+}
