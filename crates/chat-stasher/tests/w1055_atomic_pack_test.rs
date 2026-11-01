@@ -1405,7 +1405,9 @@ fn m2_when_no_fresh_connection_can_be_made_the_leftover_is_bounded_then_cleared(
     // A second push while the destination still refuses connections adds
     // nothing it cannot account for, and the first connection that works
     // clears everything this process left.
-    let _ = backend.write_bytes(FileType::Pack, &parsed, false, bytes.clone());
+    // Still refused while the destination refuses connections: the result is
+    // not the point here, the leftover count is.
+    drop(backend.write_bytes(FileType::Pack, &parsed, false, bytes.clone()));
     backend
         .write_bytes(FileType::Pack, &parsed, false, bytes.clone())
         .unwrap();
