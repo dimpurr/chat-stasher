@@ -471,6 +471,14 @@ Git does not read drivers out of a checkout, so register them once per clone:
 bash scripts/dev/setup-merge-drivers.sh
 ```
 
+One run covers the clone and every worktree of it (`.git/config` is shared). The
+driver is an inline command, not a path: a path into a worktree breaks the day
+that worktree is removed, and git then reports a plain conflict even though the
+config still looks registered. A fresh clone, or a second clone such as a build
+farm's base, needs the command again; `.private/bootstrap/init.sh` runs it.
+Check with `git config --get merge.regenerate-citations.driver`, which prints the
+command, not a path.
+
 With the drivers registered, a merge or rebase never *stops* on the two
 recordings: the driver keeps the current side, which is disposable by
 construction — it is exactly what regeneration replaces. That makes re-deriving
