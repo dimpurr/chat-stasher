@@ -8797,6 +8797,28 @@ fn print_collect_report(
         "[collect] read bytes      : delta_or_full={} prefix_validated={}",
         report.delta_bytes_read, report.prefix_bytes_validated
     );
+    // W1057: why each reset happened, counts per harness and cause word.
+    // Only when there was a reset; the same counts are kept per round in the
+    // state directory's reset-cause ledger.
+    if !report.reset_causes.is_empty() {
+        let causes: Vec<String> = report
+            .reset_causes
+            .iter()
+            .map(|((source, cause), count)| format!("{source}:{cause}={count}"))
+            .collect();
+        println!("[collect] reset causes    : {}", causes.join(" "));
+    }
+    if report.manifest_reloads > 0 {
+        println!(
+            "[collect] manifest        : reread {} time(s) mid-pass because a reclaim ran concurrently; {} session(s) settled by the newer summary",
+            report.manifest_reloads, report.late_manifest_settled
+        );
+    }
+    if let Some(kind) = &report.reset_ledger_error {
+        println!(
+            "[collect] reset ledger    : this round could not be appended ({kind}); its causes are only in the lines above"
+        );
+    }
     if !report.reconciliations.is_empty() {
         println!(
             "[collect] reconciled      : {} session(s) forced through reset",

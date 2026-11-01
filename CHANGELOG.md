@@ -15,6 +15,17 @@ under its own heading below.
 
 #### Added
 
+- **A reclaim that finishes under a running collect no longer resets the
+  sessions the pass reaches afterwards (W1057).** `reclaim-stage` and a
+  collect pass take no lock against each other; the pass read the retained
+  manifest once, at its start, so a session reclaimed by a reclaim that
+  finished mid-pass looked unverifiable and was reread whole (the 11-01
+  opencode burst). A pass now re-reads the manifest when its file changed
+  before it gives up on a cursor. Every round that reset a session also appends one row to
+  `reset-causes-v1.jsonl` in the state directory: counts of resets by source
+  and cause, no session text, kept across rounds; the same counts print as a
+  `[collect] reset causes` line.
+
 - **`--offline` on `read`, `export` and `verify` (W1053).** A read-only
   switch that takes the mirror fallback away: the destination's backend is
   never constructed — no connection is opened at all, so nothing in the
