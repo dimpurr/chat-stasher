@@ -30,8 +30,12 @@ under its own heading below.
   the older `<id>-tmp-` and `.chat-stasher-tmp` spellings are aged the same way.
   `doctor` and `prune-orphans` report them on a `tmp debris` line beside the
   historical torn-pack line, and print nothing on a healthy repository.
-  `opendal:fs` destinations no longer default an `atomic_write_dir`; a value you
-  set yourself still applies.
+  `opendal:fs` destinations keep their default `atomic_write_dir`, because
+  index and snapshot files still rely on that staged write. The pack writer
+  retries a transient failure on a fresh connection (the `retry` option applies
+  to it too), removes the failed attempt's temporary file at once rather than
+  waiting for the seven-day sweep, and reports a failed upload in plain words
+  instead of a bare backend error kind.
 - **`--offline` on `read`, `export` and `verify` (W1053).** A read-only
   switch that takes the mirror fallback away: the destination's backend is
   never constructed — no connection is opened at all, so nothing in the

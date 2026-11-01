@@ -94,6 +94,28 @@ pub trait PackIo: Send + Sync {
     fn list_files(&self, dir: &str) -> anyhow::Result<Vec<FileEntry>>;
 }
 
+/// rustic's default for the `retry` option (`rustic_backend` opendal.rs).
+const DEFAULT_RETRY: usize = 5;
+
+/// Words for an opendal failure that say what happened to a person, instead of
+/// the bare `Unexpected` kind. No path, host or account is ever included.
+fn failure_words(stage: &str, error: &opendal::Error) -> anyhow::Error {
+    use opendal::ErrorKind as K;
+    let cause = match error.kind() {
+        K::NotFound => "a directory or file the destination should hold was missing",
+        K::PermissionDenied => "the destination refused permission",
+        K::RateLimited => "the destination asked us to slow down",
+        K::ConfigInvalid => "the destination settings are not valid",
+        _ => "the connection to the destination failed or was interrupted",
+    };
+    let transient = if error.is_temporary() {
+        " (it looks transient)"
+    } else {
+        ""
+    };
+    anyhow!("{stage} failed: {cause}{transient}")
+}
+
 /// [`PackIo`] over an opendal operator (`fs` for the local-directory family,
 /// `sftp` for the remote one).
 pub struct OperatorIo {
@@ -103,9 +125,25 @@ pub struct OperatorIo {
 impl OperatorIo {
     /// Build an operator for `scheme` from the same options rustic gets.
     pub fn open(scheme: &str, options: BTreeMap<String, String>) -> anyhow::Result<Self> {
+        // The same `retry` option rustic's own backend reads (`false`/`off`
+        // = none, absent/`default` = 5, or a number), so the writer survives
+        // the transient errors the main connection already survived (W1055
+        // review M2).
+        let retries = match options.get("retry").map(String::as_str) {
+            Some("false" | "off") => 0,
+            None | Some("default") => DEFAULT_RETRY,
+            Some(number) => number.parse::<usize>().map_err(|_| {
+                anyhow!("the `retry` option must be `false`, `default` or a whole number")
+            })?,
+        };
         let _guard = RUNTIME.enter();
         let operator = opendal::Operator::via_iter(scheme, options)
-            .map_err(|_| anyhow!("could not open the destination for an atomic pack write"))?;
+            .map_err(|_| anyhow!("could not open the destination for an atomic pack write"))?
+            .layer(
+                opendal::layers::RetryLayer::new()
+                    .with_max_times(retries)
+                    .with_jitter(),
+            );
         let op = opendal::blocking::Operator::new(operator)
             .map_err(|_| anyhow!("could not start the atomic pack writer"))?;
         Ok(Self { op })
@@ -128,32 +166,32 @@ impl PackIo for OperatorIo {
         self.op
             .write(path, bytes)
             .map(|_| ())
-            .map_err(|e| anyhow!("write failed ({:?})", e.kind()))
+            .map_err(|e| failure_words("writing the temporary file", &e))
     }
 
     fn read(&self, path: &str) -> anyhow::Result<Bytes> {
         self.op
             .read(path)
             .map(|buffer| buffer.to_bytes())
-            .map_err(|e| anyhow!("read-back failed ({:?})", e.kind()))
+            .map_err(|e| failure_words("reading the temporary file back", &e))
     }
 
     fn exists(&self, path: &str) -> anyhow::Result<bool> {
         self.op
             .exists(path)
-            .map_err(|e| anyhow!("existence check failed ({:?})", e.kind()))
+            .map_err(|e| failure_words("checking whether the pack already exists", &e))
     }
 
     fn rename(&self, from: &str, to: &str) -> anyhow::Result<()> {
         self.op
             .rename(from, to)
-            .map_err(|e| anyhow!("rename failed ({:?})", e.kind()))
+            .map_err(|e| failure_words("renaming the temporary file into place", &e))
     }
 
     fn delete(&self, path: &str) -> anyhow::Result<()> {
         self.op
             .delete(path)
-            .map_err(|e| anyhow!("delete failed ({:?})", e.kind()))
+            .map_err(|e| failure_words("deleting a file", &e))
     }
 
     fn list_files(&self, dir: &str) -> anyhow::Result<Vec<FileEntry>> {
@@ -164,7 +202,7 @@ impl PackIo for OperatorIo {
         let entries = match self.op.list_options(dir, options) {
             Ok(entries) => entries,
             Err(e) if not_found(&e) => return Ok(Vec::new()),
-            Err(e) => return Err(anyhow!("listing failed ({:?})", e.kind())),
+            Err(e) => return Err(failure_words("listing the destination", &e)),
         };
         let mut out = Vec::new();
         for entry in entries {
@@ -296,9 +334,9 @@ pub enum PublishError {
 impl PublishError {
     fn describe(&self) -> String {
         match self {
-            Self::Io(error) => format!("atomic pack publication failed: {error:#}"),
-            Self::VerifyMismatch => "atomic pack publication refused: the pack read back from \
-                 the destination did not hash to its id, so it was not published"
+            Self::Io(error) => format!("{error:#}"),
+            Self::VerifyMismatch => "the pack read back from the destination did not hash to \
+                 its id, so it was not published"
                 .to_string(),
             Self::Collision => "atomic pack publication stopped: a file already holds this \
                  pack's name with different bytes; it was not touched. Someone has written a \
@@ -320,8 +358,22 @@ pub fn publish(
     now: u64,
     random: [u8; 8],
 ) -> Result<Published, PublishError> {
+    publish_to(io, id_hex, bytes, &tmp_path(id_hex, now, random))
+}
+
+/// The repository-relative path of a pack's tmp file.
+fn tmp_path(id_hex: &str, now: u64, random: [u8; 8]) -> String {
+    format!("data/{}/{}", &id_hex[..2], tmp_name(id_hex, now, random))
+}
+
+fn publish_to(
+    io: &dyn PackIo,
+    id_hex: &str,
+    bytes: Bytes,
+    tmp: &str,
+) -> Result<Published, PublishError> {
     let final_path = final_path(id_hex);
-    let tmp = format!("data/{}/{}", &id_hex[..2], tmp_name(id_hex, now, random));
+    let tmp = tmp.to_string();
 
     if let Err(error) = io.write(&tmp, bytes) {
         // Best effort only: a failed write may have left part of the tmp,
@@ -397,6 +449,31 @@ pub struct AtomicPackBackend {
     inner: Arc<dyn WriteBackend>,
     factory: IoFactory,
     io: Mutex<Option<Arc<dyn PackIo>>>,
+    policy: RetryPolicy,
+    /// Tmp files this process created, failed to remove after a failed
+    /// attempt (the destination was unreachable even on a fresh connection),
+    /// and will try to remove again on the next attempt that gets through.
+    pending: Mutex<Vec<String>>,
+}
+
+/// How a failed pack upload is retried (W1055 review M2): each retry is a
+/// whole new attempt (new tmp name) on a fresh connection, after the failed
+/// attempt's tmp was removed.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    /// Total attempts, the first included.
+    pub attempts: usize,
+    /// Pause before each further attempt.
+    pub backoff: std::time::Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            attempts: 2,
+            backoff: std::time::Duration::from_secs(2),
+        }
+    }
 }
 
 impl std::fmt::Debug for AtomicPackBackend {
@@ -410,10 +487,21 @@ impl AtomicPackBackend {
     /// pack write: a push that writes no pack, and every read command, never
     /// opens a second connection.
     pub fn around(inner: Arc<dyn WriteBackend>, factory: IoFactory) -> Arc<dyn WriteBackend> {
+        Self::around_with_policy(inner, factory, RetryPolicy::default())
+    }
+
+    /// [`Self::around`] with an explicit retry policy.
+    pub fn around_with_policy(
+        inner: Arc<dyn WriteBackend>,
+        factory: IoFactory,
+        policy: RetryPolicy,
+    ) -> Arc<dyn WriteBackend> {
         Arc::new(Self {
             inner,
             factory,
             io: Mutex::new(None),
+            policy,
+            pending: Mutex::new(Vec::new()),
         })
     }
 
@@ -448,6 +536,97 @@ impl AtomicPackBackend {
         *slot = Some(Arc::clone(&io));
         Ok(io)
     }
+
+    /// Drop the cached connection and open a fresh one, remembering it.
+    fn fresh_io(&self) -> anyhow::Result<Arc<dyn PackIo>> {
+        let mut slot = self
+            .io
+            .lock()
+            .map_err(|_| anyhow!("the atomic pack writer lock was poisoned"))?;
+        *slot = None;
+        let io = (self.factory)()?;
+        *slot = Some(Arc::clone(&io));
+        Ok(io)
+    }
+
+    /// Best-effort removal of `tmp` (and anything an earlier failure could
+    /// not remove) on a fresh connection. Returns how many files remain.
+    fn clean_up(&self, tmp: &str) -> usize {
+        let mut wanted: Vec<String> = self
+            .pending
+            .lock()
+            .map(|mut pending| std::mem::take(&mut *pending))
+            .unwrap_or_default();
+        wanted.push(tmp.to_string());
+        let mut left = Vec::new();
+        match self.fresh_io() {
+            Ok(io) => {
+                for path in wanted {
+                    if io.delete(&path).is_err() {
+                        left.push(path);
+                    }
+                }
+            }
+            Err(_) => left = wanted,
+        }
+        let count = left.len();
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.extend(left);
+        }
+        count
+    }
+
+    fn publish_with_retry(&self, id_hex: &str, bytes: &Bytes) -> Result<(), String> {
+        let attempts = self.policy.attempts.max(1);
+        let mut io = self.io().map_err(|e| unreachable_words(&e))?;
+        let mut last = String::new();
+        let mut left = 0;
+        for attempt in 1..=attempts {
+            let random = os_random().map_err(|e| format!("{e:#}"))?;
+            let tmp = tmp_path(id_hex, unix_now(), random);
+            match publish_to(&*io, id_hex, bytes.clone(), &tmp) {
+                Ok(_) => {
+                    // A connection that works again can also finish earlier
+                    // cleanup.
+                    if self.pending.lock().is_ok_and(|p| !p.is_empty()) {
+                        self.clean_up(&tmp);
+                    }
+                    return Ok(());
+                }
+                Err(PublishError::Collision) => return Err(PublishError::Collision.describe()),
+                Err(failure) => {
+                    last = failure.describe();
+                    left = self.clean_up(&tmp);
+                    if attempt < attempts {
+                        std::thread::sleep(self.policy.backoff);
+                        match self.io() {
+                            Ok(fresh) => io = fresh,
+                            Err(e) => {
+                                last = unreachable_words(&e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let cleanup = if left == 0 {
+            "the temporary files the failed attempt(s) left were removed".to_string()
+        } else {
+            format!(
+                "{left} temporary file(s) could not be removed right now because the destination \
+                 was unreachable; a later push removes them (after 7 days at the latest)"
+            )
+        };
+        Err(format!(
+            "uploading a pack to the destination failed after {attempts} attempt(s): {last}. \
+             Nothing was published under a final name, and {cleanup}. The next push tries again"
+        ))
+    }
+}
+
+fn unreachable_words(error: &anyhow::Error) -> String {
+    format!("the destination could not be reached for the pack upload ({error:#})")
 }
 
 fn backend_error(text: String) -> Box<RusticError> {
@@ -500,11 +679,8 @@ impl WriteBackend for AtomicPackBackend {
         if tpe != FileType::Pack {
             return self.inner.write_bytes(tpe, id, cacheable, buf);
         }
-        let io = self.io().map_err(|e| backend_error(format!("{e:#}")))?;
-        let random = os_random().map_err(|e| backend_error(format!("{e:#}")))?;
-        publish(&*io, &id.to_hex(), buf, unix_now(), random)
-            .map(|_| ())
-            .map_err(|e| backend_error(e.describe()))
+        self.publish_with_retry(&id.to_hex(), &buf)
+            .map_err(backend_error)
     }
 
     fn remove(&self, tpe: FileType, id: &Id, cacheable: bool) -> RusticResult<()> {
@@ -772,5 +948,24 @@ mod tests {
             entry(TmpKind::LegacyLocal, None, None).age(now),
             Age::Unknown
         );
+    }
+
+    #[test]
+    fn a_bare_opendal_kind_never_reaches_the_user() {
+        let error = opendal::Error::new(opendal::ErrorKind::Unexpected, "secret-host path");
+        let words = failure_words("writing the temporary file", &error).to_string();
+        assert!(
+            words.starts_with("writing the temporary file failed: "),
+            "{words}"
+        );
+        assert!(words.contains("failed or was interrupted"), "{words}");
+        assert!(
+            !words.contains("Unexpected") && !words.contains("secret-host"),
+            "{words}"
+        );
+        let denied = opendal::Error::new(opendal::ErrorKind::PermissionDenied, "x");
+        assert!(failure_words("renaming", &denied)
+            .to_string()
+            .contains("refused permission"));
     }
 }

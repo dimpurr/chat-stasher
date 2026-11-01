@@ -162,6 +162,9 @@ struct Rig {
     corrupt_tmp_reads: bool,
     /// Listings carry no mtime.
     no_mtime: bool,
+    /// Every write lands part of the file and then fails, but the process
+    /// lives (a dropped connection, not a kill).
+    fail_writes: bool,
     log: Mutex<Vec<String>>,
 }
 
@@ -177,6 +180,7 @@ impl Rig {
             lie_once: AtomicBool::new(false),
             corrupt_tmp_reads: false,
             no_mtime: false,
+            fail_writes: false,
             log: Mutex::new(Vec::new()),
         }
     }
@@ -217,6 +221,10 @@ impl PackIo for Rig {
     fn write(&self, path: &str, bytes: Bytes) -> anyhow::Result<()> {
         self.alive()?;
         self.note(format!("write {path}"));
+        if self.fail_writes {
+            self.inner.write(path, bytes.slice(..bytes.len() / 2))?;
+            anyhow::bail!("injected connection failure");
+        }
         if let Kill::MidWrite(n) = self.kill {
             let n = n.min(bytes.len().saturating_sub(1));
             self.inner.write(path, bytes.slice(..n))?;
@@ -861,13 +869,28 @@ fn the_real_push_publishes_every_pack_through_the_wrapper_on_both_local_shapes()
     store.push(&dir.path().join("stage"), &mk).unwrap();
     assert!(!pack_hashes(&repo).is_empty());
     assert_eq!(assert_namespace_clean(&repo, "opendal:fs"), 0);
+    // Ruling 3 as amended: the default staging directory stays, because index
+    // and snapshot files still depend on it. Packs go through the wrapper
+    // with it set, and nothing is left staged after a clean push.
+    assert!(cfg.backend_options().contains_key("atomic_write_dir"));
+    let staged: Vec<_> = data_files(&repo)
+        .keys()
+        .cloned()
+        .chain(
+            fs::read_dir(repo.join(".chat-stasher-tmp"))
+                .map(|d| {
+                    d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
+        .filter(|name| classify(name).is_some() || name.contains(".chat-stasher-tmp"))
+        .collect();
     assert!(
-        !repo.join(".chat-stasher-tmp").exists(),
-        "a new opendal:fs destination gets no default atomic_write_dir (ruling 3)"
+        staged.is_empty(),
+        "nothing is left staged after a push: {staged:?}"
     );
     store.open_indexed(&mk).expect("the repository reads back");
-    // A user's own atomic_write_dir still takes effect.
-    assert!(!cfg.backend_options().contains_key("atomic_write_dir"));
 }
 
 #[test]
@@ -1148,5 +1171,278 @@ fn the_wrapper_covers_exactly_the_two_families_and_d1a_keeps_tmp_in_data() {
     assert!(
         write.starts_with(&format!("write data/{}/", &id[..2])),
         "{write}"
+    );
+}
+
+// ------------------------------- amended ruling 3: staged index/snapshot
+
+/// Child half of the kill fixture: write a 4 MB index file through rustic's
+/// own `opendal:fs` backend with a 1 MB file-size limit, so the kernel kills
+/// the process in the middle of the write (SIGXFSZ).
+#[cfg(unix)]
+fn killed_index_write_child(root: &str, keep_default_staging: bool) {
+    let cfg = StoreConfig {
+        repo_root: "opendal:fs".to_string(),
+        options: BTreeMap::from([("root".to_string(), root.to_string())]),
+        ..store_config(Path::new(root), Path::new("unused.key"))
+    };
+    let mut options = cfg.backend_options();
+    if !keep_default_staging {
+        options.remove("atomic_write_dir");
+    }
+    let backends = rustic_backend::BackendOptions::default()
+        .repository("opendal:fs")
+        .options(options)
+        .to_backends()
+        .unwrap();
+    let id: Id = "cd".repeat(32).parse().unwrap();
+    let limit = libc::rlimit {
+        rlim_cur: 1_000_000,
+        rlim_max: 1_000_000,
+    };
+    let no_core = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: plain setrlimit calls on this child process with valid structs.
+    unsafe {
+        libc::setrlimit(libc::RLIMIT_CORE, &no_core);
+        libc::setrlimit(libc::RLIMIT_FSIZE, &limit);
+    }
+    backends
+        .repository()
+        .write_bytes(
+            FileType::Index,
+            &id,
+            true,
+            Bytes::from(vec![7_u8; 4_000_000]),
+        )
+        .unwrap();
+    unreachable!("the write must have been killed by the file-size limit");
+}
+
+/// A writer killed in the middle of an index write must leave nothing under
+/// the index's final name when the default staging directory is in force, and
+/// the control run (staging removed) proves the fixture bites: there the
+/// partial file sits under the final name. This is why the default stays.
+#[cfg(unix)]
+#[test]
+fn m1_amended_a_killed_index_write_leaves_no_torn_index_under_its_final_name() {
+    use std::os::unix::process::ExitStatusExt;
+    if let Ok(mode) = std::env::var("W1055_KILL_CHILD") {
+        let root = std::env::var("W1055_KILL_ROOT").unwrap();
+        killed_index_write_child(&root, mode == "staged");
+        return;
+    }
+    let run = |mode: &str| -> (PathBuf, std::process::ExitStatus, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir_all(root.join("index")).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "m1_amended_a_killed_index_write_leaves_no_torn_index_under_its_final_name",
+                "--test-threads=1",
+            ])
+            .env("W1055_KILL_CHILD", mode)
+            .env("W1055_KILL_ROOT", &root)
+            .status()
+            .unwrap();
+        (root, status, dir)
+    };
+    let final_index = |root: &Path| -> Option<u64> {
+        let path = root.join("index").join("cd".repeat(32));
+        fs::metadata(path).ok().map(|m| m.len())
+    };
+
+    let (control_root, status, _keep) = run("control");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGXFSZ),
+        "the control child was killed mid-write"
+    );
+    let torn =
+        final_index(&control_root).expect("control: the partial file is under the final name");
+    assert!(torn < 4_000_000, "control: it is partial ({torn} bytes)");
+
+    let (staged_root, status, _keep2) = run("staged");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGXFSZ),
+        "the staged child was killed mid-write"
+    );
+    assert_eq!(
+        final_index(&staged_root),
+        None,
+        "with the default staging directory a killed write leaves nothing under the final name"
+    );
+    assert!(
+        staged_root.join(".chat-stasher-tmp").exists(),
+        "the partial file sits in the staging directory, which the by-name sweep covers"
+    );
+}
+
+// ----------------------------------------------------- retry (review M2)
+
+use chat_stasher::atomic_pack::RetryPolicy;
+
+fn quick() -> RetryPolicy {
+    RetryPolicy {
+        attempts: 2,
+        backoff: Duration::from_millis(1),
+    }
+}
+
+/// A backend whose connections come from `make(connection_number)`.
+fn backend_over(
+    make: impl Fn(usize) -> anyhow::Result<Rig> + Send + Sync + 'static,
+) -> (Arc<dyn WriteBackend>, Arc<AtomicUsize>) {
+    let made = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&made);
+    let backend = AtomicPackBackend::around_with_policy(
+        Arc::new(Recorder::default()),
+        Box::new(move || {
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            let io: Arc<dyn PackIo> = Arc::new(make(n)?);
+            Ok(io)
+        }),
+        quick(),
+    );
+    (backend, made)
+}
+
+fn tmp_count(root: &Path) -> usize {
+    data_files(root)
+        .keys()
+        .filter(|k| classify(k).is_some())
+        .count()
+}
+
+#[test]
+fn m2_a_transient_failure_succeeds_on_retry_and_leaves_no_tmp() {
+    let (id, bytes) = pack(50);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    // The first connection drops mid-write; every later one is healthy.
+    let (backend, made) = backend_over(move |n| {
+        let mut rig = Rig::new(&root);
+        rig.fail_writes = n == 0;
+        Ok(rig)
+    });
+    let parsed: Id = id.parse().unwrap();
+    backend
+        .write_bytes(FileType::Pack, &parsed, false, bytes.clone())
+        .unwrap();
+    assert_eq!(
+        fs::read(dir.path().join(final_rel(&id))).unwrap(),
+        bytes.to_vec()
+    );
+    assert_eq!(
+        tmp_count(dir.path()),
+        0,
+        "the failed attempt's partial tmp was removed"
+    );
+    assert!(
+        made.load(Ordering::SeqCst) >= 2,
+        "the retry used a fresh connection"
+    );
+    assert_eq!(assert_namespace_clean(dir.path(), "after retry"), 0);
+}
+
+#[test]
+fn m2_a_persistent_failure_is_worded_and_leaves_no_tmp_where_cleanup_can_reach() {
+    let (id, bytes) = pack(51);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let (backend, _) = backend_over(move |_| {
+        let mut rig = Rig::new(&root);
+        rig.fail_writes = true; // every connection drops mid-write, deletes work
+        Ok(rig)
+    });
+    let parsed: Id = id.parse().unwrap();
+    for push in 0..5 {
+        let error = backend
+            .write_bytes(FileType::Pack, &parsed, false, bytes.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("failed after 2 attempt(s)"), "{error}");
+        assert!(
+            error.contains("Nothing was published under a final name"),
+            "{error}"
+        );
+        assert!(error.contains("were removed"), "{error}");
+        assert!(
+            !error.contains("Unexpected"),
+            "no bare opendal kind reaches the user: {error}"
+        );
+        assert_eq!(tmp_count(dir.path()), 0, "push {push}: nothing accumulates");
+    }
+    assert!(!dir.path().join(final_rel(&id)).exists());
+}
+
+#[test]
+fn m2_when_no_fresh_connection_can_be_made_the_leftover_is_bounded_then_cleared() {
+    let (id, bytes) = pack(52);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    // Connection 0 drops mid-write; the destination then refuses new
+    // connections for a while (1..=3), and later comes back.
+    let (backend, _) = backend_over(move |n| match n {
+        0 => {
+            let mut rig = Rig::new(&root);
+            rig.fail_writes = true;
+            Ok(rig)
+        }
+        1..=3 => anyhow::bail!("injected: cannot connect"),
+        _ => Ok(Rig::new(&root)),
+    });
+    let parsed: Id = id.parse().unwrap();
+    let error = backend
+        .write_bytes(FileType::Pack, &parsed, false, bytes.clone())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("could not be removed right now"), "{error}");
+    assert_eq!(
+        tmp_count(dir.path()),
+        1,
+        "one failed attempt, one leftover, no growth"
+    );
+    // A second push while the destination still refuses connections adds
+    // nothing it cannot account for, and the first connection that works
+    // clears everything this process left.
+    let _ = backend.write_bytes(FileType::Pack, &parsed, false, bytes.clone());
+    backend
+        .write_bytes(FileType::Pack, &parsed, false, bytes.clone())
+        .unwrap();
+    assert_eq!(
+        tmp_count(dir.path()),
+        0,
+        "the recovered connection removed the earlier leftovers"
+    );
+    assert_eq!(
+        fs::read(dir.path().join(final_rel(&id))).unwrap(),
+        bytes.to_vec()
+    );
+}
+
+#[test]
+fn m2_a_collision_is_not_retried() {
+    let (id, bytes) = pack(53);
+    let dir = tempfile::tempdir().unwrap();
+    let final_path = dir.path().join(final_rel(&id));
+    fs::create_dir_all(final_path.parent().unwrap()).unwrap();
+    fs::write(&final_path, b"formal name written wrong").unwrap();
+    let root = dir.path().to_path_buf();
+    let (backend, made) = backend_over(move |_| Ok(Rig::new(&root)));
+    let parsed: Id = id.parse().unwrap();
+    let error = backend
+        .write_bytes(FileType::Pack, &parsed, false, bytes)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("different bytes"), "{error}");
+    assert_eq!(
+        made.load(Ordering::SeqCst),
+        1,
+        "no second connection, no second attempt"
     );
 }

@@ -3797,12 +3797,29 @@ mod tests {
 }
 
 impl StoreConfig {
-    /// The options a destination's backend is built from. Since ADR-063 the
-    /// destination no longer defaults an `atomic_write_dir` (ruling 3): pack
-    /// publication is the wrapper's tmp, verify, rename, and each backend
-    /// family keeps exactly one staged write path. A value the user set
-    /// themselves is forwarded untouched.
-    fn with_atomic_fs_writes(&self, options: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    /// Fill in the `opendal:fs` staging directory. Index and snapshot files
+    /// still depend on it: ADR-063's tmp/verify/rename covers packs only, so
+    /// keeping this default is what stops a torn index or snapshot from
+    /// sitting under its final name (ruling 3 as amended 2026-11-01). Packs
+    /// go through the wrapper's own writer, built from the root alone; a value
+    /// the user set themselves is never overwritten.
+    fn with_atomic_fs_writes(
+        &self,
+        mut options: BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        // OpenDAL fs otherwise exposes the final object before its bytes are written.
+        // Stage under the repository root so publication uses a same-filesystem rename.
+        // Building the operator creates this directory, even for read-only opens:
+        // the root must be writable unless staging already exists. Crash debris stays
+        // there until a push's by-name sweep removes what is over seven days old.
+        if self.repo_root == "opendal:fs" {
+            if let Some(root) = options.get("root") {
+                let staging = Path::new(root).join(".chat-stasher-tmp");
+                options
+                    .entry("atomic_write_dir".into())
+                    .or_insert_with(|| staging.display().to_string());
+            }
+        }
         options
     }
 
@@ -3865,17 +3882,24 @@ mod atomic_fs_tests {
     use super::*;
 
     #[test]
-    fn opendal_fs_no_longer_defaults_a_staging_dir_but_keeps_the_users_own() {
-        // ADR-063 ruling 3: pack publication is the wrapper's tmp, verify,
-        // rename, so the destination stops defaulting `atomic_write_dir`.
-        // (Test shape changed with the ruling; the pinned meaning is that a
-        // user-set value still reaches the backend untouched.)
+    fn opendal_fs_keeps_its_staging_default_for_index_and_snapshot_files() {
+        // ADR-063 ruling 3, amended: packs go through the wrapper, but index
+        // and snapshot files still need the staged write, so the default
+        // stays and a user-set value still wins.
         let mut cfg = StoreConfig {
             repo_root: "opendal:fs".into(),
             options: BTreeMap::from([("root".into(), "synthetic-repo".into())]),
             ..StoreConfig::default()
         };
-        assert!(!cfg.backend_options().contains_key("atomic_write_dir"));
+        assert_eq!(
+            cfg.backend_options().get("atomic_write_dir"),
+            Some(
+                &Path::new("synthetic-repo")
+                    .join(".chat-stasher-tmp")
+                    .display()
+                    .to_string()
+            )
+        );
         cfg.options
             .insert("atomic_write_dir".into(), "fixture-custom-tmp".into());
         assert_eq!(
