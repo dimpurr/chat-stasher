@@ -269,6 +269,14 @@ pub struct BackupStore {
     /// `verify` keeps for good (a copy may never certify itself, so its
     /// store is built without this and its reads stay remote).
     mirror_reads: Option<std::sync::Arc<crate::mirror_read::MirrorReads>>,
+    /// The offline mirror seam (W1053 `--offline`): set together with
+    /// `mirror_reads` by [`BackupStore::with_offline_mirror`], and never
+    /// otherwise — a store with this flag never constructs the declared
+    /// repository's backend at all ([`BackupStore::backends`] builds the
+    /// mirror's local backend alone), so no run through it can open a
+    /// remote connection, and every file its reads need must be on the
+    /// copy or in a local cache or the read refuses.
+    offline_mirror: bool,
     /// How this store joins a session's shards: collapse unbound byte-identical
     /// replay shards by default, while retaining exact sequence-bound captured
     /// duplicates; or hand back every shard. See [`DuplicateShardPolicy`].
@@ -298,6 +306,7 @@ impl BackupStore {
             body_cache: None,
             snapshot_cache: None,
             mirror_reads: None,
+            offline_mirror: false,
             shard_policy: DuplicateShardPolicy::Collapse,
         }
     }
@@ -314,6 +323,7 @@ impl BackupStore {
             body_cache: None,
             snapshot_cache: None,
             mirror_reads: None,
+            offline_mirror: false,
             shard_policy: DuplicateShardPolicy::Collapse,
         }
     }
@@ -416,6 +426,63 @@ impl BackupStore {
         self.mirror_reads.as_ref()
     }
 
+    /// Serve this store's reads from the local mirror **only** (W1053
+    /// `--offline`): the destination's backend is never constructed, so a
+    /// store built this way cannot open a remote connection at all — every
+    /// read answers from the mirror copy, the body cache, or rustic's local
+    /// metadata cache, and a file none of them holds is the refusal the
+    /// caller words in the "did not finish" family (`3`), never an empty
+    /// answer.
+    ///
+    /// The mirror handle is the same [`MirrorReads`] a serving store
+    /// attaches online ([`crate::mirror_read::decide`] produced it), so the
+    /// counters the run moves reach the same served line the online report
+    /// prints — reworded for a run whose remote leg is structurally zero.
+    /// Distinguishing an offline store from an online mirror-first one by
+    /// a flag rather than a different type is what keeps every read path
+    /// below it unchanged: the walk, the decode and the readers never
+    /// learn which seam answered them.
+    ///
+    /// `verify` may take it too, and that is not the mirror seam ADR-062
+    /// D3 keeps off `verify`: this flag services an explicit
+    /// `verify --offline`, whose verdict certifies the copy by name (the
+    /// same stance `mirror_copy` detection words for `verify --repo <the
+    /// copy>`, 47 §5.5) — an online `verify` is still built without a
+    /// mirror and still never consults the copy.
+    pub fn with_offline_mirror(
+        mut self,
+        mirror: std::sync::Arc<crate::mirror_read::MirrorReads>,
+    ) -> Self {
+        self.mirror_reads = Some(mirror);
+        self.offline_mirror = true;
+        self
+    }
+
+    /// Whether this store serves reads from the local mirror only (W1053):
+    /// the callers that word offline absences — an offline walk cannot
+    /// claim proof of absence the way an online one can, because the
+    /// remote may hold a snapshot the copy does not — key on this instead
+    /// of re-deriving it from the seams.
+    pub fn is_offline_mirror(&self) -> bool {
+        self.offline_mirror
+    }
+
+    /// The mirrored destination's name, for an offline store's verdict
+    /// wording (W1053). Private on purpose: `with_offline_mirror` is the
+    /// only way to set the flag and it carries the handle, so an offline
+    /// store always knows whose copy it reads — the `unreachable` branch
+    /// is a construction bug rather than a default, because an empty
+    /// name here would surface in user-facing refusal sentences.
+    fn offline_mirror_of(&self) -> &str {
+        match &self.mirror_reads {
+            Some(reads) => &reads.mirror_of,
+            None => std::unreachable!(
+                "an offline store is built only by `with_offline_mirror`, which carries the \
+                 mirror's name"
+            ),
+        }
+    }
+
     /// An owned twin of this store: the same configuration values and the same
     /// cache/mirror handles (shared [`std::sync::Arc`]s, so every counter the
     /// twin moves shows up here too) — one store for a worker thread the run
@@ -432,6 +499,7 @@ impl BackupStore {
             body_cache: self.body_cache.clone(),
             snapshot_cache: self.snapshot_cache.clone(),
             mirror_reads: self.mirror_reads.clone(),
+            offline_mirror: self.offline_mirror,
             shard_policy: self.shard_policy,
         }
     }
@@ -443,6 +511,28 @@ impl BackupStore {
     /// wiring applies the connections cap as the backend `connections` option
     /// (`ConcurrentLimitLayer`).
     pub fn backends(&self) -> anyhow::Result<RepositoryBackends> {
+        // W1053 `--offline`: the declared repository's options are never
+        // turned into a backend at all — this branch returns before
+        // `to_backends()` sees `repo_root`, so no opendal operator is
+        // built, no ssh master is spawned and no socket can open, however
+        // the destination is spelled. The mirror's own local backend is
+        // the whole stack, with the body cache inside it exactly as the
+        // online mirror seam holds it (ruling 7: the copy's bytes never
+        // enter the cache).
+        if self.offline_mirror {
+            let Some(mirror) = &self.mirror_reads else {
+                anyhow::bail!(
+                    "an offline store was built without a mirror to serve from — this is a \
+                     construction bug, not a state a command can run in"
+                );
+            };
+            let repository = crate::mirror_read::OfflineMirrorBackend::wrap(
+                std::sync::Arc::clone(mirror),
+                self.body_cache.clone(),
+                self.cfg.repo_root.clone(),
+            )?;
+            return Ok(RepositoryBackends::new(repository, None));
+        }
         let mut opts = BackendOptions::default().repository(self.cfg.repo_root.as_str());
         if self.cfg.repo_root.starts_with("opendal:") || self.cfg.repo_root.starts_with("rest:") {
             // Built by `StoreConfig::backend_options`, which is defined at the
@@ -1141,6 +1231,19 @@ impl BackupStore {
             .find(|(host, _)| host == machine)
             .map(|(_, snaps)| snaps)
         else {
+            // Offline, "this repository" is only what the mirror copy holds:
+            // the destination was not contacted, so an empty partition set
+            // proves nothing about it (W1053 — the same three-state rule the
+            // deadline wording keeps, because absence offline is unknown).
+            if self.is_offline_mirror() {
+                let mirror_of = self.offline_mirror_of();
+                return Err(anyhow!(
+                    "no snapshot for machine `{machine}` in the local mirror copy of \
+                     `{mirror_of}` it was read from (--offline) — the destination was not \
+                     contacted, so whether its repository holds a snapshot for this machine \
+                     is unknown, not a measured absence"
+                ));
+            }
             return Err(anyhow!(
                 "no snapshot for machine `{machine}` in this repository"
             ));
@@ -1160,6 +1263,20 @@ impl BackupStore {
         }
         // Reached only when every snapshot of the machine was walked and none
         // held the session — a proof of absence rather than a failure to look.
+        // Offline, the walk read every snapshot **the mirror copy** holds, and
+        // the destination may hold more (W1053), so the proof the online
+        // wording claims is not this read's to make: the session stays
+        // unknown, and the exit family that follows is "did not finish".
+        if self.is_offline_mirror() {
+            let mirror_of = self.offline_mirror_of();
+            return Err(anyhow!(
+                "session `{}` holds no shards in any of the {snapshots_held} snapshots of \
+                 machine `{machine}` the local mirror copy of `{mirror_of}` holds (--offline; \
+                 all of them were read) — the destination was not contacted and may hold \
+                 newer snapshots, so this is unknown, not a proof the session is absent",
+                crate::id::short_session_id(session_id),
+            ));
+        }
         Err(anyhow!(
             "session `{}` holds no shards in any of the {snapshots_held} snapshots of machine \
              `{machine}` (all of them were read)",

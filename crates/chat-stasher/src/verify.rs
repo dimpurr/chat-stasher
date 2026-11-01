@@ -134,6 +134,15 @@ pub enum SessionOutcome {
     Match,
     /// Expected by the manifest but absent from the archive.
     MissingInArchive,
+    /// Expected by the manifest, absent from the **local mirror copy** an
+    /// offline run reconciles against (W1053 `--offline`): the destination
+    /// was not contacted, so its absence is an unknown about the archive,
+    /// never a verdict. Offline runs produce this variant where online
+    /// ones produce [`Self::MissingInArchive`], and it accounts as an
+    /// unreadable expectation (`verify` INCOMPLETE, exit `3`), not as a
+    /// failure — the walk finished over what the copy holds and the copy
+    /// did not answer for this session.
+    AbsentFromMirrorCopy,
     /// Present, but the number of shards differs.
     ShardCountMismatch { expected: usize, observed: usize },
     /// Present with the same shard count, but the concatenated length differs.
@@ -297,6 +306,19 @@ impl ReconcileReport {
             .count()
     }
 
+    /// Rows the offline copy could not answer for (W1053 `--offline`):
+    /// sessions the manifest expects that the local mirror copy does not
+    /// hold — an unknown about the archive, so a caller words them per-row
+    /// and counts the level unreadable ("INCOMPLETE", exit `3`), never as
+    /// a finding the copy failed. Zero on every online report, which is
+    /// also why this accessor is safe to call unconditionally.
+    pub fn absent_from_mirror_copy(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|r| matches!(r.outcome, SessionOutcome::AbsentFromMirrorCopy))
+            .count()
+    }
+
     /// Number of unverifiable rows.
     pub fn unverifiable(&self) -> usize {
         self.rows
@@ -412,6 +434,12 @@ impl BackupStore {
                 }
             } else {
                 match obs_map.get(&key) {
+                    // Offline, the observation is the mirror copy's, and the
+                    // destination was not contacted (W1053): a session the
+                    // copy does not hold is an unknown about the archive,
+                    // never a MISSING IN ARCHIVE verdict — the copy may
+                    // simply be behind the newest push.
+                    None if self.is_offline_mirror() => SessionOutcome::AbsentFromMirrorCopy,
                     None => SessionOutcome::MissingInArchive,
                     Some(obs) if obs.shard_count != exp.shard_count => {
                         SessionOutcome::ShardCountMismatch {

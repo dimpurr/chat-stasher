@@ -78,6 +78,27 @@
 //! (`collect`/`push`/`dest-init`/`reclaim`), which keep reading exactly the
 //! repository they write.
 //!
+//! **W1053 — `--offline`, the switch that removes the fallback** (LM5
+//! OFFLINE-RULING): the reaching shape above is *first, with a remote
+//! behind it*. [`OfflineMirrorBackend`] is the same mirror leg with no
+//! remote behind it at all: the destination's backend is never even
+//! constructed (no `to_backends()` on the declared repository, so nothing
+//! can dial), every listing is answered by the copy, and a file the copy
+//! lacks is the refusal of [`offline_absent_refusal`] — the read reports
+//! "did not finish" rather than reaching for the network, which is the
+//! ruling's whole point: the three states stay apart, so an offline
+//! absence is an *unknown about the archive* (`3`), never an empty result
+//! and never a claimed absence. The body cache still serves what it holds
+//! (the copy's bytes never enter it — ruling 7 holds offline too), and
+//! rustic's own metadata cache, being local, keeps serving trees and
+//! snapshots from earlier opens. `read` / `export` / `verify` take the
+//! switch; `verify --offline` reads the copy by name and its verdict
+//! certifies **the copy**, the same stance [`MirrorReadDecision::
+//! MirrorCopyItself`] already words for `verify --repo <the copy>`
+//! (47 §5.5) — a switch that names its target is not the silent mirror
+//! seam that ruling forbids, and online `verify` never consults the copy
+//! either way.
+//!
 //! Privacy: counters and state lines carry destination names, file counts
 //! and byte totals. No session ids, no paths a state file would keep, no
 //! conversation content.
@@ -227,6 +248,40 @@ impl MirrorReads {
             counters.mirror_listings
         )
     }
+
+    /// The same report for an offline run (W1053): the phrase the ruling
+    /// names — *served from mirror* — plus the numbers, with the remote leg
+    /// worded as the zero it is by construction rather than as a
+    /// fallback count. An offline run's `remote_files` is a structural `0`
+    /// (the backend never existed), and printing the online sentence's
+    /// "0 file(s) (0 B) read from the remote" would read as a measurement
+    /// of traffic rather than as the switch's promise kept.
+    #[must_use]
+    pub fn offline_served_line(&self) -> String {
+        let counters = self.counters();
+        format!(
+            "served from mirror `{}` — {} file(s) ({} B) from the local copy, {} listing(s) \
+             answered locally, nothing from the remote (--offline; this run opened no remote \
+             connection)",
+            self.mirror_of, counters.mirror_files, counters.mirror_bytes, counters.mirror_listings
+        )
+    }
+
+    /// The pre-read announcement an offline run prints (W1053): the
+    /// switch's promise in one line, before any step can wedge — the copy
+    /// is the only source, the remote will not be contacted, and a file the
+    /// copy lacks is the end of this read rather than a fetch. It replaces
+    /// the serving state line offline (which promises the opposite: "the
+    /// remote answers what it lacks").
+    #[must_use]
+    pub fn offline_state_line(&self) -> String {
+        format!(
+            "served from mirror `{}` — the local copy is this read's only source: the \
+             destination is not contacted, and a file the copy lacks ends the read (reported, \
+             never silently fetched)",
+            self.mirror_of
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +341,58 @@ impl MirrorReadDecision {
         match self {
             Self::Serving(reads) => Some(Arc::clone(reads)),
             _ => None,
+        }
+    }
+
+    /// Whether an offline run (W1053 `--offline`) can be served by this
+    /// machine at all: only a `Serving` mirror has a copy to read instead
+    /// of the destination, and [`Self::MirrorCopyItself`] is the copy —
+    /// a repository that is already local, so a plain read of it *is* the
+    /// offline shape (the switch attaches no seam and the copy's own
+    /// `state_line` states what is being read). Everything else — no
+    /// section, the switch off, an unusable mirror, another destination —
+    /// has no offline leg, and the caller must refuse rather than dial.
+    #[must_use]
+    pub fn offline_capable(&self) -> bool {
+        matches!(self, Self::Serving(_) | Self::MirrorCopyItself { .. })
+    }
+
+    /// The refusal sentence an offline run owes for the one machine state
+    /// that cannot serve it: `None` exactly when [`Self::offline_capable`]
+    /// is true, so the two cannot drift apart. The sentences stay in the
+    /// decision's own vocabulary (they re-word the same states
+    /// [`Self::state_line`] renders for the online fallback) because the
+    /// difference is the promise: online, an unusable mirror means "this
+    /// command reads the remote"; offline, the same state means the run
+    /// has no local copy to read at all — nothing may dial.
+    #[must_use]
+    pub fn offline_refusal(&self) -> Option<String> {
+        match self {
+            Self::Serving(_) | Self::MirrorCopyItself { .. } => None,
+            Self::Unconfigured => Some(
+                "this machine declares no `[mirror]` section, so an offline read has no local \
+                 copy to serve from — give the destination a mirror (a `[mirror]` section is \
+                 the one the `mirror` commands read) and fill it with `chat-stasher mirror \
+                 sync` first"
+                    .to_string(),
+            ),
+            Self::SwitchOff => Some(
+                "the `[mirror]` switch is off (`enabled = false`), so there is no local copy \
+                 an offline read may serve from — turn the section on and run `chat-stasher \
+                 mirror sync`, or run without `--offline`"
+                    .to_string(),
+            ),
+            Self::Unusable { why, .. } => Some(format!(
+                "the configured mirror cannot serve this read ({why}) — an offline run may \
+                 not fall back to the destination, so fix the mirror (usually `chat-stasher \
+                 mirror sync`) and re-run"
+            )),
+            Self::OtherDestination => Some(
+                "the store resolves to a repository the configured mirror does not copy, and \
+                 an offline run may not reach the destination to read it — `--offline` serves \
+                 the mirrored destination only"
+                    .to_string(),
+            ),
         }
     }
 
@@ -707,6 +814,261 @@ fn corrupt_copy_refusal(
         ),
         error,
     )
+}
+
+/// The refusal an offline read owes for a file the copy does not hold
+/// (W1053): the online seam's ordinary fallback is a remote fetch, and
+/// `--offline` exists to make exactly that fetch impossible — so the file's
+/// absence is the end of this read, worded as the unknown it is. It never
+/// reads as "the archive does not hold it": the remote was not asked, so
+/// nothing here is a claim about the archive (the caller words the exit
+/// `3`, "did not finish"). The repair is named for what it is — the
+/// mirror is mid-fill or behind, and `mirror sync` is the leg that fills
+/// it.
+fn offline_absent_refusal(
+    tpe: FileType,
+    id: &rustic_core::Id,
+    mirror_of: &str,
+    error: rustic_core::RusticError,
+) -> Box<rustic_core::RusticError> {
+    let file = if tpe == FileType::Config {
+        "`config` file".to_string()
+    } else {
+        format!("`{}` file `{}`", tpe.dirname(), id.to_hex().as_str())
+    };
+    rustic_core::RusticError::with_source(
+        rustic_core::ErrorKind::Backend,
+        format!(
+            "This `--offline` read serves the local mirror of `{mirror_of}` only, and that \
+             copy does not hold the {file} this read asked for — the remote was not \
+             contacted, so the file's absence from the copy proves nothing about the \
+             archive and this read did not finish. Run `chat-stasher mirror sync` to fill \
+             what the copy lacks, or re-run without `--offline` to let the destination \
+             answer.",
+        ),
+        error,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The offline backend (W1053): the mirror leg with no remote behind it
+// ---------------------------------------------------------------------------
+
+/// The `--offline` read seam: the copy's backend, and nothing else (W1053).
+///
+/// [`MirrorFirstBackend`] keeps the destination's backend behind the copy
+/// for the files the copy lacks; this backend holds no destination backend
+/// at all, which is the switch's whole contract — the declared repository's
+/// options are never even turned into a backend, so no opendal operator is
+/// built, no ssh master is spawned, and no socket is opened anywhere in the
+/// process. Delegation, per operation:
+///
+/// * `list_with_size` — the copy's answer, full stop. The online rule —
+///   presence stays the remote's while it can be asked — has no leg here:
+///   the listing the copy gives is the listing the read gets, counted as a
+///   locally answered listing so the served line says so.
+/// * `read_full` / `read_partial` — the copy, with the body cache consulted
+///   first exactly as [`MirrorFirstBackend`] does on its non-config legs
+///   (a hit serves; a miss reads the copy; nothing is stored — ruling 7
+///   holds offline too, because the bytes in question are the copy's own).
+///   A read that errors on a file the copy's layout says is present is the
+///   same hard [`corrupt_copy_refusal`] as online; a file the copy lacks
+///   is [`offline_absent_refusal`] — never a fetch, never an empty answer.
+/// * `config` — the copy's (the online remote-first direction exists to
+///   avoid yesterday's layout; offline has one source, and the copy's own
+///   `config` is the layout this open runs on).
+/// * writes — refused: the readers that take `--offline` are read-only,
+///   and a write through the offline seam would be a mutation of a copy
+///   only `mirror sync` may write. The refusal is loud, not delegated.
+pub(crate) struct OfflineMirrorBackend {
+    mirror: Arc<dyn WriteBackend>,
+    /// The store's identity stays the declared destination: error messages
+    /// and `repo` lines continue to name the repository the config
+    /// declares, never this machine's copy of it.
+    location: String,
+    /// The mirrored destination the copy holds (for the refusal's repair).
+    mirror_of: String,
+    /// The body cache this store would otherwise have wrapped around the
+    /// remote (ADR-034), consulted first like the online seam's fallback
+    /// ordering (ruling 7: the copy's bytes are never stored).
+    body_cache: Option<Arc<BodyCache>>,
+    reads: Arc<MirrorReads>,
+}
+
+impl OfflineMirrorBackend {
+    /// Build the offline seam over the copy: a plain local backend over the
+    /// mirrored directory (C4, the same construction [`MirrorFirstBackend`]
+    /// uses for its mirror leg), and nothing else — the caller must pass
+    /// `location`, the config-declared repository string, because the
+    /// destination's backend is never built and there is nothing to ask
+    /// `location()` of.
+    pub(crate) fn wrap(
+        reads: Arc<MirrorReads>,
+        body_cache: Option<Arc<BodyCache>>,
+        location: String,
+    ) -> anyhow::Result<Arc<dyn WriteBackend>> {
+        let options =
+            BackendOptions::default().repository(reads.mirror_root.to_string_lossy().into_owned());
+        let mirror = options
+            .to_backends()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "build the local backend over the mirror of `{}`: {e:#}",
+                    reads.mirror_of
+                )
+            })?
+            .repository();
+        Ok(Arc::new(Self {
+            mirror,
+            location,
+            mirror_of: reads.mirror_of.clone(),
+            body_cache,
+            reads,
+        }))
+    }
+
+    /// One read from the copy, classified at the same line the online seam
+    /// classifies: a present-but-unreadable file is the corruption refusal,
+    /// an absent one is the offline refusal.
+    fn read_from_copy(
+        &self,
+        tpe: FileType,
+        id: &rustic_core::Id,
+        read: impl Fn(&dyn WriteBackend) -> rustic_core::RusticResult<bytes::Bytes>,
+    ) -> rustic_core::RusticResult<bytes::Bytes> {
+        match read(&self.mirror) {
+            Ok(bytes) => {
+                self.reads.counters.note_read(true, tpe, id, bytes.len());
+                Ok(bytes)
+            }
+            Err(error) => {
+                if mirror_file_path(&self.reads.mirror_root, tpe, id).exists() {
+                    return Err(corrupt_copy_refusal(tpe, id, *error));
+                }
+                Err(offline_absent_refusal(tpe, id, &self.mirror_of, *error))
+            }
+        }
+    }
+}
+
+impl ReadBackend for OfflineMirrorBackend {
+    fn location(&self) -> String {
+        // The store's identity stays the destination, exactly as the online
+        // seam keeps it: the copy is where bytes come from, not what this
+        // repository is called.
+        self.location.clone()
+    }
+
+    fn list_with_size(
+        &self,
+        tpe: FileType,
+    ) -> rustic_core::RusticResult<Vec<(rustic_core::Id, u32)>> {
+        // No remote to defer to: the copy's answer is the whole answer. An
+        // empty or erroneous listing is passed through for the caller to
+        // word (an empty copy of a genuinely archived repository is the
+        // mid-rollback/degraded shape the online seam also lets the caller
+        // see, never silently padded).
+        let answer = self.mirror.list_with_size(tpe)?;
+        if !answer.is_empty() {
+            self.reads
+                .counters
+                .mirror_listings
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(answer)
+    }
+
+    fn read_full(
+        &self,
+        tpe: FileType,
+        id: &rustic_core::Id,
+    ) -> rustic_core::RusticResult<bytes::Bytes> {
+        self.read_from_copy(tpe, id, |backend| backend.read_full(tpe, id))
+    }
+
+    fn read_partial(
+        &self,
+        tpe: FileType,
+        id: &rustic_core::Id,
+        cacheable: bool,
+        offset: u32,
+        length: u32,
+    ) -> rustic_core::RusticResult<bytes::Bytes> {
+        // Ruling 7's offline half: the cache may serve what an earlier
+        // remote fetch stored; the copy serves the miss; and nothing this
+        // backend reads is ever stored (the same ciphertext is already on
+        // the disk, whole).
+        if crate::body_cache::BodyCacheBackend::is_body_read(tpe, cacheable) {
+            if let Some(cache) = &self.body_cache {
+                let key = crate::body_cache::CacheKey::new(id, offset, length);
+                if let Some(bytes) = cache.get(&key) {
+                    return Ok(bytes);
+                }
+                let bytes = self.read_from_copy(tpe, id, |backend| {
+                    backend.read_partial(tpe, id, cacheable, offset, length)
+                })?;
+                return Ok(bytes);
+            }
+        }
+        self.read_from_copy(tpe, id, |backend| {
+            backend.read_partial(tpe, id, cacheable, offset, length)
+        })
+    }
+
+    fn warmup_path(&self, tpe: FileType, id: &rustic_core::Id) -> String {
+        self.mirror.warmup_path(tpe, id)
+    }
+
+    fn needs_warm_up(&self) -> bool {
+        // The copy is a local backend: it needs no warming.
+        false
+    }
+
+    fn warm_up(&self, tpe: FileType, id: &rustic_core::Id) -> rustic_core::RusticResult<()> {
+        self.mirror.warm_up(tpe, id)
+    }
+}
+
+impl WriteBackend for OfflineMirrorBackend {
+    fn create(&self) -> rustic_core::RusticResult<()> {
+        offline_write_refusal()
+    }
+
+    fn write_bytes(
+        &self,
+        _tpe: FileType,
+        _id: &rustic_core::Id,
+        _cacheable: bool,
+        _buf: bytes::Bytes,
+    ) -> rustic_core::RusticResult<()> {
+        offline_write_refusal()
+    }
+
+    fn remove(
+        &self,
+        _tpe: FileType,
+        _id: &rustic_core::Id,
+        _cacheable: bool,
+    ) -> rustic_core::RusticResult<()> {
+        offline_write_refusal()
+    }
+}
+
+/// The refusal a write through the offline seam earns: `--offline` marks a
+/// read-only run, and the mirror is a copy only `mirror sync` writes — a
+/// write here would be a second, unverified copier (ADR-062 D2's rejected
+/// alternative) or a write to a repository the switch promised not to
+/// contact. Loud and typed, never silently routed.
+fn offline_write_refusal() -> rustic_core::RusticResult<()> {
+    Err(rustic_core::RusticError::new(
+        rustic_core::ErrorKind::Backend,
+        format!(
+            "A write was attempted through an `--offline` store — `--offline` serves reads from \
+             the local mirror only and never constructs the destination's backend, so this \
+             write was refused before anything was written. Run the command without \
+             `--offline` to write the declared repository.",
+        ),
+    ))
 }
 
 impl ReadBackend for MirrorFirstBackend {
@@ -1588,6 +1950,281 @@ mod tests {
                 mirror_listings: 0,
             },
             "counted as the one remote crossing it was"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // W1053: the offline seam
+    // ------------------------------------------------------------------
+
+    /// `--offline` can be served by exactly the decisions that hold bytes
+    /// this machine can read without dialing anything: a serving mirror,
+    /// and the copy itself. Every other state refuses, with one sentence
+    /// naming the fix — and `offline_refusal()` returning `None` is the
+    /// same predicate as `offline_capable()`, which is the lock that keeps
+    /// the caller from printing a refusal for a state it then serves.
+    #[test]
+    fn offline_capability_and_refusals_follow_the_decision() {
+        let enabled = true;
+        let data_root = Path::new("/data");
+
+        // Unconfigured: no copy exists to serve an offline read.
+        let config = config_with(&[("storagebox", "/remote/repo")], None);
+        let decision = decide(&config, &resolved("/remote/repo"), data_root);
+        assert!(!decision.offline_capable());
+        let refusal = decision.offline_refusal().expect("unconfigured refuses");
+        assert!(refusal.contains("no `[mirror]` section"), "{refusal}");
+        assert!(refusal.contains("mirror sync"), "{refusal}");
+
+        // The switch is off: reads must go to the source, never offline.
+        let disabled = false;
+        let config = config_with(
+            &[("storagebox", "/remote/repo")],
+            Some((&disabled, "storagebox")),
+        );
+        let decision = decide(&config, &resolved("/remote/repo"), data_root);
+        assert!(!decision.offline_capable());
+        let refusal = decision.offline_refusal().expect("switch off refuses");
+        assert!(refusal.contains("enabled = false"), "{refusal}");
+        assert!(refusal.contains("mirror sync"), "{refusal}");
+
+        // Enabled but no copy on disk: unusable, and the sentence carries
+        // the why the online state line already worded.
+        let config = config_with(
+            &[("storagebox", "/remote/repo")],
+            Some((&enabled, "storagebox")),
+        );
+        let decision = decide(
+            &config,
+            &resolved("/remote/repo"),
+            Path::new("/definitely/not/a/data/root"),
+        );
+        assert!(!decision.offline_capable());
+        let refusal = decision
+            .offline_refusal()
+            .expect("an unfilled mirror refuses");
+        assert!(
+            refusal.contains("mirror sync"),
+            "the repair is the fill: {refusal}"
+        );
+        assert!(
+            refusal.contains("may not fall back to the destination"),
+            "the refusal states the offline promise: {refusal}"
+        );
+
+        // Another destination: silence is the online rule, but an offline
+        // run may not become a quiet remote read — it refuses, loudly.
+        let config = config_with(
+            &[("storagebox", "/remote/repo"), ("r2", "/other/repo")],
+            Some((&enabled, "storagebox")),
+        );
+        let decision = decide(&config, &resolved("/other/repo"), data_root);
+        assert!(!decision.offline_capable());
+        let refusal = decision
+            .offline_refusal()
+            .expect("a different archive refuses");
+        assert!(
+            refusal.contains("does not copy"),
+            "the refusal says which mirror would have served: {refusal}"
+        );
+
+        // Serving: capable, and there is no refusal sentence to print.
+        let (_dir, _root) = temp_mirror("storagebox");
+        let config = config_with(
+            &[("storagebox", "/remote/repo")],
+            Some((&enabled, "storagebox")),
+        );
+        let decision = decide(&config, &resolved("/remote/repo"), _dir.path());
+        assert!(decision.offline_capable());
+        assert!(
+            decision.offline_refusal().is_none(),
+            "a serving mirror has no refusal to pair with its capacity"
+        );
+
+        // The copy itself: already local, so `--offline` needs no seam and
+        // no refusal — a plain read of it is the offline shape.
+        let copy = crate::mirror::mirror_dir(_dir.path(), "storagebox");
+        let decision = decide(&config, &resolved(&copy.to_string_lossy()), _dir.path());
+        assert!(matches!(
+            decision,
+            MirrorReadDecision::MirrorCopyItself { .. }
+        ));
+        assert!(decision.offline_capable());
+        assert!(decision.offline_refusal().is_none());
+    }
+
+    /// The offline seam answers from the copy and refuses what the copy
+    /// lacks, worded as the ruling requires: the refusal names `--offline`,
+    /// names the destination, says the remote was not contacted and that the
+    /// absence proves nothing — never "cannot read", never an empty answer.
+    /// A present-but-unreadable file keeps the online corruption refusal
+    /// (damage is damage offline too), a write through the seam is refused
+    /// before anything exists to write, and the copy held the *only* intact
+    /// bytes nowhere else — there is no remote behind this backend at all.
+    #[test]
+    fn the_offline_backend_serves_the_copy_and_refuses_what_it_lacks() {
+        use rustic_core::Id;
+
+        let (_dir, root) = temp_mirror("storagebox");
+        let id: Id = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+            .parse()
+            .unwrap();
+        let intact = vec![0x7bu8; 17];
+        let shard = root.join("data").join("00");
+        std::fs::create_dir_all(&shard).unwrap();
+        std::fs::write(shard.join(id.to_hex()), &intact).unwrap();
+
+        let reads = Arc::new(MirrorReads {
+            mirror_of: "storagebox".to_string(),
+            mirror_root: root.clone(),
+            counters: CounterSet::default(),
+        });
+        let backend =
+            OfflineMirrorBackend::wrap(Arc::clone(&reads), None, "opendal:s3".to_string()).unwrap();
+
+        // The identity stays the destination the config declares.
+        assert_eq!(backend.location(), "opendal:s3");
+
+        // A held file serves, byte-identical and counted on the copy's leg.
+        let bytes = backend
+            .read_full(FileType::Pack, &id)
+            .expect("the copy serves the file it holds");
+        assert_eq!(bytes.to_vec(), intact);
+
+        // The offline refusal: same layout knowledge as the online seam, so
+        // the two roads apart from absence stay apart here too — absent is
+        // the offline refusal, the present-but-truncated one corruption.
+        let said = {
+            let absent: Id = "020102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+                .parse()
+                .unwrap();
+            let error = backend
+                .read_full(FileType::Pack, &absent)
+                .expect_err("an offline read refuses what the copy lacks");
+            error.to_string()
+        };
+        assert!(
+            said.contains("`--offline`"),
+            "the refusal names the switch that owned the rules: {said}"
+        );
+        assert!(
+            said.contains("mirror of `storagebox`"),
+            "and the destination whose copy fell short: {said}"
+        );
+        assert!(
+            said.contains("the remote was not contacted"),
+            "and the promise kept: {said}"
+        );
+        assert!(
+            said.contains("proves nothing"),
+            "an offline absence is never a claim about the archive: {said}"
+        );
+        assert!(said.contains("mirror sync"), "the repair is named: {said}");
+
+        // Present but unreadable: the corruption refusal, damage being
+        // damage offline too — the remote must not rescue it (there is no
+        // remote to rescue it, and the wording must not suggest one was
+        // asked).
+        std::fs::write(shard.join(id.to_hex()), vec![0x5au8; 5]).unwrap();
+        let said = backend
+            .read_partial(FileType::Pack, &id, false, 0, 17)
+            .expect_err("a truncated file refuses the read")
+            .to_string();
+        assert!(
+            said.contains("present but cannot be read"),
+            "the corruption class keeps its own words offline: {said}"
+        );
+        assert!(said.contains("disk damage"), "and its own cause: {said}");
+        std::fs::write(shard.join(id.to_hex()), &intact).unwrap();
+
+        // A write through the offline seam is refused before anything is
+        // written: `--offline` marks a read-only run and only `mirror sync`
+        // may write the copy.
+        let said = backend
+            .write_bytes(FileType::Pack, &id, true, bytes.clone())
+            .expect_err("writes refuse through the offline seam")
+            .to_string();
+        assert!(
+            said.contains("serves reads from the local mirror only"),
+            "the refusal states why a write cannot happen offline: {said}"
+        );
+        assert!(
+            said.contains("without `--offline`"),
+            "and names the run that writes: {said}"
+        );
+
+        // The served line: the ruling's phrase, the copy's leg, no remote
+        // leg presented as a measured zero.
+        let line = reads.offline_served_line();
+        assert!(
+            line.starts_with("served from mirror `storagebox`"),
+            "every offline output states served from mirror: {line}"
+        );
+        assert!(
+            line.contains("nothing from the remote (--offline"),
+            "the remote half words the switch, not a measurement: {line}"
+        );
+        assert!(
+            !line.contains("read from the remote"),
+            "the offline line never borrows the online line's remote wording: {line}"
+        );
+        // And the pre-read announcement promises the same thing.
+        let state = reads.offline_state_line();
+        assert!(
+            state.contains("served from mirror `storagebox`"),
+            "the pre-read line uses the phrase too: {state}"
+        );
+        assert!(
+            state.contains("the destination is not contacted"),
+            "and states the promise in full: {state}"
+        );
+    }
+
+    /// The offline listing is the copy's answer, and a non-empty one is
+    /// counted as locally answered so the served line says so; the store
+    /// the CLI builds over this seam reports listings from the copy the
+    /// same way the online fallback's degraded-source leg does.
+    #[test]
+    fn an_offline_listing_answer_is_the_copys_and_is_counted() {
+        use rustic_core::Id;
+
+        let (_dir, root) = temp_mirror("storagebox");
+        let id: Id = "030102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+            .parse()
+            .unwrap();
+        let shard = root.join("data").join("03");
+        std::fs::create_dir_all(&shard).unwrap();
+        std::fs::write(shard.join(id.to_hex()), vec![0x11u8; 9]).unwrap();
+
+        let reads = Arc::new(MirrorReads {
+            mirror_of: "storagebox".to_string(),
+            mirror_root: root,
+            counters: CounterSet::default(),
+        });
+        let backend =
+            OfflineMirrorBackend::wrap(Arc::clone(&reads), None, "/declared/repo".to_string())
+                .unwrap();
+        let listed = backend
+            .list_with_size(FileType::Pack)
+            .expect("the copy answers the listing");
+        assert_eq!(listed.len(), 1, "one pack, the copy's own answer");
+        assert_eq!(
+            reads.counters().mirror_listings,
+            1,
+            "a non-empty offline listing is a locally answered listing"
+        );
+
+        // The empty answer is passed through uncounted — the same shape the
+        // online seam gives the caller for it to word, never padded, never
+        // silently treated as a remote shortcoming (there is no remote).
+        let empty = backend
+            .list_with_size(FileType::Index)
+            .expect("an empty listing is an answer, not an error");
+        assert!(empty.is_empty());
+        assert_eq!(
+            reads.counters().mirror_listings,
+            1,
+            "an empty offline listing is not a served-listing event"
         );
     }
 }

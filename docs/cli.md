@@ -226,6 +226,19 @@ leaves, whether that body took one shard or several — or a block that recurs
 without beginning the sequence, which is the weakest of the three and the one
 least distinguishable from content that genuinely repeats.
 
+`--offline` certifies the **local mirror copy** instead of the destination: the
+destination is never contacted, the copy answers every read, and the verdict is
+worded as certifying the copy — never the destination's repository — with the
+report's `served from mirror` lines stating the source. L1 and L2 grade the
+copy's own integrity: packs the copy holds that its index does not name, or
+index-named packs the copy lacks, are the copy's own findings, exit `1`. L3
+reconciles the stage against what the copy holds, and a session the stage
+expects that the copy never synced is an unknown about the archive — one
+`NOT IN THE LOCAL COPY` row, `L3 verdict: INCOMPLETE`, and the run's
+`RESULT: INCOMPLETE` (exit `3`) — never `MISSING IN ARCHIVE`, which a
+destination nobody contacted cannot prove. Online `verify` — without the
+switch — never consults the copy.
+
 ### `repair-duplicates`
 
 Read-only dry-run inventory of identical shard content in the newest archived
@@ -357,6 +370,18 @@ What the reads are worth is dated — "the local copy as of HH:MM" — and
 `verify` never consults the copy. The read rules (offline, dated answers,
 what stays the remote's) are stated in [config.md](config.md#mirror).
 
+`--offline` (on `read`, `export` and `verify`) takes the fallback away: the
+destination's backend is never even constructed — no connection is opened
+at all — and every byte answers from the mirror copy, the body cache or
+rustic's local metadata cache. The output says `served from mirror` on
+every such run, and a file the copy does not hold is the end of that read,
+reported in the "did not finish" family (exit `3`) and never as an empty
+result or a claim the archive lacks it. `verify --offline` certifies the
+copy, never the destination's repository, and says so; an online `verify`
+still never consults the copy. A machine whose mirror cannot serve an
+offline run (no `[mirror]` section, the switch off, no filled copy) has
+the switch refuse before anything is read, exit `3`.
+
 One run is one bounded round: a large first fill spans several rounds, each
 resuming where the previous stopped, and `status` reports the progress as
 progress — a round that stops early is not a failure. Before a first fill
@@ -459,6 +484,7 @@ Writes exactly the sessions `search` selects for the same flags, as `<out>/<mach
 | `--no-collapse` | Write every stored shard. By default a run that byte-for-byte replays the session's complete preceding shard sequence is collapsed to its first copy, because that is what a re-seal leaves. |
 | `--include-deleted` | For snapshot-source sessions (opencode), also write the records the source deleted, at their original positions, each carrying `"deleted": true`. The default view stays the source's final state; deleted history is never erased from the archive. Other harnesses ignore the switch. |
 | `--dry-run` | Print the plan and its cost. Writes nothing. |
+| `--offline` | Serve the export from the local [mirror](#mirror) copy only (W1053): the destination is never contacted, and the report says `served from mirror`. A selected session whose bytes the copy does not hold is listed in the manifest's failed sessions worded as an unknown (the destination was not contacted, so nothing here proves the archive lacks it) and makes the run exit `3` — never read as "the archive does not have it". |
 
 Exit codes: `0` wrote sessions and answered for everything · `1` selected nothing · `3` incomplete: what was written is real, and the manifest lists what is missing · `2` usage error. `--dry-run` reports the same exit code the real run would, so it is worth running first.
 
@@ -491,7 +517,9 @@ For snapshot-source sessions (opencode) the reported body is the **assembled** v
 
 Every step prints what it is doing before it runs — the configuration, the machine identity, the body-cache and mirror tiers, the master key file, the archive read, the ssh-master teardown — and every step that can block on something this machine does not control runs behind its own deadline, so a read that cannot finish is a named step on screen and an exit code, never a silent hang (the backend calls the archive walk makes open connections with no timeout of their own, and the observed incident was exactly one such read: a 1373-byte session that sat 120 s with five printed lines and no verdict, then finished, unannounced, 17.6 minutes in — a silent read is a hang wearing a different clock). A destination that accepts the connection and then says nothing is the case this exists for: the step is abandoned at its budget, the verdict says `did not answer within <N>s` and the run exits `3` — the step is **unknown**, never worded as unreachable (a measured refusal the destination made), never as a session that is absent, and no report line prints for a body that was not read. The steps that did answer keep their lines, exactly as a healthy run prints them. `CHAT_STASHER_READ_STEP_BUDGET_SECS=<seconds>` replaces **every** read-step budget for one run — the defaults are 30 s for a local file (configuration, identity, master key), 90 s for the body-cache and mirror directory walk, 30 s for the ssh-master teardown, 1800 s for one session's archive read (an old session is found by streaming every tree of every snapshot the reclaim design may have pushed it into, which is not a small operation even for a small session), and a deliberately generous hour for `--all-machines`, which exists to read everything. A read that needs longer than its budget on a healthy machine is a bug to file against the budget, not a number to guess past: say so in an issue.
 
-Exit codes: `0` read · `1` completed and the result failed · `3` did not finish reading (no key, repository unreadable, session not in any snapshot it could read, a step that outlived its deadline — named, and unknown rather than absent) · `2` usage error.
+`--offline` serves the read from the local [mirror](#mirror) copy only (W1053): the destination's backend is never constructed, so no connection is opened at all, and the report says `served from mirror` on both its state line and its served line. The steps stay traced and bounded exactly as above — a wedged local disk still deserves a named exit — but the ssh-master teardown line reads `N/A (--offline…)` because the run opened none, and the archive trace names the mirror as its source. A file the copy does not hold ends the read in the "did not finish" family: exit `3`, the refusal names the copy's shortfall and the repair (`mirror sync`), and a session whose snapshots the copy never synced is worded as unknown — never "holds no shards in any of the snapshots" as a proof of absence, because the destination was not asked. A machine whose mirror cannot serve an offline run (no `[mirror]` section, the switch off, no filled copy) refuses before anything is read, exit `3`.
+
+Exit codes: `0` read · `1` completed and the result failed · `3` did not finish reading (no key, repository unreadable, session not in any snapshot it could read, a step that outlived its deadline — named, and unknown rather than absent — or, offline, anything the copy lacked) · `2` usage error.
 
 `--session` here is the **whole** stored id, `<tool>.<machine>.<native id>`, and unlike `search --session` it accepts no prefix: anything shorter exits `3` with "holds no shards in any of the snapshots of machine …", which means it could not be resolved rather than that it is absent. The full ids are in an `export`'s `manifest.json`, and `read --all-machines --full-ids` prints them all at the cost of reading and hashing every shard. [Recover a lost machine's conversations](use-cases/lost-machine.md#5-read-one-back) is the worked version.
 

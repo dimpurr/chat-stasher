@@ -15,6 +15,30 @@ under its own heading below.
 
 #### Added
 
+- **`--offline` on `read`, `export` and `verify` (W1053).** A read-only
+  switch that takes the mirror fallback away: the destination's backend is
+  never constructed — no connection is opened at all, so nothing in the
+  process can dial it — and every byte answers from the local mirror copy,
+  the body cache or rustic's local metadata cache. Every offline output
+  states `served from mirror`, on both its state line and its served
+  line, so a report always names which disk answered. Anything the copy
+  cannot serve is the end of that read in the "did not finish" family
+  (exit `3`): a file the copy lacks refuses by name (with the
+  `mirror sync` repair), a session whose snapshots the copy never synced
+  is worded as unknown rather than as the proof of absence the online
+  walk could claim — never an empty result, never "the archive does not
+  have it". `verify --offline` certifies the **copy**, never the
+  destination's repository, and words the verdict that way
+  (`RESULT: OK` over a verified copy, `FAILED` when the copy fails its
+  own check, `INCOMPLETE` for a session the stage expects that the copy
+  never synced — a `NOT IN THE LOCAL COPY` unknown, not `MISSING IN
+  ARCHIVE`); an online `verify` still never consults the copy. The run
+  keeps W1052's step traces and deadlines — a wedged local disk still
+  gets a named step and an exit code — while skipping the ssh-master
+  teardown entirely (the run opened none). A machine whose mirror cannot
+  serve an offline run — no `[mirror]` section, the switch off, no
+  filled copy, another archive — refuses before anything is read, exit
+  `3`, with the fix named.
 - **Letta pull inside the scheduled pass.** Declaring `[pull.letta]` in the
   config (account id, inbox; credential, pacing, budget and 100–200-row
   page size optional) makes every `run-once` pass pull the producer before
