@@ -165,6 +165,9 @@ struct Rig {
     /// Every write lands part of the file and then fails, but the process
     /// lives (a dropped connection, not a kill).
     fail_writes: bool,
+    /// Set by a failed write: the dropped connection can no longer delete
+    /// either, so only a fresh connection can remove the partial tmp.
+    stale: AtomicBool,
     log: Mutex<Vec<String>>,
 }
 
@@ -181,6 +184,7 @@ impl Rig {
             corrupt_tmp_reads: false,
             no_mtime: false,
             fail_writes: false,
+            stale: AtomicBool::new(false),
             log: Mutex::new(Vec::new()),
         }
     }
@@ -223,6 +227,7 @@ impl PackIo for Rig {
         self.note(format!("write {path}"));
         if self.fail_writes {
             self.inner.write(path, bytes.slice(..bytes.len() / 2))?;
+            self.stale.store(true, Ordering::SeqCst);
             anyhow::bail!("injected connection failure");
         }
         if let Kill::MidWrite(n) = self.kill {
@@ -272,6 +277,9 @@ impl PackIo for Rig {
     fn delete(&self, path: &str) -> anyhow::Result<()> {
         self.alive()?;
         self.note(format!("delete {path}"));
+        if self.stale.load(Ordering::SeqCst) {
+            anyhow::bail!("injected: the connection is gone");
+        }
         self.inner.delete(path)
     }
 
