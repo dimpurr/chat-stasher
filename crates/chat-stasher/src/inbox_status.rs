@@ -258,8 +258,15 @@ impl Report {
 /// Filesystem-only observation; unsupported backends stay unknown without a
 /// network probe. Opaque object names cannot disclose a platform before pull.
 fn waiting(locator: &str, now: u64) -> anyhow::Result<(usize, Option<u64>)> {
+    waiting_by(locator, now, None)
+}
+fn waiting_by(
+    locator: &str,
+    now: u64,
+    deadline: Option<std::time::Instant>,
+) -> anyhow::Result<(usize, Option<u64>)> {
     if locator.starts_with("s3://") {
-        return waiting_s3(locator, now);
+        return waiting_s3(locator, now, deadline);
     }
     let backend = locator
         .strip_prefix("fs://")
@@ -299,10 +306,26 @@ fn waiting(locator: &str, now: u64) -> anyhow::Result<(usize, Option<u64>)> {
 /// Longest a status or doctor run waits for an object-store listing. A slow or
 /// unreachable bucket is an unknown count, never an empty inbox.
 const S3_OBSERVE_SECS: u64 = 20;
+/// Shared budget for every s3 inbox in one status or doctor run, under the
+/// doctor's own inbox budget, so several dead inboxes cannot overrun it. An
+/// inbox that finds the budget spent is unknown without any request.
+const S3_TOTAL_SECS: u64 = 25;
 
 /// Read-only listing of an s3 inbox (every page). Without the credential
 /// environment no request is made and the count stays unknown.
-fn waiting_s3(locator: &str, now: u64) -> anyhow::Result<(usize, Option<u64>)> {
+fn waiting_s3(
+    locator: &str,
+    now: u64,
+    deadline: Option<std::time::Instant>,
+) -> anyhow::Result<(usize, Option<u64>)> {
+    let mut wait = std::time::Duration::from_secs(S3_OBSERVE_SECS);
+    if let Some(deadline) = deadline {
+        wait = wait.min(deadline.saturating_duration_since(std::time::Instant::now()));
+    }
+    anyhow::ensure!(
+        !wait.is_zero(),
+        "inbox listing unavailable: waiting count unknown"
+    );
     let config =
         crate::remote_inbox::S3InboxConfig::from_locator(locator, |name| std::env::var(name).ok())?;
     let (tx, rx) = std::sync::mpsc::channel();
@@ -316,7 +339,7 @@ fn waiting_s3(locator: &str, now: u64) -> anyhow::Result<(usize, Option<u64>)> {
         })();
         tx.send(observed).ok();
     });
-    rx.recv_timeout(std::time::Duration::from_secs(S3_OBSERVE_SECS))
+    rx.recv_timeout(wait)
         .map_err(|_| anyhow::anyhow!("inbox listing unavailable: waiting count unknown"))?
 }
 
@@ -334,6 +357,7 @@ pub fn inspect(root: &Path, now: u64) -> Report {
             }
         }
     }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(S3_TOTAL_SECS);
     let entries = match std::fs::read_dir(root) {
         Ok(e) => e,
         Err(_) => {
@@ -375,7 +399,7 @@ pub fn inspect(root: &Path, now: u64) -> Report {
             if config.locator.starts_with("s3://") {
                 view.backend = Some("s3");
             }
-            if let Ok((count, oldest)) = waiting(&config.locator, now) {
+            if let Ok((count, oldest)) = waiting_by(&config.locator, now, Some(deadline)) {
                 view.waiting = Some(count);
                 view.oldest_age_secs = oldest;
                 view.backend_state = "known";
@@ -506,6 +530,17 @@ mod tests {
         assert!(waiting(&locator, 100).is_err());
         assert!(!backend.exists());
         assert!(waiting("s3://synthetic-unreachable", 100).is_err());
+    }
+
+    #[test]
+    fn a_spent_shared_budget_is_unknown_without_any_request() {
+        // The budget check comes before credential lookup and any network use.
+        let error = waiting_by("s3://b/p", 0, Some(std::time::Instant::now()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("waiting count unknown"), "{error}");
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        assert!(waiting_by("s3://b/p", 0, Some(past)).is_err());
     }
 
     #[test]

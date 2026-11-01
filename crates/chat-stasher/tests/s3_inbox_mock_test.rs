@@ -763,3 +763,54 @@ fn s3_locator_and_environment_parsing_never_echoes_values() {
     assert!(S3InboxConfig::from_locator("s3://b", env(full)).is_err());
     assert!(S3InboxConfig::from_locator("fs:///x", env(full)).is_err());
 }
+
+#[test]
+fn plain_http_is_accepted_only_for_a_true_loopback_host() {
+    let get = |name: &str| match name {
+        S3_ENDPOINT_ENV => Some(ENDPOINT.with(|e| e.borrow().clone())),
+        S3_ACCESS_KEY_ID_ENV => Some(KEY_ID.to_owned()),
+        S3_SECRET_ACCESS_KEY_ENV => Some(SECRET.to_owned()),
+        _ => None,
+    };
+    let accepted = |endpoint: &str| {
+        ENDPOINT.with(|e| *e.borrow_mut() = endpoint.to_owned());
+        S3InboxConfig::from_locator("s3://b/p", get).is_ok()
+    };
+    for good in [
+        "http://127.0.0.1:9000",
+        "http://localhost",
+        "http://localhost:9000/",
+        "http://[::1]:9000",
+        "http://[::1]",
+        "https://account.r2.cloudflarestorage.com",
+    ] {
+        assert!(accepted(good), "{good}");
+    }
+    for bad in [
+        "http://localhost:80@evil.example",
+        "http://127.0.0.1:80@evil.example",
+        "http://[::1]@evil.example",
+        "http://[::1]:80@evil.example/",
+        "http://user:pw@127.0.0.1:9000",
+        "http://127.0.0.1.evil.example",
+        "http://localhost.evil.example",
+        "http://localhostevil.example",
+        "http://127.0.0.1:80x",
+        "http://127.0.0.1:",
+        "http://[::1]x",
+        "http://[::1",
+        "http://evil.example/?@localhost",
+        "http://evil.example#@127.0.0.1",
+        "http://evil.example\\@localhost",
+        "http://localhost\\@evil.example",
+        "http://",
+        "http:// localhost",
+        "http://storage.example.invalid",
+        "ftp://localhost",
+    ] {
+        assert!(!accepted(bad), "{bad}");
+    }
+}
+thread_local! {
+    static ENDPOINT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}

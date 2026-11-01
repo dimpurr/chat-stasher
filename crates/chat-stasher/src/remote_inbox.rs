@@ -461,12 +461,41 @@ pub fn parse_s3_locator(locator: &str) -> anyhow::Result<(String, String)> {
     Ok((bucket.into(), prefix.into()))
 }
 
+/// True only for `http://` to a literal loopback host. The authority (text up
+/// to the first `/`, `?` or `#`) is parsed exactly: userinfo (`@`), backslashes
+/// and whitespace are refused, the port must be all digits, and the host must
+/// be `localhost`, `127.0.0.1` or `[::1]` as a whole.
 fn loopback_http(endpoint: &str) -> bool {
     let Some(rest) = endpoint.strip_prefix("http://") else {
         return false;
     };
-    let host = rest.split(['/', ':']).next().unwrap_or("");
-    host == "127.0.0.1" || host == "localhost" || rest.starts_with("[::1]")
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty()
+        || authority.contains(['@', '\\'])
+        || authority
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return false;
+    }
+    // `port` is None when the authority has no port, Some(text) after a colon.
+    let (host, port): (String, Option<&str>) = if let Some(after) = authority.strip_prefix('[') {
+        match after.split_once(']') {
+            Some((inner, "")) => (format!("[{inner}]"), None),
+            Some((inner, tail)) => match tail.strip_prefix(':') {
+                Some(p) => (format!("[{inner}]"), Some(p)),
+                None => return false,
+            },
+            None => return false,
+        }
+    } else {
+        match authority.split_once(':') {
+            Some((h, p)) => (h.to_owned(), Some(p)),
+            None => (authority.to_owned(), None),
+        }
+    };
+    let port_ok = port.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    port_ok && matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
 }
 
 impl S3InboxConfig {
