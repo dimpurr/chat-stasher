@@ -117,6 +117,18 @@ fn plant_key_file(key: &Path) {
 
 /// Write the sandboxed config naming one destination, `blackhole`-shaped
 /// unless `endpoint` says otherwise, with its key file at `key`.
+///
+/// `retry = off` is the adr023/destinit rule for a known-shut port, planted
+/// in every destination this file writes because the two endpoint shapes
+/// here are deliberate atoms: the control's port refuses on the spot, and
+/// the blackhole answers and then never closes, which never errors an
+/// attempt and so never reaches the ladder either. Left at the backend's
+/// default, one measured refusal surfaces only after five jittered
+/// exponential waits — measured 49 s on the dev Mac, and past this
+/// runner's own 60 s kill on CI's Windows cell (run 41284513606, where the
+/// control raced backon instead of the read path and lost) — folding the
+/// ladder's clock into what the fixtures below hold to the read path's
+/// own deadlines.
 fn plant_destinated_config(
     sandbox: &Path,
     endpoint: &str,
@@ -144,6 +156,7 @@ root = "/synthetic/v1"
 access_key_id = "synthetic-access-key-id"
 secret_access_key = "synthetic-secret-access-key"
 disable_config_load = "true"
+retry = "off"
 "#,
             key = key.display(),
         )?;
@@ -577,8 +590,13 @@ fn read_bounds_a_master_key_file_that_never_answers() {
 /// A destination that answers the connection and then says nothing is a
 /// timeout; a destination that refuses the connection is a measured error,
 /// and the two must never wear each other's wording. This is the control
-/// case: `127.0.0.1:1` refuses instantly, so `read` exits 3 through the
-/// existing remote-error path and never claims a deadline expired.
+/// case: `127.0.0.1:1` refuses instantly, so with the planted
+/// `retry = off` (the adr023/destinit rule — see
+/// `plant_destinated_config`) the refusal surfaces on the first attempt
+/// and `read` exits 3 through the existing remote-error path, never
+/// claiming a deadline expired; with the backend's default ladder the
+/// same refusal only surfaces after five jittered waits, which raced this
+/// runner's own hard kill on CI's Windows cell before the knob landed.
 #[test]
 fn a_refused_connection_is_an_error_not_a_timeout() {
     let _guard = ENV_LOCK
@@ -589,7 +607,6 @@ fn a_refused_connection_is_an_error_not_a_timeout() {
     plant_key_file(&key);
     plant_destinated_config(sandbox.path(), "http://127.0.0.1:1", &key, true)
         .expect("write the destination config");
-    let started = Instant::now();
     let run = run_bounded(read_command(
         sandbox.path(),
         &[
