@@ -472,6 +472,24 @@ _CONTRACT_VERIFIED_VERSION_RE = re.compile(r"^\s+version:\s*'([^']*)',\s*$")
 _CONTRACT_VERIFIED_SCOPE_RE = re.compile(r"^\s+scope:\s*'([^']*)',\s*$")
 
 
+def read_holds_raw(root: str) -> dict[str, Any]:
+    """The hold file's `holds` object as written, or {} when there is no file.
+    Validation lives in `load_top_layer_holds`; this only lets the platform
+    parser attach a hold's status wording to its row."""
+    path = os.path.join(root, HOLDS_REL)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise SupportMatrixError(f"{HOLDS_REL}: cannot be read: {exc}") from None
+    holds = data.get("holds") if isinstance(data, dict) else None
+    if not isinstance(holds, dict):
+        raise SupportMatrixError(f"{HOLDS_REL}: needs a top-level `holds` object")
+    return holds
+
+
 def parse_contract_platforms(root: str) -> list[dict[str, Any]]:
     """Parse `ALL_PLATFORMS` out of the extension's contract.ts.
 
@@ -615,6 +633,8 @@ def parse_contract_platforms(root: str) -> list[dict[str, Any]]:
         # free slot, so the risk belongs in it — recorded here instead, the
         # account gap would be invisible to every reader of the first slot,
         # which is exactly the failure the second field was added to close.
+        raw_hold = read_holds_raw(root).get(f"web:{p['id']}")
+        p["hold_status"] = raw_hold.get("status") if isinstance(raw_hold, dict) else None
         if p["accountSwitchRisk"] is not None and p["knownIssue"] is None:
             raise SupportMatrixError(
                 f"{owner}: `accountSwitchRisk` is set while `knownIssue` is absent — "
@@ -750,6 +770,11 @@ def web_status(p: dict[str, Any]) -> str:
     # historical fact; the freshness judgement on it is rendered separately in
     # the Last verified column.
     if p.get("lastVerified") is not None:
+        if p.get("hold_status"):
+            # A held row's record does not cover the current path (see
+            # top-layer-holds.json): the hand-written wording replaces the
+            # plain verified claim everywhere the status is printed.
+            return p["hold_status"]
         return f"{STATUS_VERIFIED} ({p['lastVerified']['date']})"
     if p["channel"] == "experimental":
         return STATUS_EXPERIMENTAL
@@ -1004,30 +1029,34 @@ def load_top_layer_holds(root: str) -> dict[str, str]:
     """Editorial holds: sources kept OUT of the verified-only layer although a
     dated record exists, because that record no longer covers the current path.
 
-    Keys are `local:<id>` or `web:<id>`; each value is the public reason. The
-    file is hand-written evidence, so it is validated hard: a hold on a source
-    that does not exist, or without a reason, is an error, never a no-op.
+    Keys are `local:<id>` or `web:<id>`; each value is an object with a public
+    `reason` and, for a web source only, an optional `status` that replaces the
+    plain verified wording in every table and source page. The file is
+    hand-written evidence, so it is validated hard: a hold on a source that
+    does not exist, or without a reason, is an error, never a no-op. Returns
+    key -> reason.
     """
-    path = os.path.join(root, HOLDS_REL)
-    if not os.path.isfile(path):
+    holds = read_holds_raw(root)
+    if not holds:
         return {}
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError) as exc:
-        raise SupportMatrixError(f"{HOLDS_REL}: cannot be read: {exc}") from None
-    holds = data.get("holds") if isinstance(data, dict) else None
-    if not isinstance(holds, dict):
-        raise SupportMatrixError(f"{HOLDS_REL}: needs a top-level `holds` object")
     known = {f"local:{h['id']}" for h in load_harnesses(root)} | {
         f"web:{p['id']}" for p in parse_contract_platforms(root)
     }
-    for key, reason in holds.items():
+    out: dict[str, str] = {}
+    for key, value in holds.items():
         if key not in known:
             raise SupportMatrixError(f"{HOLDS_REL}: hold `{key}` names no source in the registry or the contract")
+        reason = value.get("reason") if isinstance(value, dict) else None
         if not isinstance(reason, str) or not reason.strip():
-            raise SupportMatrixError(f"{HOLDS_REL}: hold `{key}` needs a non-empty reason")
-    return dict(holds)
+            raise SupportMatrixError(f"{HOLDS_REL}: hold `{key}` needs an object with a non-empty `reason`")
+        status = value.get("status")
+        if status is not None:
+            if not key.startswith("web:"):
+                raise SupportMatrixError(f"{HOLDS_REL}: hold `{key}`: `status` is only supported on web sources")
+            if not isinstance(status, str) or not status.strip():
+                raise SupportMatrixError(f"{HOLDS_REL}: hold `{key}`: `status` must be a non-empty string")
+        out[key] = reason
+    return out
 
 
 def top_layer_exclusion(
@@ -1643,14 +1672,32 @@ def selftest() -> int:
         holds_path = os.path.join(tmp, HOLDS_REL)
         os.makedirs(os.path.dirname(holds_path), exist_ok=True)
         with open(holds_path, "w", encoding="utf-8") as fh:
-            json.dump({"holds": {"web:no-such-source": "x"}}, fh)
+            json.dump({"holds": {"web:no-such-source": {"reason": "x"}}}, fh)
         try:
             load_top_layer_holds(tmp)
             hold_diag = None
         except SupportMatrixError as exc:
             hold_diag = str(exc)
-        os.remove(holds_path)
         probe("a hold on an unknown source is an error", hold_diag is not None and "no-such-source" in hold_diag)
+        with open(holds_path, "w", encoding="utf-8") as fh:
+            json.dump({"holds": {"web:p-stable": {"reason": "r", "status": "verified on the old route (2026-09-15)"}}}, fh)
+        held_platforms = parse_contract_platforms(tmp)
+        held_web = {p["id"]: p for p in held_platforms}
+        probe(
+            "a hold's status wording replaces the plain verified status, only on its row",
+            web_status(held_web["p-stable"]) == "verified on the old route (2026-09-15)"
+            and web_status(held_web["p-exp"]) == STATUS_EXPERIMENTAL
+            and load_top_layer_holds(tmp) == {"web:p-stable": "r"},
+        )
+        with open(holds_path, "w", encoding="utf-8") as fh:
+            json.dump({"holds": {"p-bare": "a string, not an object"}}, fh)
+        try:
+            load_top_layer_holds(tmp)
+            bare_diag = None
+        except SupportMatrixError as exc:
+            bare_diag = str(exc)
+        probe("a hold that is not an object with a reason is an error", bare_diag is not None)
+        os.remove(holds_path)
         unverified_full = render_full([], [web["p-unver"]], [], SELFTEST_AS_OF)
         probe(
             "an explicitly unverified capability renders as unverified",

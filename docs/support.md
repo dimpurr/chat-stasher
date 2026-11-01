@@ -165,7 +165,7 @@ stays in the count. See [Codex](sources/codex.md).
 
 | Platform | Origins | Channel | Capture credibility | Status |
 |---|---|---|---|---|
-| deepseek | https://chat.deepseek.com | stable | from-source | verified end-to-end (2026-09-24) |
+| deepseek | https://chat.deepseek.com | stable | from-source | verified end-to-end on the earlier broad route (2026-09-24); the narrowed route of 2026-10-05 is not live-verified |
 | perplexity | https://www.perplexity.ai | experimental | from-source | experimental |
 | chatgpt | https://chatgpt.com, https://chat.openai.com | stable | from-source | verified end-to-end (2026-09-24) |
 | gemini | https://gemini.google.com | stable | from-source | verified end-to-end (2026-09-24) |
