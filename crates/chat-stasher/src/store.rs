@@ -1736,6 +1736,26 @@ pub fn reset_sealed_shard_count_calls() {
     SEALED_SHARD_COUNT_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// How many times [`stage_freshness_token`] has walked the whole sessions
+/// tree in this process. Test-only: the in-process handoff path asserts the
+/// push preflight never repeats that walk, and this is the counter that
+/// proves it.
+#[doc(hidden)]
+pub static STAGE_TOKEN_WALK_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Read [`STAGE_TOKEN_WALK_CALLS`]. Test-only.
+#[doc(hidden)]
+pub fn stage_token_walk_calls() -> usize {
+    STAGE_TOKEN_WALK_CALLS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Reset [`STAGE_TOKEN_WALK_CALLS`]. Test-only.
+#[doc(hidden)]
+pub fn reset_stage_token_walk_calls() {
+    STAGE_TOKEN_WALK_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// A freshness token for the sealed-shard tree under `stage/sessions/`: the
 /// mtime of the sessions root, of every machine directory, and of every
 /// session directory, each paired with its path.
@@ -1770,6 +1790,24 @@ impl StageFreshnessToken {
     }
 }
 
+impl StageFreshnessToken {
+    /// True when the sessions root itself still has the mtime it had when the
+    /// token was taken. This is the single-point recheck of the in-process
+    /// handoff: one `stat`, no tree walk. An unreadable root never matches,
+    /// so the caller recounts and fails closed.
+    fn sessions_root_still_matches(&self, stage_root: &Path) -> bool {
+        let root = stage_root.join(SESSIONS_DIR);
+        let current = match fs::metadata(&root) {
+            Ok(meta) => meta.modified().ok().map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(None),
+            // reason: an unreadable root must read as "changed", never as
+            // "still fresh"; the recount that follows fails closed.
+            Err(_) => None,
+        };
+        current == Some(self.sessions_root)
+    }
+}
+
 /// A sealed-shard count bound to the stage tree it was taken from.
 #[derive(Debug, Clone)]
 pub struct CountedStageShards {
@@ -1799,11 +1837,30 @@ impl CountedStageShards {
     }
 }
 
+impl CountedStageShards {
+    /// The count handed off inside one `run-once` pass, rechecked at a single
+    /// point: the sessions root's mtime. Between the pass's stage audit and
+    /// its push preflight nothing in this process writes under `sessions/`,
+    /// and the pass is the stage's only writer, so the per-directory walk of
+    /// [`Self::fresh_count`] repeats work the audit just did. A changed root
+    /// (a machine directory added or removed) or an unreadable one returns
+    /// `None` and the caller recounts. Standalone `push` keeps
+    /// [`Self::fresh_count`].
+    pub fn handed_off_count(&self, stage_root: &Path) -> Option<usize> {
+        if self.freshness.sessions_root_still_matches(stage_root) {
+            Some(self.count)
+        } else {
+            None
+        }
+    }
+}
+
 /// Recompute the freshness token for `stage_root` cheaply. This enumerates the
 /// sessions root, every machine directory, and every session directory, and
 /// stats each one — it never enumerates bucket contents or stats files, so it
 /// is far cheaper than a full [`sealed_shard_count_with_token`] walk.
 pub fn stage_freshness_token(stage_root: &Path) -> anyhow::Result<StageFreshnessToken> {
+    STAGE_TOKEN_WALK_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let sessions_root = stage_root.join(SESSIONS_DIR);
     let sessions_mtime = match fs::metadata(&sessions_root) {
         Ok(meta) => Some(meta.modified()?),
