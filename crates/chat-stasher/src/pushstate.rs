@@ -85,6 +85,7 @@ pub fn record_success(
     snapshots_in_repo: u64,
     finished_at_unix: u64,
 ) -> anyhow::Result<()> {
+    crate::test_identity_guard::refuse_fixture_write(&[destination, machine], state_dir)?;
     let mut state = match load(state_dir) {
         PushStateRead::Present(state) => state,
         PushStateRead::Missing => PushState::default(),
