@@ -58,6 +58,16 @@ pub fn validate(name: &str, locator: &str) -> anyhow::Result<()> {
     );
     Ok(())
 }
+/// [`validate`] plus the rule for a declaration made now: an s3 locator must
+/// name a dedicated prefix. Records declared earlier still load unchanged
+/// (their identity must never be stranded) and their use fails closed.
+pub fn validate_new(name: &str, locator: &str) -> anyhow::Result<()> {
+    validate(name, locator)?;
+    if locator.starts_with("s3://") {
+        crate::remote_inbox::parse_s3_locator(locator)?;
+    }
+    Ok(())
+}
 fn path(root: &Path, name: &str) -> PathBuf {
     root.join(format!("{name}.json"))
 }

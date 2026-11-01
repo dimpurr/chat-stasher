@@ -751,7 +751,7 @@ crates/chat-stasher/src/letta.rs:236-246  72e855d41735  lines=11
   <- docs-dev/privacy.md:184, docs-dev/threat-model.md:55, docs-dev/threat-model.md:67  :: ) -> Result<Self> {
 crates/chat-stasher/src/main.rs:115  51c934204980  lines=1
   <- docs-dev/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…
-crates/chat-stasher/src/main.rs:239-1925  03594334d0de  lines=1687
+crates/chat-stasher/src/main.rs:239-1925  04d7a5b35e81  lines=1687
   <- docs-dev/install.md:1127, docs-dev/privacy.md:1183, docs-dev/threat-model.md:938  :: enum Command {
 crates/chat-stasher/src/main.rs:240-241  6f7da3119197  lines=2
   <- docs-dev/install.md:292  :: /// Write a commented default config if none exists (non-de…

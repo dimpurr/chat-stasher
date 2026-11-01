@@ -15,6 +15,14 @@ under its own heading below.
 
 #### Added
 
+- **S3/R2 remote inboxes (RI-5).** `inbox-init`, `inbox-pull` and `send`
+  accept an `s3://<bucket>/<prefix>` locator beside `fs://`. The endpoint and
+  keys come from `CHAT_STASHER_INBOX_S3_*` in the environment, never from the
+  declaration, a send key or any output; a missing credential stops before any
+  network call and is reported as unknown, not as an empty inbox. Listing reads
+  every page of a large prefix, and `status` and `doctor` show an s3 inbox's
+  waiting count and oldest age live (`backend=s3`). Filesystem inboxes are
+  unchanged. See [`docs/inboxes.md`](docs/inboxes.md).
 - **`--offline` on `read`, `export` and `verify` (W1053).** A read-only
   switch that takes the mirror fallback away: the destination's backend is
   never constructed — no connection is opened at all, so nothing in the

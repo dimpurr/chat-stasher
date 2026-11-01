@@ -430,3 +430,109 @@ impl RemoteInbox {
         Ok(n)
     }
 }
+
+/// Environment variables that carry the S3 inbox endpoint and credentials.
+/// The locator (`s3://<bucket>/<prefix>`) never holds them, and no value is
+/// ever printed. The puller needs a read/delete grant and a producer only a
+/// write grant on the dedicated prefix; supply each side its own pair.
+pub const S3_ENDPOINT_ENV: &str = "CHAT_STASHER_INBOX_S3_ENDPOINT";
+pub const S3_ACCESS_KEY_ID_ENV: &str = "CHAT_STASHER_INBOX_S3_ACCESS_KEY_ID";
+pub const S3_SECRET_ACCESS_KEY_ENV: &str = "CHAT_STASHER_INBOX_S3_SECRET_ACCESS_KEY";
+
+/// Split `s3://<bucket>/<prefix>` into its parts. A dedicated, non-root prefix
+/// is mandatory; query strings, userinfo and fragments cannot be expressed.
+pub fn parse_s3_locator(locator: &str) -> anyhow::Result<(String, String)> {
+    let rest = locator
+        .strip_prefix("s3://")
+        .ok_or_else(|| anyhow::anyhow!("invalid s3 inbox locator"))?;
+    let (bucket, prefix) = rest
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid s3 inbox locator: s3://<bucket>/<prefix>"))?;
+    let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
+    anyhow::ensure!(
+        !bucket.is_empty()
+            && !bucket.contains(['\\', ':'])
+            && !prefix.is_empty()
+            && prefix
+                .split('/')
+                .all(|s| !s.is_empty() && s != "." && s != ".."),
+        "invalid s3 inbox locator: s3://<bucket>/<prefix>"
+    );
+    Ok((bucket.into(), prefix.into()))
+}
+
+fn loopback_http(endpoint: &str) -> bool {
+    let Some(rest) = endpoint.strip_prefix("http://") else {
+        return false;
+    };
+    let host = rest.split(['/', ':']).next().unwrap_or("");
+    host == "127.0.0.1" || host == "localhost" || rest.starts_with("[::1]")
+}
+
+impl S3InboxConfig {
+    /// Resolve a declared locator plus the credential environment. `get`
+    /// reads one variable (`std::env::var` in the CLI). Missing or empty
+    /// values are one fixed, value-free error; plain http is accepted only to
+    /// a loopback host.
+    pub fn from_locator(
+        locator: &str,
+        get: impl Fn(&str) -> Option<String>,
+    ) -> anyhow::Result<Self> {
+        let (bucket, prefix) = parse_s3_locator(locator)?;
+        let var = |name: &str| get(name).filter(|v| !v.is_empty());
+        let (Some(endpoint), Some(access_key_id), Some(secret_access_key)) = (
+            var(S3_ENDPOINT_ENV),
+            var(S3_ACCESS_KEY_ID_ENV),
+            var(S3_SECRET_ACCESS_KEY_ENV),
+        ) else {
+            anyhow::bail!(
+                "s3 inbox credentials unavailable: set CHAT_STASHER_INBOX_S3_ENDPOINT, \
+                 CHAT_STASHER_INBOX_S3_ACCESS_KEY_ID and CHAT_STASHER_INBOX_S3_SECRET_ACCESS_KEY"
+            );
+        };
+        anyhow::ensure!(
+            endpoint.starts_with("https://") || loopback_http(&endpoint),
+            "s3 inbox endpoint must be https"
+        );
+        Ok(Self {
+            bucket,
+            endpoint,
+            access_key_id,
+            secret_access_key,
+            prefix,
+        })
+    }
+}
+
+impl RemoteInbox {
+    /// Count the objects waiting directly under the inbox and the age in
+    /// seconds of the oldest. The age is `None` when any object lacks a
+    /// modification time, so a partial answer is never presented as complete.
+    /// A listing failure is an error; every page is read before answering.
+    pub fn observe(&self, now: u64) -> anyhow::Result<(usize, Option<u64>)> {
+        let entries = self
+            .operator
+            .list("/")
+            .map_err(|_| anyhow::anyhow!("inbox listing unavailable: waiting count unknown"))?;
+        let mut count = 0;
+        let mut oldest: Option<u64> = None;
+        let mut age_unknown = false;
+        for entry in entries {
+            if entry.metadata().is_dir() {
+                continue;
+            }
+            count += 1;
+            let age = entry
+                .metadata()
+                .last_modified()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t.to_string()).ok())
+                .and_then(|t| u64::try_from(t.timestamp()).ok())
+                .and_then(|t| now.checked_sub(t));
+            match age {
+                Some(age) => oldest = Some(oldest.map_or(age, |p| p.max(age))),
+                None => age_unknown = true,
+            }
+        }
+        Ok((count, if age_unknown { None } else { oldest }))
+    }
+}

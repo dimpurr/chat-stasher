@@ -181,6 +181,10 @@ pub struct InboxView {
     pub name: String,
     pub waiting: Option<usize>,
     pub oldest_age_secs: Option<u64>,
+    /// Present only for a non-filesystem backend, so filesystem output keeps
+    /// its exact shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<&'static str>,
     pub backend_state: &'static str,
     pub history_state: &'static str,
     pub last_successful_pull: Option<u64>,
@@ -228,7 +232,10 @@ impl Report {
                 },
                 |v| v.to_string(),
             );
-            eprintln!("[remote inbox {}] waiting={count}; oldest_age={oldest}; last_successful_pull={last}; history={}", i.name, i.history_state);
+            let backend = i
+                .backend
+                .map_or_else(String::new, |b| format!("; backend={b}"));
+            eprintln!("[remote inbox {}] waiting={count}; oldest_age={oldest}; last_successful_pull={last}; history={}{backend}", i.name, i.history_state);
             if let Some(pull) = &i.last_pull {
                 let missing = pull
                     .missing_account
@@ -251,6 +258,9 @@ impl Report {
 /// Filesystem-only observation; unsupported backends stay unknown without a
 /// network probe. Opaque object names cannot disclose a platform before pull.
 fn waiting(locator: &str, now: u64) -> anyhow::Result<(usize, Option<u64>)> {
+    if locator.starts_with("s3://") {
+        return waiting_s3(locator, now);
+    }
     let backend = locator
         .strip_prefix("fs://")
         .map(Path::new)
@@ -284,6 +294,30 @@ fn waiting(locator: &str, now: u64) -> anyhow::Result<(usize, Option<u64>)> {
         }
     }
     Ok((count, if age_unknown { None } else { oldest }))
+}
+
+/// Longest a status or doctor run waits for an object-store listing. A slow or
+/// unreachable bucket is an unknown count, never an empty inbox.
+const S3_OBSERVE_SECS: u64 = 20;
+
+/// Read-only listing of an s3 inbox (every page). Without the credential
+/// environment no request is made and the count stays unknown.
+fn waiting_s3(locator: &str, now: u64) -> anyhow::Result<(usize, Option<u64>)> {
+    let config =
+        crate::remote_inbox::S3InboxConfig::from_locator(locator, |name| std::env::var(name).ok())?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let observed = (|| {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let entered = runtime.enter();
+            let inbox = crate::remote_inbox::RemoteInbox::open_s3(&config, 10 * 1024 * 1024)?;
+            drop(entered);
+            inbox.observe(now)
+        })();
+        tx.send(observed).ok();
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(S3_OBSERVE_SECS))
+        .map_err(|_| anyhow::anyhow!("inbox listing unavailable: waiting count unknown"))?
 }
 
 pub fn inspect(root: &Path, now: u64) -> Report {
@@ -331,12 +365,16 @@ pub fn inspect(root: &Path, now: u64) -> Report {
             name: name.into(),
             waiting: None,
             oldest_age_secs: None,
+            backend: None,
             backend_state: "unknown",
             history_state: "unknown",
             last_successful_pull: None,
             last_pull: None,
         };
         if let Ok(Some(config)) = inbox_config::load(root, name) {
+            if config.locator.starts_with("s3://") {
+                view.backend = Some("s3");
+            }
             if let Ok((count, oldest)) = waiting(&config.locator, now) {
                 view.waiting = Some(count);
                 view.oldest_age_secs = oldest;
