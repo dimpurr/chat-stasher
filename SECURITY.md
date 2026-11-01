@@ -62,12 +62,12 @@ actually claims (each is derived from code in `docs-dev/threat-model.md`):
 1. Conversation content reaching a network destination the user did not
    configure.
 2. The extension capturing traffic outside its declared platform origins
-   (`apps/extension/lib/contract.ts:305-350`, `:921-934`).
+   (`apps/extension/lib/contract.ts:305-373`, `:966-979`).
 3. The CLI writing to, or otherwise mutating, a harness's own session store,
    which is opened read-only (`crates/chat-stasher/src/sqlite_probe.rs:23-29`,
-   `:2082-2089`).
+   `:2567-2574`).
 4. `push` creating a snapshot that silently drops content it cannot account for
-   (`crates/chat-stasher/src/main.rs:8455-8462,8482-8486`).
+   (`crates/chat-stasher/src/main.rs:10909-10925,11047-11052`).
 
 **Known and already documented, so not a new finding** — these are written up in
 [`docs-dev/threat-model.md`](docs-dev/threat-model.md) and we are not currently defending

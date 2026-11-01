@@ -17,6 +17,12 @@ safe to reproduce without access to anyone's private conversations.
 - Keep changes focused, explain observable behavior, and add or update tests
   for behavior changes. Documentation-only changes should still state what a
   new user can verify locally.
+- A change that fixes or changes a source's behaviour updates that source
+  page's *Known issues* and *Changelog* under `docs/sources/` in the same PR.
+  A recorded end-to-end verification updates "last verified" through its
+  existing data source (the harness registry or the extension contract, then
+  re-derived with `python3 scripts/gen-source-pages.py --apply`), never by hand
+  in the generated block.
 
 ## Commit messages
 
@@ -39,8 +45,12 @@ git config core.hooksPath scripts/hooks
 
 Git does not read hooks out of a checkout by itself, and nothing in this
 repository runs that command for you, so a fresh clone is unfiltered until you
-do. The Chinese in `apps/extension/locales/zh_CN.yml` is the single exception,
-and it is the same one `check-terminology.py` encodes as T5.
+do. The Chinese in `apps/extension/locales/zh_CN.yml` is one sanctioned home;
+the single `UPGRADE_WINDOW_MESSAGE` constant in
+`crates/chat-stasher/src/destdiag.rs` (W1034's upgrade-window sentence) is the
+other — the same two exceptions `check-terminology.py` encodes as T5's
+production allowance, which pins that one definition line and lets any other
+CJK anywhere, a re-typed copy included, fire.
 
 ## Local checks
 
@@ -92,7 +102,7 @@ this check also runs the live product, which writes the real
 the data root does not survive contact with its own purpose. Instead, after the
 run, every entry the run created or modified under the real data, config,
 cache and state-home roots is inspected, and is a leak when its name carries a
-reserved fixture token (`synthetic`, `fixture`, `probe`, `dummy`,
+reserved fixture token (`synthetic`, `fixture`, `probe`, `dummy`, `gate-mbp`,
 case-insensitive, as a whole token) or a per-run marker, when a small file's
 bytes carry the marker, or when a small file under `<data root>/state` carries
 a fixture token — the coordination store is where the incident's row landed,
@@ -124,7 +134,7 @@ native-messaging half is covered by tests passing an explicit `--target-root`,
 because Windows resolves those directories through the Known Folder API and no
 environment variable moves them. The guard is the check; a second, code-level
 fail-safe (`src/test_identity_guard.rs`) refuses to write a reserved fixture
-identity (`synthetic-…`, `fixture-…`, `probe-…`, `dummy-…`) to a destination
+identity (`synthetic-…`, `fixture-…`, `probe-…`, `dummy-…`, `gate-mbp`) to a destination
 outside the process temp directory at all, so a test that loses its sandbox is
 stopped at the write even if the guard is not the thing running it.
 
@@ -139,9 +149,12 @@ and the smoke — follow:
 python3 scripts/check-terminology.py
 python3 scripts/check-citation-drift.py
 python3 -m unittest scripts/tests/test_check_citation_drift.py
+python3 -m unittest scripts/tests/test_user_strings.py
 python3 scripts/output-inventory.py --check
 python3 scripts/check-support-matrix.py
 python3 scripts/check-support-matrix.py --selftest
+python3 scripts/check-source-pages.py
+python3 scripts/check-source-pages.py --selftest
 python3 scripts/takeout-format-inventory.py --selftest
 python3 scripts/tests/test_takeout_format_inventory.py
 python3 scripts/check-commit-messages.py --selftest
@@ -156,6 +169,7 @@ bash scripts/selftest-check-static-binary.sh
 bash scripts/selftest-crates-version-state.sh
 bash scripts/selftest-npm-latest-tag.sh
 bash scripts/dev/test-reload-extension.sh
+bash scripts/dev/test-cdp-keep-platform-tabs.sh
 bash scripts/dev/test-rebase-onto-main.sh
 bash scripts/dev/test-merge-drivers.sh
 bash scripts/dev/test-cache-isolation-guard.sh
@@ -173,6 +187,21 @@ bash scripts/smoke/linux-smoke.sh
 repository and a stub build command, so it needs no extension toolchain, no
 network and no browser. It is the guard for the reload script's mechanics, which
 is why it sits here rather than only in the section below that describes them.
+The cases from 16 on are the guard for which `node_modules` the build runs from:
+a checkout whose install cannot serve the ref being built must trigger an
+install *inside the throwaway worktree* and must not be written to, because the
+checkout it was invoked in may be the tree the developer's own browser loads
+from.
+
+`test-cdp-keep-platform-tabs.sh` is the same shape for
+`scripts/dev/cdp-keep-platform-tabs.mjs`, the opt-in dev helper that keeps the
+platform tabs the backfill leg needs open in a dedicated CDP test browser. It
+runs against a mock DevTools endpoint built into the test file — HTTP plus a
+minimal WebSocket handshake, no browser and no network — and that mock records
+every `Page.reload` with its own timestamp, which is what makes the two
+properties worth asserting assertable without driving a real Chrome: only an
+exact-host allowlist is reloaded, and the reloads are spaced. Both are the
+properties that keep the helper from being a way to hammer someone's browser.
 
 `test-rebase-onto-main.sh` and `test-merge-drivers.sh` are the pair for the
 derived-file merge rule described under "Resolving a merge" below. Both build
@@ -357,6 +386,15 @@ Seven of these checks guard properties that are easy to break without noticing:
   registry and the extension's platform table, and fails when either source
   moved without the committed tables being re-derived. It never decides whether
   a row's claim is true — only whether the table still matches its inputs.
+- `check-source-pages.py` re-derives the per-source pages under `docs/sources/`
+  from the same three inputs those pages name — the harness registry, the
+  extension's platform table, and the import seam's `TakeoutPlatform` enum —
+  and fails when a page is missing, when no source owns a page, when a
+  generated header block no longer matches those inputs, when the generated
+  index drifted, or when a hand-written body lost or reordered one of its
+  fixed headings. Like the support-matrix check it never decides whether a
+  page's prose is true; it holds exactly the boundary between the generated
+  half and the written half.
 - `check-doc-links.py` resolves every link between our own Markdown files,
   including the `#fragment` on each one. A link to a file that moved, or to a
   heading that was renamed under it, renders perfectly and fails silently, and
@@ -482,6 +520,18 @@ inside the window the next run refuses to touch the load dir and asks for
 extension is left manual, because the browser offers no supported API for it; the
 script prints it: toggle the extension off and on in chrome://extensions, then
 reload the platform tabs.
+
+The worktree borrows the checkout's `node_modules` by symlink so the build needs
+no install and no network — but only when that tree can serve the ref being
+built. The check is against the *ref's* `apps/extension/package.json`, not the
+checkout's, because the ref is what gets built: a ref whose dependencies moved
+past the checkout's install is exactly the stale case. When a declared
+dependency is not linked, the script says so by name and runs
+`pnpm install --frozen-lockfile --prefer-offline` **inside the throwaway
+worktree** — never in your checkout, which is very often the directory your own
+browser loads its unpacked extension from. `--frozen-lockfile` is what keeps
+that honest: a ref whose lockfile disagrees fails there rather than quietly
+building a different dependency tree than the one committed.
 
 That toggle is removable when Chrome was started with
 `--remote-debugging-port`. Passing `--cdp-port <port>` makes the script find the

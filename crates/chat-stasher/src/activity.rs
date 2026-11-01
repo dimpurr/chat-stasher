@@ -2336,16 +2336,19 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 ///
 /// This is the harness's side of [`crate::provenance::SessionProvenance`]: what
 /// the archived records themselves say about where the session came from, as
-/// opposed to what the collection path or the registry already recorded. Seven
+/// opposed to what the collection path or the registry already recorded. Ten
 /// harnesses have a reader today — `claude-code` (its working directory and
 /// owning tenancy), `gemini-cli` (its `projectHash`), `opencode` (its
-/// directory, project, and archive fact), `openclaw` (its `agent_id`, plus
-/// the archived status of a cold snapshot), `grok` (its CLI `session_docs`
-/// row's `cwd`), `codex` (its `session_meta` record's working directory
-/// and repository), and `continue` (the workspace directory its session
-/// file names); every other harness answers with the empty set, which is
-/// the honest answer for a dimension nothing was read from — and never a
-/// value inferred from the harness name.
+/// directory, project and workspace keys, and archive fact), `cursor` (its
+/// workspace and tracked repositories), `openclaw` (its `agent_id`, plus the
+/// archived status of a cold snapshot), `grok` (its CLI `session_docs` row's
+/// `cwd`), `codex` (its `session_meta` record's working directory and
+/// repository), `hermes-agent` (its `sessions` row's directory, gateway peer
+/// binding, repository identity, and its archived / pinned flags), `zed`
+/// (the workspace folders its `threads` table records), and `continue` (the
+/// workspace directory its session file names); every other harness
+/// answers with the empty set, which is the honest answer for a dimension
+/// nothing was read from — and never a value inferred from the harness name.
 ///
 /// A record that does not parse is skipped, exactly as it is everywhere else in
 /// this module: an unreadable line is not evidence about a dimension.
@@ -2397,6 +2400,14 @@ fn session_dimensions(harness: &str, lines: &[&str]) -> crate::provenance::Sessi
                         fold_gemini_cli_dimensions(&mut dimensions, document);
                     }
                 }
+            }
+        }
+        "cursor" => {
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                fold_cursor_dimensions(&mut dimensions, &record);
             }
         }
         "grok" => {
@@ -2466,9 +2477,75 @@ fn session_dimensions(harness: &str, lines: &[&str]) -> crate::provenance::Sessi
                 }
             }
         }
+        "hermes-agent" => {
+            // Hermes Agent exports a session as **one sealed envelope line**
+            // carrying the whole `sessions` row beside its messages, exactly as
+            // opencode does, so the same per-line loop applies here too.
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                fold_hermes_agent_dimensions(&mut dimensions, &record);
+            }
+        }
+        "zed" => {
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                fold_zed_dimensions(&mut dimensions, &record);
+            }
+        }
         _ => {}
     }
     dimensions
+}
+
+/// Zed states the workspace folders a thread belongs to in the `threads`
+/// table's `folder_paths` column, which `read_zed_session` exports onto the
+/// session envelope (`session.folder_paths`).
+///
+/// The folders are the thread's project/workspace identities, so every one is
+/// recorded as a `container`; the first entry — the primary workspace root the
+/// ticket designates, lexicographically first as Zed stores the list — is also
+/// the session's `cwd`. That is the class of value `cwd` exists for: the
+/// `cwd ≠ repo identity` rule separates repository identities (URLs, UUIDs,
+/// digests like `projectHash`) from filesystem paths, and a workspace folder
+/// **is** a filesystem path, the same recorded-path-to-cwd reading Cursor's
+/// workspace URI and Continue's `workspaceDirectory` already take. Neither
+/// dimension is inferred from the other, and a NULL or empty `folder_paths`
+/// leaves both unobserved.
+///
+/// Two column shapes are read, both honestly the same fact: the array
+/// [`crate::sqlite_probe::read_zed_session`] exports today, and the raw
+/// newline-separated text an envelope sealed before that export carried. Old
+/// sessions stay observable instead of silently losing their projection.
+fn fold_zed_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) {
+    let Some(folder_paths) = record.pointer("/session/folder_paths") else {
+        return;
+    };
+    let paths: Vec<String> = match folder_paths {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_string))
+            .collect(),
+        serde_json::Value::String(text) => text
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => return,
+    };
+    let Some(primary) = paths.first() else {
+        return;
+    };
+    dimensions.insert_cwd(primary.clone());
+    for path in paths {
+        dimensions.insert_container(path);
+    }
 }
 
 /// Claude Code writes two provenance facts on the **top level** of a transcript
@@ -2533,7 +2610,7 @@ fn fold_gemini_cli_dimensions(
 /// opencode exports a session as one envelope that carries, beside the
 /// conversation, the row its own `session` table recorded about it
 /// (`sqlite_probe.rs` seals that row under the
-/// `chat-stasher.opencode.session.v1` schema). Three of its fields are
+/// `chat-stasher.opencode.session.v1` schema). Four of its fields are
 /// dimension facts, and they are three different kinds of fact:
 ///
 /// `directory` — else `path`, where the directory is null or empty — is where
@@ -2547,6 +2624,12 @@ fn fold_gemini_cli_dimensions(
 /// derivable from one. It names the project the session belonged to, which is
 /// what `container` exists for — and keeping it there rather than leaning on
 /// the directory is the whole point of the `cwd ≠ repo identity` rule.
+///
+/// `workspace_id` is that same kind of key once more, naming the workspace
+/// rather than the project: a second opaque foreign key, present on the rows
+/// that carry one and absent from the rest. It is kept beside `project_id` as
+/// a second container observation, never recorded *instead* of it — a row
+/// that names both identities states two facts, and neither is discarded.
 ///
 /// `time_archived` is a recorded fact, not a state to compute: the row holds
 /// the millisecond moment the session was archived, or nothing. An integer
@@ -2578,6 +2661,9 @@ fn fold_opencode_dimensions(
     }
     if let Some(project) = non_empty_str(session.get("project_id")) {
         dimensions.insert_container(project);
+    }
+    if let Some(workspace) = non_empty_str(session.get("workspace_id")) {
+        dimensions.insert_container(workspace);
     }
     if session
         .get("time_archived")
@@ -2752,6 +2838,199 @@ fn fold_continue_dimensions(
     dimensions.insert_cwd(workspace.clone());
     dimensions.insert_container(workspace);
     true
+}
+
+/// Hermes Agent exports a session as one envelope that carries, beside the
+/// conversation, the whole `sessions` row the store recorded about it
+/// (`sqlite_probe.rs` seals that row under the
+/// `chat-stasher.hermes-agent.session.v1` schema). Four of its columns are
+/// dimension facts, and they are four different kinds of fact:
+///
+/// `cwd` is where the session ran. It is a path, so it lands in `cwd` under
+/// the same rule as Claude Code's, and the repository it may sit inside is
+/// never inferred from it. Each export states the directory its own row
+/// recorded, so a session whose row moved between exports keeps every
+/// directory it recorded rather than only the last.
+///
+/// `git_repo_root` is the inverse case, and the one that makes the pair a
+/// pair: the upstream repository the session's checkout belonged to, an
+/// identity the harness recorded rather than one derivable from the path, so
+/// it lands in `container`. The directory itself never becomes a `container`
+/// (the `cwd ≠ repo identity` rule).
+///
+/// `user_id` is the **gateway peer binding**: the messenger account a gateway
+/// session belongs to. It is a namespace rather than a person — one peer owns
+/// many sessions (locally, two peers own every row that records one) — which
+/// is what makes it a tenancy. It is recorded only on gateway rows: a local
+/// `cli`, `cron`, `oneshot` or `recovered` session stores no account at all
+/// and is left unobserved rather than filed under a fabricated one.
+///
+/// `archived` and `pinned` are explicit lifecycle flags the harness records
+/// (`INTEGER NOT NULL DEFAULT 0`). Nonzero stamps the state it names, and the
+/// zero default is not `active`: it says the harness marked nothing, which
+/// leaves Status unobserved — the same reading opencode's null `time_archived`
+/// gets, because the absence of a marker is never the state it might have
+/// been. Only the integer shape the
+/// exporter writes is trusted: a value of another type is a row this reader
+/// cannot read, not a fact it may take on faith.
+///
+/// Only an envelope identified by its schema is read at all: a line with a
+/// `session` object that the exporter did not seal is a record nothing
+/// vouches for, however much it looks like one.
+fn fold_hermes_agent_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) {
+    if record.get("schema").and_then(serde_json::Value::as_str)
+        != Some("chat-stasher.hermes-agent.session.v1")
+    {
+        return;
+    }
+    let Some(session) = record.get("session") else {
+        return;
+    };
+    if let Some(cwd) = non_empty_str(session.get("cwd")) {
+        dimensions.insert_cwd(cwd);
+    }
+    if let Some(tenant) = non_empty_str(session.get("user_id")) {
+        dimensions.insert_tenant(tenant);
+    }
+    if let Some(container) = non_empty_str(session.get("git_repo_root")) {
+        dimensions.insert_container(container);
+    }
+    if hermes_flag_is_set(session.get("archived")) {
+        dimensions.insert_status("archived");
+    }
+    if hermes_flag_is_set(session.get("pinned")) {
+        dimensions.insert_status("pinned");
+    }
+}
+
+/// Whether one `INTEGER NOT NULL DEFAULT 0` Hermes lifecycle column records the
+/// state it names.
+///
+/// A flag is recorded only when the row holds an integer that is not zero. The
+/// zero default means the harness marked nothing, which is an unobserved state
+/// and says nothing about the state that could have been: a missing `archived`
+/// is never read as `active`. A null, a string, and a row with no such column
+/// are equally nothing this reader can read, so none of them is turned into a
+/// state.
+fn hermes_flag_is_set(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_i64)
+        .is_some_and(|flag| flag != 0)
+}
+
+/// TICKET-4D-05 · Cursor states, on the **composer object**, which workspace the
+/// conversation ran in and which git repositories it was tracking.
+///
+/// The capture wraps that object one of two ways, and they are told apart
+/// structurally here for the same reason `normalize::cursor` tells them apart
+/// that way — the shape is the evidence, and a label the caller may have spelled
+/// differently is not:
+///
+/// * global store (`cursorDiskKV`): `{"…","session":{"key":…,"value":{composer}}}`
+/// * legacy workspace store (`ItemTable`): `{"…","session":{composer}}`
+///
+/// `workspaceIdentifier.uri` is the container, kept **as the composer spelled
+/// it**. That is what makes the `cwd ≠ repo identity` rule readable here: a
+/// `vscode-remote://` workspace and a local `file://` one are different
+/// containers and stay distinguishable, while the path below is an OS execution
+/// location — never a repository identity, and never promoted into `container`
+/// on its own.
+///
+/// `trackedGitRepos` contributes its repository identities to the same
+/// dimension, so a composer opened on a git repository records that repository
+/// beside the workspace that contains it instead of one dimension replacing the
+/// other.
+///
+/// **The composer's `status` is deliberately not read.** `none` / `completed` /
+/// `aborted` is the state of the *generation run* when the row was written: it
+/// changes while the user watches, and `"none"` is what an idle composer says
+/// rather than what its lifecycle is. Folding it into `status` would assert that
+/// a conversation was archived because a run finished — the claim the
+/// `missing archived/pinned ≠ active` rule forbids. With no lifecycle marker
+/// recorded, the dimension stays empty.
+fn fold_cursor_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) {
+    let Some(composer) = cursor_composer(record) else {
+        return;
+    };
+    if let Some(uri) = cursor_workspace_uri(composer) {
+        dimensions.insert_container(uri.clone());
+        if let Some(path) = cursor_file_path(&uri) {
+            dimensions.insert_cwd(path);
+        }
+    }
+    if let Some(repos) = composer
+        .get("trackedGitRepos")
+        .and_then(serde_json::Value::as_array)
+    {
+        for repo in repos {
+            if let Some(repo) = non_empty_str(Some(repo)) {
+                dimensions.insert_container(repo);
+            }
+        }
+    }
+}
+
+/// The composer an exported Cursor session line carries, or `None` when the
+/// line carries no `session` at all. A `value` that is a bare string is still
+/// returned: a value column that did not decode to JSON holds no field to read,
+/// and letting the lookups below find nothing says so without a second shape
+/// check here.
+fn cursor_composer(record: &serde_json::Value) -> Option<&serde_json::Value> {
+    let session = record.get("session")?;
+    match session.get("value") {
+        Some(value) => Some(value),
+        None => Some(session),
+    }
+}
+
+/// The workspace URI as the composer spells it, whether it wrote the URI text
+/// itself or the object VS Code serializes a URI into (whose `external` is that
+/// same text). Any other shape — absent, null, an empty string, an object with
+/// no `external` — is left unobserved rather than rebuilt from a sibling field
+/// such as `fsPath`: a boundary the record did not spell is not one that was
+/// recorded, and guessing it from a path would put a repository identity and an
+/// OS location in one value.
+fn cursor_workspace_uri(composer: &serde_json::Value) -> Option<String> {
+    let uri = composer.pointer("/workspaceIdentifier/uri")?;
+    if uri.is_string() {
+        non_empty_str(Some(uri))
+    } else {
+        non_empty_str(uri.get("external"))
+    }
+}
+
+/// The OS path a `file://` workspace URI names, or `None` for every other
+/// scheme and for any spelling this function cannot reproduce byte for byte.
+///
+/// A workspace reached over `vscode-remote://` or inside a dev container names
+/// no local directory, so its cwd stays unobserved — the container above is
+/// still recorded, because a remote workspace is a real boundary that is simply
+/// not a directory this machine ran in.
+///
+/// A percent-escape is the other refusal, and it is the common one: a folder
+/// with a space in it is spelled `file:///…/My%20Folder`, and undoing that needs
+/// a URI parser this crate does not depend on. Emitting the escaped text would
+/// record a path that does not exist, so nothing is recorded instead — the raw
+/// shard still holds the composer's own spelling for anyone who wants it.
+///
+/// A **URI with an authority** is the third refusal: `file://server/share` is
+/// how a UNC workspace is spelled, and everything after the scheme is a share on
+/// another machine — the leading separators are gone, so what is left would
+/// become a relative path no OS here resolves. Only the empty-authority form VS
+/// Code serializes for a local file, `file:///…`, names a directory this archive
+/// can compare, and its path is the one that begins at the third slash.
+fn cursor_file_path(uri: &str) -> Option<String> {
+    let path = uri.strip_prefix("file://")?;
+    if !path.starts_with('/') || path.contains('%') {
+        return None;
+    }
+    Some(path.to_string())
 }
 
 /// A string a record actually recorded, as opposed to one that is absent, of
@@ -3152,6 +3431,45 @@ mod tests {
             r#"{{"schema":"chat-stasher.opencode.session.v1","session":{{{fields}}},"messages":[],"orphan_parts":[]}}"#
         )
     }
+
+    // --------------------------------------------------- TICKET-4D-09 · zed
+    //
+    // The workspace folders Zed's `threads.folder_paths` column records for a
+    // thread: every folder is a project/workspace identity (`container`), and
+    // the first entry is the session's working directory (`cwd`).
+
+    /// One archived Zed session envelope, spelled the way
+    /// `read_sqlite_session`'s Zed route writes it.
+    fn zed_envelope(folder_paths: &str) -> String {
+        format!(
+            r#"{{"schema":"chat-stasher.sqlite.session.v1","table":"threads","session":{{"id":"synthetic-zed","summary":"synthetic-summary","updated_at":"{RFC_T1}","folder_paths":{folder_paths}}}}}"#
+        )
+    }
+
+    // ------------------------------------------------ TICKET-4D-05 · cursor
+    //
+    // The two boundaries a Cursor composer states about itself: the workspace it
+    // ran in, and the git repositories it was tracking.
+
+    /// One exported Cursor composer line with whatever provenance the caller
+    /// spells in. The default is the global `cursorDiskKV` wrapper, the shape the
+    /// composer is measured in; `cursor_composer_with` swaps it for the legacy
+    /// workspace wrapper.
+    fn cursor_composer_with(workspace: &str, extra: &str) -> String {
+        format!(
+            r#"{{"schema":"chat-stasher.sqlite.session.v1","table":"cursorDiskKV","session":{{"key":"composerData:eeeeeeee-5555","value":{{"composerId":"eeeeeeee-5555","createdAt":1753000000000,"fullConversationHeadersOnly":[],"conversationMap":{{}},{workspace}{extra}}}}}}}"#
+        )
+    }
+
+    /// A workspace URI in the object VS Code serializes one into — the shape
+    /// measured on the local global store. `scheme` is what says whether the
+    /// path below names a local directory.
+    fn file_workspace(uri: &str) -> String {
+        format!(
+            r#""workspaceIdentifier":{{"id":"b9aaf50f1cc29397064ab565777ef13d","uri":{{"$mid":1,"fsPath":"/w/one","external":"{uri}","path":"/w/one","scheme":"file"}}}}"#
+        )
+    }
+
     #[test]
     fn gemini_cli_records_its_project_hash_as_the_container() {
         let line = gemini_doc(r#","projectHash":"hash-fixture""#);
@@ -3160,6 +3478,42 @@ mod tests {
         assert!(
             row.dimensions.cwd.is_empty(),
             "a digest is not a path, so it never becomes a cwd: {:?}",
+            row.dimensions.cwd
+        );
+    }
+
+    #[test]
+    fn a_cursor_composer_records_its_workspace_and_the_directory_it_names() {
+        let line = cursor_composer_with(&file_workspace("file:///w/one"), "");
+        let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+        assert_eq!(
+            row.dimensions.container,
+            ["file:///w/one"],
+            "the container is the workspace boundary as Cursor spelled it, not the \
+             stripped path below it"
+        );
+        assert_eq!(
+            row.dimensions.cwd,
+            ["/w/one"],
+            "a `file://` workspace names the directory the session ran in"
+        );
+    }
+
+    #[test]
+    fn a_remote_workspace_is_a_container_but_names_no_local_directory() {
+        let uri = "vscode-remote://ssh-remote+host.example/srv/repo";
+        let line = cursor_composer_with(
+            &format!(
+                r#""workspaceIdentifier":{{"id":"b9aaf50f1cc29397064ab565777ef13d","uri":{{"$mid":1,"fsPath":"/srv/repo","external":"{uri}","path":"/srv/repo","scheme":"vscode-remote"}}}}"#
+            ),
+            "",
+        );
+        let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, [uri]);
+        assert!(
+            row.dimensions.cwd.is_empty(),
+            "a workspace on another machine is a boundary, not a directory this \
+             machine ran in: {:?}",
             row.dimensions.cwd
         );
     }
@@ -3214,6 +3568,43 @@ mod tests {
     }
 
     #[test]
+    fn zed_records_its_workspace_folders_as_containers_and_the_first_as_cwd() {
+        let line = zed_envelope(r#"["/w/one","/w/two"]"#);
+        let row = build_row("s", "mbp", "zed", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, ["/w/one", "/w/two"]);
+        assert_eq!(
+            row.dimensions.cwd,
+            ["/w/one"],
+            "the first entry is the primary workspace root, a filesystem path, \
+             so it is the session's cwd"
+        );
+    }
+
+    #[test]
+    fn tracked_git_repositories_are_recorded_beside_the_workspace() {
+        let line = cursor_composer_with(
+            &file_workspace("file:///w/one"),
+            r#","trackedGitRepos":["git@host.example:org/one.git","/w/one/vendor"]"#,
+        );
+        let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+        assert_eq!(
+            row.dimensions.container,
+            [
+                "/w/one/vendor",
+                "file:///w/one",
+                "git@host.example:org/one.git"
+            ],
+            "a composer opened on a git repository records that repository beside \
+             the workspace holding it, rather than one replacing the other"
+        );
+        assert_eq!(
+            row.dimensions.cwd,
+            ["/w/one"],
+            "a tracked repository is not a working directory"
+        );
+    }
+
+    #[test]
     fn an_absent_empty_or_mistyped_project_hash_records_no_container() {
         let row = build_row(
             "s",
@@ -3239,6 +3630,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_empty_tracked_repo_list_is_not_a_container() {
+        // 4 of the 23 composers measured on the local global store carry the key
+        // with nothing in it. An empty array is the absence of a repository, not
+        // a repository named "none" that every such composer would share.
+        let line =
+            cursor_composer_with(&file_workspace("file:///w/one"), r#","trackedGitRepos":[]"#);
+        let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, ["file:///w/one"]);
+    }
+
+    #[test]
+    fn a_composer_without_workspace_metadata_records_no_container() {
+        // The other two composers measured on the local global store name a
+        // workspace by `id` only, or carry no `trackedGitRepos` key at all. An
+        // `id` is a workspace handle Cursor mints internally rather than a
+        // boundary this archive can compare a directory against, so neither
+        // shape is turned into one.
+        let by_id = cursor_composer_with(
+            r#""workspaceIdentifier":{"id":"empty-window"}"#,
+            r#","trackedGitRepos":[]"#,
+        );
+        let bare = cursor_composer_with("", "");
+        for (case, line) in [("id-only", by_id), ("bare", bare)] {
+            let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+            assert!(
+                row.dimensions.is_empty(),
+                "a {case} composer stated no boundary this dimension can hold: {:?}",
+                row.dimensions
+            );
+            assert!(row.dimensions.is_valid());
+        }
+    }
+
+    #[test]
+    fn an_absent_empty_or_mistyped_workspace_uri_records_nothing() {
+        let unparseable = "not json at all";
+        let null_workspace = cursor_composer_with(r#""workspaceIdentifier":null"#, "");
+        let mistyped_uri = cursor_composer_with(r#""workspaceIdentifier":{"uri":7}"#, "");
+        let empty_uri = cursor_composer_with(r#""workspaceIdentifier":{"uri":""}"#, "");
+        // The object form with no `external` is not rebuilt from its sibling
+        // `fsPath`: that would file an OS location in the container dimension and
+        // blur the one rule that keeps the two apart.
+        let no_external = cursor_composer_with(
+            r#""workspaceIdentifier":{"uri":{"scheme":"file","fsPath":"/w/one"}}"#,
+            "",
+        );
+        let repos = cursor_composer_with("", r#","trackedGitRepos":["",7,null]"#);
+        let row = build_row(
+            "s",
+            "mbp",
+            "cursor",
+            &[
+                unparseable,
+                null_workspace.as_str(),
+                mistyped_uri.as_str(),
+                empty_uri.as_str(),
+                no_external.as_str(),
+                repos.as_str(),
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "an unreadable or non-reproducible value is nothing observed, never a \
+             value: {:?}",
+            row.dimensions
+        );
+        assert!(
+            row.dimensions.is_valid(),
+            "and it must never be a value a capture envelope could compare against"
+        );
+    }
+
     /// Dimensions are read per harness: a claude-code record carrying a
     /// `projectHash` key of its own is not a gemini-cli document, and reading
     /// it here would report a container for a harness nobody asked about.
@@ -3251,6 +3715,16 @@ mod tests {
             "the gemini-cli reader is the only one that reads projectHash: {:?}",
             row.dimensions.container
         );
+    }
+
+    #[test]
+    fn zed_keeps_the_raw_text_shape_of_an_envelope_sealed_before_the_array_export() {
+        // Pre-change exports carry the column as the newline-separated text Zed
+        // stores; the projection reads the same fact rather than leaving old
+        // sessions unobserved.
+        let line = zed_envelope("\"/w/one\\n/w/two\"");
+        let row = build_row("s", "mbp", "zed", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, ["/w/one", "/w/two"]);
         assert_eq!(row.dimensions.cwd, ["/w/one"]);
     }
 
@@ -3315,9 +3789,40 @@ mod tests {
             "s",
             "mbp",
             "opencode",
-            &[oc_with(r#""id":"s1","directory":"/w/one","project_id"""#).as_str()],
+            &[oc_with(r#""id":"s1","directory":"/w/one","project_id":"""#).as_str()],
         );
         assert!(row.dimensions.container.is_empty());
+    }
+
+    #[test]
+    fn a_workspace_an_opencode_row_names_is_a_second_container_beside_the_project() {
+        // The row carries a second opaque foreign key beside the project one,
+        // and both are facts the harness recorded — kept as a set, never one
+        // promoted over the other.
+        let both = oc_with(
+            r#""id":"s1","directory":"/w/one","project_id":"project-fixture","workspace_id":"ws-fixture""#,
+        );
+        let row = build_row("s", "mbp", "opencode", &[both.as_str()]);
+        assert_eq!(
+            row.dimensions.container,
+            ["project-fixture", "ws-fixture"],
+            "two identities the row stated are two container observations"
+        );
+        // A row without a project still names its workspace, so the key is a
+        // container answer in its own right, not a decoration on the project's.
+        let alone = oc_with(r#""id":"s1","directory":"/w/one","workspace_id":"ws-fixture""#);
+        let row = build_row("s", "mbp", "opencode", &[alone.as_str()]);
+        assert_eq!(row.dimensions.container, ["ws-fixture"]);
+        // The empty and null spellings of the same absence stay unobserved.
+        let blank = oc_with(r#""id":"s1","project_id":"project-fixture","workspace_id":"""#);
+        let null = oc_with(r#""id":"s1","workspace_id":null"#);
+        let row = build_row("s", "mbp", "opencode", &[blank.as_str(), null.as_str()]);
+        assert_eq!(
+            row.dimensions.container,
+            ["project-fixture"],
+            "an empty or absent workspace key is nothing observed: {:?}",
+            row.dimensions
+        );
     }
 
     #[test]
@@ -3391,6 +3896,111 @@ mod tests {
         assert!(
             row.dimensions.is_valid(),
             "and it must never be a value a capture envelope could compare against"
+        );
+    }
+
+    #[test]
+    fn a_percent_escaped_path_is_recorded_as_a_container_and_not_as_a_directory() {
+        // A folder with a space in it is spelled `file:///…/My%20Folder`, and
+        // undoing that needs a URI parser this crate does not depend on. The
+        // escaped text names no directory, so it becomes no cwd — the boundary is
+        // still recorded, and the composer's own spelling stays in the raw shard.
+        let line = cursor_composer_with(
+            r#""workspaceIdentifier":{"uri":{"scheme":"file","external":"file:///w/%20one"}}"#,
+            "",
+        );
+        let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, ["file:///w/%20one"]);
+        assert!(
+            row.dimensions.cwd.is_empty(),
+            "a path this reader cannot reproduce byte for byte is not a path it \
+             observed: {:?}",
+            row.dimensions.cwd
+        );
+    }
+
+    #[test]
+    fn a_workspace_uri_with_an_authority_names_no_local_directory() {
+        // A UNC workspace is spelled `file://server/share`: the authority is
+        // another machine, and the text after the scheme has no third slash
+        // where a local file's path begins. It would become a relative path no
+        // OS here resolves, so the boundary is recorded and the directory is not.
+        let line = cursor_composer_with(
+            r#""workspaceIdentifier":{"uri":{"scheme":"file","external":"file://server/share/one"}}"#,
+            "",
+        );
+        let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, ["file://server/share/one"]);
+        assert!(
+            row.dimensions.cwd.is_empty(),
+            "a share on another machine is not a directory this machine ran in: {:?}",
+            row.dimensions.cwd
+        );
+    }
+
+    #[test]
+    fn an_undecodable_composer_column_leaves_every_dimension_unobserved() {
+        let line = r#"{"schema":"chat-stasher.sqlite.session.v1","table":"cursorDiskKV","session":{"key":"composerData:ffffffff-6666","value":"not json"}}"#;
+        let row = build_row("s", "mbp", "cursor", &[line]);
+        assert!(row.dimensions.is_empty(), "{:?}", row.dimensions);
+    }
+
+    #[test]
+    fn the_legacy_workspace_export_states_the_same_two_boundaries() {
+        // The per-workspace `ItemTable` store writes the composer itself as
+        // `session`; the global store wraps it in `value`. Telling them apart by
+        // that shape rather than by a label is what makes one reader serve both.
+        let line = r#"{"schema":"chat-stasher.cursor.legacy.session.v1","session":{"composerId":"ffffffff-6666","createdAt":1753000000000,"conversation":[],"workspaceIdentifier":{"id":"b9aaf50f1cc29397064ab565777ef13d","uri":{"$mid":1,"fsPath":"/w/two","external":"file:///w/two","path":"/w/two","scheme":"file"}},"trackedGitRepos":["/w/two/vendor"]}}"#;
+        let row = build_row("s", "mbp", "cursor", &[line]);
+        assert_eq!(row.dimensions.container, ["/w/two/vendor", "file:///w/two"]);
+        assert_eq!(row.dimensions.cwd, ["/w/two"]);
+    }
+
+    #[test]
+    fn a_generation_status_is_not_a_lifecycle_status() {
+        // `status` on a composer is the state of the generation *run* at the
+        // moment the row was written: it moves while the user watches, and
+        // "none" is what an idle composer says. Recording any of the three as
+        // lifecycle state would claim a conversation was archived because a run
+        // finished.
+        for status in ["none", "completed", "aborted"] {
+            let line = cursor_composer_with(
+                &file_workspace("file:///w/one"),
+                &format!(r#","status":"{status}""#),
+            );
+            let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+            assert!(
+                row.dimensions.status.is_empty(),
+                "`status: {status:?}` is generation state, not lifecycle: {:?}",
+                row.dimensions
+            );
+            assert_eq!(row.dimensions.container, ["file:///w/one"]);
+        }
+    }
+
+    #[test]
+    fn cursor_dimensions_travel_in_the_index_line() {
+        let line = cursor_composer_with(&file_workspace("file:///w/one"), "");
+        let json = to_jsonl(&build_row("s", "mbp", "cursor", &[line.as_str()]));
+        assert!(
+            json.contains(r#""container":["file:///w/one"]"#),
+            "line: {json}"
+        );
+        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
+        assert!(
+            !json.contains(r#""status""#),
+            "no lifecycle marker was recorded, so none is written: {json}"
+        );
+
+        let bare = to_jsonl(&build_row(
+            "s",
+            "mbp",
+            "cursor",
+            &[cursor_composer_with("", "").as_str()],
+        ));
+        assert!(
+            !bare.contains("\"dimensions\""),
+            "an unobserved dimension is omitted rather than written empty: {bare}"
         );
     }
 
@@ -4054,6 +4664,225 @@ mod tests {
         assert!(json.contains(r#""container":["/w/one"]"#), "line: {json}");
         assert!(!json.contains("\"tenant\""), "line: {json}");
         assert!(!json.contains("\"status\""), "line: {json}");
+    }
+
+    // --------------------------------------------- TICKET-4D-13 · hermes-agent
+    //
+    // The four facts a Hermes Agent session row states about itself: the
+    // directory it ran in, the repository it belonged to, the gateway peer it
+    // served, and the archived / pinned flags it recorded.
+
+    /// One Hermes Agent export envelope carrying whatever `session` fields the
+    /// caller spells in, so each case states exactly which fields it is about.
+    /// The shape is the one `sqlite_probe.rs` seals: one line per session, the
+    /// whole `sessions` row beside its messages.
+    fn hermes_with(fields: &str) -> String {
+        format!(
+            r#"{{"schema":"chat-stasher.hermes-agent.session.v1","session":{{{fields}}},"messages":[],"session_model_usage":[]}}"#
+        )
+    }
+
+    #[test]
+    fn hermes_agent_states_its_directory_repository_peer_and_lifecycle() {
+        let line = hermes_with(
+            r#""id":"s1","cwd":"/w/one","git_repo_root":"https://github.com/org/repo-fixture","user_id":"peer-fixture","archived":1"#,
+        );
+        let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert_eq!(
+            row.dimensions.container,
+            ["https://github.com/org/repo-fixture"],
+            "the repository root the harness recorded is a container, which is \
+             what the directory on its own can never be"
+        );
+        assert_eq!(
+            row.dimensions.tenant,
+            ["peer-fixture"],
+            "a gateway row's peer binding is a namespace many sessions share, \
+             which is what makes it a tenancy"
+        );
+        assert_eq!(row.dimensions.status, ["archived"]);
+    }
+
+    #[test]
+    fn a_local_hermes_session_states_no_dimension() {
+        // A local run stores no peer binding, no repository root and no flag:
+        // the row's own defaults, and every dimension stays unobserved.
+        let line = hermes_with(
+            r#""id":"s1","source":"cli","cwd":null,"user_id":null,"git_repo_root":null,"archived":0,"pinned":0"#,
+        );
+        let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
+        assert!(
+            row.dimensions.is_empty(),
+            "a row that recorded none of the four facts states none of them: {:?}",
+            row.dimensions
+        );
+        assert!(row.dimensions.is_valid());
+    }
+
+    #[test]
+    fn an_unarchived_unpinned_hermes_session_stays_status_unobserved() {
+        // The zero default says the harness marked nothing; it is not `active`,
+        // and no state is inferred from the absence.
+        let line = hermes_with(r#""id":"s1","cwd":"/w/one","archived":0,"pinned":0"#);
+        let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
+        assert!(
+            row.dimensions.status.is_empty(),
+            "a zero flag is an unobserved status, never `{}`: {:?}",
+            "active",
+            row.dimensions.status
+        );
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert!(
+            row.dimensions.tenant.is_empty(),
+            "a local row recorded no peer, and none is invented: {:?}",
+            row.dimensions.tenant
+        );
+    }
+
+    #[test]
+    fn a_hermes_flagged_session_records_every_flag_the_row_set() {
+        let line = hermes_with(r#""id":"s1","pinned":1"#);
+        let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
+        assert_eq!(row.dimensions.status, ["pinned"]);
+        // Both flags set is both states, not one of them: the row recorded two.
+        let line = hermes_with(r#""id":"s1","archived":1,"pinned":1"#);
+        let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
+        assert_eq!(row.dimensions.status, ["archived", "pinned"]);
+    }
+
+    #[test]
+    fn an_absent_empty_or_mistyped_hermes_value_records_no_dimension() {
+        let row = build_row(
+            "s",
+            "mbp",
+            "hermes-agent",
+            &[
+                "not json at all",
+                hermes_with(r#""id":"s1","cwd":"","user_id":"","git_repo_root":"""#).as_str(),
+                hermes_with(r#""id":"s1","cwd":7,"user_id":{"id":"x"},"git_repo_root":["r"]"#)
+                    .as_str(),
+                // A flag spelled as a string is not the integer shape the
+                // exporter writes, so it is unread rather than trusted.
+                hermes_with(r#""id":"s1","archived":"1","pinned":"1""#).as_str(),
+                // A `session` object the exporter did not seal is a record
+                // nothing vouches for, whatever it says.
+                r#"{"session":{"cwd":"/w/one","user_id":"peer-fixture","archived":1}}"#,
+                // Nor is an envelope whose schema names something else.
+                r#"{"schema":"chat-stasher.hermes-agent.session.v2","session":{"cwd":"/w/one"}}"#,
+                // Nor one sealed for another harness, even under a key this
+                // fold reads.
+                r#"{"schema":"chat-stasher.opencode.session.v1","session":{"cwd":"/w/one","user_id":"peer-fixture"}}"#,
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "an empty, mistyped, or unsealed value is nothing observed, never a value: {:?}",
+            row.dimensions
+        );
+        assert!(
+            row.dimensions.is_valid(),
+            "and it must never be a value a capture envelope could compare against"
+        );
+    }
+
+    #[test]
+    fn a_hermes_directory_never_becomes_a_container() {
+        // The one field that could be mistaken for a repository identity is the
+        // directory itself; it stays a path, and the container stays unobserved
+        // rather than being inferred from where the session happened to run.
+        let line = hermes_with(r#""id":"s1","cwd":"/w/one""#);
+        let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert!(
+            row.dimensions.container.is_empty(),
+            "a path is not a repository identity: {:?}",
+            row.dimensions.container
+        );
+    }
+
+    #[test]
+    fn another_harness_reads_no_hermes_agent_dimensions() {
+        // The same bytes under a harness nobody asked about, and under the
+        // harness that shares the envelope-with-a-`session`-row shape: the
+        // facts belong to the harness whose reader states them.
+        let line = hermes_with(r#""id":"s1","cwd":"/w/one","user_id":"peer-fixture""#);
+        for harness in ["opencode", "claude-code"] {
+            let row = build_row("s", "mbp", harness, &[line.as_str()]);
+            assert!(
+                row.dimensions.is_empty(),
+                "dimensions are answered per harness, not read from whatever an \
+                 archived line happens to carry: {harness} {:?}",
+                row.dimensions
+            );
+        }
+        // And the envelope under its own harness is where the facts live.
+        let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert_eq!(row.dimensions.tenant, ["peer-fixture"]);
+    }
+
+    #[test]
+    fn the_hermes_agent_dimensions_travel_in_the_index_line() {
+        let line = hermes_with(
+            r#""id":"s1","cwd":"/w/one","git_repo_root":"https://github.com/org/repo-fixture","user_id":"peer-fixture","archived":1"#,
+        );
+        let json = to_jsonl(&build_row("s", "mbp", "hermes-agent", &[line.as_str()]));
+        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
+        assert!(
+            json.contains(r#""tenant":["peer-fixture"]"#),
+            "line: {json}"
+        );
+        assert!(
+            json.contains(r#""container":["https://github.com/org/repo-fixture"]"#),
+            "line: {json}"
+        );
+        assert!(json.contains(r#""status":["archived"]"#), "line: {json}");
+
+        // A row that recorded no flag omits the status rather than writing an
+        // `active` the harness never stated.
+        let bare = hermes_with(r#""id":"s1","cwd":"/w/one""#);
+        let json = to_jsonl(&build_row("s", "mbp", "hermes-agent", &[bare.as_str()]));
+        assert!(!json.contains("\"status\""), "line: {json}");
+    }
+
+    #[test]
+    fn a_zed_thread_without_folders_leaves_container_and_cwd_unobserved() {
+        for line in [
+            zed_envelope("null"),
+            zed_envelope("[]"),
+            zed_envelope("\"\""),
+            r#"{"schema":"chat-stasher.sqlite.session.v1","table":"threads","session":{"id":"synthetic-zed","updated_at":"2025-01-15T12:34:56.789Z"}}"#.to_string(),
+            "not json at all".to_string(),
+        ] {
+            let row = build_row("s", "mbp", "zed", &[line.as_str()]);
+            assert!(
+                row.dimensions.container.is_empty() && row.dimensions.cwd.is_empty(),
+                "NULL, empty, absent or unparseable folder_paths records no folder: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_zed_projection_travels_in_the_index_line() {
+        let line = zed_envelope(r#"["/w/one"]"#);
+        let json = to_jsonl(&build_row("s", "mbp", "zed", &[line.as_str()]));
+        assert!(json.contains(r#""container":["/w/one"]"#), "line: {json}");
+        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
+    }
+
+    #[test]
+    fn another_harness_reads_no_cursor_dimensions() {
+        // A Claude Code transcript has a `workspaceIdentifier` of nobody's, but
+        // reading it here would file a Cursor boundary under a harness that
+        // recorded none.
+        let line = cursor_composer_with(&file_workspace("file:///w/one"), "");
+        let row = build_row("s", "mbp", "claude-code", &[line.as_str()]);
+        assert!(
+            row.dimensions.is_empty(),
+            "dimensions are read per harness: {:?}",
+            row.dimensions
+        );
     }
 
     // ------------------------------------------------- W219 · account keys

@@ -4,7 +4,7 @@
 use crate::message_audit::{self, BodyMetadata, JoinPolicy, MetadataSource, Projection};
 use anyhow::{ensure, Context, Result};
 use serde_json::Value;
-use std::{fs, io::Write, path::Path};
+use std::{collections::BTreeSet, fs, io::Write, path::Path};
 
 pub const KEY_FILE_ENV: &str = "CHAT_STASHER_AUDIT_KEY_FILE";
 
@@ -329,7 +329,16 @@ pub fn backfill_stage(stage: &Path, machine: &str, key: &JoinPolicy) -> Result<B
             .file_name()
             .into_string()
             .map_err(|_| anyhow::anyhow!("invalid audit session identity"))?;
-        for (_, path) in crate::store::sealed_shard_entries(&entry.path())? {
+        // Shards are visited in sealed-sequence order, never directory order:
+        // the rebuild has to append the same rows in the same order the
+        // incremental collection path already wrote them, or a rebuilt
+        // sidecar holds the same facts in different bytes. `read_dir` does
+        // not promise an order, and a multi-bucket session arrives as one
+        // interleaved list, so the sequence number is the only ordering that
+        // matches how the shard set was built.
+        let mut shards = crate::store::sealed_shard_entries(&entry.path())?;
+        shards.sort_by_key(|(seq, _)| *seq);
+        for (_, path) in shards {
             let bytes = fs::read(path)
                 .map_err(|_| anyhow::anyhow!("audit migration body is unreadable"))?;
             backfill_shard(stage, machine, &session, &bytes, key, &mut report)?;
@@ -348,12 +357,39 @@ pub fn backfill_archive(
     key: &JoinPolicy,
 ) -> Result<BackfillReport> {
     let mut report = BackfillReport::default();
+    // The archive walk may re-run whole once on a READ-RACE index-miss,
+    // re-delivering sessions the raced attempt already backfilled. The
+    // sidecar commits reconcile on identity, so re-running a session
+    // writes nothing new — but the report's counters count sessions, so a
+    // re-delivered session is skipped: one session must report as one
+    // scanned, not two.
+    let mut backfilled_sessions = BTreeSet::new();
     store.for_each_archived_session_shards_with_policy(
         masterkey,
         machine,
         crate::store::DuplicateShardPolicy::KeepAll,
         |session, shards| {
-            for (_, bytes) in shards {
+            if !backfilled_sessions.insert(session.to_string()) {
+                return Ok(());
+            }
+            // ADR-061: snapshot-source sessions hand the audit backfill the
+            // assembled current-state body, not the raw shard set — a
+            // multi-copy or increment-era session would otherwise audit
+            // every record several times. Inbox capture bundles (which also
+            // live under `opencode.*` ids) classify as byte-verbatim and
+            // pass through, and other harnesses keep the raw bodies.
+            let is_opencode = crate::opencode_records::harness_is_opencode(session);
+            let bodies: Vec<Vec<u8>> = if is_opencode {
+                let owned: Vec<Vec<u8>> = shards.iter().map(|(_, bytes)| bytes.clone()).collect();
+                vec![crate::opencode_records::project_session_body(
+                    session,
+                    &owned,
+                    crate::opencode_records::BodyView::Current,
+                )?]
+            } else {
+                shards.iter().map(|(_, bytes)| bytes.clone()).collect()
+            };
+            for bytes in &bodies {
                 backfill_shard(stage, machine, session, bytes, key, &mut report)?;
             }
             Ok(())

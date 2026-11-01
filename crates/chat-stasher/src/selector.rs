@@ -24,9 +24,21 @@
 //! That third variant is the whole point of the type. `None` for a time is
 //! "we do not know", never "1970" and never "outside the window".
 //!
+//! The `surface` filter (ADR-059's dimension) follows the same rule with one
+//! addition on the *asked* side: a session matches only the surface its
+//! records **observed** — an absent observation is unevaluated, never an
+//! implicit value, because "claude-code's CLI library records no surface"
+//! must not be read as "these sessions are `cli`" — and the value the user
+//! asks for must be one the registry declares in its `dimensions.surfaces`
+//! union. A value no harness declares can never match anything, so it is a
+//! usage error, never an empty result ([`SelectorArgs::resolve_validated`]).
+//!
 //! This module is deliberately pure: no IO, no repository, no printing. It
 //! takes metadata in and returns a verdict, which is what makes it reusable by
-//! `export` and testable without a fixture.
+//! `export` and testable without a fixture. That is also why the surface
+//! vocabulary is an **argument** of the validated resolve rather than something
+//! this module reads: the registry is IO, and the rule text stays here where
+//! one function decides it for every caller.
 
 use std::collections::BTreeSet;
 
@@ -164,7 +176,13 @@ pub struct Selector {
     /// Match these harnesses. `Some(empty)` matches nothing, which is what a
     /// user who typed `--harness ""` asked for; `None` is no constraint.
     pub harnesses: Option<BTreeSet<String>>,
-    /// Match an observed runtime surface.
+    /// Match an observed runtime surface: the session's records must name this
+    /// exact value in their `surface` dimension. Absent or empty recorded
+    /// provenance is **unevaluated** — never an implicit "cli" — and a session
+    /// whose records name a different surface is a proven non-match. The value
+    /// itself must be one the registry declares in its `dimensions.surfaces`
+    /// union; callers resolving CLI or dashboard input go through
+    /// [`SelectorArgs::resolve_validated`], which refuses anything else.
     pub surface: Option<String>,
     /// Conversation-time window. `None` == every session, whatever its time.
     pub window: Option<TimeWindow>,
@@ -345,7 +363,15 @@ pub struct SelectorArgs {
     /// The harness is the leading `.`/`~` segment of the archived session id.
     #[arg(long, value_delimiter = ',', value_name = "ID")]
     pub harness: Option<Vec<String>>,
-    /// Match an observed runtime surface. `--sub-surface` remains an alias.
+    /// Match an observed runtime surface (ADR-059): the session's records
+    /// must name this exact value in their `surface` dimension. `cli` and
+    /// `desktop-cowork` are the claude-code values; the full vocabulary is
+    /// the registry's `dimensions.surfaces` union, validated by
+    /// [`Self::resolve_validated`] — an unknown value is a usage error,
+    /// never an empty result. A session whose records carry no surface at
+    /// all (claude-code's CLI library records none) is listed as unplaceable
+    /// while this filter is active: an absent observation is not a value.
+    /// `--sub-surface` remains an alias.
     #[arg(long, visible_alias = "sub-surface")]
     pub surface: Option<String>,
     /// One local calendar day, `YYYY-MM-DD`. Identical to `--since D --until D`.
@@ -400,11 +426,52 @@ impl std::fmt::Display for UsageError {
 impl std::error::Error for UsageError {}
 
 impl SelectorArgs {
+    /// Resolve the flags with the surface vocabulary the registry declares
+    /// (ADR-059 D1, DSK-5): [`Self::resolve`] plus the one check a surface
+    /// filter needs to be honest — a requested value no harness declares can
+    /// never match a session, so it fails here as a usage error rather than
+    /// coming back later dressed as an empty result.
+    ///
+    /// `surface_vocabulary` is the union of every harness's
+    /// `dimensions.surfaces`, passed in by the caller because this module
+    /// does no IO. The check runs only when a surface was actually
+    /// requested: a flag-absent query resolves exactly like [`Self::resolve`]
+    /// — default is all surfaces, and an **empty** vocabulary changes
+    /// nothing for it. An empty vocabulary with a requested surface is a
+    /// real error that names the vocabulary it checked, still not an empty
+    /// result.
+    pub fn resolve_validated(
+        &self,
+        surface_vocabulary: &BTreeSet<String>,
+    ) -> Result<Resolved, UsageError> {
+        if let Some(surface) = &self.surface {
+            if !surface_vocabulary.contains(surface) {
+                let known: Vec<String> = surface_vocabulary
+                    .iter()
+                    .map(|value| format!("`{value}`"))
+                    .collect();
+                return Err(UsageError(format!(
+                    "`{surface}` is not a surface the harness registry declares. Known \
+                     surface values: {} (`dimensions.surfaces` in the harness registry). A \
+                     surface value no source records can never match a session, so the \
+                     query is refused here rather than answered with an empty result",
+                    known.join(", ")
+                )));
+            }
+        }
+        self.resolve()
+    }
+
     /// Turn the flags into a [`Selector`], or explain why they cannot be.
     ///
     /// `--day` / `--since` / `--until` are resolved against the **local**
     /// timezone here, once, so that a caller never has to know a timezone
     /// exists. Flags that merely conflict are caught earlier, by clap.
+    ///
+    /// This resolves the *requested* surface value against no vocabulary at
+    /// all: [`Self::resolve_validated`] is the variant user-facing callers
+    /// use, and this one stays for callers whose surface values are already
+    /// known-good (the tests, and flag round-trips inside the dashboard).
     pub fn resolve(&self) -> Result<Resolved, UsageError> {
         let mut warnings = Vec::new();
         let window = self.resolve_window(&mut warnings)?;
@@ -630,6 +697,137 @@ mod tests {
                 }
             ));
         }
+    }
+
+    // ------------------------------------------------ surface: observed values
+
+    /// The recorded side of the rule: an observed surface matches — including
+    /// for a session that ran through several surfaces and recorded each — and
+    /// a session that observed a *different* surface is a proven non-match,
+    /// which leaves the unevaluated verdict exclusively to sessions whose
+    /// records carry no observation at all.
+    #[test]
+    fn a_recorded_surface_matches_and_a_different_one_is_a_non_match() {
+        let selector = Selector {
+            surface: Some("desktop-cowork".to_string()),
+            ..Default::default()
+        };
+        let cowork = ["desktop-cowork".to_string()];
+        let resumed_through_both = ["cli".to_string(), "desktop-cowork".to_string()];
+        let ide = ["ide".to_string()];
+        assert_eq!(
+            selector.select(&SessionMeta {
+                surfaces: Some(&cowork),
+                ..meta("m", "claude-code.m.s1", Some((1, 2)))
+            }),
+            Verdict::Selected
+        );
+        assert_eq!(
+            selector.select(&SessionMeta {
+                surfaces: Some(&resumed_through_both),
+                ..meta("m", "claude-code.m.s2", Some((1, 2)))
+            }),
+            Verdict::Selected,
+            "a session that observed several surfaces is matched by each of them"
+        );
+        assert_eq!(
+            selector.select(&SessionMeta {
+                surfaces: Some(&ide),
+                ..meta("m", "google-antigravity.m.s3", Some((1, 2)))
+            }),
+            Verdict::NotSelected
+        );
+    }
+
+    /// The asked side of the rule (DSK-5): the value must be one the registry
+    /// declares. The refusal names the typo itself and the accepted
+    /// vocabulary, so it is recognizable and repairable without opening the
+    /// registry, and it never becomes an empty result.
+    #[test]
+    fn a_surface_outside_the_vocabulary_is_a_usage_error_that_names_the_values() {
+        let args = SelectorArgs {
+            surface: Some("cowork-desktop".to_string()),
+            ..Default::default()
+        };
+        let err = args
+            .resolve_validated(&registry_vocabulary())
+            .expect_err("a value the registry does not declare must not resolve");
+        assert!(
+            err.0.contains("cowork-desktop"),
+            "the refusal must name the requested value: {}",
+            err.0
+        );
+        assert!(
+            err.0.contains("desktop-cowork") && err.0.contains("ide"),
+            "the refusal must list the accepted vocabulary: {}",
+            err.0
+        );
+        assert!(
+            err.0.contains("dimensions.surfaces"),
+            "the refusal must name where the vocabulary lives: {}",
+            err.0
+        );
+    }
+
+    /// The check is exact: surface values are declared words, not patterns, so
+    /// a wrong case or an empty string is refused rather than guessed at —
+    /// the same rule [`parse_local_day`] applies to dates.
+    #[test]
+    fn the_vocabulary_check_is_exact_not_a_pattern() {
+        for bad in ["CLI", "desktop", ""] {
+            let args = SelectorArgs {
+                surface: Some(bad.to_string()),
+                ..Default::default()
+            };
+            assert!(
+                args.resolve_validated(&registry_vocabulary()).is_err(),
+                "`{bad}` must not be accepted as a surface value"
+            );
+        }
+    }
+
+    /// A value inside the vocabulary resolves to exactly what the plain
+    /// resolve produces: validation adds a refusal case, never a new meaning.
+    #[test]
+    fn a_surface_inside_the_vocabulary_resolves_like_the_plain_resolve() {
+        let args = SelectorArgs {
+            surface: Some("desktop-cowork".to_string()),
+            machine: Some("m".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            args.resolve_validated(&registry_vocabulary())
+                .unwrap()
+                .selector,
+            args.resolve().unwrap().selector
+        );
+    }
+
+    /// Flag absent = the check never runs, so the validated resolve is the
+    /// plain one even against an empty vocabulary: the default is *all*
+    /// surfaces, and it is decided by absence, not by what the registry
+    /// happens to declare.
+    #[test]
+    fn with_no_surface_flag_the_validated_resolve_is_the_plain_one() {
+        let args = SelectorArgs {
+            machine: Some("m".to_string()),
+            ..Default::default()
+        };
+        let validated = args.resolve_validated(&BTreeSet::new()).unwrap();
+        let plain = args.resolve().unwrap();
+        assert_eq!(validated.selector, plain.selector);
+        assert!(validated.warnings.is_empty());
+    }
+
+    /// The vocabulary shape mirrors the shipped registry's declare set (the
+    /// values ADR-059 names): `cli` and `desktop-cowork` for claude-code —
+    /// plus what other harnesses declare, which is why the union, not one
+    /// harness's list, is the vocabulary a query is checked against.
+    fn registry_vocabulary() -> BTreeSet<String> {
+        ["app", "cli", "desktop-cowork", "ide", "web"]
+            .into_iter()
+            .map(String::from)
+            .collect()
     }
 
     fn window(since: i64, until: i64) -> TimeWindow {

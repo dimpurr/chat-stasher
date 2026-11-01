@@ -1046,10 +1046,13 @@ fn pull_cli_requires_readback_from_every_destination_and_survives_reclamation() 
         .map(|(i, cfg)| chat_stasher::stagereclaim::NamedStore {
             name: format!("synthetic-{i}"),
             cfg: cfg.clone(),
+            // ADR-060: these destinations were just pushed to successfully,
+            // so the classification a real run would derive is healthy.
+            health: chat_stasher::destdiag::DestinationHealth::Healthy,
         })
         .collect();
     assert!(
-        !chat_stasher::stagereclaim::reclaim_stage(&stage, &destinations, true)
+        !chat_stasher::stagereclaim::reclaim_stage(&stage, &destinations, true, None)
             .unwrap()
             .blocked()
     );
@@ -1135,12 +1138,9 @@ fn destination_proof_binds_partition_and_full_shard_bytes_without_body_cache() {
         file_sha256: record["file_sha256"].as_str().unwrap().into(),
         matched_shard: path.file_name().unwrap().to_str().unwrap().into(),
     });
-    assert!(!DestinationArchive {
-        stage: &stage,
-        destinations: &[]
-    }
-    .holds("synthetic-puller", &outcome)
-    .unwrap());
+    assert!(!DestinationArchive::new(&stage, &[])
+        .holds("synthetic-puller", &outcome)
+        .unwrap());
     let other = f.owner.root().join("synthetic-other-stage");
     std::fs::create_dir(&other).unwrap();
     let mut other_record = record.clone();
@@ -1159,10 +1159,7 @@ fn destination_proof_binds_partition_and_full_shard_bytes_without_body_cache() {
             .push(&other, &key)
             .unwrap();
     }
-    let proof = DestinationArchive {
-        stage: &stage,
-        destinations: &configs,
-    };
+    let proof = DestinationArchive::new(&stage, &configs);
     assert!(
         !proof.holds("synthetic-puller", &outcome).unwrap(),
         "another partition cannot prove this shard"

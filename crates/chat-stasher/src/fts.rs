@@ -680,7 +680,7 @@ const HARNESS_SOURCE_FORMATS: &[(&str, &str)] = &[
     ("cursor", FORMAT_SQLITE),
     ("grok", FORMAT_SQLITE),
     ("grok-bot", FORMAT_JSON),
-    ("github-copilot-cli", "jsonl"),
+    ("github-copilot-cli", FORMAT_SQLITE),
     ("aider", "markdown"),
     ("crush", FORMAT_SQLITE),
     ("zed", FORMAT_SQLITE),
@@ -690,6 +690,16 @@ const HARNESS_SOURCE_FORMATS: &[(&str, &str)] = &[
     // archive holds, which is that file decoded (`collect` strips the frame
     // structure), so the word is `jsonl` exactly as it is for codex.
     ("deepseek-harness", "jsonl"),
+    // ADR-054 D2: the codebuff whitelist is whole-file JSON
+    // (`chat-messages.json`). The sidecar is the same format but never
+    // reaches fts: it seals beside the body under the same identity.
+    ("codebuff", FORMAT_JSON),
+    // W1046: the registered half the transcripts live in is jsonl; the
+    // metadata lines seal under the same session id as part of that body.
+    ("workbuddy", FORMAT_JSONL),
+    // W1047: the CodeBuddy CLI archives the same-core transcripts with no
+    // metadata lines beside them, so the whole body is the jsonl events.
+    ("codebuddy", FORMAT_JSONL),
 ];
 
 fn declared_format(harness: &str) -> Option<&'static str> {
@@ -772,6 +782,8 @@ fn export_reader(raw: &str) -> Option<String> {
         "chat-stasher.openclaw.session.v1" => Some("openclaw".to_string()),
         "chat-stasher.hermes-agent.session.v1" => Some("hermes-agent".to_string()),
         "chat-stasher.cursor.legacy.session.v1" => Some("cursor".to_string()),
+        "chat-stasher.github-copilot-cli.session.v1" => Some("github-copilot-cli".to_string()),
+        "chat-stasher.workbuddy.session.v1" => Some("workbuddy".to_string()),
         "chat-stasher.sqlite.session.v1" => {
             match value.get("table").and_then(serde_json::Value::as_str) {
                 Some("cursorDiskKV") => Some("cursor".to_string()),
@@ -2716,10 +2728,11 @@ mod tests {
     /// disappearing into a coverage line that says the view is complete.
     #[test]
     fn every_local_harness_is_read_or_reported_by_format() {
-        let copilot_jsonl = concat!(
-            r#"{"event":"session.start","data":{"id":"synthetic"}}"#,
-            "\n",
-            r#"{"event":"session.end","data":{}}"#,
+        let copilot_export = concat!(
+            r#"{"schema":"chat-stasher.github-copilot-cli.session.v1","#,
+            r#""session":{"id":"synthetic","cwd":"/synthetic","repository":"dimpurr/synthetic"},"#,
+            r#""turns":[{"session_id":"synthetic","turn_index":0,"user_message":"synthetic question","#,
+            r#""assistant_response":"synthetic answer","timestamp":"2026-10-08T10:00:01Z"}]}"#
         );
         // A SQLite database archived whole: the bytes of the file, not text.
         let sqlite_bytes: &[u8] = b"SQLite format 3\0\x00\x01\x02\x03\xff\xfe";
@@ -2790,11 +2803,13 @@ mod tests {
                 Expected::Text("synthetic question"),
             ),
             (
-                // The desktop replica is JSON persistence, but this change
-                // does not implement a reader for it.
+                // The desktop replica's records are read by the normalize
+                // reader, so an archived shard in the replica's own shape
+                // contributes the text the reader rendered.
                 "grok-bot",
-                br#"{"replica":{"sequence":1,"entries":[]}}"#,
-                Expected::Format(FORMAT_JSON),
+                br#"{"kind":"message","seq":1,"isStreaming":false,"role":"user","content":"synthetic question"}
+{"kind":"message","seq":2,"isStreaming":false,"role":"assistant","content":"synthetic answer"}"#,
+                Expected::Text("synthetic question"),
             ),
             (
                 "google-antigravity",
@@ -2802,9 +2817,12 @@ mod tests {
                 Expected::Text("synthetic question"),
             ),
             (
+                // The export of one `sessions` row together with its `turns`,
+                // as the Copilot CLI reader writes it (the `timestamp`
+                // column travels raw; no time is claimed).
                 "github-copilot-cli",
-                copilot_jsonl.as_bytes(),
-                Expected::Format(FORMAT_JSONL),
+                copilot_export.as_bytes(),
+                Expected::Text("synthetic question"),
             ),
             (
                 // aider's chat history *is* a markdown transcript.
@@ -2822,6 +2840,29 @@ mod tests {
                 "continue",
                 br#"{"messages":[{"role":"user","content":"synthetic question"}]}"#,
                 Expected::Text("synthetic question"),
+            ),
+            (
+                // The codebuff body is one whole-file JSON array
+                // (ADR-054 D2); the reader takes the latest generation's
+                // turns, so an indexable body needs one renderable turn.
+                "codebuff",
+                br#"[{"variant":"user","content":"synthetic codebuff question"}]"#,
+                Expected::Text("synthetic codebuff question"),
+            ),
+            (
+                // A WorkBuddy body mixes the collector's metadata lines with
+                // the raw transcript events (W1046); the reader takes the
+                // speech half, so one user_query turn makes it indexable.
+                "workbuddy",
+                br#"{"type":"message","role":"user","content":[{"type":"input_text","text":"<user_query>synthetic workbuddy question</user_query>"}],"timestamp":1780000000000}"#,
+                Expected::Text("synthetic workbuddy question"),
+            ),
+            (
+                // The CLI body (W1047) is the same-core events with no
+                // metadata lines at all; the reader is the shared one.
+                "codebuddy",
+                br#"{"type":"message","role":"user","content":[{"type":"input_text","text":"<user_query>synthetic codebuddy question</user_query>"}],"timestamp":1780000000000}"#,
+                Expected::Text("synthetic codebuddy question"),
             ),
         ];
 
@@ -2899,11 +2940,285 @@ mod tests {
         assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSONL));
     }
 
+    /// A grok-bot `message` record with no transcript text is read as the
+    /// measured empty it is: the reader knows the kind and skips the record
+    /// with no count, so the shard is indexed-with-no-text — `body` empty,
+    /// no unread lines — rather than `not indexable: json`. The previous
+    /// state, reported by format because no reader existed, is what this
+    /// test used to pin before the reader landed.
     #[test]
-    fn grok_bot_message_records_without_transcript_text_remain_unindexable() {
+    fn grok_bot_message_record_without_transcript_text_is_a_measured_empty() {
         let extracted =
             extract_index_document_for("grok-bot", br#"{"seq":1,"kind":"message"}"#).unwrap();
+        assert!(extracted.is_indexable());
+        assert!(extracted.body.is_empty());
+        assert!(extracted.message_offsets.is_empty());
+        assert_eq!(extracted.unread_lines, 0);
+    }
+
+    /// The GB-5 §8/§9 rows over the grok-bot reader: exactly the rendered
+    /// text is indexed — a human turn, a bot record's words, its widget
+    /// question with the answered resolution, a voice call's description
+    /// and spoken turns — while the never-indexed classes stay out of the
+    /// body: the secret record's strings (the §3 rule holds in the index
+    /// too), ids and nonces, `event` bookkeeping, and file names, which
+    /// render as attachment references rather than text.
+    #[test]
+    fn grok_bot_rendered_text_is_indexed_and_secret_id_and_file_strings_are_not() {
+        let body = concat!(
+            r#"{"id":"synthetic-id-1","kind":"message","seq":1,"timestampMs":1780000000000,"requestId":"synthetic-request-1","isStreaming":false,"role":"user","content":"synthetic searchable question"}"#,
+            "\n",
+            r#"{"id":"synthetic-id-2","kind":"send-message","seq":2,"timestampMs":1780000000100,"requestId":"synthetic-request-2","message":{"type":"synthetic-type","content":"synthetic searchable bot words","widget":{"prompt":"synthetic pick a report","options":[{"label":"synthetic option one","value":"synthetic-value-1"}]}},"respondedValue":"synthetic-value-1"}"#,
+            "\n",
+            r#"{"id":"synthetic-id-3","kind":"event","seq":3,"timestampMs":1780000000200,"event":{"type":"synthetic-event-type","automationName":"synthetic automation name"}}"#,
+            "\n",
+            r#"{"id":"synthetic-id-4","kind":"voice-call","seq":4,"timestampMs":1780000000300,"call":{"callId":"synthetic-call-1","description":"synthetic described call"},"conversation":{"turns":[{"speaker":"user","text":"synthetic spoken turn words","atMs":1780000000400}],"nudges":[{"request":"synthetic nudge words","atMs":1780000000500,"answer":null}]}}"#,
+            "\n",
+            r#"{"id":"synthetic-id-5","kind":"user-attachment","seq":5,"timestampMs":1780000000600,"clientNonce":"synthetic-nonce-1","file_name":"synthetic-report.txt","byteSize":128}"#,
+            "\n",
+            r#"{"id":"synthetic-id-6","kind":"send-message","seq":6,"timestampMs":1780000000700,"requestId":"synthetic-request-6","message":{"type":"synthetic-type","content":"synthetic secret adjacent words","secretRequest":{"label":"synthetic-secret-label","target":{"name":"synthetic-secret-target"}}},"secretProvided":true}"#,
+            "\n",
+        );
+        let extracted = extract_index_document_for("grok-bot", body.as_bytes()).unwrap();
+        assert!(extracted.is_indexable());
+        for needle in [
+            "synthetic searchable question",
+            "synthetic searchable bot words",
+            "synthetic pick a report",
+            "synthetic option one",
+            "answered: synthetic-value-1",
+            "synthetic described call",
+            "synthetic spoken turn words",
+            "synthetic nudge words",
+        ] {
+            assert!(
+                extracted.body.contains(needle),
+                "rendered text {needle:?} is not in the index body"
+            );
+        }
+        for withheld in [
+            // The secret rule reaches the index: every string of the
+            // record that named the credential exchange is absent.
+            "synthetic-secret-label",
+            "synthetic-secret-target",
+            "synthetic secret adjacent words",
+            // Ids and nonces are not conversation text.
+            "synthetic-request-1",
+            "synthetic-nonce-1",
+            "synthetic-call-1",
+            // `event` bookkeeping and file names never become text.
+            "synthetic automation name",
+            "synthetic-report.txt",
+        ] {
+            assert!(
+                !extracted.body.contains(withheld),
+                "never-indexed string {withheld:?} reached the index body"
+            );
+        }
+        assert!(!extracted.message_offsets.is_empty());
+        // Every line parsed, so nothing was silently unread.
+        assert_eq!(extracted.unread_lines, 0);
+    }
+
+    /// A grok-bot shard that is JSON but holds no record the reader knows
+    /// — no `seq`/`kind` anywhere — is the shape the registry row pinned
+    /// before Slice C put a reader-shaped shard there and asked for
+    /// `Expected::Text`. Every line counts unrecognized and none renders,
+    /// so the shard is reported by its format, never guessed into an
+    /// indexed empty body.
+    #[test]
+    fn grok_bot_json_the_reader_cannot_parse_is_still_reported_by_format() {
+        let extracted =
+            extract_index_document_for("grok-bot", br#"{"replica":{"sequence":1,"entries":[]}}"#)
+                .unwrap();
         assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSON));
+        assert!(extracted.body.is_empty());
+    }
+
+    /// W986: a session body holding a cross-shard replay — the second shard
+    /// re-delivered the first's rows, the third re-delivered the middle's
+    /// new rows — indexes each turn once. The extractor reads through the
+    /// same variant-per-seq rule the reader applies, so a row stored twice
+    /// by the archive contributes its text once to the index body and no
+    /// needle is findable twice over.
+    #[test]
+    fn grok_bot_cross_shard_replays_index_each_turn_once() {
+        let body = concat!(
+            r#"{"id":"synthetic-one","kind":"message","seq":1,"timestampMs":1780000000000,"isStreaming":false,"role":"user","content":"synthetic quadruped question"}"#,
+            "\n",
+            r#"{"id":"synthetic-two","kind":"message","seq":2,"timestampMs":1780000000100,"isStreaming":false,"role":"assistant","content":"synthetic quadruped answer"}"#,
+            "\n",
+            r#"{"_chat_stasher":{"source":"grok-bot","partial_replica":true,"sequence_gaps":[],"observed_sequence_min":1,"observed_sequence_max":2}}"#,
+            "\n",
+            // Shard two replays shard one whole; only the metadata seal
+            // differs, so no whole-body replay check drops it. Shard three
+            // replays the middle shard's new row again (interleaved shape).
+            r#"{"id":"synthetic-one","kind":"message","seq":1,"timestampMs":1780000000000,"isStreaming":false,"role":"user","content":"synthetic quadruped question"}"#,
+            "\n",
+            r#"{"id":"synthetic-two","kind":"message","seq":2,"timestampMs":1780000000100,"isStreaming":false,"role":"assistant","content":"synthetic quadruped answer"}"#,
+            "\n",
+            r#"{"id":"synthetic-three","kind":"message","seq":3,"timestampMs":1780000000200,"isStreaming":false,"role":"user","content":"synthetic quadruped follow-up"}"#,
+            "\n",
+            r#"{"_chat_stasher":{"source":"grok-bot","partial_replica":true,"sequence_gaps":[],"observed_sequence_min":1,"observed_sequence_max":3}}"#,
+            "\n",
+            r#"{"id":"synthetic-three","kind":"message","seq":3,"timestampMs":1780000000200,"isStreaming":false,"role":"user","content":"synthetic quadruped follow-up"}"#,
+            "\n",
+            r#"{"_chat_stasher":{"source":"grok-bot","partial_replica":true,"sequence_gaps":[],"observed_sequence_min":1,"observed_sequence_max":3}}"#,
+            "\n",
+        );
+        let extracted = extract_index_document_for("grok-bot", body.as_bytes()).unwrap();
+        assert!(extracted.is_indexable());
+        // Three distinct turns, one message each: the replayed rows add no
+        // message of their own and no second copy of anyone's text.
+        assert_eq!(extracted.message_offsets.len(), 3);
+        for needle in [
+            "synthetic quadruped question",
+            "synthetic quadruped answer",
+            "synthetic quadruped follow-up",
+        ] {
+            assert_eq!(
+                extracted.body.matches(needle).count(),
+                1,
+                "turn {needle:?} must be indexed exactly once, not once per stored copy"
+            );
+        }
+        assert_eq!(extracted.unread_lines, 0);
+    }
+
+    /// The secret rule must hold in the built index, not only in the
+    /// extractor's answer (GB-5 §3): a grok-bot session that carried a
+    /// secret record is still searchable — its plainly rendered phrase is
+    /// found — but the strings of the withheld record are findable by no
+    /// query, because they were never stored as text at all. The queries
+    /// are three characters or longer, so each zero is a measurement the
+    /// trigram index can actually make, not a refusal to answer.
+    #[test]
+    fn grok_bot_secret_strings_are_not_findable_by_search() {
+        let body = concat!(
+            r#"{"id":"synthetic-id-1","kind":"message","seq":1,"timestampMs":1780000000000,"isStreaming":false,"role":"user","content":"synthetic hedgehog question"}"#,
+            "\n",
+            r#"{"id":"synthetic-id-2","kind":"send-message","seq":2,"timestampMs":1780000000100,"requestId":"synthetic-request-2","message":{"type":"synthetic-type","content":"synthetic open bot words","secretRequest":{"label":"synthetic-secret-label","target":{"name":"synthetic-secret-target"}}},"secretProvided":true}"#,
+            "\n",
+        );
+        let text = extract_index_document_for("grok-bot", body.as_bytes()).unwrap();
+        assert!(text.is_indexable());
+        assert!(text.body.contains("synthetic hedgehog question"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        let sources = [SourceDoc::fingerprinted(
+            "machine/grok-bot.machine.synthetic-agent",
+            "synthetic-sha",
+        )];
+        index
+            .build(&sources, |_| Ok(the(text.clone(), 64)))
+            .unwrap();
+        let set = index.matches("hedgehog").unwrap().unwrap();
+        assert_eq!(set.len(), 1);
+        assert_eq!(
+            set.matches[0].id,
+            "machine/grok-bot.machine.synthetic-agent"
+        );
+        for withheld in [
+            "synthetic-secret-label",
+            "synthetic-secret-target",
+            "synthetic open bot words",
+        ] {
+            let set = index.matches(withheld).unwrap().unwrap();
+            assert!(
+                set.is_empty(),
+                "the secret record's string {withheld:?} was found by search"
+            );
+        }
+    }
+
+    /// A native Grok transcript body is indexed from its native
+    /// records, and a legacy `session_docs` summary in the same body
+    /// is not appended again as another turn (ADR-056 D7): the two
+    /// are observations of one session, not two conversations.
+    #[test]
+    fn a_grok_native_transcript_indexes_native_text_without_the_legacy_summary() {
+        let body = concat!(
+            r#"{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{"session_id":"s1","updated_at":1784924765,"title":"synthetic title","content":"synthetic legacy summary"}}"#,
+            "\n",
+            r#"{"type":"user","content":[{"type":"text","text":"synthetic user turn"}]}"#,
+            "\n",
+            r#"{"type":"assistant","content":"synthetic answer"}"#,
+            "\n",
+        );
+        let extracted = extract_index_document_for("grok", body.as_bytes()).unwrap();
+        assert!(extracted.is_indexable());
+        assert!(extracted.body.contains("synthetic user turn"));
+        assert!(extracted.body.contains("synthetic answer"));
+        assert!(!extracted.body.contains("synthetic legacy summary"));
+    }
+
+    /// The recorded reasoning summary is plaintext the source itself
+    /// kept, so it is indexed like any thinking block — while the
+    /// encrypted reasoning it summarizes never reaches the index as
+    /// text.
+    #[test]
+    fn a_grok_native_reasoning_summary_is_indexed_without_the_encrypted_content() {
+        let body = concat!(
+            r#"{"type":"reasoning","encrypted_content":"synthetic-ciphertext-blob","id":"r1","status":"completed","summary":[{"type":"summary_text","text":"synthetic reasoning summary"}]}"#,
+            "\n",
+        );
+        let extracted = extract_index_document_for("grok", body.as_bytes()).unwrap();
+        assert!(extracted.is_indexable());
+        assert!(extracted.body.contains("synthetic reasoning summary"));
+        assert!(!extracted.body.contains("synthetic-ciphertext-blob"));
+    }
+
+    /// A native transcript whose every record carries only encrypted
+    /// reasoning has no plaintext this build can read: it is reported
+    /// by format, never indexed as an empty body.
+    #[test]
+    fn a_grok_native_transcript_of_encrypted_reasoning_only_is_reported_by_format() {
+        let body = concat!(
+            r#"{"type":"reasoning","encrypted_content":"synthetic-ciphertext-blob","id":"r1","status":"completed","summary":[]}"#,
+            "\n",
+            r#"{"type":"reasoning","encrypted_content":"synthetic-ciphertext-blob","id":"r2","status":"completed","summary":[]}"#,
+            "\n",
+        );
+        let extracted = extract_index_document_for("grok", body.as_bytes()).unwrap();
+        assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSONL));
+        assert!(extracted.body.is_empty());
+    }
+
+    /// A mixed body whose native records are all recognized but render
+    /// nothing keeps the legacy `session_docs` summary as its reading,
+    /// so the summary — the body's only readable text — is what the
+    /// index gets. Suppression needs a native reading that actually
+    /// rendered; recognition alone would have turned this into a
+    /// session with nothing indexable in it.
+    #[test]
+    fn a_grok_mixed_body_of_unrenderable_native_records_indexes_the_legacy_summary() {
+        let body = concat!(
+            r#"{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{"session_id":"s1","updated_at":1784924765,"title":"synthetic title","content":"synthetic legacy summary"}}"#,
+            "\n",
+            r#"{"type":"reasoning","encrypted_content":"synthetic-ciphertext-blob","id":"r1","status":"completed","summary":[]}"#,
+            "\n",
+        );
+        let extracted = extract_index_document_for("grok", body.as_bytes()).unwrap();
+        assert!(extracted.is_indexable());
+        assert!(extracted.body.contains("synthetic legacy summary"));
+        assert!(!extracted.body.contains("synthetic-ciphertext-blob"));
+    }
+
+    /// A user record that mixes renderable and unrenderable parts is
+    /// indexed from its text parts only: inline image bytes are not
+    /// conversation text, and their presence must not cost the turn
+    /// its indexable prose.
+    #[test]
+    fn a_grok_mixed_user_record_with_unrenderable_parts_is_indexed_from_its_text_parts() {
+        let body = concat!(
+            r#"{"type":"user","content":[{"type":"text","text":"synthetic user turn"},{"type":"image","url":"data:synthetic"}]}"#,
+            "\n",
+        );
+        let extracted = extract_index_document_for("grok", body.as_bytes()).unwrap();
+        assert!(extracted.is_indexable());
+        assert!(extracted.body.contains("synthetic user turn"));
+        assert!(!extracted.body.contains("data:synthetic"));
     }
 
     /// The registry ids, read from the same file the scanner loads.

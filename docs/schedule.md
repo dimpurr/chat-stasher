@@ -36,7 +36,7 @@ That is the whole step. `schedule install`:
 2. writes it where the scheduler looks: `~/Library/LaunchAgents/` on macOS, `~/.config/systemd/user/` on Linux;
 3. loads it: `launchctl bootstrap` on macOS, `systemctl --user daemon-reload` and `systemctl --user enable --now` on Linux.
 
-It ends with one line, for example `[schedule] installed agents: 1 unchanged: 0`.
+It ends with one line, for example `[schedule] installed agents: 1 unchanged: 0`. Anything it noticed about the declared set warns right after: a declared destination no installed timer pushes, or one whose `env:` credentials a timer cannot resolve — both say what happens next and what to run, because before the install warned there was no place those facts surfaced before the disk filled.
 
 Running it again is safe. A timer that is already installed with the same content is left alone and counted as `unchanged`. One whose content changed, for example because you moved the binary, is rewritten and reloaded.
 
@@ -96,9 +96,14 @@ For example:
 [destinations.r2.options]
 access_key_id = "file:~/.config/chat-stasher/r2-access-key-id"
 secret_access_key = "keychain:r2"
+
+[pull.letta]
+api_key = "keychain:my-letta-key"
 ```
 
 Unlike `env:`, these forms **fail closed**: if the file, the line or the keychain item cannot be read, the config is refused with an error naming the option and the reference, never the secret. So a broken reference shows up on the next command, not as a silent failure at 3 a.m.
+
+The declared `[pull.letta]` producer rides the same timer, so its credential obeys the same rule: write `pull.letta.api_key` in one of these forms, and `schedule install` warns on the spot — with the same sentence `status`, `doctor` and the menu bar carry — when the declaration is missing and only a shell's `LETTA_API_KEY` would be visible.
 
 A `keychain:` lookup uses your macOS login keychain; a LaunchAgent can read it only when that keychain is unlocked and permits the lookup. If you are still logged in but the keychain is locked, `file:` or `env-file:` avoids that keychain dependency.
 
@@ -129,9 +134,9 @@ The first line is the verdict. It is read from the record the last pass left beh
 
 "Stopped" means no pass for more than four intervals (at least one hour). `status` exits `0` only when the verdict is healthy, and `1` otherwise, so it works as a check in a script. Its report is on stderr: run it bare, not through a pipe, if you want the exit code.
 
-Every `run-once` pass also prints one summary line on stdout, last in its output: `[run-once] phases ms: scan=… collect=… collect_harness=[…] stage_audit=… metadata_hash=… activity_index=… push_preflight=… backup=… run_state_write=…; counts: records_scanned=… files_statted=… source_bytes_read=… shard_bytes_read_hashed=… sqlite_sessions_queried=… sqlite_sessions_exported=… state_saves=…`. It is the same record the timer-visibility feature writes to `run-state.json`, so a slow pass can be attributed to the phase that was slow from either place. The record holds durations and counts only — no session id, no path, no harness display name, no conversation content; the per-harness timings are keyed by the harness's registry id. A phase the pass never reached (push preflight and backup on a pass with nothing to push) reads `0`: zero is a measurement of "did not run", never a fallback.
+Every `run-once` pass also prints one summary line on stdout, last in its output: `[run-once] phases ms: letta_pull=… scan=… collect=… collect_harness=[…] stage_audit=… metadata_hash=… activity_index=… push_preflight=… backup=… run_state_write=…; counts: records_scanned=… files_statted=… source_bytes_read=… shard_bytes_read_hashed=… sqlite_sessions_queried=… sqlite_sessions_exported=… state_saves=…`. It is the same record the timer-visibility feature writes to `run-state.json`, so a slow pass can be attributed to the phase that was slow from either place. The record holds durations and counts only — no session id, no path, no harness display name, no conversation content; the per-harness timings are keyed by the harness's registry id. A phase the pass never reached (push preflight and backup on a pass with nothing to push) reads `0`: zero is a measurement of "did not run", never a fallback. `letta_pull=0` also covers a pass with no `[pull.letta]` declared; a declared producer that is pulled before the collect step is timed there, and when it cannot finish reading the pass ends with exit 3 and the failed `pull-letta` step in the record ([pull.md](pull.md)). The record keeps that fact **beside** the local steps rather than inside `failed_step`, so a pass whose collect also failed keeps both, and `status` renders them as **two lines**: the archive cycle's own health first, the producer's own sentence second — a sentence that reports backfill progress (`pulled N of ~M conversations`) while a large account is still completing across rounds, always with the exit code still non-zero until the pass really finished reading.
 
-`status --json` adds a `local` section: whether the timer units are installed, which ones, when the next run is due and why, and the sessions still staged and waiting to upload. `installed` needs two things on both platforms: every timer file present, *and* the scheduler confirming the job is loaded — systemd confirming each timer active on Linux, launchd finding each agent on macOS. Files the scheduler did not confirm are reported as `unconfirmed` — the reason sits beside them in `next_run_why` ("launchd has not loaded …", "systemd did not report a next run", or that the manager could not be asked at all). Those two are different answers and are worded as different answers: a plist written by hand with `--output` and never bootstrapped is the first, and a machine with no user session to reach is the second. The last pass is reported separately, in `run_state`: a file that is in place is not proof that the scheduler loaded it, so installed files and a healthy verdict are never one field. Its `phases` field carries the per-phase record above, for a script that wants the numbers without parsing the summary line.
+`status --json` adds a `local` section: whether the timer units are installed, which ones, when the next run is due and why, and the sessions still staged and waiting to upload. `installed` needs two things on both platforms: every timer file present, *and* the scheduler confirming the job is loaded — systemd confirming each timer active on Linux, launchd finding each agent on macOS. Files the scheduler did not confirm are reported as `unconfirmed` — the reason sits beside them in `next_run_why` ("launchd has not loaded …", "systemd did not report a next run", or that the manager could not be asked at all). Those two are different answers and are worded as different answers: a plist written by hand with `--output` and never bootstrapped is the first, and a machine with no user session to reach is the second. The last pass is reported separately, in `run_state`: a file that is in place is not proof that the scheduler loaded it, so installed files and a healthy verdict are never one field. Its `phases` field carries the per-phase record above, for a script that wants the numbers without parsing the summary line. When `[mirror]` is configured the same section carries the local copy's field family — size, last sync, snapshots behind, orphans, each measured / unknown / not applicable — plus the already-worded `rows` the menu bar app displays.
 
 ### When it runs
 
@@ -148,7 +153,7 @@ Change the interval in the config, then run `schedule install` again so the time
 
 | | Where |
 |---|---|
-| macOS | `~/Library/Logs/chat-stasher/run-once.log` and `run-once.err.log`. All destinations' timers write to these two files. Each is emptied at the start of a run once it passes 5 MB. |
+| macOS | `~/Library/Logs/chat-stasher/run-once.log` and `run-once.err.log`. All destinations' timers write to these two files. Both append across runs and can grow until you manage them yourself. Reinstall the schedule to replace older templates that emptied logs over 5 MB. |
 | Linux | The journal: `journalctl --user -u chat-stasher-run-once-<destination>.service` |
 
 A successful pass ends with `result: COMPLETED` (a new snapshot) or `result: NOOP` (nothing changed). Both are healthy.
@@ -162,9 +167,9 @@ chat-stasher reclaim-stage --stage ~/stash/chat-stasher/stage           # dry ru
 chat-stasher schedule install --unit reclaim-stage --stage ~/stash/chat-stasher/stage
 ```
 
-It runs weekly, on Sunday at 03:17 local time on macOS, and around then on Linux (with up to 15 minutes of random delay). It is one timer for all destinations, so it takes no `--destination`. If any destination cannot be reached or does not hold a session, nothing is removed that week, and the reason is in its log (`reclaim-stage.log`).
+It runs weekly, on Sunday at 03:17 local time on macOS, and around then on Linux (with up to 15 minutes of random delay). It is one timer for all destinations, so it takes no `--destination`. If any destination cannot be reached or does not hold a session, nothing is removed that week. The reason is in its log (on macOS, `reclaim-stage.log` and `reclaim-stage.err.log` append across runs; on Linux, the journal for `chat-stasher-reclaim-stage.service`), and it is also what `chat-stasher status` and `doctor` report: a blocked clean-up names the destination it waits for and how much it holds back, and the menu bar app posts a system notification once it has been blocked twice in a row. `schedule install --unit reclaim-stage` warns on the spot when a declared destination is pushed by no installed hourly timer — a destination that never receives pushes keeps the clean-up blocked for the whole machine.
 
-Run the dry run by hand first, so you see what it would do.
+Run the dry run by hand first, so you see what it would do. Reinstall an existing macOS reclaim schedule to replace older templates that emptied logs over 5 MB.
 
 ## Remove the timer
 

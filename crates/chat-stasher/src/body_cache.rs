@@ -1531,7 +1531,12 @@ impl BodyCacheBackend {
     }
 
     /// Whether this read is a conversation-body read.
-    fn is_body_read(tpe: FileType, cacheable: bool) -> bool {
+    ///
+    /// Shared with [`crate::mirror_read`], whose mirror seam reuses the same
+    /// classification to decide which of its reads may consult — and fill —
+    /// a body cache (ADR-062 ruling 7), so the two backends can never
+    /// disagree about what a "body read" is.
+    pub(crate) fn is_body_read(tpe: FileType, cacheable: bool) -> bool {
         tpe == FileType::Pack && !cacheable
     }
 }

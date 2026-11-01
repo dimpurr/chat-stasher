@@ -13,15 +13,19 @@ mod antigravity;
 /// One extractor file per harness, dispatched by [`normalize_value`]. A
 /// harness with no arm there is served the raw view only — see
 /// [`harness_has_a_reader`] — and never a generic guess about its shape.
+mod codebuff;
 mod codex;
 mod cursor;
 mod deepseek_harness;
 mod gemini_cli;
+mod github_copilot_cli;
+mod grok_bot;
 mod grok_cli;
 mod hermes_agent;
 mod kimi_code;
 mod openclaw;
 mod opencode;
+mod workbuddy;
 mod zed;
 
 pub const DEFAULT_WINDOW: usize = 50;
@@ -133,6 +137,19 @@ pub struct Conversation {
     pub canonical_follows_active: bool,
     pub attachments: Vec<AttachmentRef>,
     pub provenance: Provenance,
+    /// Missing replica sequence positions as inclusive runs, from the
+    /// harness's own measurement line — never recomputed from the rendered
+    /// seqs, which share positions (variants) and prove nothing about
+    /// completeness. A head run ("rows 1–34 missing") is in the list: the
+    /// measurement starts at one. Empty is the no-claim default of a body
+    /// whose harness records no gap measurement, not a measured "no gaps".
+    pub sequence_gap_runs: Vec<(u64, u64)>,
+    /// Whether the source recorded itself partial (grok-bot's
+    /// `partial_replica`): an observed window, not a promise of complete
+    /// history. `false` is both "the source said complete" and "the source
+    /// said nothing"; there is no signal to tell apart today, so the reader
+    /// records what the one existing measurement line says.
+    pub partial: bool,
 }
 
 impl Conversation {
@@ -155,6 +172,8 @@ impl Conversation {
             canonical_follows_active: true,
             attachments: Vec::new(),
             provenance,
+            sequence_gap_runs: Vec::new(),
+            partial: false,
         }
     }
 
@@ -181,6 +200,45 @@ pub fn normalize(harness: &str, body: &str) -> Conversation {
         // The wire journal needs per-body state to fold a step's parts into
         // one assistant message, so it owns its own line walk.
         kimi_code::normalize_body(body, &mut conversation);
+        return conversation;
+    }
+    if harness == "grok" {
+        // The `grok` id covers two producers (W911): the SQLite
+        // `session_docs` export and the native JSONL transcript. Which one
+        // a body holds is a per-body fact — a mixed body whose native
+        // records render prefers them and must not append the legacy
+        // summary again as another turn — so the harness owns its line
+        // walk, as `kimi-code` does.
+        grok_cli::normalize_body(body, &mut conversation);
+        return conversation;
+    }
+    if harness == "grok-bot" {
+        // The replica reader renders one message per sequence position, and
+        // which variant of a position is final is only knowable after the
+        // whole body is read, so it owns its own line walk like kimi-code.
+        grok_bot::normalize_body(body, &mut conversation);
+        return conversation;
+    }
+    if harness == "codebuff" {
+        // The transcript is a whole JSON array sealed as one generation per
+        // changed pass (ADR-054 D2), so the body holds one or more complete
+        // generations and the reading is a whole-body fact — which
+        // generation is current — that the per-line walk cannot decide.
+        codebuff::normalize_body(body, &mut conversation);
+        return conversation;
+    }
+    if harness == "workbuddy" || harness == "codebuddy" {
+        // The same-core readers (W1046/W1047): the WorkBuddy desktop app and
+        // the CodeBuddy CLI are two builds of one `cbc` core and write the
+        // same nine-type event schema. A body mixes the collector's
+        // metadata lines (or a bare tombstone) with the raw transcript
+        // events — and a tool call finds its result only by pairing
+        // `callId`s across lines, so the shared reader owns its line walk.
+        // No per-harness branch exists: the ruling's measurement (CS-WB-2)
+        // found the CLI only *adds* `summary` and `turn-metrics`, which the
+        // desktop reader already counts, so a fork would be a second way to
+        // say the same facts.
+        workbuddy::normalize_body(body, &mut conversation);
         return conversation;
     }
     for line in body.lines() {
@@ -248,8 +306,8 @@ pub fn normalize(harness: &str, body: &str) -> Conversation {
 /// is an inbox bundle (see [`is_web_bundle`], whose reader is the generic one),
 /// and the `""` row that carries no harness id at all (it keeps the structural
 /// attempt and its distinct provenance-unknown state). Every other id — the
-/// registry harnesses with no extractor yet (github-copilot-cli, aider, crush,
-/// zed, continue) — is served the raw view only.
+/// registry harnesses with no extractor yet (aider, crush, continue) — is served
+/// the raw view only.
 fn harness_has_a_reader(harness: &str) -> bool {
     matches!(
         harness,
@@ -264,6 +322,8 @@ fn harness_has_a_reader(harness: &str) -> bool {
             | "cursor"
             | "zed"
             | "grok"
+            | "grok-bot"
+            | "github-copilot-cli"
             | "chatgpt"
             | "deepseek"
             // The local DeepSeek Harness (`dsh`) is a different harness from the
@@ -272,6 +332,9 @@ fn harness_has_a_reader(harness: &str) -> bool {
             // deliberately not abbreviable to `deepseek`.
             | "deepseek-harness"
             | "claude"
+            | "codebuff"
+            | "workbuddy"
+            | "codebuddy"
             | ""
     ) || is_web_bundle(harness)
 }
@@ -316,9 +379,7 @@ fn normalize_value(harness: &str, value: &Value, conversation: &mut Conversation
         "hermes-agent" => hermes_agent::normalize_session(value, conversation),
         "cursor" => cursor::normalize_session(value, conversation),
         "zed" => zed::normalize_session(value, conversation),
-        "grok" if grok_cli::is_session_docs_record(value) => {
-            grok_cli::normalize_session(value, conversation)
-        }
+        "github-copilot-cli" => github_copilot_cli::normalize_session(value, conversation),
         "chatgpt" => normalize_chatgpt(value, conversation),
         "claude" => normalize_claude_web(value, conversation),
         "deepseek" => normalize_deepseek(value, conversation),
@@ -686,7 +747,7 @@ fn normalize_deepseek(value: &Value, conversation: &mut Conversation) {
 /// is read rather than counted as one unreadable line. Records the reader
 /// cannot turn into a message stay counted, one per record — the array's own
 /// arithmetic, not a claim about the whole body.
-fn normalize_generic(value: &Value, conversation: &mut Conversation) {
+pub(super) fn normalize_generic(value: &Value, conversation: &mut Conversation) {
     let messages = match value {
         Value::Array(messages) => messages,
         _ => match value.get("messages").and_then(Value::as_array) {
@@ -862,7 +923,7 @@ fn attachment_from_map(map: &serde_json::Map<String, Value>) -> AttachmentRef {
     }
 }
 
-fn payload(value: &Value) -> Option<Value> {
+pub(super) fn payload(value: &Value) -> Option<Value> {
     match value.pointer("/raw/text").and_then(Value::as_str) {
         Some(text) => serde_json::from_str(text).ok(),
         None => Some(value.clone()),

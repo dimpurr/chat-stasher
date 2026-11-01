@@ -146,6 +146,41 @@ pub fn zed_schema() -> SqliteSchemaSpec<'static> {
     }
 }
 
+/// Export-side schema for GitHub Copilot CLI's `session-store.db`, as the
+/// shipped build's own embedded documentation describes it (@github/copilot
+/// v1.0.80 build artifacts — the same source the registry cell cites): the
+/// `sessions` table holds one row per session (`id`, `cwd`, `repository`,
+/// `branch`, `summary`, `created_at`, `updated_at`), and the `turns` table
+/// one row per turn (`session_id`, `turn_index`, `user_message`,
+/// `assistant_response`, `timestamp`).
+///
+/// No timestamp column is declared. No real `session-store.db` has ever been
+/// observed (the one known session lives on a machine this archive cannot
+/// reach), so this build claims no session time for this harness — the same
+/// rule that keeps a value it could not read out of the archive rather than
+/// guessing it. The session's own `created_at`/`updated_at` and the turn
+/// `timestamp` still travel through the raw export below, so the observation
+/// exists without being read as a claim.
+pub fn github_copilot_cli_schema() -> SqliteSchemaSpec<'static> {
+    SqliteSchemaSpec {
+        table: "sessions",
+        id_column: Some("id"),
+        // The two columns the 4D projection (TICKET-4D-12) reads its
+        // dimensions from must exist before one session may be enumerated;
+        // every other column — including the time columns — is exported if
+        // present but never required.
+        required_columns: vec!["id", "cwd", "repository"],
+        key_column: None,
+        key_prefix: None,
+        time_column: None,
+        json_value_column: None,
+        json_time_path: None,
+        time_is_seconds: false,
+        time_is_iso8601: false,
+        qualification: None,
+    }
+}
+
 /// Build the schema spec for a harness from its registry cell. `None` when the
 /// cell is not a recognised SQLite store (no `sql_table` declared) — the
 /// caller then falls back to [`opencode_schema`], preserving pre-B27 behaviour
@@ -449,7 +484,7 @@ pub struct HermesSessionSnapshot {
 /// read-only SQLite transaction. `mode=ro` still lets SQLite read committed
 /// WAL content; no database or sidecar is opened for writing.
 pub fn read_hermes_session(db: &Path, session_id: &str) -> Result<HermesSessionSnapshot, String> {
-    ensure_hermes_wal_readable(db)?;
+    ensure_wal_readable(db)?;
     let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
     conn.busy_timeout(Duration::from_secs(2))
         .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
@@ -522,14 +557,14 @@ fn ensure_hermes_schema(conn: &Connection) -> Result<(), String> {
 /// any message content. A partial or changed schema must not look like an
 /// empty archive.
 pub fn validate_hermes_schema(db: &Path) -> Result<(), String> {
-    ensure_hermes_wal_readable(db)?;
+    ensure_wal_readable(db)?;
     let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
     conn.busy_timeout(Duration::from_secs(2))
         .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
     ensure_hermes_schema(&conn)
 }
 
-fn ensure_hermes_wal_readable(db: &Path) -> Result<(), String> {
+fn ensure_wal_readable(db: &Path) -> Result<(), String> {
     if db_is_wal(db) && sidecar(db, "-wal").exists() && !sidecar(db, "-shm").exists() {
         return Err(
             "WAL database has no shared-memory sidecar; refusing an incomplete read-only snapshot"
@@ -575,6 +610,273 @@ fn hermes_sqlite_value_to_json(value: ValueRef<'_>) -> Value {
         ValueRef::Text(value) => Value::String(String::from_utf8_lossy(value).into_owned()),
         ValueRef::Blob(value) => Value::Array(value.iter().copied().map(Value::from).collect()),
     }
+}
+
+/// Columns the WorkBuddy `sessions` table must carry before this build claims
+/// it can enumerate the store's sessions: identity, the transport a session's
+/// local transcripts hinge on, the soft-delete tombstone flag, and the two
+/// timestamps every observed installation fills in. A store without any of
+/// them is refused by name, never counted as zero sessions.
+pub const EXPECTED_WORKBUDDY_SESSION_COLUMNS: [&str; 5] = [
+    "id",
+    "transport",
+    "deleted_at",
+    "created_at",
+    "last_activity_at",
+];
+
+/// The schema tag of one exported WorkBuddy session line: the full metadata
+/// row, or the bare tombstone for a session the source soft-deleted.
+pub const WORKBUDDY_SESSION_SCHEMA: &str = "chat-stasher.workbuddy.session.v1";
+
+/// Metadata-only row of the WorkBuddy `sessions` table (W1046). The row body
+/// (title, model, cwd and every companion column) is not carried during
+/// scanning; it is exported only after `collect` has decided that this
+/// session's logical cursor changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkBuddySessionRow {
+    /// `sessions.id`; measured to equal the `.jsonl` transcript file name's
+    /// stem, and the row wins over any file name disagreement.
+    pub id: String,
+    /// `deleted_at IS NOT NULL` (any non-null value, including the `-1` the
+    /// store's cloud-sort index implies is a sentinel): the source
+    /// soft-deleted this session, so the reader exports a tombstone.
+    pub deleted: bool,
+    /// `None` when the row does not spell its transport; an unstated
+    /// transport stays unknown and is never local-by-guesswork.
+    pub transport: Option<String>,
+    /// `last_activity_at`, falling back to `created_at` — epoch milliseconds.
+    /// `None` when neither column reads as an integer; a row without a
+    /// readable time is never stamped with a fake epoch.
+    pub time_ms: Option<i64>,
+}
+
+/// One WorkBuddy export: the session row's metadata (or its tombstone) as a
+/// single JSON line, plus the content-hash cursor that decides when the line
+/// counts as changed.
+#[derive(Debug, Clone)]
+pub struct WorkBuddySessionSnapshot {
+    pub cursor: OpenCodeCursor,
+    pub json_line: Vec<u8>,
+}
+
+/// Where a WorkBuddy read opens from: either the live store itself, or a
+/// copied `db` + `-wal` + `-shm` trio in a temporary directory this hold keeps
+/// alive (and removes on drop) while connections read the copy.
+struct WorkBuddyRead {
+    db_path: PathBuf,
+    _copy: Option<tempfile::TempDir>,
+}
+
+impl WorkBuddyRead {
+    /// Resolve the read source for `db`. WorkBuddy is the deliberate
+    /// exception to this module's `mode=ro&immutable=1` fallback: its
+    /// uncheckpointed WAL holds live session content that an immutable open
+    /// would silently skip, so `immutable=1` is never used here. A WAL store
+    /// whose `-shm` sidecar is absent (a store whose writer is gone) is read
+    /// through a copied trio instead, which keeps the no-write guarantee —
+    /// any sidecar SQLite needs is created beside the copy, never beside the
+    /// user's store — without losing the WAL's content. Everything else
+    /// opens in place with plain `mode=ro`.
+    fn resolve(db: &Path) -> Result<WorkBuddyRead, String> {
+        if db_is_wal(db) && sidecar(db, "-wal").exists() && !sidecar(db, "-shm").exists() {
+            let copy = copy_wal_trio(db)?;
+            let db_path = copy.path().join("workbuddy.db");
+            Ok(WorkBuddyRead {
+                db_path,
+                _copy: Some(copy),
+            })
+        } else {
+            Ok(WorkBuddyRead {
+                db_path: db.to_path_buf(),
+                _copy: None,
+            })
+        }
+    }
+
+    fn open(&self) -> Result<Connection, String> {
+        // Never `immutable=1`: see [`WorkBuddyRead::resolve`].
+        let uri = format!("file:{}?mode=ro", self.db_path.display());
+        let conn = Connection::open_with_flags(
+            &uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|error| format!("read-only open failed: {error}"))?;
+        conn.busy_timeout(Duration::from_secs(2))
+            .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
+        Ok(conn)
+    }
+}
+
+/// Copy `db` and whichever sidecars exist into a fresh temporary directory,
+/// one member at a time — three separate byte runs, not an atomic snapshot of
+/// the store. A copy that straddles a writer relies for its honesty on the
+/// WAL format itself, not on this copy being one instant of the store's
+/// bytes: every WAL frame carries its own checksum under the salts of the
+/// header that opened the log, so SQLite never replays a half-written frame
+/// as if it were committed — a torn copy opens to the frames that
+/// checksummed whole, and never invents a row the store never wrote. That
+/// per-frame integrity is the real guarantee the read-path arrangement
+/// documents; snapshot atomicity is not, and this comment must not promise
+/// it (W1047f L4).
+fn copy_wal_trio(db: &Path) -> Result<tempfile::TempDir, String> {
+    let dir = tempfile::tempdir()
+        .map_err(|error| format!("failed to create a temporary read directory: {error}"))?;
+    for path in sqlite_store_files(db) {
+        if !path.exists() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .ok_or_else(|| "store trio member has no file name".to_string())?
+            .to_str()
+            .ok_or_else(|| "store trio member name is not UTF-8".to_string())?;
+        // The main db is renamed to a fixed stem so [`WorkBuddyRead::resolve`]
+        // can recompute the copy's db path; the sidecars must keep their
+        // derived names or SQLite will not see them.
+        let to_name = if path == db { "workbuddy.db" } else { name };
+        fs::copy(&path, dir.path().join(to_name))
+            .map_err(|error| format!("failed to copy {name} for a read-only copy: {error}"))?;
+    }
+    Ok(dir)
+}
+
+fn ensure_workbuddy_schema(conn: &Connection) -> Result<(), String> {
+    let mut statement = conn
+        .prepare("PRAGMA table_info(\"sessions\")")
+        .map_err(|error| format!("failed to inspect WorkBuddy sessions schema: {error}"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("failed to inspect WorkBuddy sessions schema: {error}"))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("failed to inspect WorkBuddy sessions schema: {error}"))?;
+    if EXPECTED_WORKBUDDY_SESSION_COLUMNS
+        .iter()
+        .any(|column| !columns.iter().any(|actual| actual == column))
+    {
+        return Err(format!(
+            "WorkBuddy schema mismatch: table=sessions columns={}",
+            columns.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Enumerate WorkBuddy session rows without touching the row bodies (title,
+/// model and companions stay in the store until a pass decides to export
+/// them). Every read goes through [`WorkBuddyRead`]: `mode=ro` in place, or a
+/// copied trio when a WAL store's `-shm` is absent — `immutable=1` is never
+/// used, because the uncheckpointed WAL holds live session content.
+pub fn enumerate_workbuddy_sessions(db: &Path) -> Result<Vec<WorkBuddySessionRow>, String> {
+    let read = WorkBuddyRead::resolve(db)?;
+    let conn = read.open()?;
+    ensure_workbuddy_schema(&conn)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT \"id\", \"transport\", \"deleted_at\", \"last_activity_at\", \"created_at\"
+             FROM \"sessions\" ORDER BY \"id\"",
+        )
+        .map_err(|error| format!("failed to read WorkBuddy session rows: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            let id = row.get::<_, String>(0)?;
+            let transport = match row.get_ref(1)? {
+                ValueRef::Null => None,
+                ValueRef::Text(value) => Some(String::from_utf8_lossy(value).into_owned()),
+                // reason: a transport that is not text is a value this
+                // enumerator cannot name; unknown, never local-by-guesswork.
+                _ => None,
+            };
+            let deleted = !matches!(row.get_ref(2)?, ValueRef::Null);
+            let time_ms = match row.get_ref(3)? {
+                ValueRef::Integer(value) => Some(value),
+                ValueRef::Null => match row.get_ref(4)? {
+                    ValueRef::Integer(value) => Some(value),
+                    // reason: a non-integer timestamp column is a value this
+                    // enumerator cannot name; the row keeps db-mtime fallback
+                    // instead of a fake epoch.
+                    _ => None,
+                },
+                _ => None,
+            };
+            Ok(WorkBuddySessionRow {
+                id,
+                deleted,
+                transport,
+                time_ms,
+            })
+        })
+        .map_err(|error| format!("failed to enumerate WorkBuddy session rows: {error}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("failed to read WorkBuddy session rows: {error}"))
+}
+
+/// Read one WorkBuddy session row and export it as one JSON line, live or
+/// tombstoned. A live row exports its full metadata (every column, read
+/// read-only); a row whose `deleted_at` is not null exports a bare tombstone
+/// carrying the session's identity and the deletion marker and nothing else —
+/// tombstones mask, they do not archive the deleted session's content, which
+/// stays in whatever earlier passes delivered.
+pub fn read_workbuddy_session(
+    db: &Path,
+    session_id: &str,
+) -> Result<WorkBuddySessionSnapshot, String> {
+    let read = WorkBuddyRead::resolve(db)?;
+    let conn = read.open()?;
+    ensure_workbuddy_schema(&conn)?;
+    let row = conn
+        .query_row(
+            "SELECT * FROM sessions WHERE id = ?1",
+            [session_id],
+            |row| {
+                let deleted = sqlite_column_is_not_null(row, "deleted_at")?;
+                let exported = if deleted {
+                    None
+                } else {
+                    Some(hermes_row_to_json_object(row)?)
+                };
+                Ok(exported)
+            },
+        )
+        .optional()
+        .map_err(|error| format!("failed to read WorkBuddy session row: {error}"))?;
+    let exported = row.ok_or_else(|| {
+        "WorkBuddy session row is not in the store the scan saw; nothing was archived for it"
+            .to_string()
+    })?;
+    let json_line = match exported {
+        Some(session) => {
+            let envelope =
+                serde_json::json!({ "schema": WORKBUDDY_SESSION_SCHEMA, "session": session });
+            serde_json::to_vec(&envelope)
+                .map_err(|error| format!("failed to serialize WorkBuddy session: {error}"))?
+        }
+        None => {
+            let tombstone = serde_json::json!({
+                "schema": WORKBUDDY_SESSION_SCHEMA,
+                "session": session_id,
+                "deleted": true,
+            });
+            serde_json::to_vec(&tombstone)
+                .map_err(|error| format!("failed to serialize WorkBuddy tombstone: {error}"))?
+        }
+    };
+    let cursor = OpenCodeCursor {
+        session_time_updated: None,
+        content_sha256: Some(hex_digest(&Sha256::digest(&json_line))),
+        row_count: 1,
+        row_high_water: None,
+        message_count: 0,
+        message_high_water: None,
+        part_count: 0,
+        part_high_water: None,
+    };
+    Ok(WorkBuddySessionSnapshot { cursor, json_line })
+}
+
+/// Whether the named column of `row`'s SELECT holds a non-null value.
+fn sqlite_column_is_not_null(row: &rusqlite::Row<'_>, column: &str) -> rusqlite::Result<bool> {
+    Ok(!matches!(row.get_ref(column)?, ValueRef::Null))
 }
 
 /// Metadata-only row returned by a registry-declared SQLite session table.
@@ -1341,14 +1643,25 @@ pub fn opencode_session_cursor(db: &Path, session_id: &str) -> Result<OpenCodeCu
     opencode_session_cursor_with_conn(&conn, session_id)
 }
 
-/// Export exactly one session as exactly one JSON line. The line is returned
-/// to collect as bytes and is never printed. Session, message, and part rows
-/// are read from one SQLite snapshot so a concurrent writer cannot combine
-/// rows from two logical database versions.
-pub fn read_opencode_session(
-    db: &Path,
-    session_id: &str,
-) -> Result<OpenCodeSessionSnapshot, String> {
+/// One complete read of a session's rows, in the record form ADR-061 writes
+/// records from: the session row, every message row **without** its parts
+/// inlined (parts are records of their own), and every part row. The rows are
+/// read from one SQLite snapshot so a concurrent writer cannot combine rows
+/// from two logical database versions; the orders are the source's own —
+/// messages by `(time_created, id)`, parts by `(message_id, time_created, id)`
+/// — and are what ADR-061's assembly sorts by, never arrival order.
+#[derive(Debug, Clone)]
+pub struct OpenCodeSessionSweep {
+    pub cursor: OpenCodeCursor,
+    pub session_row: Value,
+    pub message_rows: Vec<Value>,
+    pub part_rows: Vec<Value>,
+}
+
+/// Read one session's full row set once (the serialize-and-hash sweep ADR-061
+/// D1 describes: the pass still *reads* the session in full; the saving is on
+/// write bytes, not read bytes).
+pub fn read_opencode_sweep(db: &Path, session_id: &str) -> Result<OpenCodeSessionSweep, String> {
     let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
     conn.busy_timeout(Duration::from_secs(2))
         .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
@@ -1357,13 +1670,13 @@ pub fn read_opencode_session(
         .map_err(|error| format!("failed to start read-only transaction: {error}"))?;
     let cursor = opencode_session_cursor_with_conn(&conn, session_id)?;
 
-    let session = conn
+    let session_row = conn
         .query_row("SELECT * FROM session WHERE id = ?1", [session_id], |row| {
             row_to_json_object(row, false)
         })
         .map_err(|error| format!("failed to read session rows: {error}"))?;
 
-    let mut messages = Vec::new();
+    let mut message_rows = Vec::new();
     {
         let mut statement = conn
             .prepare("SELECT * FROM message WHERE session_id = ?1 ORDER BY time_created, id")
@@ -1375,12 +1688,13 @@ pub fn read_opencode_session(
             })
             .map_err(|error| format!("failed to enumerate message rows: {error}"))?;
         for row in rows {
-            messages.push(row.map_err(|error| format!("failed to read message rows: {error}"))?);
+            let (_id, message) =
+                row.map_err(|error| format!("failed to read message rows: {error}"))?;
+            message_rows.push(message);
         }
     }
 
-    let mut parts_by_message: std::collections::BTreeMap<String, Vec<Value>> =
-        std::collections::BTreeMap::new();
+    let mut part_rows = Vec::new();
     {
         let mut statement = conn
             .prepare(
@@ -1394,33 +1708,44 @@ pub fn read_opencode_session(
             })
             .map_err(|error| format!("failed to enumerate part rows: {error}"))?;
         for row in rows {
-            let (message_id, part) =
+            let (_message_id, part) =
                 row.map_err(|error| format!("failed to read part rows: {error}"))?;
-            parts_by_message.entry(message_id).or_default().push(part);
+            part_rows.push(part);
         }
     }
 
-    let messages: Vec<Value> = messages
-        .into_iter()
-        .map(|(id, mut message)| {
-            if let Value::Object(object) = &mut message {
-                // reason: when a message has no corresponding entries in the part table, the parts array itself is empty list []
-                let parts = parts_by_message.remove(&id).unwrap_or_default();
-                object.insert("parts".to_string(), Value::Array(parts));
-            }
-            message
-        })
-        .collect();
-    let orphan_parts: Vec<Value> = parts_by_message.into_values().flatten().collect();
-    let envelope = serde_json::json!({
-        "schema": "chat-stasher.opencode.session.v1",
-        "session": session,
-        "messages": messages,
-        "orphan_parts": orphan_parts,
-    });
-    let json_line = serde_json::to_vec(&envelope)
-        .map_err(|error| format!("failed to serialize opencode session: {error}"))?;
-    Ok(OpenCodeSessionSnapshot { cursor, json_line })
+    Ok(OpenCodeSessionSweep {
+        cursor,
+        session_row,
+        message_rows,
+        part_rows,
+    })
+}
+
+/// Export exactly one session as exactly one JSON line. The line is returned
+/// to collect as bytes and is never printed. Session, message, and part rows
+/// are read from one SQLite snapshot so a concurrent writer cannot combine
+/// rows from two logical database versions.
+///
+/// The bytes come from [`crate::opencode_records::compose_v1_line`] — the
+/// one serializer the fresh export and ADR-061's assembled views share, so
+/// "the assembled default view equals a fresh export" is a byte contract
+/// made of the same code, not two formats that happen to agree.
+pub fn read_opencode_session(
+    db: &Path,
+    session_id: &str,
+) -> Result<OpenCodeSessionSnapshot, String> {
+    let sweep = read_opencode_sweep(db, session_id)?;
+    let json_line_row = crate::opencode_records::compose_v1_line(
+        &sweep.session_row,
+        &sweep.message_rows,
+        &sweep.part_rows,
+    )
+    .map_err(|error| format!("failed to compose opencode session: {error}"))?;
+    Ok(OpenCodeSessionSnapshot {
+        cursor: sweep.cursor,
+        json_line: json_line_row,
+    })
 }
 
 /// Enumerate one-row sessions using the registry-declared SQLite schema.
@@ -1651,7 +1976,9 @@ fn zed_row_to_json_object(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     for index in 0..statement.column_count() {
         let name = statement.column_name(index)?.to_string();
         let val_ref = row.get_ref(index)?;
-        if name == "data" {
+        if name == "folder_paths" {
+            object.insert(name, folder_paths_to_json(val_ref));
+        } else if name == "data" {
             let data_json = match val_ref {
                 ValueRef::Blob(bytes) => {
                     if data_type == "zstd" {
@@ -1696,6 +2023,168 @@ fn zed_row_to_json_object(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         }
     }
     Ok(Value::Object(object))
+}
+
+/// Export Zed's `threads.folder_paths` column as the JSON array of workspace
+/// paths it holds.
+///
+/// Zed stores the list newline-separated and lexicographically sorted (see
+/// `PathList::serialize` in Zed's `crates/util/src/path_list.rs`), and writes
+/// NULL when the thread belongs to no folder. The array is the shape the 4D
+/// projection in `activity.rs` reads: NULL stays NULL and an empty list
+/// becomes an empty array, so "no folder observed" has exactly one spelling
+/// per state instead of a string that might be empty, absent, or blank. A
+/// value of any other type is not a path list either, so it stays NULL too —
+/// a hex or numeric spelling would reach the projection as a folder identity
+/// the column never held.
+fn folder_paths_to_json(value: ValueRef<'_>) -> Value {
+    let ValueRef::Text(bytes) = value else {
+        return Value::Null;
+    };
+    let paths: Vec<Value> = String::from_utf8_lossy(bytes)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| Value::String(line.to_string()))
+        .collect();
+    Value::Array(paths)
+}
+
+/// One complete GitHub Copilot CLI export unit: the session's `sessions` row
+/// with every same-session `turns` row, plus the dimensions the row itself
+/// observed.
+#[derive(Debug, Clone)]
+pub struct GitHubCopilotSessionSnapshot {
+    pub cursor: OpenCodeCursor,
+    pub json_line: Vec<u8>,
+    pub dimensions: crate::provenance::SessionProvenance,
+}
+
+/// The `schema` string stamped on one GitHub Copilot CLI export.
+pub const GITHUB_COPILOT_SESSION_SCHEMA: &str = "chat-stasher.github-copilot-cli.session.v1";
+
+/// The 4D dimensions one GitHub Copilot CLI session row observed — exactly
+/// `TICKET-4D-12`'s two fields, both read from the row itself: the
+/// `repository` it recorded as its workspace context, and the `cwd` it recorded
+/// as the directory the session ran in (an execution location, never a repo
+/// identity — `cwd ≠ repo identity`).
+///
+/// The map's original phrasing put the cwd on the CLI's per-session turn
+/// events; no real store's on-disk layout for those has ever been measured
+/// (they live somewhere below the `session-state/` directory whose exact shape
+/// the v1.0.80 artifacts do not spell out), so the turn-level cwd is not
+/// observable through this reader. The session-level `cwd` the same build
+/// documents *is* observed, and a missing or non-text value observes nothing
+/// rather than an empty one (`missing ≠ empty`).
+fn copilot_snapshot_dimensions(row: &Value) -> crate::provenance::SessionProvenance {
+    let mut dimensions = crate::provenance::SessionProvenance::default();
+    if let Some(repository) = row.get("repository").and_then(Value::as_str) {
+        dimensions.insert_container(repository);
+    }
+    if let Some(cwd) = row.get("cwd").and_then(Value::as_str) {
+        dimensions.insert_cwd(cwd);
+    }
+    dimensions
+}
+
+/// Validate the two tables a GitHub Copilot CLI export requires without
+/// materialising any content. A partial or changed schema must not look like
+/// an empty archive.
+fn ensure_github_copilot_schema(conn: &Connection) -> Result<(), String> {
+    for (table, required) in [
+        ("sessions", &["id", "cwd", "repository"][..]),
+        (
+            "turns",
+            &[
+                "session_id",
+                "turn_index",
+                "user_message",
+                "assistant_response",
+            ][..],
+        ),
+    ] {
+        let columns = sqlite_table_columns(conn, table)
+            .map_err(|error| format!("failed to read Copilot {table} schema: {error}"))?;
+        if required
+            .iter()
+            .any(|column| !columns.iter().any(|actual| actual == column))
+        {
+            return Err(format!(
+                "GitHub Copilot CLI schema mismatch: table={table} columns={}",
+                columns.join(",")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Export one GitHub Copilot CLI session and every `turns` row of the same
+/// session in a WAL-aware, read-only SQLite transaction. `mode=ro` still lets
+/// SQLite read committed WAL content; no database or sidecar is opened for
+/// writing.
+///
+/// No time field is claimed for the session: the schema this reader is built
+/// from was read out of the shipped v1.0.80 build artifacts, and no real
+/// `session-store.db` has ever been observed, so the session's `created_at` /
+/// `updated_at` and the turn `timestamp` travel through the raw export below
+/// but are never read as a time claim. That is why the cursor is a content
+/// hash of the exported line — the same construction [`read_hermes_session`]
+/// uses — instead of a time high-water: it must not depend on a column whose
+/// on-disk type no measurement has pinned down.
+pub fn read_github_copilot_session(
+    db: &Path,
+    session_id: &str,
+) -> Result<GitHubCopilotSessionSnapshot, String> {
+    ensure_wal_readable(db)?;
+    let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
+    ensure_github_copilot_schema(&conn)?;
+    conn.execute_batch("BEGIN")
+        .map_err(|error| format!("failed to start read-only transaction: {error}"))?;
+    let session = conn
+        .query_row(
+            "SELECT * FROM sessions WHERE id = ?1",
+            [session_id],
+            hermes_row_to_json_object,
+        )
+        .map_err(|error| format!("failed to read Copilot session row: {error}"))?;
+    let dimensions = copilot_snapshot_dimensions(&session);
+    let turns = read_copilot_turns(&conn, session_id)?;
+    let turn_count = turns.len() as u64;
+    let envelope = serde_json::json!({
+        "schema": GITHUB_COPILOT_SESSION_SCHEMA,
+        "session": session,
+        "turns": turns,
+    });
+    let json_line = serde_json::to_vec(&envelope)
+        .map_err(|error| format!("failed to serialize Copilot session: {error}"))?;
+    let cursor = OpenCodeCursor {
+        session_time_updated: None,
+        content_sha256: Some(hex_digest(&Sha256::digest(&json_line))),
+        row_count: 1,
+        row_high_water: None,
+        message_count: turn_count,
+        message_high_water: None,
+        part_count: 0,
+        part_high_water: None,
+    };
+    Ok(GitHubCopilotSessionSnapshot {
+        cursor,
+        json_line,
+        dimensions,
+    })
+}
+
+fn read_copilot_turns(conn: &Connection, session_id: &str) -> Result<Vec<Value>, String> {
+    let sql = "SELECT * FROM turns WHERE session_id = ?1 ORDER BY turn_index, rowid";
+    let mut statement = conn
+        .prepare(sql)
+        .map_err(|error| format!("failed to read Copilot turns: {error}"))?;
+    let rows = statement
+        .query_map([session_id], hermes_row_to_json_object)
+        .map_err(|error| format!("failed to enumerate Copilot turns: {error}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("failed to read Copilot turn rows: {error}"))
 }
 
 /// Enumerate qualified composers in Cursor's legacy workspaceStorage. Each
@@ -2479,10 +2968,10 @@ mod tests {
         let conn = Connection::open(&db).unwrap();
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
-             CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, model TEXT, started_at TEXT, ended_at TEXT, archived INTEGER, input_tokens INTEGER);
+             CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, model TEXT, started_at TEXT, ended_at TEXT, archived INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0, cwd TEXT, user_id TEXT, git_repo_root TEXT, input_tokens INTEGER);
              CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp TEXT, token_count INTEGER, active INTEGER, compacted INTEGER, _compressed_summary TEXT);
              CREATE TABLE session_model_usage (session_id TEXT, model TEXT, billing_provider TEXT, billing_base_url TEXT, billing_mode TEXT, task TEXT, api_call_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER, estimated_cost_usd REAL, actual_cost_usd REAL, cost_status TEXT, cost_source TEXT, first_seen TEXT, last_seen TEXT);
-             INSERT INTO sessions VALUES ('hermes-s1','cli','model-a','2026-01-01','2026-01-02',1,99);
+             INSERT INTO sessions VALUES ('hermes-s1','cli','model-a','2026-01-01','2026-01-02',1,0,'/w/hermes-fixture','peer-fixture','https://github.com/org/hermes-fixture',99);
              INSERT INTO messages VALUES (1,'hermes-s1','user','synthetic prompt','2026-01-01T00:00:00Z',3,0,1,'synthetic summary');
              INSERT INTO messages VALUES (2,'hermes-s1','assistant','synthetic reply','2026-01-01T00:00:01Z',5,1,0,NULL);
              INSERT INTO session_model_usage VALUES ('hermes-s1','model-a','provider-a','https://a.invalid','default','chat',1,10,5,2,1,4,0.25,0.2,'priced','fixture','a','b');
@@ -2492,6 +2981,17 @@ mod tests {
         let snapshot = read_hermes_session(&db, "hermes-s1").unwrap();
         let value: Value = serde_json::from_slice(&snapshot.json_line).unwrap();
         assert_eq!(value["schema"], "chat-stasher.hermes-agent.session.v1");
+        // The envelope carries the whole `sessions` row, so the four columns the
+        // 4D fold reads reach it through `SELECT *`: the working directory, the
+        // gateway peer binding, the repository root, and both lifecycle flags.
+        assert_eq!(value["session"]["cwd"], "/w/hermes-fixture");
+        assert_eq!(value["session"]["user_id"], "peer-fixture");
+        assert_eq!(
+            value["session"]["git_repo_root"],
+            "https://github.com/org/hermes-fixture"
+        );
+        assert_eq!(value["session"]["archived"], 1);
+        assert_eq!(value["session"]["pinned"], 0);
         assert_eq!(value["messages"].as_array().unwrap().len(), 2);
         assert_eq!(value["messages"][0]["active"], 0);
         assert_eq!(value["messages"][0]["compacted"], 1);
@@ -3415,6 +3915,121 @@ mod zed_tests {
         assert_eq!(val["session"]["summary"], "synthetic-summary");
         assert_eq!(val["session"]["data"]["title"], "synthetic-title");
         assert_eq!(val["session"]["data"]["messages"][0]["text"], "hello");
+        // TICKET-4D-09: the workspace folders the thread belongs to are
+        // preserved in the export as the array of paths the 4D projection
+        // reads — the newline-separated column text, split and filtered.
+        assert_eq!(
+            val["session"]["folder_paths"],
+            serde_json::json!(["/path/to/folder"])
+        );
+    }
+
+    /// TICKET-4D-09: a thread belonging to no folder writes a NULL column, and
+    /// the export keeps it NULL — "no folder observed" must not become an
+    /// empty array or a placeholder at the export boundary.
+    #[test]
+    fn zed_export_keeps_a_null_folder_paths_unobserved() {
+        let sandbox = Sandbox::new();
+        let db = sandbox.root().join("threads.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                data_type TEXT NOT NULL,
+                data BLOB NOT NULL,
+                parent_id TEXT,
+                folder_paths TEXT,
+                folder_paths_order TEXT,
+                created_at TEXT
+            );",
+        )
+        .unwrap();
+
+        let raw_json = br#"{"title":"synthetic-title","messages":[]}"#;
+        let compressed = zstd::encode_all(&raw_json[..], 3).unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, summary, updated_at, data_type, data, parent_id, folder_paths, folder_paths_order, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                "synthetic-zed-null",
+                "synthetic-summary",
+                "2026-10-03T10:00:00.000000+00:00",
+                "zstd",
+                compressed,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                "2026-10-03T09:00:00.000000+00:00",
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let spec = zed_schema();
+        let snapshot = read_zed_session(&db, &spec, "synthetic-zed-null").unwrap();
+        let val: Value = serde_json::from_slice(&snapshot.json_line).unwrap();
+        assert_eq!(
+            val["session"]["folder_paths"],
+            Value::Null,
+            "a thread with no folder records no folder: NULL stays NULL"
+        );
+    }
+
+    /// TICKET-4D-09: a `folder_paths` value that is not text is not
+    /// a path list, so the export keeps it unobserved. A hex or
+    /// numeric spelling would travel to the 4D projection, which
+    /// reads every string as the newline-separated folder list and
+    /// would record it as a folder identity the column never held.
+    #[test]
+    fn zed_export_keeps_a_non_text_folder_paths_unobserved() {
+        let sandbox = Sandbox::new();
+        let db = sandbox.root().join("threads.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                data_type TEXT NOT NULL,
+                data BLOB NOT NULL,
+                parent_id TEXT,
+                folder_paths TEXT,
+                folder_paths_order TEXT,
+                created_at TEXT
+            );",
+        )
+        .unwrap();
+
+        let raw_json = br#"{"title":"synthetic-title","messages":[]}"#;
+        let compressed = zstd::encode_all(&raw_json[..], 3).unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, summary, updated_at, data_type, data, parent_id, folder_paths, folder_paths_order, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                "synthetic-zed-blob",
+                "synthetic-summary",
+                "2026-10-03T10:00:00.000000+00:00",
+                "zstd",
+                compressed,
+                Option::<String>::None,
+                vec![0xDEu8, 0xADu8, 0xBEu8, 0xEFu8],
+                Option::<String>::None,
+                "2026-10-03T09:00:00.000000+00:00",
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let spec = zed_schema();
+        let snapshot = read_zed_session(&db, &spec, "synthetic-zed-blob").unwrap();
+        let val: Value = serde_json::from_slice(&snapshot.json_line).unwrap();
+        assert_eq!(
+            val["session"]["folder_paths"],
+            Value::Null,
+            "a value that is not a path list records no folder"
+        );
     }
 
     #[test]
@@ -3458,5 +4073,208 @@ mod zed_tests {
         let spec = zed_schema();
         let result = read_zed_session(&db, &spec, "corrupt-zed-1");
         assert!(result.is_err(), "corrupt zstd blob must fail closed");
+    }
+}
+
+#[cfg(test)]
+mod github_copilot_tests {
+    use super::*;
+    use crate::test_support::Sandbox;
+
+    fn synthetic_copilot_store(sandbox: &Sandbox, drifted: bool) -> PathBuf {
+        let db = sandbox.root().join("session-store.db");
+        let conn = Connection::open(&db).unwrap();
+        let sessions_columns = if drifted {
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT)"
+        } else {
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                cwd TEXT,
+                git_root TEXT,
+                repository TEXT,
+                host_type TEXT,
+                branch TEXT,
+                name TEXT,
+                summary TEXT,
+                user_named INTEGER,
+                summary_count INTEGER,
+                created_at TEXT,
+                updated_at TEXT
+            )"
+        };
+        conn.execute_batch(&format!(
+            "{sessions_columns};
+             CREATE TABLE turns (
+                session_id TEXT NOT NULL,
+                turn_index INTEGER NOT NULL,
+                user_message TEXT,
+                assistant_response TEXT,
+                timestamp TEXT,
+                model TEXT
+            );"
+        ))
+        .unwrap();
+        if drifted {
+            return db;
+        }
+        conn.execute(
+            "INSERT INTO sessions (id, cwd, git_root, repository, host_type, branch, name, summary, user_named, summary_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                "synthetic-copilot",
+                "/synthetic/cwd",
+                "/synthetic/cwd/repo",
+                "dimpurr/synthetic-repo",
+                "github",
+                "synthetic-branch",
+                "synthetic-name",
+                "synthetic summary",
+                1,
+                3,
+                "2026-10-08T10:00:00Z",
+                "2026-10-08T11:00:00Z",
+            ],
+        )
+        .unwrap();
+        // A second session without any of the 4D fields: a missing value must
+        // stay unobserved rather than becoming an empty one.
+        conn.execute(
+            "INSERT INTO sessions (id, cwd, repository, created_at, updated_at)
+             VALUES (?1, NULL, NULL, ?2, ?3)",
+            rusqlite::params![
+                "synthetic-copilot-bare",
+                "2026-10-08T10:00:00Z",
+                "2026-10-08T11:00:00Z",
+            ],
+        )
+        .unwrap();
+        let synthetic_turns: [(i64, &str, Option<&str>, &str); 2] = [
+            (
+                0,
+                "synthetic question",
+                Some("synthetic answer"),
+                "2026-10-08T10:00:01Z",
+            ),
+            (1, "synthetic follow-up", None, "2026-10-08T10:00:02Z"),
+        ];
+        for (turn_index, user, assistant, timestamp) in synthetic_turns {
+            conn.execute(
+                "INSERT INTO turns (session_id, turn_index, user_message, assistant_response, timestamp, model)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    "synthetic-copilot",
+                    turn_index,
+                    user,
+                    assistant,
+                    timestamp,
+                    "synthetic-model",
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        db
+    }
+
+    #[test]
+    fn copilot_export_carries_session_turns_and_both_4d_dimensions() {
+        let sandbox = Sandbox::new();
+        let db = synthetic_copilot_store(&sandbox, false);
+        let spec = github_copilot_cli_schema();
+
+        let probe = probe_sqlite_store_with(&db, &spec);
+        assert!(matches!(
+            probe.sessions,
+            SqliteSessionProbe::Known {
+                count: 2,
+                candidate_count: 2,
+                ..
+            }
+        ));
+
+        let rows = enumerate_sqlite_sessions(&db, &spec).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.mtime.is_none()));
+
+        let snapshot = read_github_copilot_session(&db, "synthetic-copilot").unwrap();
+        let value: Value = serde_json::from_slice(&snapshot.json_line).unwrap();
+        assert_eq!(
+            value["schema"],
+            "chat-stasher.github-copilot-cli.session.v1"
+        );
+        assert_eq!(value["session"]["id"], "synthetic-copilot");
+        assert_eq!(value["session"]["repository"], "dimpurr/synthetic-repo");
+        // Every column travels — including the time columns, so the raw
+        // archive keeps the fact this reader deliberately does not claim.
+        assert_eq!(value["session"]["created_at"], "2026-10-08T10:00:00Z");
+        assert_eq!(value["turns"].as_array().map(Vec::len), Some(2));
+        assert_eq!(value["turns"][0]["user_message"], "synthetic question");
+        assert_eq!(value["turns"][1]["assistant_response"], Value::Null);
+        assert_eq!(
+            snapshot.dimensions.container,
+            vec!["dimpurr/synthetic-repo".to_string()]
+        );
+        assert_eq!(snapshot.dimensions.cwd, vec!["/synthetic/cwd".to_string()]);
+        assert!(snapshot.dimensions.tenant.is_empty());
+        assert!(snapshot.dimensions.status.is_empty());
+        // The cursor is a content hash, not a time high-water: it must hold
+        // no timestamp for a harness whose no field was measured.
+        assert_eq!(snapshot.cursor.session_time_updated, None);
+        assert!(snapshot.cursor.content_sha256.is_some());
+        assert_eq!(snapshot.cursor.message_count, 2);
+
+        let other = read_github_copilot_session(&db, "synthetic-copilot-bare").unwrap();
+        assert!(other.dimensions.is_empty());
+    }
+
+    #[test]
+    fn copilot_export_of_unknown_session_fails_closed() {
+        let sandbox = Sandbox::new();
+        let db = synthetic_copilot_store(&sandbox, false);
+        let result = read_github_copilot_session(&db, "never-recorded");
+        assert!(
+            result.is_err(),
+            "a session that is not in the store must not export an empty session"
+        );
+    }
+
+    #[test]
+    fn copilot_drifted_schema_fails_closed_instead_of_reading_empty() {
+        let sandbox = Sandbox::new();
+        let db = synthetic_copilot_store(&sandbox, true);
+
+        // The store gate: enumeration must answer `SchemaMismatch`, never a
+        // clean-looking zero.
+        let spec = github_copilot_cli_schema();
+        let probe = probe_sqlite_store_with(&db, &spec);
+        assert!(matches!(
+            probe.sessions,
+            SqliteSessionProbe::SchemaMismatch { .. }
+        ));
+        assert!(enumerate_sqlite_sessions(&db, &spec).is_err());
+        assert!(read_github_copilot_session(&db, "synthetic-copilot").is_err());
+    }
+
+    #[test]
+    fn copilot_store_without_turns_table_fails_the_export() {
+        let sandbox = Sandbox::new();
+        let db = sandbox.root().join("session-store.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, repository TEXT, created_at TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, cwd, repository, created_at) VALUES ('synthetic-copilot', '/synthetic', 'synthetic/repo', '2026-10-08T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let result = read_github_copilot_session(&db, "synthetic-copilot");
+        assert!(
+            result.is_err(),
+            "no turns table means the export cannot happen"
+        );
+        assert!(result.unwrap_err().contains("turns"));
     }
 }

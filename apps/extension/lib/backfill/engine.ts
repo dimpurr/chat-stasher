@@ -42,7 +42,7 @@ import { chatGptScopeWorkspace, chatGptUnresolvedScope, chatGptWorkspaceScope, f
 import type { AccountIdentity } from './types';
 import { withClaudeAccountReading, type ClaudeAccountReading } from '../claude-account';
 import { isClaudeOrgId } from './claude-org';
-import { recordDebtTimes } from './debt-store';
+import { recordDebtListings, recordDebtTimes } from './debt-store';
 import { dropDebt, enqueueDebts, nextDebt, settleDebt } from './debts';
 import { recordFailure, type FailureEntry, type FailureReason } from './failures';
 import {
@@ -1026,6 +1026,27 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     };
   }
   const { state, ledger } = opened;
+  /**
+   * 🔴 W984 · **The conversation metadata this run can attach to a delivered
+   *    body, by id** — seeded from what the ledger's rows held at open (the
+   *    normal case: the conversation was enumerated by a *previous* run and
+   *    its listing was recorded on the debt row then), and merged with the
+   *    listings of any page this run itself reads.
+   *
+   * The two sources must both land here, and in one map, because the body
+   * segment's `captured` is built from this map alone: a same-run body crosses
+   * neither a ledger open (it happened before the page arrived) nor a row read
+   * (its row was written by this run's own `persist`, after the snapshot
+   * behind `listingsAtOpen` was taken). A later-run body needs the store copy —
+   * which is why the listing is *recorded* (debt-store.ts) rather than kept
+   * run-local.
+   *
+   * An id with no entry has **no recorded metadata** — a fact about the list
+   * response or about a row written before this change, never about the debt,
+   * and the delivered capture simply carries no `listing` key (absent stays
+   * absent, invariant 1).
+   */
+  const listingsById = ledger.listingsAtOpen();
   if (opts.platform === 'chatgpt') {
     if (!state.chatgptEnumeration) {
       state.chatgptEnumeration = newChatGptEnumeration();
@@ -2590,6 +2611,30 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         console.warn('[chat-stasher] the list gave conversation times, but the debt store refused the write; they will be counted as time-unknown');
       }
     }
+
+    /**
+     * 🔴 W984 · Same placement, same reasoning, one extra step. The listing is
+     *    recorded on rows that are already in the store (`recordDebtListings`,
+     *    the W113 shape applied to conversation metadata) and **merged into
+     *    this run's own map**, because a body fetched in the same run as its
+     *    enumeration — the one-list-page-per-tick flow W10 set up — reads its
+     *    metadata from the page that is in hand right now, not from the store.
+     *
+     * It is a separate write from the debt diff for the same reason the times
+     * one is: metadata is not one of the three lists the ledger's invariants
+     * are stated over. And like the times, a store that refuses the write is
+     *    logged and lived with — the cost is a bundle without its
+     *    conversation's title, which the platform's list may re-give on a
+     *    re-enumeration, and failing the run over it would trade conversations
+     *    for decoration.
+     */
+    if (parsed.page.listings && parsed.page.listings.size > 0) {
+      for (const [id, listing] of parsed.page.listings) listingsById.set(id, listing);
+      const recorded = await recordDebtListings(opts.platform, opts.scope, parsed.page.listings);
+      if (recorded === null) {
+        console.warn('[chat-stasher] the list gave conversation metadata, but the debt store refused the write; those conversations\' bundles will carry none');
+      }
+    }
   }
 
   const bodyBudget = opts.maxDetails ?? Number.POSITIVE_INFINITY;
@@ -3388,6 +3433,13 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
           archived: state.chatgptDebtProvenance[id]!.archived,
         },
       } : {}),
+      // 🔴 W984 · The conversation-level metadata this debt's row carries —
+      //    read from the page that enumerated it or from the row a previous
+      //    run recorded (see `listingsById` at the top of this run). Absent
+      //    for a conversation the enumeration named no metadata for, which is
+      //    the honest delivery: the bundle keeps no `listing` key rather than
+      //    an invented one.
+      ...(listingsById.has(id) ? { listing: listingsById.get(id)! } : {}),
     };
     if (opts.platform === 'claude' && http.claudeAccountIdentity) {
       let reading: ClaudeAccountReading;

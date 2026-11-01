@@ -34,9 +34,17 @@
  *    id this leg derives from the content URL and writes the session under, so the two responses
  *    are attachable as soon as the list body is carried. Section 2 pins that too.
  *
- * 🔴 Scope note: this file **stops at the determination**. No capture is widened, no field is
- *    carried, and no title is read. If the list response is ever carried, this file is where that
- *    change has to come and say so — the assertions below are written to go red on exactly that.
+ * 🔴 Scope note, revised by **W984** (2026-10-12): the determination above is still chapters 1 and
+ *    3 of this file — the **content response** carries no conversation-level field (measured,
+ *    section 1), and the **live row's two gates** are unchanged (section 2), because W984 did not
+ *    widen the capture row: the list response is still not a hook candidate. What changed is the
+ *    *other* consumer of the list: the backfill enumeration (`parseGrokListPage`) now reads the
+ *    four fields onto `EnumPage.listings`, the engine records them on the debt rows (the W113
+ *    `DebtTime` shape), a delivered backfill body carries them on the capture, and the bundle
+ *    holds them under one additive `listing` key (tests/w984-grok-listing-metadata.test.ts).
+ *    The second test of section 2 below pins the new parser state; the others keep their original
+ *    meaning. A live capture of a conversation the enumeration has not listed still carries no
+ *    metadata — that is the accepted state W984 recorded, not a gap it closes.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -250,11 +258,13 @@ describe('W917-1 · the content response carries no conversation-level field', (
 });
 
 // ---------------------------------------------------------------------------
-// 2 · The fields live in the list response, which this leg does not carry
+// 2 · The fields live in the list response, which the live row does not carry
 // ---------------------------------------------------------------------------
-describe('W917-2 · the conversation-level fields live in the list response, which is not carried', () => {
-  it('the list body carries `title` and `createTime`, and the grok row refuses it on two gates', () => {
-    // The request that would be needed, named from the plan's own constant rather than as prose.
+describe('W917-2 · the conversation-level fields live in the list response, which the live row does not carry', () => {
+  it('the list body carries `title` and `createTime`, and the live row refuses it on two gates', () => {
+    // The request that would be needed for a LIVE capture, named from the plan's own constant
+    // rather than as prose. W984 did not change these gates: it carried the metadata out of
+    // the enumeration leg instead (see the revised scope note in this file's header).
     expect(GROK_LIST_PATH).toBe('/rest/app-chat/conversations');
     const body = JSON.parse(LIST_BODY) as { conversations: Record<string, unknown>[] };
     const conversation = body.conversations[0]!;
@@ -287,19 +297,33 @@ describe('W917-2 · the conversation-level fields live in the list response, whi
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it('the leg that already receives the list body reads its ids, not its metadata', () => {
+  it('the leg that receives the list body now reads its metadata as well as its ids (W984)', () => {
     const parsed = parseGrokListPage(LIST_BODY);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect(parsed.page.ids).toEqual([ID]);
-    // 🔴 The metadata is dropped on the floor here today: the returned page names ids, a total and
-    //    a cursor, and no per-conversation title or time. `EnumPage.times` is the slot for a list's
-    //    per-conversation time (`DebtTimeSource` already names a `list-create` source) — and the
-    //    grok plan fills neither, because the field names above are source-backed rather than
-    //    measured on a live list response, and a field name we have not measured is a field name
-    //    this repository does not read.
-    expect(Object.keys(parsed.page).sort()).toEqual(['ids', 'nextToken', 'total']);
-    expect(parsed.page.times).toBeUndefined();
+    // 🔴 W984 · The metadata this file's section 2 named as "dropped on the
+    //    floor" is now carried: the four source-backed fields land in
+    //    `EnumPage.listings` keyed by the join key — the same conversationId
+    //    section 2's last test holds — and travel to the delivered bundle
+    //    verbatim (debt row → capture → bundle; the full road is
+    //    tests/w984-grok-listing-metadata.test.ts).
+    //
+    // The honesty note from the determination survives, amended: the field
+    // NAMES are still source-backed rather than live-measured on a list
+    // response, which is why every one of them is type-gated at the parse and
+    // absent stays absent. What no longer follows from that note is "so the
+    // leg reads ids only" — W984 decided to carry the source-backed set
+    // rather than leave the oracle-measured gap in place.
+    expect(parsed.page.listings?.get(ID)).toEqual({
+      title: 'synthetic-conversation-title',
+      starred: false,
+      createTime: '2026-07-01T09:59:00.000000Z',
+      modifyTime: '2026-07-01T10:01:10.000Z',
+    });
+    // The old "ids only" pin, kept where it still holds: the page names ids,
+    // a total and a cursor — plus the listings map this page's rows earned.
+    expect(Object.keys(parsed.page).sort()).toEqual(['ids', 'listings', 'nextToken', 'total']);
   });
 
   it('the join key the two responses share is the one this leg already holds', () => {

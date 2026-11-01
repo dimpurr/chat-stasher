@@ -76,6 +76,11 @@ pub struct PassMetrics {
     // Wall time per phase, in milliseconds. A phase the pass never
     // reached (push preflight and backup on a no-op pass) stays 0:
     // zero is a measurement of "did not run", never a fallback.
+    /// The declared `[pull.letta]` API-pull producer, pulled before the
+    /// collect step. `0` also covers a pass with no producer declared:
+    /// a pull that did not run and a declaration that does not exist are
+    /// both "no letta pull happened".
+    pub letta_pull_ms: u64,
     /// Registry scan (`scanner::scan_with_machine`).
     pub scan_ms: u64,
     /// Incremental staging of every scanned record
@@ -107,12 +112,48 @@ pub struct PassMetrics {
     pub source_bytes_read: u64,
     /// Shard-body bytes read and hashed: the committed JSONL prefixes
     /// re-hashed during collection plus the shard bodies the activity
-    /// index read and hashed.
+    /// index read and hashed. A session the incremental index carried
+    /// forward is here by having contributed zero to this counter,
+    /// not by being counted — the carried count is
+    /// [`Self::activity_index_sessions_carried`].
     pub shard_bytes_read_hashed: u64,
+    /// Sessions the incremental activity-index build carried forward
+    /// without re-reading their bodies (SYNC-D). Zero is the honest
+    /// value for a build that derived everything — a pass that carried
+    /// nothing is a measurement, not a failure.
+    pub activity_index_sessions_carried: u64,
     /// SQLite sessions whose per-session rows were queried.
     pub sqlite_sessions_queried: u64,
     /// SQLite sessions exported (re-sealed) into the stage.
     pub sqlite_sessions_exported: u64,
+    /// ADR-061: snapshot-source sessions sealed as one whole-file
+    /// observation line (the pre-increment shape, and the one-pass degrade
+    /// of an unknown increment map).
+    #[serde(default)]
+    pub sqlite_full_exports: u64,
+    /// ADR-061: changed snapshot-source sessions sealed as record-level
+    /// increment shards.
+    #[serde(default)]
+    pub sqlite_increment_passes: u64,
+    /// ADR-061: record lines sealed by those passes (records, explicit
+    /// tombstones, session observations).
+    #[serde(default)]
+    pub sqlite_increment_records: u64,
+    /// ADR-061: bytes of those record lines (Σw in D6's hourly rule,
+    /// `written ≤ max(1.2 × growth, 64 KiB)`).
+    #[serde(default)]
+    pub sqlite_increment_bytes: u64,
+    /// ADR-061: the measured true growth of the same passes — payload
+    /// bytes of new and changed records (Δ in D6's hourly rule).
+    #[serde(default)]
+    pub sqlite_growth_bytes: u64,
+    /// ADR-062 (LM-2): the post-push mirror copy round, when a mirror is
+    /// configured and enabled. Zero is the honest value for a pass that did
+    /// not reach the step or runs with the mirror off; a round that stopped
+    /// early (budget, disk floor, remote readability) still measures its
+    /// wall time, because a stopped mirror round is a fact, not a failure.
+    #[serde(default)]
+    pub mirror_sync_ms: u64,
     /// Collector state saves plus this run-state write.
     pub state_saves: u64,
 }
@@ -120,6 +161,12 @@ pub struct PassMetrics {
 impl PassMetrics {
     /// One line of `key=value` pairs, for the run-once summary line.
     /// Counts and durations only — no names, paths or content.
+    ///
+    /// `mirror_sync` rides on the same line — but only when the pass reached
+    /// the mirror step (ADR-062 / LM-2: the field is 0 for a pass that did
+    /// not run the step, and a zero standing in for "did not run" is the
+    /// shape this module never prints). A pass with the mirror unconfigured
+    /// or off therefore changes no output at all.
     pub fn summary_line(&self) -> String {
         let harness_ms = self
             .collect_harness_ms
@@ -127,12 +174,20 @@ impl PassMetrics {
             .map(|(harness, ms)| format!("{harness}={ms}"))
             .collect::<Vec<_>>()
             .join(",");
+        let mirror_sync = if self.mirror_sync_ms > 0 {
+            format!(" mirror_sync={}", self.mirror_sync_ms)
+        } else {
+            String::new()
+        };
         format!(
-            "[run-once] phases ms: scan={} collect={} collect_harness=[{}] \
+            "[run-once] phases ms: letta_pull={} scan={} collect={} collect_harness=[{}] \
              stage_audit={} metadata_hash={} activity_index={} push_preflight={} \
-             backup={} run_state_write={}; counts: records_scanned={} \
+             backup={} run_state_write={}{}; counts: records_scanned={} \
              files_statted={} source_bytes_read={} shard_bytes_read_hashed={} \
-             sqlite_sessions_queried={} sqlite_sessions_exported={} state_saves={}",
+             sqlite_sessions_queried={} sqlite_sessions_exported={} \
+             state_saves={} activity_index_sessions_carried={}; \
+             sg3: full_exports={} incr_passes={} incr_records={} incr_bytes={} growth_bytes={}",
+            self.letta_pull_ms,
             self.scan_ms,
             self.collect_ms,
             harness_ms,
@@ -142,6 +197,7 @@ impl PassMetrics {
             self.push_preflight_ms,
             self.backup_ms,
             self.run_state_write_ms,
+            mirror_sync,
             self.records_scanned,
             self.files_statted,
             self.source_bytes_read,
@@ -149,8 +205,28 @@ impl PassMetrics {
             self.sqlite_sessions_queried,
             self.sqlite_sessions_exported,
             self.state_saves,
+            self.activity_index_sessions_carried,
+            self.sqlite_full_exports,
+            self.sqlite_increment_passes,
+            self.sqlite_increment_records,
+            self.sqlite_increment_bytes,
+            self.sqlite_growth_bytes,
         )
     }
+}
+
+/// Backfill progress the declared `[pull.letta]` producer reported for the
+/// last pass: conversations published and journaled so far, and the
+/// estimated total this round's listing named. Present while a large
+/// account is still completing across rounds; absent when the producer is
+/// caught up, undeclared, or the pass never reached it. Counts only, the
+/// same boundary every other field of this file holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullLettaBackfill {
+    /// Conversations whose first publication the producer completed.
+    pub pulled: usize,
+    /// Conversations the listing said exist, journaled or still owed.
+    pub estimated_total: usize,
 }
 
 /// One `run-once` pass, as durable metadata.
@@ -165,6 +241,30 @@ pub struct RunState {
     /// `None` on success. Never carries an error message body, so no path or
     /// session text can leak into it.
     pub failed_step: Option<String>,
+    /// The declared `[pull.letta]` producer did not finish reading this
+    /// pass — rate-limited, refusing, partly proven, contending, or still
+    /// backfilling. Recorded **beside** `failed_step`, not inside it: a
+    /// pass whose collect or push failed while the producer also went
+    /// unread keeps both facts, so the later local failure cannot erase the
+    /// producer's (the two lines `status` renders say both).
+    #[serde(default)]
+    pub pull_letta_unread: bool,
+    /// Another pass of this machine held the producer's state lock, so this
+    /// pass deferred instead of reading the producer itself. Not a failure
+    /// — the pass that won the lock reports the producer's own result the
+    /// same round, and every pass's push moves the shared stage — but never
+    /// silent either: `status` renders it as the producer's own line beside
+    /// the green archive sentence. Mutually exclusive with
+    /// [`Self::pull_letta_unread`] in practice: a pass that deferred never
+    /// learned the producer's own state, and an unread pass can only be the
+    /// one that held the lock.
+    #[serde(default)]
+    pub pull_letta_deferred: bool,
+    /// The producer's backfill progress, when it reported one. Absent when
+    /// caught up, undeclared, or never reached — never a zero standing in
+    /// for "did not run".
+    #[serde(default)]
+    pub pull_letta_backfill: Option<PullLettaBackfill>,
     /// Shards this pass sealed into the stage.
     pub shards_written: usize,
     /// Sealed shards present in the stage when the pass decided to push.
@@ -172,6 +272,14 @@ pub struct RunState {
     pub snapshot_created: bool,
     pub collect_errors: usize,
     pub archive_gaps: usize,
+    /// Codebuff sessions the collect half read but could not archive, because
+    /// the transcript snapshot did not validate as a JSON array (ADR-054
+    /// D6). A pass with skips here is *incomplete* — it did not finish
+    /// reading — which `run-once` reports instead of a success. Counts
+    /// only, like the fields beside it, and additively default so older
+    /// state files still parse.
+    #[serde(default)]
+    pub torn_skips: usize,
     /// sha256 prefix of the machine partition name — enough to notice that
     /// two machines share a state dir, without recording the hostname.
     pub machine_digest: String,
@@ -182,7 +290,14 @@ pub struct RunState {
 }
 
 impl RunState {
-    /// Build a record for a pass that ended now.
+    /// Build a record for a pass, stamped with the current second.
+    ///
+    /// `run_once_pass` builds this at the *start* of the pass, as the
+    /// pessimistic record it then corrects step by step, so the stamp taken
+    /// here is the moment the pass began. Whoever writes the file has to call
+    /// [`RunState::mark_finished`] first: a record that skips it claims a pass
+    /// which took N seconds finished N seconds before it started, and every
+    /// reader of `finished_at_unix` is then wrong by the whole pass.
     pub fn new(
         outcome: RunOutcome,
         failed_step: Option<&str>,
@@ -195,14 +310,30 @@ impl RunState {
             duration_ms,
             outcome,
             failed_step: failed_step.map(str::to_string),
+            pull_letta_unread: false,
+            pull_letta_deferred: false,
+            pull_letta_backfill: None,
             shards_written: 0,
             stage_shards: 0,
             snapshot_created: matches!(outcome, RunOutcome::Completed),
             collect_errors: 0,
             archive_gaps: 0,
+            torn_skips: 0,
             machine_digest: machine_digest(machine),
             phases: PassMetrics::default(),
         }
+    }
+
+    /// Restamp `finished_at_unix` with the current second, immediately before
+    /// the record is written.
+    ///
+    /// The field documents itself as the moment the pass *ended*, and only
+    /// the caller holding the finished pass knows that moment — a record built
+    /// at the start of the work cannot. So the stamp is moved here, at the one
+    /// point where both the duration and the end are known: after
+    /// `cmd_run_once` has measured `duration_ms`, before `save`.
+    pub fn mark_finished(&mut self) {
+        self.finished_at_unix = now_unix();
     }
 }
 
@@ -280,12 +411,35 @@ pub fn stale_after_secs(interval_secs: u64) -> u64 {
         .max(STALE_FLOOR_SECS)
 }
 
+/// The declared Letta producer's own line in `status`'s answer, when the
+/// last pass leaves the producer worth a separate sentence. This is the
+/// second line of the two-line split: the archive cycle's health is
+/// [`Verdict::line`], the producer's state is here, and neither pretends
+/// to be the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LettaLine {
+    /// The producer's sentence, already worded.
+    pub sentence: String,
+    /// The command or check that addresses it, when one exists.
+    pub fix: Option<String>,
+}
+
 /// One human sentence plus the exit decision behind it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
+    /// The timer health conclusion — the archive cycle's own state. When
+    /// only the declared Letta producer went unread, this line stays the
+    /// *healthy archive* sentence: the whole pass is not worded unhealthy
+    /// (the producer's failure is the second line, `letta`), but it does
+    /// not get to call the run healthy-overall either (`healthy` says no).
     pub line: String,
     /// false → `status` must exit non-zero.
     pub healthy: bool,
+    /// The declared Letta producer's separate line, when the last pass
+    /// left one to say: "did not finish reading" with its fix, or backfill
+    /// progress with the next-round promise. `None` when no producer was
+    /// declared or it completed.
+    pub letta: Option<LettaLine>,
 }
 
 /// Turn a read into one sentence. `now_unix` is a parameter, never read from
@@ -299,12 +453,14 @@ pub fn summarize(read: &RunStateRead, now_unix: u64, stale_after_secs: u64) -> V
             line: "No run has ever been recorded: run-once has never completed successfully on this machine (or the state directory was cleared). It is impossible to tell whether the timer is working."
                 .to_string(),
             healthy: false,
+            letta: None,
         },
         RunStateRead::Unreadable(why) => Verdict {
             line: format!(
                 "A run record exists but is unreadable ({why}): there is no way to tell whether the last run succeeded."
             ),
             healthy: false,
+            letta: None,
         },
         RunStateRead::Present(state) => {
             let age = now_unix.saturating_sub(state.finished_at_unix);
@@ -321,17 +477,48 @@ pub fn summarize(read: &RunStateRead, now_unix: u64, stale_after_secs: u64) -> V
                         outcome_word(state.outcome)
                     ),
                     healthy: false,
+                    letta: letta_line_of(state),
                 };
             }
             if state.outcome.is_failure() {
+                // A pass that failed only at its local steps keeps naming the
+                // local step here, with the producer's own line rendered
+                // beside it when the pass recorded one — both facts stay
+                // in the record, so both stay in the answer.
+                let producer_only = state.pull_letta_unread
+                    && matches!(state.failed_step.as_deref(), None | Some("pull-letta"));
                 let step = state.failed_step.as_deref().unwrap_or("no step recorded");
                 return Verdict {
-                    line: format!(
-                        "Last run failed: the {step} step errored {ago} ago, with no successful run since."
-                    ),
+                    line: if producer_only {
+                        // The local cycle completed — the record proved its
+                        // snapshot and shards — so the first line reports the
+                        // archive cycle as healthy while the producer's line
+                        // carries the failure. The pass still was not a
+                        // success, and `healthy: false` keeps the exit code
+                        // from saying otherwise.
+                        format!(
+                            "Archive cycle healthy: last run {ago} ago, took {} ms, archived {} shard(s), {}.",
+                            state.duration_ms,
+                            state.shards_written,
+                            if state.snapshot_created {
+                                "snapshot created"
+                            } else {
+                                "no change, so no snapshot created"
+                            }
+                        )
+                    } else {
+                        format!(
+                            "Last run failed: the {step} step errored {ago} ago, with no successful run since."
+                        )
+                    },
                     healthy: false,
+                    letta: letta_line_of(state),
                 };
             }
+            // The healthy first line can still carry a producer line: a
+            // deferred producer is the one fact that turns up beside a
+            // green archive cycle — the hand-off the deferral sentence
+            // names, never a failure wording.
             Verdict {
                 line: format!(
                     "Healthy: last run {ago} ago, took {} ms, archived {} shard(s), {}.",
@@ -344,9 +531,78 @@ pub fn summarize(read: &RunStateRead, now_unix: u64, stale_after_secs: u64) -> V
                     }
                 ),
                 healthy: true,
+                letta: letta_line_of(state),
             }
         }
     }
+}
+
+/// The declared producer's second line, from the record's facts. `None`
+/// when the pass declared no producer or the producer completed. A
+/// deferral is rendered as the hand-off it is — never a failure
+/// wording — and an unread producer as the failure it is; the healthy
+/// first line carries either beside it unchanged.
+fn letta_line_of(state: &RunState) -> Option<LettaLine> {
+    if !state.pull_letta_unread {
+        // A deferral is the producer's own line too — visible beside the
+        // green archive sentence, but worded as the hand-off it is, never
+        // as a failure: the pass that won the lock reported the pull that
+        // hour.
+        if state.pull_letta_deferred {
+            return Some(LettaLine {
+                sentence: "Letta pull deferred: another pass of this machine held \
+                           the producer's state lock, so this pass did not read the \
+                           producer itself. Not a failure — the pass that held the \
+                           lock reports the producer's result, and every pass's push \
+                           moves the shared stage — but the record names it rather \
+                           than staying silent."
+                    .to_string(),
+                fix: None,
+            });
+        }
+        return None;
+    }
+    if let Some(backfill) = &state.pull_letta_backfill {
+        // The counted unit of `pulled` is the conversation, so a record at
+        // `pulled == estimated_total` is the sandwich state a round that
+        // published every conversation but could not reach the agent-level
+        // material leaves: wording it "N of ~N conversations still
+        // backfilling" would imply an unarchived conversation where every
+        // one is archived — the remainder is named for what it is.
+        let progress = if backfill.pulled >= backfill.estimated_total {
+            format!(
+                "every conversation is archived and the agent-level material \
+                  (window, listing, metadata and capture order) is what remains"
+            )
+        } else {
+            format!(
+                "{} of ~{} conversations archived so far",
+                backfill.pulled, backfill.estimated_total
+            )
+        };
+        return Some(LettaLine {
+            sentence: format!(
+                "Letta pull did not finish reading: the account is still backfilling — \
+                  {progress}; the next pass continues from where this one stopped, and \
+                  the pass stays at exit 3 (\"did not finish reading\") until the \
+                  backfill completes."
+            ),
+            fix: None,
+        });
+    }
+    Some(LettaLine {
+        sentence:
+            "Letta pull did not finish reading this pass; its unread remainder stays pending \
+             in the producer state, never \"no messages\", and the pass stays at exit 3 \
+             (\"did not finish reading\")."
+                .to_string(),
+        fix: Some(
+            "check that the timer can resolve pull.letta.api_key (a file:, env-file: or \
+             keychain: reference) and that the inbox and state paths are reachable; the \
+             step's own error is in the run-once error log"
+                .to_string(),
+        ),
+    })
 }
 
 /// Machine-readable shape of a [`RunStateRead`] for `status --json`.
@@ -386,10 +642,19 @@ pub fn run_state_json(
                 "outcome": outcome,
                 "duration_ms": state.duration_ms,
                 "failed_step": state.failed_step,
+                "pull_letta_unread": state.pull_letta_unread,
+                "pull_letta_deferred": state.pull_letta_deferred,
+                "pull_letta_backfill": state.pull_letta_backfill.as_ref().map(|backfill| {
+                    serde_json::json!({
+                        "pulled": backfill.pulled,
+                        "estimated_total": backfill.estimated_total,
+                    })
+                }),
                 "shards_written": state.shards_written,
                 "snapshot_created": state.snapshot_created,
                 "collect_errors": state.collect_errors,
                 "archive_gaps": state.archive_gaps,
+                "torn_skips": state.torn_skips,
                 "phases": serde_json::to_value(&state.phases)
                     // reason: PassMetrics is plain integers and string keys,
                     // so its serialization cannot fail; the fallback keeps
@@ -497,6 +762,7 @@ mod tests {
         state.phases.sqlite_sessions_queried = 16;
         state.phases.sqlite_sessions_exported = 17;
         state.phases.state_saves = 18;
+        state.phases.letta_pull_ms = 19;
         save(&state_dir, &state).unwrap();
         match load(&state_dir) {
             RunStateRead::Present(read) => {
@@ -529,6 +795,7 @@ mod tests {
         metrics.state_saves = 16;
         let line = metrics.summary_line();
         for key in [
+            "letta_pull=0",
             "scan=1",
             "collect=2",
             "chatgpt=3",
@@ -548,6 +815,22 @@ mod tests {
         ] {
             assert!(line.contains(key), "summary line must carry {key}: {line}");
         }
+        assert!(
+            !line.contains("mirror_sync="),
+            "a pass that did not reach the mirror step prints no mirror phase, \
+             not a zero standing in for \"did not run\": {line}"
+        );
+
+        // ADR-062 (LM-2): a pass that did reach the mirror step carries it
+        // on the same measured line as every other phase.
+        metrics.mirror_sync_ms = 17;
+        let line = metrics.summary_line();
+        assert!(line.contains("mirror_sync=17"), "{line}");
+        assert!(
+            line.contains("run_state_write=9 mirror_sync=17;"),
+            "mirror_sync belongs inside the phases list, same half as the \
+             other durations: {line}"
+        );
     }
 
     /// W880: `status --json` exposes the per-phase record under
@@ -562,5 +845,22 @@ mod tests {
         assert_eq!(json["phases"]["scan_ms"], 42);
         assert_eq!(json["phases"]["records_scanned"], 7);
         assert!(json["phases"]["collect_harness_ms"].as_object().is_some());
+    }
+
+    /// The record is built at the start of a pass and written at its end, so
+    /// the field that promises "the moment the pass ended" can only become
+    /// true when the caller restamps it. 1000 stands in for a stamp taken
+    /// long before the write.
+    #[test]
+    fn mark_finished_replaces_the_stamp_taken_when_the_pass_started() {
+        let mut state = RunState::new(RunOutcome::Noop, None, "some-laptop", 42);
+        state.finished_at_unix = 1_000;
+        state.mark_finished();
+        assert!(
+            state.finished_at_unix > 1_000,
+            "mark_finished must re-read the clock, got {}",
+            state.finished_at_unix
+        );
+        assert!(state.finished_at_unix <= now_unix(), "never in the future");
     }
 }

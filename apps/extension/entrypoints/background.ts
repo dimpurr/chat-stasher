@@ -262,6 +262,13 @@ async function buildBundle(captured: CapturedFetch, store: BackfillStore | null)
     ...(fingerprint === null ? {} : { fingerprint }),
     ...(captured.provenance ? { provenance: captured.provenance } : {}),
     ...(captured.provenanceSupplement ? { provenanceSupplement: captured.provenanceSupplement } : {}),
+    // 🔴 W984 · The conversation-level metadata the enumeration read (title /
+    //    starred / createTime / modifyTime on grok). Present only on a capture
+    //    the backfill leg produced for a conversation its enumeration named
+    //    metadata for; a live-leg capture never carries one — the list route is
+    //    outside the platform row's pathHints — and both legs' older bundles
+    //    stay byte-identical, because absence keeps copying to absence here.
+    ...(captured.listing ? { listing: captured.listing } : {}),
     url: captured.url,
     method: captured.method,
     status: captured.status,

@@ -54,6 +54,13 @@
 //! a proof that there were none. An index that names a pack the backend does not
 //! list is a contradiction rather than an unknown: the reading finished, and the
 //! two sources disagree.
+//!
+//! Torn debris is *not* an unknown: an unindexed pack whose header cannot be
+//! read at all is debris from an interrupted push — a known state, reported
+//! with its own count and bytes and [`crate::debris`]'s one sentence, and it
+//! makes the survey neither incomplete nor a failure (ISSUE-006 step A). What
+//! stays unknown is the pack whose header reads but which does not verify, and
+//! the pack whose bytes the backend would not serve.
 
 use crate::orphans::{self, PackInventory};
 use crate::store::StoreConfig;
@@ -66,15 +73,49 @@ pub enum Verdict {
     /// The header decrypted, every blob it declares decrypted and decompressed
     /// to the length it gives, every plaintext hashed to the id the header
     /// names, and the pack's bytes hashed to the id it is stored under — the
-    /// checks [`crate::packcheck::verify_pack`] makes, and the ones the adopting
-    /// open must pass before it will reuse a pack.
-    Verified,
-    /// It could not be proven. `reason` is the verifier's own message, which
-    /// names the pack by its id prefix.
-    Unverified {
-        /// Why this pack could not be read back as the bytes it is stored under.
+    /// checks [`crate::packcheck::verify_pack`] makes, and the ones the
+    /// adopting open must pass before it will reuse a pack. Stranded content:
+    /// adoptable by the next open, never torn.
+    Stranded,
+    /// Torn debris from an interrupted push: the pack cannot be read as a pack
+    /// at all — shorter than a header, a header length the file cannot hold,
+    /// or a header that will not decrypt. `reason` is the probe's own message.
+    /// It belongs to no backup and can be ignored
+    /// ([`crate::debris::INTERRUPTED_PUSH_SENTENCE`]); it makes the survey
+    /// neither incomplete nor a failure.
+    Torn {
+        /// Why the pack's bytes cannot be read as a pack, naming it by id
+        /// prefix.
         reason: String,
     },
+    /// Its status could not be established: the header reads but the pack does
+    /// not verify, or even the header range could not be read. `reason` is the
+    /// verifier's own message, which names the pack by its id prefix. Unknown
+    /// keeps the survey incomplete — unlike torn, which is a known state.
+    Unverified {
+        /// Why this pack's status is unknown.
+        reason: String,
+    },
+}
+
+/// The shared classification of one unindexed candidate's bytes: the
+/// [`crate::debris`] categories behind [`Verdict`], decided by the one
+/// function every reader shares. `None` is a pack that verified complete.
+fn verdict_of(failure: Option<&crate::packcheck::PackError>) -> Verdict {
+    use crate::debris::PackClass;
+    let check: Result<(), &crate::packcheck::PackError> = match failure {
+        None => Ok(()),
+        Some(err) => Err(err),
+    };
+    match crate::debris::classify_pack(Some(false), &check) {
+        PackClass::Stranded => Verdict::Stranded,
+        PackClass::Torn { why } => Verdict::Torn { reason: why },
+        // Unindexed is established by the survey itself, so the remaining
+        // fail-closed reasons are the unclassifiable bytes: unknown.
+        PackClass::FailClosed { why } | PackClass::Corrupt { why } => {
+            Verdict::Unverified { reason: why }
+        }
+    }
 }
 
 /// One pack no index file names.
@@ -99,7 +140,24 @@ impl Candidate {
     /// Whether the next push would reuse this pack's bytes.
     #[must_use]
     pub fn verified(&self) -> bool {
-        matches!(self.verdict, Verdict::Verified)
+        matches!(self.verdict, Verdict::Stranded)
+    }
+
+    /// Whether this pack is interrupted-push debris: known, ignorable, and
+    /// neither an incomplete survey nor a failure.
+    #[must_use]
+    pub fn torn(&self) -> bool {
+        matches!(self.verdict, Verdict::Torn { .. })
+    }
+
+    /// One word for the human report's per-pack line and the `--json` status.
+    #[must_use]
+    pub fn status_word(&self) -> &'static str {
+        match &self.verdict {
+            Verdict::Stranded => "stranded",
+            Verdict::Torn { .. } => "torn",
+            Verdict::Unverified { .. } => "unknown",
+        }
     }
 }
 
@@ -174,18 +232,19 @@ impl Inventory {
         self.candidates.iter().map(|pack| pack.bytes).sum()
     }
 
-    /// Candidates whose bytes read back as the ids they are stored under.
+    /// Candidates whose bytes read back as the ids they are stored under:
+    /// stranded content the next open adopts.
     #[must_use]
-    pub fn verified_packs(&self) -> usize {
+    pub fn stranded_packs(&self) -> usize {
         self.candidates
             .iter()
             .filter(|pack| pack.verified())
             .count()
     }
 
-    /// Backend bytes those verified packs occupy.
+    /// Backend bytes those stranded packs occupy.
     #[must_use]
-    pub fn verified_bytes(&self) -> u64 {
+    pub fn stranded_bytes(&self) -> u64 {
         self.candidates
             .iter()
             .filter(|pack| pack.verified())
@@ -193,12 +252,29 @@ impl Inventory {
             .sum()
     }
 
-    /// Candidates that could not be read, so their status is unknown.
+    /// Candidates that are interrupted-push debris: torn files that belong to
+    /// no backup and can be ignored.
+    #[must_use]
+    pub fn torn_packs(&self) -> usize {
+        self.candidates.iter().filter(|pack| pack.torn()).count()
+    }
+
+    /// Backend bytes those torn packs occupy.
+    #[must_use]
+    pub fn torn_bytes(&self) -> u64 {
+        self.candidates
+            .iter()
+            .filter(|pack| pack.torn())
+            .map(|pack| pack.bytes)
+            .sum()
+    }
+
+    /// Candidates whose status could not be established, so it is unknown.
     #[must_use]
     pub fn unknown_packs(&self) -> usize {
         self.candidates
             .iter()
-            .filter(|pack| !pack.verified())
+            .filter(|pack| matches!(pack.verdict, Verdict::Unverified { .. }))
             .count()
     }
 
@@ -207,7 +283,7 @@ impl Inventory {
     pub fn unknown_bytes(&self) -> u64 {
         self.candidates
             .iter()
-            .filter(|pack| !pack.verified())
+            .filter(|pack| matches!(pack.verdict, Verdict::Unverified { .. }))
             .map(|pack| pack.bytes)
             .sum()
     }
@@ -259,16 +335,23 @@ pub fn survey(
         .map(|((id, bytes), verdict)| Candidate {
             id: id.clone(),
             bytes: *bytes,
-            verdict: match verdict {
-                Ok(_) => Verdict::Verified,
-                Err(reason) => Verdict::Unverified { reason },
+            // The survey itself established "no index file names it" for every
+            // candidate, so the classification's `indexed` input is always
+            // `Some(false)` here; what the verdict splits is the bytes' own
+            // shape — torn debris against stranded content against unknown.
+            verdict: match &verdict {
+                Ok(_) => Verdict::Stranded,
+                Err(failure) => verdict_of(Some(failure)),
             },
         })
         .collect();
 
     // The fences are checked in the order the adopting open checks them
     // (`index_adopting`): a missing entry refuses before verification is even
-    // attempted, so a report says the same thing the next push would do.
+    // attempted, so a report says the same thing the next push would do. A
+    // torn pack refuses too — the adopting open still refuses the whole set
+    // over any pack that does not verify, torn debris included — but the
+    // refusal's reason is the torn one, not an unknown one.
     let next_push = if candidates.is_empty() {
         NextPush::NothingStranded
     } else if !report.missing.is_empty() {
@@ -279,8 +362,8 @@ pub fn survey(
             ),
         }
     } else if let Some(why) = candidates.iter().find_map(|pack| match &pack.verdict {
-        Verdict::Unverified { reason } => Some(reason.clone()),
-        Verdict::Verified => None,
+        Verdict::Stranded => None,
+        Verdict::Torn { reason } | Verdict::Unverified { reason } => Some(reason.clone()),
     }) {
         NextPush::Refused { why }
     } else {
@@ -397,7 +480,10 @@ pub fn error_line(error: &anyhow::Error) -> String {
 mod tests {
     use super::{backend_kind, error_line, redact, Candidate, Inventory, NextPush, Verdict};
 
-    fn inventory(packs: &[(&str, u64, bool)]) -> Inventory {
+    /// One candidate's verdict by the flag the other assertions need:
+    /// `ok` = strands (verifies complete), `torn` = interrupted-push debris,
+    /// neither = unknown.
+    fn inventory(packs: &[(&str, u64, Verdict)]) -> Inventory {
         Inventory {
             fingerprint: "00".repeat(32),
             backend: "local",
@@ -405,15 +491,17 @@ mod tests {
             total_bytes: packs.iter().map(|(_, bytes, _)| bytes).sum(),
             candidates: packs
                 .iter()
-                .map(|(id, bytes, ok)| Candidate {
+                .map(|(id, bytes, verdict)| Candidate {
                     id: (*id).to_string(),
                     bytes: *bytes,
-                    verdict: if *ok {
-                        Verdict::Verified
-                    } else {
-                        Verdict::Unverified {
-                            reason: "pack 0123456789ab: damaged".to_string(),
-                        }
+                    verdict: match verdict {
+                        Verdict::Stranded => Verdict::Stranded,
+                        Verdict::Torn { reason } => Verdict::Torn {
+                            reason: reason.clone(),
+                        },
+                        Verdict::Unverified { reason } => Verdict::Unverified {
+                            reason: reason.clone(),
+                        },
                     },
                 })
                 .collect(),
@@ -425,16 +513,63 @@ mod tests {
     #[test]
     fn a_pack_that_does_not_verify_is_counted_as_unknown_not_as_zero() {
         let inv = inventory(&[
-            ("a".repeat(64).as_str(), 10, true),
-            ("b".repeat(64).as_str(), 25, false),
+            ("a".repeat(64).as_str(), 10, Verdict::Stranded),
+            (
+                "b".repeat(64).as_str(),
+                25,
+                Verdict::Unverified {
+                    reason: "pack 0123456789ab: damaged".to_string(),
+                },
+            ),
         ]);
         assert_eq!(inv.candidate_packs(), 2);
         assert_eq!(inv.candidate_bytes(), 35);
-        assert_eq!(inv.verified_packs(), 1);
-        assert_eq!(inv.verified_bytes(), 10);
+        assert_eq!(inv.stranded_packs(), 1);
+        assert_eq!(inv.stranded_bytes(), 10);
         // The unknown is a count and a size, never an absence.
         assert_eq!(inv.unknown_packs(), 1);
         assert_eq!(inv.unknown_bytes(), 25);
+    }
+
+    /// Torn debris is a *known* state with its own count and byte total,
+    /// reported apart from stranded content, and never folded into unknown:
+    /// an interrupted push's leftovers make the survey neither incomplete
+    /// nor a failure (ISSUE-006 step A).
+    #[test]
+    fn torn_debris_counts_apart_from_stranded_and_unknown() {
+        let inv = inventory(&[
+            ("a".repeat(64).as_str(), 10, Verdict::Stranded),
+            (
+                "b".repeat(64).as_str(),
+                1966080,
+                Verdict::Torn {
+                    reason: "pack 0123456789ab declares a 1697901003-byte header, which does \
+                             not fit a 1966080-byte pack"
+                        .to_string(),
+                },
+            ),
+            (
+                "c".repeat(64).as_str(),
+                5,
+                Verdict::Unverified {
+                    reason: "pack 0123456789ab: damaged".to_string(),
+                },
+            ),
+        ]);
+        assert_eq!(inv.torn_packs(), 1);
+        assert_eq!(inv.torn_bytes(), 1_966_080);
+        assert_eq!(inv.stranded_packs(), 1);
+        assert_eq!(inv.stranded_bytes(), 10);
+        assert_eq!(inv.unknown_packs(), 1);
+        assert_eq!(inv.unknown_bytes(), 5);
+        assert_eq!(inv.candidate_packs(), 3);
+        // The status words the human report and `--json` share.
+        let words: Vec<&str> = inv
+            .candidates
+            .iter()
+            .map(|pack| pack.status_word())
+            .collect();
+        assert_eq!(words, vec!["stranded", "torn", "unknown"]);
     }
 
     #[test]
@@ -442,6 +577,7 @@ mod tests {
         let inv = inventory(&[]);
         assert_eq!(inv.candidate_packs(), 0);
         assert_eq!(inv.candidate_bytes(), 0);
+        assert_eq!(inv.torn_packs(), 0);
         assert_eq!(inv.unknown_packs(), 0);
         assert_eq!(inv.total_packs, 0);
     }
@@ -449,13 +585,13 @@ mod tests {
     #[test]
     fn a_candidate_reports_the_id_prefix_the_human_report_prints() {
         let id = "0123456789abcdef".repeat(4);
-        let inv = inventory(&[(&id, 1, true)]);
+        let inv = inventory(&[(&id, 1, Verdict::Stranded)]);
         assert_eq!(inv.candidates[0].id_prefix(), "0123456789ab");
     }
 
     #[test]
     fn a_short_or_empty_id_is_printed_whole_rather_than_panicking() {
-        let inv = inventory(&[("abc", 1, true)]);
+        let inv = inventory(&[("abc", 1, Verdict::Stranded)]);
         assert_eq!(inv.candidates[0].id_prefix(), "abc");
     }
 

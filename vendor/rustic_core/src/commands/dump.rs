@@ -54,6 +54,7 @@ pub(crate) fn dump<S: IndexedFull>(
         .map(|id| {
             repo.index().get_data(id).ok_or_else(|| {
                 RusticError::new(ErrorKind::Internal, "Data Blob `{id}`  not found in index")
+                    .attach_error_code("I003")
                     .attach_context("id", id.to_string())
             })
         })

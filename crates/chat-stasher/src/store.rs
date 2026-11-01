@@ -26,6 +26,7 @@
 //!     backend `connections` option; locally we pin the global rayon pool,
 //!     which backs `decrypt.rs`'s read fan-out).
 
+pub use crate::opencode_records::BodyView;
 use anyhow::{anyhow, Context};
 use rayon::ThreadPoolBuilder;
 use rustic_backend::BackendOptions;
@@ -261,6 +262,21 @@ pub struct BackupStore {
     /// from (SRCH-1b). `None` is the default and the whole-cache-off case — see
     /// [`BackupStore::with_snapshot_cache`].
     snapshot_cache: Option<std::sync::Arc<crate::snapshot_cache::SnapshotCache>>,
+    /// The mirror-first read seam (ADR-062 D3 / LM-3): when set, this store's
+    /// reads take the local mirror of the destination before the remote, file
+    /// by file, falling back to the remote per missing file. `None` is the
+    /// default, the every-store-before-LM-3 shape — and the guarantee
+    /// `verify` keeps for good (a copy may never certify itself, so its
+    /// store is built without this and its reads stay remote).
+    mirror_reads: Option<std::sync::Arc<crate::mirror_read::MirrorReads>>,
+    /// The offline mirror seam (W1053 `--offline`): set together with
+    /// `mirror_reads` by [`BackupStore::with_offline_mirror`], and never
+    /// otherwise — a store with this flag never constructs the declared
+    /// repository's backend at all ([`BackupStore::backends`] builds the
+    /// mirror's local backend alone), so no run through it can open a
+    /// remote connection, and every file its reads need must be on the
+    /// copy or in a local cache or the read refuses.
+    offline_mirror: bool,
     /// How this store joins a session's shards: collapse unbound byte-identical
     /// replay shards by default, while retaining exact sequence-bound captured
     /// duplicates; or hand back every shard. See [`DuplicateShardPolicy`].
@@ -289,6 +305,8 @@ impl BackupStore {
             machine,
             body_cache: None,
             snapshot_cache: None,
+            mirror_reads: None,
+            offline_mirror: false,
             shard_policy: DuplicateShardPolicy::Collapse,
         }
     }
@@ -304,6 +322,8 @@ impl BackupStore {
             machine: String::new(),
             body_cache: None,
             snapshot_cache: None,
+            mirror_reads: None,
+            offline_mirror: false,
             shard_policy: DuplicateShardPolicy::Collapse,
         }
     }
@@ -376,6 +396,114 @@ impl BackupStore {
         self.snapshot_cache.as_ref()
     }
 
+    /// Serve this store's reads from the local mirror first, when it has the
+    /// file (ADR-062 D3 / LM-3).
+    ///
+    /// Deliberately a per-store decision, exactly like [`Self::with_body_cache`],
+    /// and for the same reason with an ADR behind it: **`verify` never gets
+    /// one** — it asks the remote so a copy may never certify itself (47
+    /// §5.5) — and neither do the write paths, which read exactly the
+    /// repository they write. The readers ADR-062 D3 names — `read` /
+    /// `search` / `ui` / index rebuild / `export` — attach one when the
+    /// configuration owns a usable mirror of this destination
+    /// ([`crate::mirror_read::decide`]); a store built without this call
+    /// keeps its pre-LM-3 reads bit for bit.
+    ///
+    /// Ruling 7 rides in the combination: with a mirror set, the body cache
+    /// is installed **inside** the mirror seam rather than around it, so
+    /// mirror-served bytes never enter the cache and remote-fallback bytes
+    /// still do.
+    pub fn with_mirror_reads(
+        mut self,
+        mirror: Option<std::sync::Arc<crate::mirror_read::MirrorReads>>,
+    ) -> Self {
+        self.mirror_reads = mirror;
+        self
+    }
+
+    /// The mirror seam this store reads through, if any.
+    pub fn mirror_reads(&self) -> Option<&std::sync::Arc<crate::mirror_read::MirrorReads>> {
+        self.mirror_reads.as_ref()
+    }
+
+    /// Serve this store's reads from the local mirror **only** (W1053
+    /// `--offline`): the destination's backend is never constructed, so a
+    /// store built this way cannot open a remote connection at all — every
+    /// read answers from the mirror copy, the body cache, or rustic's local
+    /// metadata cache, and a file none of them holds is the refusal the
+    /// caller words in the "did not finish" family (`3`), never an empty
+    /// answer.
+    ///
+    /// The mirror handle is the same [`MirrorReads`] a serving store
+    /// attaches online ([`crate::mirror_read::decide`] produced it), so the
+    /// counters the run moves reach the same served line the online report
+    /// prints — reworded for a run whose remote leg is structurally zero.
+    /// Distinguishing an offline store from an online mirror-first one by
+    /// a flag rather than a different type is what keeps every read path
+    /// below it unchanged: the walk, the decode and the readers never
+    /// learn which seam answered them.
+    ///
+    /// `verify` may take it too, and that is not the mirror seam ADR-062
+    /// D3 keeps off `verify`: this flag services an explicit
+    /// `verify --offline`, whose verdict certifies the copy by name (the
+    /// same stance `mirror_copy` detection words for `verify --repo <the
+    /// copy>`, 47 §5.5) — an online `verify` is still built without a
+    /// mirror and still never consults the copy.
+    pub fn with_offline_mirror(
+        mut self,
+        mirror: std::sync::Arc<crate::mirror_read::MirrorReads>,
+    ) -> Self {
+        self.mirror_reads = Some(mirror);
+        self.offline_mirror = true;
+        self
+    }
+
+    /// Whether this store serves reads from the local mirror only (W1053):
+    /// the callers that word offline absences — an offline walk cannot
+    /// claim proof of absence the way an online one can, because the
+    /// remote may hold a snapshot the copy does not — key on this instead
+    /// of re-deriving it from the seams.
+    pub fn is_offline_mirror(&self) -> bool {
+        self.offline_mirror
+    }
+
+    /// The mirrored destination's name, for an offline store's verdict
+    /// wording (W1053). Private on purpose: `with_offline_mirror` is the
+    /// only way to set the flag and it carries the handle, so an offline
+    /// store always knows whose copy it reads — the `unreachable` branch
+    /// is a construction bug rather than a default, because an empty
+    /// name here would surface in user-facing refusal sentences.
+    fn offline_mirror_of(&self) -> &str {
+        match &self.mirror_reads {
+            Some(reads) => &reads.mirror_of,
+            None => std::unreachable!(
+                "an offline store is built only by `with_offline_mirror`, which carries the \
+                 mirror's name"
+            ),
+        }
+    }
+
+    /// An owned twin of this store: the same configuration values and the same
+    /// cache/mirror handles (shared [`std::sync::Arc`]s, so every counter the
+    /// twin moves shows up here too) — one store for a worker thread the run
+    /// may have to abandon (W1052's detached deadline workers cannot borrow
+    /// this one, and a wedged worker must not take the only store with it).
+    ///
+    /// Every field is either copied, cloned or `Arc`-cloned in; nothing is
+    /// opened or dialed here — a twin opens backends exactly when the store
+    /// it came from does, at the first operation.
+    pub fn owned_twin(&self) -> Self {
+        BackupStore {
+            cfg: self.cfg.clone(),
+            machine: self.machine.clone(),
+            body_cache: self.body_cache.clone(),
+            snapshot_cache: self.snapshot_cache.clone(),
+            mirror_reads: self.mirror_reads.clone(),
+            offline_mirror: self.offline_mirror,
+            shard_policy: self.shard_policy,
+        }
+    }
+
     /// Build the backend handles.
     ///
     /// Local paths use rustic_backend's `LocalBackend` directly. When a remote
@@ -383,6 +511,28 @@ impl BackupStore {
     /// wiring applies the connections cap as the backend `connections` option
     /// (`ConcurrentLimitLayer`).
     pub fn backends(&self) -> anyhow::Result<RepositoryBackends> {
+        // W1053 `--offline`: the declared repository's options are never
+        // turned into a backend at all — this branch returns before
+        // `to_backends()` sees `repo_root`, so no opendal operator is
+        // built, no ssh master is spawned and no socket can open, however
+        // the destination is spelled. The mirror's own local backend is
+        // the whole stack, with the body cache inside it exactly as the
+        // online mirror seam holds it (ruling 7: the copy's bytes never
+        // enter the cache).
+        if self.offline_mirror {
+            let Some(mirror) = &self.mirror_reads else {
+                anyhow::bail!(
+                    "an offline store was built without a mirror to serve from — this is a \
+                     construction bug, not a state a command can run in"
+                );
+            };
+            let repository = crate::mirror_read::OfflineMirrorBackend::wrap(
+                std::sync::Arc::clone(mirror),
+                self.body_cache.clone(),
+                self.cfg.repo_root.clone(),
+            )?;
+            return Ok(RepositoryBackends::new(repository, None));
+        }
         let mut opts = BackendOptions::default().repository(self.cfg.repo_root.as_str());
         if self.cfg.repo_root.starts_with("opendal:") || self.cfg.repo_root.starts_with("rest:") {
             // Built by `StoreConfig::backend_options`, which is defined at the
@@ -392,6 +542,29 @@ impl BackupStore {
             opts = opts.options(self.cfg.backend_options());
         }
         let backends = opts.to_backends().context("build backend options")?;
+        // The read seam, outermost first: ADR-062 D3's mirror-first reads
+        // (LM-3) hold the body cache inside them when a mirror is attached,
+        // because ruling 7 keys on provenance — a cache wrapped *around* a
+        // mirror seam would store exactly the mirror bytes the ruling keeps
+        // out. With no mirror attached, the stack is unchanged from ADR-034:
+        // the body cache sits *below* rustic, wrapped over the backend
+        // handles themselves.
+        if let Some(mirror) = &self.mirror_reads {
+            let repository = crate::mirror_read::MirrorFirstBackend::wrap(
+                backends.repository(),
+                std::sync::Arc::clone(mirror),
+                self.body_cache.clone(),
+            )?;
+            let hot = match backends.repo_hot() {
+                Some(hot) => Some(crate::mirror_read::MirrorFirstBackend::wrap(
+                    hot,
+                    std::sync::Arc::clone(mirror),
+                    self.body_cache.clone(),
+                )?),
+                None => None,
+            };
+            return Ok(RepositoryBackends::new(repository, hot));
+        }
         // ADR-034: the body cache sits *below* rustic, as a wrapper over the
         // backend handles — the only seam where a conversation body can be
         // observed as the remote's own ciphertext. `rustic_backend` hands back
@@ -487,7 +660,7 @@ impl BackupStore {
     /// Push the whole stage tree (`sessions/<machine>/<id>/NNNNNN.jsonl`) into
     /// a fresh snapshot. The stage root must already hold only sealed shards.
     pub fn push(&self, stage_root: &Path, mk: &MasterKey) -> anyhow::Result<PushSummary> {
-        self.push_with(stage_root, mk, false)
+        self.push_with(stage_root, mk, false, None)
     }
 
     /// Push, but let the repository decline to write the snapshot when its tree
@@ -512,7 +685,20 @@ impl BackupStore {
         stage_root: &Path,
         mk: &MasterKey,
     ) -> anyhow::Result<PushSummary> {
-        self.push_with(stage_root, mk, true)
+        self.push_with(stage_root, mk, true, None)
+    }
+
+    /// Push with a stage-shard count already taken by the caller (run-once's
+    /// collect-time audit). The count is reused only while its freshness token
+    /// still matches the stage; otherwise it is retaken here, so a shard
+    /// written between the caller's count and this backup is never omitted.
+    pub fn push_with_count(
+        &self,
+        stage_root: &Path,
+        mk: &MasterKey,
+        counted: Option<&CountedStageShards>,
+    ) -> anyhow::Result<PushSummary> {
+        self.push_with(stage_root, mk, false, counted)
     }
 
     fn push_with(
@@ -520,16 +706,30 @@ impl BackupStore {
         stage_root: &Path,
         mk: &MasterKey,
         skip_if_unchanged: bool,
+        counted: Option<&CountedStageShards>,
     ) -> anyhow::Result<PushSummary> {
         // This must run before opening or backing up the repository. A stage
         // assembled for machine A must never be snapshotted as machine B.
         validate_stage_machines(stage_root, &self.machine)?;
-        let stage_shards = sealed_shard_count(stage_root)?;
+        // A count the caller took at collection time is reused only while the
+        // stage tree still matches its freshness token; a mismatch means files
+        // were written or removed since, and the count must be retaken so the
+        // empty-stage guard below and the progress total stay honest.
+        let stage_shards = match counted.and_then(|c| c.fresh_count(stage_root)) {
+            Some(count) => count,
+            None => sealed_shard_count(stage_root)?,
+        };
         // This guard used to refuse any shard-less stage: while readers looked only at the
         // newest snapshot per machine, an empty snapshot made the machine look as if it
         // held nothing. ADR-021 made those readers cumulative, so the guard now refuses
         // only when the stage holds neither sealed shards nor machine metadata (ADR-022).
-        if stage_shards == 0 && !crate::metahash::has_meta_files(stage_root, &self.machine)? {
+        // A machine-log generation counts as content too (ADR-053 D4): a
+        // machine whose only captured product is its harness input log is not
+        // an empty stage, and refusing here would silently drop it.
+        if stage_shards == 0
+            && !crate::metahash::has_meta_files(stage_root, &self.machine)?
+            && !crate::metahash::has_machine_log_files(stage_root, &self.machine)?
+        {
             anyhow::bail!(
                 "refusing empty snapshot: stage contains no sealed shards; collect or restore the stage first"
             );
@@ -947,6 +1147,12 @@ impl BackupStore {
     /// without a holder: "not in any snapshot I could read" and "not in any
     /// snapshot" are different answers, and only the second is a negative.
     ///
+    /// One carve-out, bounded: a snapshot tree that is not in the index the
+    /// open loaded — a read racing a push, the READ-RACE gate in
+    /// [`crate::readback`] — first costs one bounded wait, one index reload
+    /// and one re-read before that `Err` stands. The re-read is the same
+    /// walk, never an older snapshot: B is not the fallback here.
+    ///
     /// Payload tier: this is the one call that fetches and decrypts conversation
     /// bytes. A session no snapshot holds is an `Err`, never an empty result.
     pub fn read_session_concat(
@@ -955,16 +1161,89 @@ impl BackupStore {
         session_id: &str,
         mk: &MasterKey,
     ) -> anyhow::Result<(Vec<u8>, Vec<(String, String)>)> {
+        self.read_session_concat_with_view(machine, session_id, mk, BodyView::Current)
+    }
+
+    /// [`Self::read_session_concat`] with the ADR-061 body view chosen: the
+    /// default ([`BodyView::Current`]) is the source's final state — for a
+    /// snapshot-source session, the assembled last-version-per-record
+    /// projection, byte-equal to a fresh export at quiescence;
+    /// [`BodyView::IncludeDeleted`] additionally emits records the source
+    /// deleted at their original positions, marked `"deleted": true`. The
+    /// raw shard-set identity the caller can also get stays a function of
+    /// the raw bytes (D3: the raw triple remains the proof, the assembled
+    /// body is the projection, and they differ by design).
+    ///
+    /// The READ-RACE gate sits over this read
+    /// ([`crate::readback::reread_plain_once_on_index_race`]): a snapshot
+    /// tree the open's index cannot resolve first costs one bounded wait,
+    /// one index reload and one re-read, and only then becomes the `Err`
+    /// below.
+    pub fn read_session_concat_with_view(
+        &self,
+        machine: &str,
+        session_id: &str,
+        mk: &MasterKey,
+        view: BodyView,
+    ) -> anyhow::Result<(Vec<u8>, Vec<(String, String)>)> {
+        crate::readback::reread_plain_once_on_index_race(move || {
+            self.read_session_concat_attempt(machine, session_id, mk, view)
+        })
+    }
+
+    /// [`Self::read_session_concat_with_view`]'s single attempt: one
+    /// repository open, one cumulative walk of the machine's snapshots.
+    fn read_session_concat_attempt(
+        &self,
+        machine: &str,
+        session_id: &str,
+        mk: &MasterKey,
+        view: BodyView,
+    ) -> anyhow::Result<(Vec<u8>, Vec<(String, String)>)> {
         let (repo, _adoption) = self
             .open_indexed(mk)
             .context("open repository for session content")?;
         self.require_sound_packs(&repo)?;
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
-        let Some(host_snaps) = crate::readback::snapshots_by_host_newest_first(snaps)
+        let grouped_hosts = crate::readback::snapshots_by_host_newest_first(snaps);
+        // ADR-046 (draft) Phase 1: an explicit session read is a reader, so
+        // the effective control stream is folded from the union of every
+        // host's newest snapshot before any body is fetched, and an omitted
+        // identity is a typed refusal the command layer distinguishes from a
+        // read that did not finish. An unreadable or conflicting control
+        // stream is an `Err`: this call fails closed — it never answers from
+        // a policy it could not establish.
+        let control_policy =
+            crate::deletion_control::load_strict_reader_policy(&repo, &grouped_hosts)?;
+        if let visibility @ (crate::deletion_control::Visibility::Hidden
+        | crate::deletion_control::Visibility::Purged
+        | crate::deletion_control::Visibility::RedactedThroughCutoff { .. }) =
+            control_policy.visibility(machine, session_id)
+        {
+            return Err(anyhow::anyhow!(crate::deletion_control::SessionOmitted {
+                machine: machine.to_string(),
+                session_id: session_id.to_string(),
+                state: visibility,
+            }));
+        }
+        let Some(host_snaps) = grouped_hosts
             .into_iter()
             .find(|(host, _)| host == machine)
             .map(|(_, snaps)| snaps)
         else {
+            // Offline, "this repository" is only what the mirror copy holds:
+            // the destination was not contacted, so an empty partition set
+            // proves nothing about it (W1053 — the same three-state rule the
+            // deadline wording keeps, because absence offline is unknown).
+            if self.is_offline_mirror() {
+                let mirror_of = self.offline_mirror_of();
+                return Err(anyhow!(
+                    "no snapshot for machine `{machine}` in the local mirror copy of \
+                     `{mirror_of}` it was read from (--offline) — the destination was not \
+                     contacted, so whether its repository holds a snapshot for this machine \
+                     is unknown, not a measured absence"
+                ));
+            }
             return Err(anyhow!(
                 "no snapshot for machine `{machine}` in this repository"
             ));
@@ -978,11 +1257,26 @@ impl BackupStore {
             session_id,
             self.body_cache.as_ref(),
             self.shard_policy,
+            view,
         )? {
             return Ok(result);
         }
         // Reached only when every snapshot of the machine was walked and none
         // held the session — a proof of absence rather than a failure to look.
+        // Offline, the walk read every snapshot **the mirror copy** holds, and
+        // the destination may hold more (W1053), so the proof the online
+        // wording claims is not this read's to make: the session stays
+        // unknown, and the exit family that follows is "did not finish".
+        if self.is_offline_mirror() {
+            let mirror_of = self.offline_mirror_of();
+            return Err(anyhow!(
+                "session `{}` holds no shards in any of the {snapshots_held} snapshots of \
+                 machine `{machine}` the local mirror copy of `{mirror_of}` holds (--offline; \
+                 all of them were read) — the destination was not contacted and may hold \
+                 newer snapshots, so this is unknown, not a proof the session is absent",
+                crate::id::short_session_id(session_id),
+            ));
+        }
         Err(anyhow!(
             "session `{}` holds no shards in any of the {snapshots_held} snapshots of machine \
              `{machine}` (all of them were read)",
@@ -1015,6 +1309,33 @@ impl BackupStore {
         mk: &MasterKey,
         wanted: &BTreeSet<(String, String)>,
     ) -> anyhow::Result<BTreeMap<(String, String), (Vec<u8>, Vec<(String, String)>)>> {
+        self.read_selected_sessions_with_view(mk, wanted, BodyView::Current)
+    }
+
+    /// [`Self::read_selected_sessions`] with the ADR-061 body view chosen —
+    /// see [`Self::read_session_concat_with_view`]. The READ-RACE gate sits
+    /// over the whole batch (see [`Self::read_session_concat_with_view`]):
+    /// one bounded wait and one re-read for a batch whose walk hit a
+    /// not-in-index snapshot tree.
+    pub fn read_selected_sessions_with_view(
+        &self,
+        mk: &MasterKey,
+        wanted: &BTreeSet<(String, String)>,
+        view: BodyView,
+    ) -> anyhow::Result<BTreeMap<(String, String), (Vec<u8>, Vec<(String, String)>)>> {
+        crate::readback::reread_plain_once_on_index_race(move || {
+            self.read_selected_sessions_attempt(mk, wanted, view)
+        })
+    }
+
+    /// [`Self::read_selected_sessions_with_view`]'s single attempt: one
+    /// repository open, the batch walked.
+    fn read_selected_sessions_attempt(
+        &self,
+        mk: &MasterKey,
+        wanted: &BTreeSet<(String, String)>,
+        view: BodyView,
+    ) -> anyhow::Result<BTreeMap<(String, String), (Vec<u8>, Vec<(String, String)>)>> {
         let mut out = BTreeMap::new();
         if wanted.is_empty() {
             return Ok(out);
@@ -1042,6 +1363,7 @@ impl BackupStore {
                     session_id,
                     self.body_cache.as_ref(),
                     self.shard_policy,
+                    view,
                 )? {
                     out.insert((machine.clone(), session_id.to_string()), result);
                 }
@@ -1054,6 +1376,10 @@ impl BackupStore {
 /// Read one session cumulatively across a machine's snapshots. Reclaimed
 /// snapshots may contain only the newest sealed sequence, so retain the newest
 /// copy of each archive-relative shard path while walking every snapshot.
+///
+/// `view` selects the ADR-061 body projection for snapshot-source sessions
+/// (see [`BackupStore::read_session_concat_with_view`]); the raw
+/// concat is still what the L3 triple is proved over.
 fn dump_cumulative_session<S: rustic_core::IndexedFull>(
     repo: &Repository<S>,
     snapshots: &[SnapshotFile],
@@ -1061,6 +1387,7 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
     session_id: &str,
     body_cache: Option<&std::sync::Arc<crate::body_cache::BodyCache>>,
     policy: DuplicateShardPolicy,
+    view: BodyView,
 ) -> anyhow::Result<Option<(Vec<u8>, Vec<(String, String)>)>> {
     let mut held: BTreeMap<(u64, String), (Option<u64>, String, rustic_core::repofile::Node)> =
         BTreeMap::new();
@@ -1158,6 +1485,7 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
     };
     let mut concat = Vec::new();
     let mut hashes = Vec::new();
+    let mut selected_bodies: Vec<Vec<u8>> = Vec::new();
     for (index, (sequence, name, body)) in shards.into_iter().enumerate() {
         if duplicates.contains(&index)
             && !sequence.is_some_and(|sequence| observed_sequences.contains(&sequence))
@@ -1166,9 +1494,31 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
         }
         let digest: [u8; 32] = Sha256::digest(&body).into();
         concat.extend_from_slice(&body);
+        selected_bodies.push(body);
         hashes.push((name, hex_digest(&digest)));
     }
-    Ok(Some((concat, hashes)))
+    // ADR-061 D3: the reader-facing body of a snapshot-source session is the
+    // assembled last-version-per-record projection (whole-file and increment
+    // records mixed, tombstones applied), while the per-shard identities the
+    // caller just collected remain the raw proof. Inbox capture bundles —
+    // which live under `opencode.*` ids too — classify as byte-verbatim and
+    // pass through untouched (W213). Every other harness keeps the raw
+    // concat, which for append-style sources already is the growth log and
+    // stays byte-identical. An assembly that cannot be completed is an
+    // error, never a short body ("did not finish reading").
+    let body = if crate::opencode_records::harness_is_opencode(session_id) {
+        crate::opencode_records::project_session_body(session_id, &selected_bodies, view).map_err(
+            |error| {
+                anyhow::anyhow!(
+                    "session `{}` cannot be assembled: {error}",
+                    crate::id::short_session_id(session_id)
+                )
+            },
+        )?
+    } else {
+        concat
+    };
+    Ok(Some((body, hashes)))
 }
 
 /// Declare the plaintext size of the session about to be dumped, so ADR-034's
@@ -1205,8 +1555,15 @@ pub fn concat_shards(
     machine: &str,
     session_id: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    let dir = session_shard_dir(stage_root, machine, session_id);
-    let mut entries = sealed_shard_entries(&dir)?;
+    concat_shards_in_dir(&session_shard_dir(stage_root, machine, session_id))
+}
+
+/// Concatenated bytes of every sealed shard in one shard directory (seq
+/// order). The directory is supplied rather than derived, so a shard set that
+/// does not live under `sessions/` — a machine log (ADR-053 D4) — is read by
+/// exactly the same code as a session.
+pub fn concat_shards_in_dir(dir: &Path) -> anyhow::Result<Vec<u8>> {
+    let mut entries = sealed_shard_entries(dir)?;
     entries.sort_by_key(|(seq, _)| *seq);
     let mut all = Vec::new();
     for (_, path) in entries {
@@ -1226,6 +1583,45 @@ fn concat_sha_of(stage_root: &Path, machine: &str, session_id: &str) -> anyhow::
 /// `<stage>/sessions/<machine>/<session_id>` — the partitioned directory.
 pub fn session_shard_dir(stage_root: &Path, machine: &str, session_id: &str) -> PathBuf {
     stage_root.join(SESSIONS_DIR).join(machine).join(session_id)
+}
+
+/// Stage namespace of the per-machine harness logs (ADR-053 D4). A sibling of
+/// `sessions/` and `ext-status/`, never inside either: the session tree is
+/// walked by session readers and counters, and `ext-status/` is documented as
+/// metadata-only while a machine log is body-tier (ADR-053 D5).
+pub const MACHINE_LOGS_DIR: &str = "machine-logs";
+
+/// `<stage>/machine-logs/<machine>/<harness>/<log_id>` — the directory that
+/// holds one machine log's sealed generations.
+///
+/// `<harness>` is the registry harness id and `<log_id>` the log's declared id
+/// (`claude-code` / `history`), both validated by the scanner before they get
+/// here: they are path components, so an id carrying a separator would place
+/// the write outside this namespace.
+pub fn machine_log_shard_dir(
+    stage_root: &Path,
+    machine: &str,
+    harness: &str,
+    log_id: &str,
+) -> PathBuf {
+    stage_root
+        .join(MACHINE_LOGS_DIR)
+        .join(machine)
+        .join(harness)
+        .join(log_id)
+}
+
+/// Sealed generations of one machine log, oldest first.
+pub fn machine_log_shard_entries(
+    stage_root: &Path,
+    machine: &str,
+    harness: &str,
+    log_id: &str,
+) -> anyhow::Result<Vec<(u64, PathBuf)>> {
+    let mut entries =
+        sealed_shard_entries(&machine_log_shard_dir(stage_root, machine, harness, log_id))?;
+    entries.sort_by_key(|(seq, _)| *seq);
+    Ok(entries)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1275,21 +1671,29 @@ pub fn stage_file_sha256s(stage_root: &Path) -> anyhow::Result<BTreeSet<String>>
 /// Machine values are represented by full SHA-256 digests in the diagnostic,
 /// never by hostnames.
 pub fn validate_stage_machines(stage_root: &Path, expected: &str) -> anyhow::Result<()> {
-    let sessions_root = stage_root.join(SESSIONS_DIR);
-    let machines = match fs::read_dir(&sessions_root) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).with_context(|| format!("read {}", sessions_root.display())),
-    };
     let mut unexpected = Vec::new();
-    for entry in machines {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name != expected {
-            unexpected.push(name);
+    // Both machine-keyed namespaces are checked: the session tree and the
+    // machine-log tree (ADR-053 D4). A machine log carries what the user typed,
+    // so pushing a stage that holds another machine's machine logs would
+    // archive that machine's prompts under this snapshot — the same failure
+    // this guard already refuses for sessions.
+    for root in [SESSIONS_DIR, MACHINE_LOGS_DIR] {
+        let machines = match fs::read_dir(stage_root.join(root)) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("read {}", stage_root.join(root).display()))
+            }
+        };
+        for entry in machines {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name != expected {
+                unexpected.push(name);
+            }
         }
     }
     if unexpected.is_empty() {
@@ -1312,31 +1716,182 @@ pub fn machine_fingerprint(machine: &str) -> String {
     hex_digest(&Sha256::digest(machine.as_bytes()))
 }
 
-/// Count sealed shards across every machine/session in a stage. Directories
-/// without a shard do not make an archive look non-empty, and unrelated files
-/// are ignored. This is the push guard that distinguishes a retained stage
-/// with no new content from an empty stage that must not create a snapshot.
-pub fn sealed_shard_count(stage_root: &Path) -> anyhow::Result<usize> {
+/// How many times [`sealed_shard_count_with_token`] has run in this process.
+/// Test-only: the collect-once-reuse path asserts a quiet run-once pass
+/// performs exactly one stage-shard count, and this is the counter that
+/// proves it.
+#[doc(hidden)]
+pub static SEALED_SHARD_COUNT_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Read [`SEALED_SHARD_COUNT_CALLS`]. Test-only.
+#[doc(hidden)]
+pub fn sealed_shard_count_calls() -> usize {
+    SEALED_SHARD_COUNT_CALLS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Reset [`SEALED_SHARD_COUNT_CALLS`]. Test-only.
+#[doc(hidden)]
+pub fn reset_sealed_shard_count_calls() {
+    SEALED_SHARD_COUNT_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// A freshness token for the sealed-shard tree under `stage/sessions/`: the
+/// mtime of the sessions root, of every machine directory, and of every
+/// session directory, each paired with its path.
+///
+/// The token stops at session directories: it never stats shard files, so it
+/// stays far cheaper than a count. Adding or removing anything under
+/// `sessions/` — a whole session directory, or a shard inside an existing
+/// one — changes a tracked directory's mtime and breaks the match, so a count
+/// bound to the old token is retaken. A shard whose bytes are replaced in
+/// place leaves every directory mtime alone and is not caught, which is safe:
+/// the number of shards is unchanged and the backup walks the live tree, so
+/// the new bytes are archived regardless.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageFreshnessToken {
+    sessions_root: Option<std::time::SystemTime>,
+    dirs: Vec<(PathBuf, std::time::SystemTime)>,
+}
+
+impl StageFreshnessToken {
+    /// True when the stage tree still looks exactly as it did when the token
+    /// was taken, so a count bound to this token is still valid. A token that
+    /// cannot be recomputed (an unreadable directory) never matches, so the
+    /// caller fails closed and recounts.
+    pub fn still_matches(&self, stage_root: &Path) -> bool {
+        stage_freshness_token(stage_root)
+            .map(|current| &current == self)
+            // reason: a token that cannot be recomputed must read as "the
+            // stage changed", never as "still fresh" — the caller then
+            // recounts and fails closed when the retake fails, so an
+            // unreadable stage can never be mistaken for a verified one.
+            .unwrap_or(false)
+    }
+}
+
+/// A sealed-shard count bound to the stage tree it was taken from.
+#[derive(Debug, Clone)]
+pub struct CountedStageShards {
+    /// The number of sealed shards counted.
+    pub count: usize,
+    /// What the stage tree looked like when the count was taken.
+    pub freshness: StageFreshnessToken,
+}
+
+impl CountedStageShards {
+    /// Take a fresh count of the sealed shards under `stage_root`.
+    pub fn count(stage_root: &Path) -> anyhow::Result<Self> {
+        let (count, freshness) = sealed_shard_count_with_token(stage_root)?;
+        Ok(Self { count, freshness })
+    }
+
+    /// The count, but only while the stage tree still matches the token it was
+    /// taken from. `None` means the caller must recount — the stage gained or
+    /// lost a session's shards since the count, so the old number could be
+    /// wrong in the dangerous direction.
+    pub fn fresh_count(&self, stage_root: &Path) -> Option<usize> {
+        if self.freshness.still_matches(stage_root) {
+            Some(self.count)
+        } else {
+            None
+        }
+    }
+}
+
+/// Recompute the freshness token for `stage_root` cheaply. This enumerates the
+/// sessions root, every machine directory, and every session directory, and
+/// stats each one — it never enumerates bucket contents or stats files, so it
+/// is far cheaper than a full [`sealed_shard_count_with_token`] walk.
+pub fn stage_freshness_token(stage_root: &Path) -> anyhow::Result<StageFreshnessToken> {
+    let sessions_root = stage_root.join(SESSIONS_DIR);
+    let sessions_mtime = match fs::metadata(&sessions_root) {
+        Ok(meta) => Some(meta.modified()?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("stat {}", sessions_root.display())),
+    };
+    let mut dirs: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+    if sessions_mtime.is_some() {
+        for machine in fs::read_dir(&sessions_root)
+            .with_context(|| format!("read {}", sessions_root.display()))?
+        {
+            let machine = machine?;
+            if !machine.file_type()?.is_dir() {
+                continue;
+            }
+            dirs.push((machine.path(), fs::metadata(machine.path())?.modified()?));
+            for session in fs::read_dir(machine.path())? {
+                let session = session?;
+                if session.file_type()?.is_dir() {
+                    dirs.push((session.path(), fs::metadata(session.path())?.modified()?));
+                }
+            }
+        }
+    }
+    dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(StageFreshnessToken {
+        sessions_root: sessions_mtime,
+        dirs,
+    })
+}
+
+/// Count sealed shards across every machine/session in a stage, and return a
+/// freshness token binding the count to the stage tree it was taken from.
+/// Directories without a shard do not make an archive look non-empty, and
+/// unrelated files are ignored. This is the push guard that distinguishes a
+/// retained stage with no new content from an empty stage that must not create
+/// a snapshot.
+pub fn sealed_shard_count_with_token(
+    stage_root: &Path,
+) -> anyhow::Result<(usize, StageFreshnessToken)> {
+    SEALED_SHARD_COUNT_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let sessions_root = stage_root.join(SESSIONS_DIR);
     let machines = match fs::read_dir(&sessions_root) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((
+                0,
+                StageFreshnessToken {
+                    sessions_root: None,
+                    dirs: Vec::new(),
+                },
+            ))
+        }
         Err(e) => return Err(e).with_context(|| format!("read {}", sessions_root.display())),
     };
+    let sessions_mtime = fs::metadata(&sessions_root)?.modified()?;
     let mut count = 0;
+    let mut dirs: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
     for machine in machines {
         let machine = machine?;
         if !machine.file_type()?.is_dir() {
             continue;
         }
+        dirs.push((machine.path(), fs::metadata(machine.path())?.modified()?));
         for session in fs::read_dir(machine.path())? {
             let session = session?;
             if session.file_type()?.is_dir() {
+                dirs.push((session.path(), fs::metadata(session.path())?.modified()?));
                 count += sealed_shard_entries(&session.path())?.len();
             }
         }
     }
-    Ok(count)
+    dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok((
+        count,
+        StageFreshnessToken {
+            sessions_root: Some(sessions_mtime),
+            dirs,
+        },
+    ))
+}
+
+/// Count sealed shards across every machine/session in a stage. Directories
+/// without a shard do not make an archive look non-empty, and unrelated files
+/// are ignored. This is the push guard that distinguishes a retained stage
+/// with no new content from an empty stage that must not create a snapshot.
+pub fn sealed_shard_count(stage_root: &Path) -> anyhow::Result<usize> {
+    sealed_shard_count_with_token(stage_root).map(|(count, _)| count)
 }
 
 /// Absolute path of shard `seq` using the default bucket cap.
@@ -1358,8 +1913,16 @@ pub fn shard_path_with_cap(
     seq: u64,
     bucket_cap: usize,
 ) -> PathBuf {
-    session_shard_dir(stage_root, machine, session_id)
-        .join(shard_bucket_name(seq, bucket_cap))
+    shard_path_in_dir(
+        &session_shard_dir(stage_root, machine, session_id),
+        seq,
+        bucket_cap,
+    )
+}
+
+/// Absolute path of shard `seq` inside an already-resolved shard directory.
+pub fn shard_path_in_dir(dir: &Path, seq: u64, bucket_cap: usize) -> PathBuf {
+    dir.join(shard_bucket_name(seq, bucket_cap))
         .join(shard_filename(seq))
 }
 
@@ -1423,7 +1986,118 @@ impl ShardSeqError {
 
 /// Path of the shard sequence counter for one (machine, session).
 pub fn shard_seq_file(stage_root: &Path, machine: &str, session_id: &str) -> PathBuf {
-    session_shard_dir(stage_root, machine, session_id).join(SHARD_SEQ_FILE)
+    shard_seq_file_in_dir(&session_shard_dir(stage_root, machine, session_id))
+}
+
+/// Path of the shard sequence counter of an already-resolved shard directory.
+pub fn shard_seq_file_in_dir(dir: &Path) -> PathBuf {
+    dir.join(SHARD_SEQ_FILE)
+}
+
+/// File name of the per-session captured-start record (ADR-054 D4): the
+/// codebuff chat directory name's own RFC 3339 UTC instant plus its source,
+/// written beside the sealed shards so the manifest's regenerated rows carry
+/// the recorded value instead of losing it. Same collision safety as
+/// `shard-seq`: never a shard shape, so every shard walk ignores it.
+pub const CAPTURED_START_FILE: &str = "captured-start";
+
+/// Prefix of the raw sidecar files a session-directory whitelist rule seals
+/// beside the transcript under the same session identity (ADR-054 D5/D9).
+/// Content-addressed (`extra-<name>.<sha256-12>`), append-only in the stage:
+/// a changed sidecar lands as a new file and an unchanged one is not
+/// rewritten — the same one-generation-per-observation shape the sealed
+/// shards keep. Never a shard shape, so shard counting, manifest
+/// concatenation and reclamation's shard walk all ignore them.
+pub const EXTRA_FILE_PREFIX: &str = "extra-";
+
+/// True for every sealed sidecar file name (see [`EXTRA_FILE_PREFIX`]).
+pub fn is_extra_file(name: &str) -> bool {
+    name.starts_with(EXTRA_FILE_PREFIX)
+}
+
+/// Write a session's captured-start record beside its sealed shards.
+/// Idempotent: an existing identical record is left untouched, and an
+/// existing *different* record is overwritten in place — the record is the
+/// stamp of a fact already captured, not a history of stamps, and a second
+/// pass that recomputes the same fact must not churn the stage.
+pub fn write_captured_start(
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+    record: &crate::manifest::CapturedStart,
+) -> anyhow::Result<()> {
+    let dir = session_shard_dir(stage_root, machine, session_id);
+    write_captured_start_in_dir(&dir, record)
+}
+
+/// [`write_captured_start`] for an already-resolved session directory.
+pub fn write_captured_start_in_dir(
+    dir: &Path,
+    record: &crate::manifest::CapturedStart,
+) -> anyhow::Result<()> {
+    let path = dir.join(CAPTURED_START_FILE);
+    let body = serde_json::to_vec(record).context("serialize captured-start record")?;
+    if let Ok(existing) = fs::read(&path) {
+        if existing == body {
+            return Ok(());
+        }
+    }
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let tmp = dir.join(format!(".{CAPTURED_START_FILE}.tmp"));
+    fs::write(&tmp, &body).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+/// Read a session's captured-start record from its stage directory. Absent
+/// or unparseable records observe nothing — an unknown start time, never a
+/// fabricated one — so `None` covers both, deliberately.
+pub fn read_captured_start_in_dir(
+    dir: &Path,
+) -> anyhow::Result<Option<crate::manifest::CapturedStart>> {
+    let path = dir.join(CAPTURED_START_FILE);
+    match fs::read(&path) {
+        Ok(body) => serde_json::from_slice(&body).with_context(|| {
+            format!("parse captured-start record {} (deleting or leaving it makes the session start unknown, which is honest)", path.display())
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+/// Seal one raw whitelist sidecar file under the same session identity
+/// (ADR-054 D5/D9): the bytes land in the session's own stage directory as
+/// `extra-<name>.<sha256-12>`, already content-addressed by the caller's
+/// digest. Returns `true` when a new file was written and `false` when this
+/// content is already sealed — an unchanged sidecar must not rewrite the
+/// stage, and a changed one appends a new generation like a shard does.
+pub fn write_session_extra_file(
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+    name: &str,
+    bytes: &[u8],
+) -> anyhow::Result<bool> {
+    // The sidecar's own name is part of the sealed file's name, so two
+    // declared files can never collide. The digest keeps distinct contents
+    // distinct, same argument as the shard sequence but keyed on bytes.
+    let digest12: String = hex_digest(&Sha256::digest(bytes))
+        .chars()
+        .take(12)
+        .collect();
+    let file_name = format!("{EXTRA_FILE_PREFIX}{name}.{digest12}");
+    let dir = session_shard_dir(stage_root, machine, session_id);
+    let path = dir.join(&file_name);
+    if path.is_file() {
+        return Ok(false);
+    }
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let tmp = dir.join(format!(".{file_name}.tmp"));
+    fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(true)
 }
 
 /// Decide whether a `NotFound` from reading the shard sequence file really
@@ -1472,7 +2146,13 @@ fn confirm_shard_seq_absence(path: &Path) -> Result<(), std::io::Error> {
 /// file, which Windows folds into the same error code — is `Unusable` and must
 /// be repaired, not treated as zero.
 pub fn load_shard_seq_state(stage_root: &Path, machine: &str, session_id: &str) -> ShardSeqState {
-    let path = shard_seq_file(stage_root, machine, session_id);
+    load_shard_seq_state_in_dir(&shard_seq_file(stage_root, machine, session_id))
+}
+
+/// [`load_shard_seq_state`] for an already-resolved counter path. The counter
+/// and the shards it numbers always live in one directory, so a shard set
+/// outside `sessions/` reads its counter through the same classification.
+pub fn load_shard_seq_state_in_dir(path: &Path) -> ShardSeqState {
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1509,17 +2189,16 @@ pub fn load_shard_seq_state(stage_root: &Path, machine: &str, session_id: &str) 
     }
 }
 
-/// Highest shard sequence already present in the session dir (0 when none).
+/// Highest shard sequence already present in one shard directory (0 when none).
 ///
 /// Seeds the counter on first run so a pre-existing stage migrates seamlessly:
 /// an existing stage already has shards, so the counter must never start at 0.
-fn derive_shard_high_water(
-    stage_root: &Path,
-    machine: &str,
-    session_id: &str,
-) -> anyhow::Result<u64> {
-    let dir = session_shard_dir(stage_root, machine, session_id);
-    Ok(sealed_shard_entries(&dir)?
+/// The directory is supplied rather than derived, so a machine log's
+/// generations (ADR-053 D4) are numbered by exactly the session rule: its own
+/// directory, its own counter, and a stage reclaim that removed already
+/// archived generations must not reset the next sequence (ADR-020 Phase 2).
+pub fn derive_shard_high_water_in_dir(dir: &Path) -> anyhow::Result<u64> {
+    Ok(sealed_shard_entries(dir)?
         .into_iter()
         .map(|(seq, _)| seq)
         .max()
@@ -1536,13 +2215,7 @@ fn derive_shard_high_water(
 /// high-watermark is never behind the shard set it governs — a stage reclaim
 /// that deletes shard files can therefore never reset the next sequence
 /// (ADR-020 Phase 2).
-fn persist_shard_seq(
-    stage_root: &Path,
-    machine: &str,
-    session_id: &str,
-    seq: u64,
-) -> anyhow::Result<()> {
-    let path = shard_seq_file(stage_root, machine, session_id);
+fn persist_shard_seq_in_dir(path: &Path, seq: u64) -> anyhow::Result<()> {
     let parent = path.parent().expect("shard seq file has a parent");
     fs::create_dir_all(parent)
         .with_context(|| format!("create shard seq directory {}", parent.display()))?;
@@ -1577,13 +2250,20 @@ fn persist_shard_seq(
 /// On first run the counter does not exist yet, so the initial high-watermark
 /// is derived from the shards already on disk (seamless migration — never 0).
 pub fn next_shard_seq(stage_root: &Path, machine: &str, session_id: &str) -> anyhow::Result<u64> {
-    let high_water = match load_shard_seq_state(stage_root, machine, session_id) {
-        ShardSeqState::Missing => derive_shard_high_water(stage_root, machine, session_id)?,
+    next_shard_seq_in_dir(&session_shard_dir(stage_root, machine, session_id))
+}
+
+/// [`next_shard_seq`] for an already-resolved shard directory, so a machine
+/// log's generations share the session rule exactly.
+pub fn next_shard_seq_in_dir(dir: &Path) -> anyhow::Result<u64> {
+    let counter = shard_seq_file_in_dir(dir);
+    let high_water = match load_shard_seq_state_in_dir(&counter) {
+        ShardSeqState::Missing => derive_shard_high_water_in_dir(dir)?,
         ShardSeqState::Loaded(seq) => seq,
         ShardSeqState::Unusable(error) => return Err(error.into_anyhow()),
     };
     let next = high_water + 1;
-    persist_shard_seq(stage_root, machine, session_id, next)?;
+    persist_shard_seq_in_dir(&counter, next)?;
     Ok(next)
 }
 
@@ -1663,11 +2343,7 @@ fn write_sealed_shard_bytes_with_repeat_policy(
     bucket_cap: usize,
     allow_exact_repeat: bool,
 ) -> anyhow::Result<String> {
-    let mut raw = Vec::new();
-    for line in lines {
-        raw.extend_from_slice(line);
-        raw.push(b'\n');
-    }
+    let raw = seal_framed_lines(lines);
     write_sealed_shard_raw_with_policy(
         writer,
         stage_root,
@@ -1677,6 +2353,59 @@ fn write_sealed_shard_bytes_with_repeat_policy(
         bucket_cap,
         allow_exact_repeat,
     )
+}
+
+/// Frame lines the way every sealed shard frames them: each item followed by
+/// exactly one newline.
+fn seal_framed_lines(lines: &[Vec<u8>]) -> Vec<u8> {
+    let mut raw = Vec::new();
+    for line in lines {
+        raw.extend_from_slice(line);
+        raw.push(b'\n');
+    }
+    raw
+}
+
+/// Seal one machine log's newly captured lines under the machine-log namespace
+/// (ADR-053 D2/D4).
+///
+/// The same writer, the same bucket cap and the same per-directory sequence
+/// counter as a session shard — the directory is the only difference, which is
+/// what "sealed with the existing shard writer" means. `allow_exact_repeat`
+/// carries the JSONL meaning it has for sessions: bytes appended after a
+/// validated prefix hash may legitimately repeat earlier bytes, and they are
+/// still sealed rather than collapsed.
+///
+/// Deliberately **not** routed through `audit_store::record_collected_shard`:
+/// that join projects a session's *messages* into the audit sidecar, and a
+/// machine log has no assistant side to project — only what the user typed
+/// (ADR-053 D1/D6). Fidelity for these captures is stamped next to the shard
+/// by the collector (`machine-log@1`, `source: captured`, `value: raw`), which
+/// is ADR-051's capture-time stamp, not a declared default.
+pub fn write_sealed_machine_log_shard(
+    stage_root: &Path,
+    machine: &str,
+    harness: &str,
+    log_id: &str,
+    lines: &[Vec<u8>],
+    bucket_cap: usize,
+    allow_exact_repeat: bool,
+) -> anyhow::Result<String> {
+    assert_stage_writer_audited(StageWriter::Collect)?;
+    let raw = seal_framed_lines(lines);
+    let dir = machine_log_shard_dir(stage_root, machine, harness, log_id);
+    let written = crate::shard_writer::write_shard_in_dir(
+        &dir,
+        bucket_cap,
+        crate::shard_writer::ShardSource::Store {
+            raw: &raw,
+            writer: StageWriter::Collect,
+            allow_exact_repeat,
+        },
+        &[harness, log_id],
+        stage_root,
+    )?;
+    Ok(written.filename())
 }
 
 /// Install `raw` verbatim as the next sealed shard — no line framing is added.
@@ -1737,8 +2466,15 @@ pub fn find_duplicate_shard(
     session_id: &str,
     raw: &[u8],
 ) -> anyhow::Result<Option<String>> {
-    let dir = session_shard_dir(stage_root, machine, session_id);
-    let mut existing = sealed_shard_entries(&dir)?;
+    find_duplicate_shard_in_dir(&session_shard_dir(stage_root, machine, session_id), raw)
+}
+
+/// [`find_duplicate_shard`] inside an already-resolved shard directory. A
+/// machine log's captured bytes are deduplicated by the same rule: a capture
+/// that repeats an earlier generation byte-for-byte is only idempotent for
+/// callers that say so (see `allow_exact_repeat` in the writer).
+pub fn find_duplicate_shard_in_dir(dir: &Path, raw: &[u8]) -> anyhow::Result<Option<String>> {
+    let mut existing = sealed_shard_entries(dir)?;
     existing.sort_by_key(|(seq, _)| *seq);
     let wanted_hash = Sha256::digest(raw);
     for (seq, path) in existing {
@@ -2147,6 +2883,160 @@ impl StoreConfig {
     }
 }
 
+/// Whether the repository `cfg` points to exists and contains at least one snapshot.
+///
+/// Returns `false` on any error, missing repo, or empty snapshot list.
+pub fn destination_has_snapshots(cfg: &StoreConfig) -> bool {
+    let store = BackupStore::for_metadata_query(cfg.clone());
+    let Ok(backends) = store.backends() else {
+        return false;
+    };
+    let Ok(repo_exists) = store.repo_exists(&backends) else {
+        return false;
+    };
+    if !repo_exists {
+        return false;
+    }
+    match backends.repository().list(FileType::Snapshot) {
+        Ok(list) => !list.is_empty(),
+        Err(_) => false,
+    }
+}
+
+/// The first half of the shared-read gate: does the string name a location
+/// `rustic_backend`'s own `location_to_type_and_path` would route to its
+/// local backend?
+///
+/// Kept as its own function because "which backend would open this string"
+/// and "which disk would be read" are different questions (the second half
+/// of the gate answers the second), and because this half must keep
+/// mirroring `rustic_backend`'s classification exactly, so the predicate
+/// and the backend a resolved config eventually opens cannot disagree about
+/// the *backend*: no scheme at all (a plain or relative path), the explicit
+/// `local:` prefix, and on Windows the one-letter drive and colon-bearing
+/// backslash shapes that backend itself routes local. Everything else —
+/// every `opendal:` service, `rest:`, and any other scheme-shaped string —
+/// answers `false`.
+fn repository_routes_local_backend(cfg: &StoreConfig) -> bool {
+    let Some((scheme, path)) = cfg.repo_root.split_once(':') else {
+        // No scheme at all: a plain (absolute or relative) path.
+        return true;
+    };
+    if scheme == "local" {
+        return true;
+    }
+    if cfg!(windows) {
+        // `rustic_backend`'s own Windows local rules: a one-letter drive with
+        // no `/` (its `C:\repo` and `C:Projects\` shapes), and a
+        // colon-bearing backslash form (its `\\?\C:\Test\repo` shape — a
+        // colon-less UNC never reaches here, being the no-scheme arm).
+        if scheme.len() == 1 && !cfg.repo_root.contains('/') {
+            return true;
+        }
+        if scheme.contains('\\') || path.contains('\\') {
+            return true;
+        }
+    }
+    false
+}
+
+/// The conventional roots each OS itself mounts *other* filesystems at —
+/// the places Finder and the desktop environments attach external disks
+/// and network shares, and therefore the places a stale SMB/NFS handle
+/// turns a plain `stat` into a hang no caller can bound. The shipped
+/// multi-machine example (`docs/destinations.md`) lives exactly there:
+/// `/Volumes/<your-disk>/chat-stasher/repo`, on storage "they all mount".
+///
+/// A convention, deliberately: the gate must itself perform **no I/O**,
+/// because it is evaluated for precisely the stale paths it exists to
+/// refuse. Storage mounted outside these roots stays checkable today —
+/// a hand-run `mount_smbfs` into a home directory, macOS's
+/// `~/Library/CloudStorage`, and on Windows a drive letter mapped to a
+/// share (which a drive letter cannot be told apart from) — and that
+/// residual is stated here rather than closed by a stat that would hang.
+fn mounted_storage_roots() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        &["/Volumes/"]
+    } else if cfg!(unix) {
+        &["/mnt/", "/media/", "/run/media/"]
+    } else {
+        // Windows mounts shares as drive letters; only the UNC shapes are
+        // its provably-network paths, and `proof_reads_mounted_storage`
+        // rejects those on its own.
+        &[]
+    }
+}
+
+/// The second half of the shared-read gate: does the *path* a
+/// local-backend-shaped string names sit under one of the OS's
+/// mounted-storage roots (or, on Windows, is it a `\\`-rooted network
+/// reference)? `true` means the proof must not touch it whatever its
+/// speed on a good day.
+fn proof_reads_mounted_storage(path: &str) -> bool {
+    if cfg!(windows) {
+        // A `\\`-rooted path here — the no-scheme arm, or the tail of a
+        // `local:` — is `\\server\share` or its `\\?\UNC\server\share`
+        // spelling: a network reference by construction, whatever the
+        // backend does with it.
+        return path.starts_with("\\\\");
+    }
+    mounted_storage_roots()
+        .iter()
+        .any(|root| path == root.trim_end_matches('/') || path.starts_with(root))
+}
+
+/// Whether `cfg` names a repository a shared read path may check from this
+/// machine's own filesystem — the gate for W1034's upgrade-window proof
+/// (its callers: `status` including the menu-bar poll, `doctor`, and
+/// `reclaim-stage`'s degraded listing).
+///
+/// "Local" must be *positively recognised*, never inferred from "not a
+/// known backend string": [`repository_routes_local_backend`] mirrors
+/// `rustic_backend`'s own `location_to_type_and_path` local rules, and
+/// everything it does not recognise answers `false`, because a backend's
+/// `list()` opens a connection with no timeout and the callers of this
+/// gate are read paths whose contract reads local files and dials no
+/// destination.
+///
+/// A local-backend string still does not name a *disk* — "no scheme" says
+/// which backend would open the path, not which filesystem the path lands
+/// on. `docs/destinations.md` ships exactly that shape as its
+/// mounted-storage example (`/Volumes/<your-disk>/chat-stasher/repo`), and
+/// a stale SMB/NFS handle on such a mount turns the proof's `stat` and
+/// snapshot walk into the same hang the backend-shaped half refuses. So a
+/// recognised local path must also sit outside the OS's conventional
+/// mount roots: there the check is skipped, because the record-based
+/// never-pushed wording is true without the read, and the roads and the
+/// fix it prints are the same repair (a never-initialised destination
+/// gains nothing from the check — a repository without its `config` file
+/// ends it before any walk — and a skipped or unreadable repository keeps
+/// that record-based wording: the suppression direction, never a claimed
+/// window out of a read that did not happen).
+///
+/// `opendal:fs` — opendal's own filesystem service — is excluded with the
+/// rest: its backend build creates a staging directory under the repository
+/// root (`StoreConfig::with_atomic_fs_writes`), a write a read-only path must
+/// not perform, so a repository reached that way keeps the record-based
+/// never-pushed wording instead of a proved upgrade window.
+pub fn repository_is_local(cfg: &StoreConfig) -> bool {
+    if !repository_routes_local_backend(cfg) {
+        return false;
+    }
+    match cfg.repo_root.split_once(':') {
+        // No scheme at all: a plain path, judged by the mount-root bound
+        // exactly as written.
+        None => !proof_reads_mounted_storage(&cfg.repo_root),
+        // The explicit `local:` scheme carries the same paths the
+        // no-scheme arm does — so it carries the same bound.
+        Some((scheme, tail)) if scheme == "local" => !proof_reads_mounted_storage(tail),
+        // The Windows drive / volume shapes: a drive letter does not name
+        // the transport (`Z:` may be a mapped share), so these keep the
+        // check and the residual stays the one stated on
+        // [`mounted_storage_roots`].
+        Some(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -2395,6 +3285,181 @@ mod tests {
         assert_eq!(parse_shard_seq("000001.json"), None);
         assert_eq!(parse_shard_seq("000001.txt"), None);
         assert_eq!(parse_shard_seq("0000000.jsonl"), None); // wrong width
+    }
+
+    /// W1034rev3 Medium 2 / W1034f2: the gate that decides whether a shared
+    /// read path (`reconcile` / `reclaim-stage`'s degraded listing) may check
+    /// a repository's snapshots. Local must be *positively recognised* — every
+    /// backend string, known or not, rejects the check rather than risking a
+    /// network dial with no timeout — and the recognition must be
+    /// `rustic_backend`'s own `location_to_type_and_path` local rules, so the
+    /// predicate and the backend a resolved config eventually opens cannot
+    /// disagree about what "local" means. The classification half is its own
+    /// function since W1034f2, because the composed gate adds a second
+    /// property on top of it: a local-backend string must also name a disk
+    /// the machine did not mount (the next test pins that half).
+    #[test]
+    fn repository_is_local_classifies_every_backend_shape() {
+        for repo in ["/srv/backup-repo", "relative/repo"] {
+            let cfg = StoreConfig {
+                repo_root: repo.into(),
+                ..StoreConfig::default()
+            };
+            assert!(
+                repository_routes_local_backend(&cfg),
+                "a plain path ({repo}) is the local backend's own shape"
+            );
+            assert!(
+                repository_is_local(&cfg),
+                "a plain path ({repo}) outside every mount root keeps the check"
+            );
+        }
+        let explicit = StoreConfig {
+            repo_root: "local:/srv/backup-repo".into(),
+            ..StoreConfig::default()
+        };
+        assert!(
+            repository_routes_local_backend(&explicit),
+            "the explicit `local:` scheme is the local backend's own name"
+        );
+        assert!(
+            repository_is_local(&explicit),
+            "the explicit `local:` scheme outside every mount root keeps the check"
+        );
+        for backend in [
+            "opendal:sftp",
+            "opendal:s3",
+            "opendal:fs",
+            "opendal:fs:/srv/repo",
+            "rest:https://backup.example/",
+            "sftp:user@box:/srv/repo",
+            "opendal:",
+            "b2:bucket",
+        ] {
+            let cfg = StoreConfig {
+                repo_root: backend.into(),
+                ..StoreConfig::default()
+            };
+            assert!(
+                !repository_routes_local_backend(&cfg),
+                "a backend string ({backend}) is not the local backend's shape"
+            );
+            assert!(
+                !repository_is_local(&cfg),
+                "a backend string ({backend}) never gets the shared-read check"
+            );
+        }
+        // The Windows shapes `location_to_type_and_path` itself routes to the
+        // local backend split by their punctuation: a colon-less UNC path is
+        // the no-scheme arm, while the colon-bearing drive and `\\?\C:\…`
+        // forms are local only where rustic_backend's Windows rules apply —
+        // on this platform the drive-letter case is a scheme parse error in
+        // rustic_backend (`C` is no backend), so the classification's
+        // expected value is the platform fact, asserted on both sides. The
+        // composed gate keeps those shapes where no mount-root text applies
+        // but refuses the UNC *network* reference on the platform that can
+        // open one without a backend string hanging off it.
+        for unc in [
+            r"\\.\Volume{b75e2c83-0000-0000-0000-602f00000000}\Test\repo",
+            r"\\Server2\Share\Test\repo",
+        ] {
+            let cfg = StoreConfig {
+                repo_root: unc.into(),
+                ..StoreConfig::default()
+            };
+            assert!(
+                repository_routes_local_backend(&cfg),
+                "a colon-less backslash-rooted path ({unc}) is the no-scheme arm, \
+                 local-backend-shaped on every platform"
+            );
+            assert_eq!(
+                repository_is_local(&cfg),
+                !cfg!(windows),
+                "the composed gate refuses a `\\`-rooted network reference on \
+                 Windows; elsewhere such a string is only a local filename"
+            );
+        }
+        for windows_local in [r"C:\srv\repo", r"\\?\C:\Test\repo"] {
+            let cfg = StoreConfig {
+                repo_root: windows_local.into(),
+                ..StoreConfig::default()
+            };
+            assert_eq!(
+                repository_routes_local_backend(&cfg),
+                cfg!(windows),
+                "the colon-bearing Windows shape {windows_local} follows \
+                 rustic_backend's own local rules"
+            );
+            assert_eq!(
+                repository_is_local(&cfg),
+                cfg!(windows),
+                "the colon-bearing Windows shape {windows_local} keeps the \
+                 same verdict as its classification: no mount-root text applies"
+            );
+        }
+    }
+
+    /// W1034f2 Medium 1 (the rev4 review's first finding): a local-backend
+    /// *string* is not a bounded *read*. A colon-less `repo` was classified
+    /// local even when it names mounted storage — `/Volumes/<your-disk>/
+    /// chat-stasher/repo` is the shipped multi-machine example
+    /// (`docs/destinations.md`), and a stale SMB/NFS handle there turns the
+    /// proof's `stat` into a hang with no timeout, from `status`, the
+    /// menu-bar poll and `doctor` alike. The composed gate now refuses the
+    /// OSes' conventional mount roots — this test was run red against the
+    /// one-layer gate on every platform before the second half was added.
+    #[test]
+    fn repository_is_local_never_proofs_a_mounted_storage_path() {
+        let cfg_for = |repo: &str| StoreConfig {
+            repo_root: repo.into(),
+            ..StoreConfig::default()
+        };
+        if cfg!(target_os = "macos") {
+            for repo in [
+                "/Volumes/Backup/chat-stasher/repo",
+                "local:/Volumes/Backup/chat-stasher/repo",
+                "/Volumes",
+            ] {
+                assert!(
+                    !repository_is_local(&cfg_for(repo)),
+                    "the macOS mount root ({repo}) is never consulted for the window"
+                );
+            }
+            assert!(
+                repository_is_local(&cfg_for("/Users/archivist/chat-stasher/repo")),
+                "a path on the boot volume keeps the check"
+            );
+        }
+        if cfg!(unix) && !cfg!(target_os = "macos") {
+            for repo in [
+                "/mnt/backup/chat-stasher/repo",
+                "/media/archivist/usb/chat-stasher/repo",
+                "/run/media/archivist/usb/chat-stasher/repo",
+                "local:/mnt/backup/chat-stasher/repo",
+            ] {
+                assert!(
+                    !repository_is_local(&cfg_for(repo)),
+                    "the conventional mount root ({repo}) is never consulted for the window"
+                );
+            }
+            assert!(
+                repository_is_local(&cfg_for("/home/archivist/chat-stasher/repo")),
+                "a path on the boot volume keeps the check"
+            );
+        }
+        if cfg!(windows) {
+            for repo in [r"\\Fileserver\Share\chat-stasher\repo"] {
+                assert!(
+                    !repository_is_local(&cfg_for(repo)),
+                    "a colon-less UNC network reference ({repo}) is never consulted for the window"
+                );
+            }
+            assert!(
+                repository_is_local(&cfg_for(r"C:\Users\archivist\chat-stasher\repo")),
+                "an ordinary drive-letter path keeps the check — the residual \
+                 `mounted_storage_roots` states (a drive letter does not name the transport)"
+            );
+        }
     }
 
     #[test]

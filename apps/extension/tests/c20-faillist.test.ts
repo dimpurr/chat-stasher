@@ -12,7 +12,7 @@
  *  3. the failure list hits its cap ⇒ drop the oldest and record how many were dropped (never a silent truncation).
  *
  * Cases 1 and 2 both start from the **real production entry point**: runtime.onMessage('chat-captured')
- *  → handleCaptured → kickBackfill → tickBackfill → runBackfill → sink。
+ *  → handleCaptured → kickBackfill → tickBackfill → runBackfill → sink.
  * Zero real network and zero logged-in state throughout: the http port is a pure function in this
  * file, and the write-down channel is a synthetic native host (tests/synthetic-native-host.ts).
  */

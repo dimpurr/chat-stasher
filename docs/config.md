@@ -58,6 +58,7 @@ opencode = "~/.local/share/opencode/opencode.db"
 - For a tool that stores one database file, give the file. For a tool that stores a folder of sessions, give the folder.
 - `grok-bot` accepts the app-support directory; its reader locates `sand-client-persistence` below it, decodes the app's base32-named state blobs, and archives observed replica rows as partial data with sequence gaps recorded (positions before the first observed row included). It is available on macOS only. A row the app rewrites in place is archived as an additional variant of that sequence, never as a replacement.
 - `hermes-agent` accepts the `state.db` file. Its legacy `~/.hermes/sessions` compatibility sources are scanned when no root is set here; a root you set is the whole source, and the default home paths are not consulted around it.
+- A tool whose source is several roots (Claude Code's desktop Cowork store and Codex's archived threads each have their own row in the support table) names one root with the tool id plus the root id: `claude-code:claude-desktop-cowork = "…"`. The plain tool id keeps naming the tool's own primary store — `claude-code` is the CLI store, `codex` the active sessions — and the other roots keep looking at their registered locations.
 - A path you write here is always looked at, even where the registry has no verified path for your system.
 - A path that does not exist is reported as *unknown*, never as "0 sessions".
 
@@ -155,6 +156,117 @@ This machine's **body cache** may retain bodies fetched by eligible single-sessi
 - A `[cache]` section with an unreadable value turns the cache **off** instead of guessing, and `doctor` says why.
 - `chat-stasher cache` shows what it holds, and `chat-stasher cache clear` empties it.
 
+## `[pull.letta]`
+
+Declares the Letta API-pull producer for the scheduled pass: with this
+section present, every `run-once` pass pulls the producer **before** its
+collect step, so the hourly job archives Letta without a separate command.
+`chat-stasher pull letta` (see [pull.md](pull.md)) is unchanged and reads
+the same pipeline. The section rejects unknown keys: a provider this build
+does not know must not look declared while silently never being pulled.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `account_id` | (required) | The stable provider account ID you chose, independent of the API key. Never logged. |
+| `inbox` | (required) | The local inbox directory the producer's `inbox@3` bundles are published into. Keep it stable across runs. |
+| `api_key` | (unset → the environment) | The credential the pull authenticates with: a literal, or a `file:PATH`, `env-file:PATH:NAME` or `keychain:ACCOUNT` reference — the same forms destination options accept, fail-closed the same way. A timer sees no login shell, so this is the form the hourly pass can actually reach; without it the pull reads `LETTA_API_KEY` from the environment, which `schedule install`, `status`, `doctor` and the menu bar flag as unreachable by the timer. Never logged. |
+| `state` | `~/.local/share/chat-stasher/state/api-pull/letta` | Durable private producer state. Preserve it across restores: its identity salt keeps the account's derived tenant stable across key rotation. |
+| `pace_ms` | `1000` | Serial request pacing. The unattended pass accepts **1000–60000** (at least one request per second — an unattended job never hammers the provider); the interactive `pull letta` command accepts 0–60000. |
+| `budget_seconds` | `600` | Whole-pass wall-clock budget, shared by the walk and the archive-proof phase. The unattended pass accepts **1–2700** (45 minutes, below the hourly period, so one pass can never contend with its own successor); the interactive command accepts 1–3600. |
+| `page_size` | `100` | Rows requested per page. Accepts **100–200** only — the provider rejects larger agent-history pages. |
+
+A declaration that cannot be honoured (a missing key, a value outside the
+band) stops the pass's pull with the config key named, and the whole pass
+ends with exit 3 ("did not finish reading") while the local archive cycle
+still runs: a partly-read producer is never reported as an empty one.
+
+## `[mirror]`
+
+Declares this machine's **local mirror**: a byte-exact, file-by-file copy
+of one declared destination's whole repository (everything except
+`locks/`, which this build never holds), kept on local disk under
+`~/.local/share/chat-stasher/mirror/<name>`. Nothing is decrypted to copy
+it — the copy is the destination's own ciphertext, and `keys/` is copied
+verbatim, which is the same encrypted master key the destination already
+uses, not a new one. For the command itself see [cli.md](cli.md#mirror).
+
+Enabling this section is what moves **reads**, not just copying: `read`,
+`search`, `export`, `index build` and the `ui` dashboard answer the
+mirrored destination's bytes from this local copy first, falling back to
+the remote for each file the copy does not hold yet (a mid-fill mirror is
+an ordinary partial copy, and the fallback is quiet per-file progress —
+the report's `mirror served` line counts which files each side served).
+A machine with the mirror enabled can read sessions **offline**: with the
+remote gone, listings fall back to the copy too. Two things stay the
+remote's own while it can be asked: file *presence* (which files exist is
+the remote's word, so a behind copy never silently shrinks what a search
+sees), and `verify`, which never certifies anything from the copy — a
+copy may not grade itself. Where reads happened, the answer is dated by
+the copy: the ui and report lines show "the local copy as of HH:MM" (the
+last completed sync), and a copy that outlived its section or its switch
+still says so when read directly. One corruption rule keeps the copy
+honest: a file that is present but unreadable on the copy (disk damage)
+is a hard failure that stops the read with the file's name and the repair
+(`mirror sync` re-downloads a file that no longer hashes to its name) —
+it is never quietly replaced from the remote mid-read.
+
+The `--offline` switch (`read`, `export`, `verify`) takes the fallback
+away for one run: the destination is not contacted at all — its backend
+is never even built — and every byte comes from the copy and the local
+caches, with `served from mirror` on the output and a "did not finish"
+exit (`3`, never an empty result or a claimed absence) for anything the
+copy cannot serve. `verify --offline` is the switch's one exception to
+"never certifies anything from the copy": it certifies the copy, by name,
+and words the verdict that way — an online `verify` still never consults
+it.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | The switch. A machine that declares no section, or sets this false, mirrors nothing and reads only the remote — the read behaviour above is the switch's, not a separate one. |
+| `mirror_of` | (required) | The declared destination to mirror, by name. One mirror per machine: repointing this key is safe — the old record is expired rather than inherited (the state file names the destination it was built for, and coverage answers only for that name). |
+| `min_free_gib` | `max(10, min(5% of the volume's capacity, 20))` | The free-space floor for the mirror's volume. Before a first fill starts, the remaining download plus this floor must fit in the free space, or the round refuses rather than write toward a full disk; mid-fill, free space falling below it pauses the copy. The 20 GiB cap keeps the percentage term of the default from demanding ever more headroom on a large disk; setting this key always wins over the default. |
+
+- The scheduled pass runs the copy after its push, inside the round's
+  leftover budget; `mirror sync` runs the same round on demand. A first
+  fill of a large repository spans several rounds and `status` shows its
+  progress — a round that stops early (budget, disk floor, remote
+  readability) is a pause, not a failure, and the next round resumes.
+- What the copy keeps is visible without running anything: `status`
+  prints one `[mirror]` line and `doctor` a whole `D13` section — the
+  copy's size on disk, when the last sync completed (with its age), how
+  many snapshots the last completed round's record does not hold
+  closure-complete, and how many orphan files the mirror still carries.
+  These are the settled four: the same sentence family, with one
+  wording, appears in `status`, in `doctor` and in the menu bar app. A
+  first sync reads as exactly that (`first sync … in progress:
+  downloaded A of X (a%), of which B (b%) hash-verified` — the two
+  numbers a fill has: everything of the listing already on disk, and
+  the subset a hash has vouched for, downloaded ≥ verified always),
+  never as a red, while `reclaim` holds the
+  sessions it would cover — and that hold-back is a code gate, not a
+  promise: `reclaim-stage` refuses a session — `not-mirrored` — until the
+  copy's completed-round record holds that session's proof snapshot
+  closure-complete, and the mirror rows name how many sessions it is
+  currently holding back, so the count comes from the reclaim's own
+  record and never a guess.
+- Orphan files — what a deliberate remote cleanup left behind in the
+  mirror — are never deleted automatically. `doctor` reports their count
+  and the reclaimable bytes; remove the files by hand, or delete the
+  whole mirror directory and re-run `mirror sync` to rebuild a copy
+  without them.
+- A round that *checked and failed* is the exception: a file that hashes
+  against its own name twice and fails both times is source corruption
+  and exits `1`, recorded `failed`. The exception is that verdict, not
+  any hold: the mirror re-checks the source every round until it is
+  fixed, and a retry alone does not heal it.
+- Turning the mirror off stops the copying and deletes nothing, and puts
+  reads back on the remote — the copy stays on disk, and reading it
+  directly (or verifying it, `--repo` over its directory) still says it
+  is the copy being read. The leftover copy keeps every byte until you
+  delete it, and its size is still shown (`status`'s `[mirror]` line and
+  `doctor`'s D13 word it with its measured bytes while the switch is
+  off), so a leftover is an inventory fact, never an invisible one.
+
 ## Files chat-stasher keeps outside the config
 
 | What | Where | Safe to delete? |
@@ -163,6 +275,8 @@ This machine's **body cache** may retain bodies fetched by eligible single-sessi
 | Machine identity | `~/.local/share/chat-stasher/machine-identity` | No. A new one starts a new partition. |
 | Collection state | `~/.local/share/chat-stasher/state/` | Not recommended. |
 | Stage | the folder you chose | Only through `reclaim-stage`. |
+| Mirror copy | `~/.local/share/chat-stasher/mirror/<name>/`, one per mirrored destination | Yes — it is a re-downloadable copy; deleting it stops nothing else, the next sync round refills it. Holds ciphertext only, but it does include the mirrored destination's `keys/` directory on the same volume. |
+| Mirror records | `~/.local/share/chat-stasher/state/mirror-state.json`, `…/mirror-progress.json` | Not recommended. Coverage answers come from these. |
 | Metadata cache | the platform cache folder, under `rustic` | Yes. |
 | Body cache | see `[cache]` | Yes: `cache clear`. |
 | Full-text index | the platform cache folder, under `chat-stasher/fts`, one per destination. **Plaintext.** | Yes: `index clear --destination <name>`. |

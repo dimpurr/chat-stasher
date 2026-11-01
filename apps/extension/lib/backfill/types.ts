@@ -1459,7 +1459,7 @@ export type TotalSource = 'response-total' | 'unknown' | 'contradicted';
 
 /** The counting window for the daily quota, split by UTC date. */
 export interface DailyCounter {
-  /** YYYY-MM-DD（UTC） */
+  /** YYYY-MM-DD (UTC) */
   day: string;
   count: number;
   /**

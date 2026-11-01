@@ -885,7 +885,6 @@ fn assert_identical_turn_resume(session: &str, replay: &[u8]) {
     fs::write(&registry_path, serde_json::to_vec(&registry_json).unwrap()).unwrap();
 
     let repeated = b"{\"created_at\":\"2026-10-02T10:00:00Z\",\"type\":\"USER_INPUT\",\"content\":\"synthetic repeated turn\"}\n";
-    assert!(!repeated.is_empty());
     write_transcript(&cli_root, session, repeated);
 
     let stage = root.join("stage");

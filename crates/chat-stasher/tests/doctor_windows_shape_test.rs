@@ -27,6 +27,7 @@
 //! that supplies the shape there).
 
 use chat_stasher::doctor;
+use chat_stasher::scanner::ProbeState;
 use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -241,4 +242,222 @@ fn windows_shaped_home_still_honours_the_configured_root() {
     );
 
     std::env::remove_var("CHAT_STASHER_REGISTRY");
+}
+
+/// The shipped Windows shape of the claude-code family (W1006d, ADR-059
+/// draft D6): the CLI primary store is scannable while the desktop Cowork
+/// root's Windows cell is `unascertained` — a path the scan refuses to
+/// guess at — so the family's combined total is a *qualified lower
+/// bound*. `doctor` must report the measured CLI count, not erase it into
+/// a blanket unknown (the side effect the draft's external review rejected),
+/// and must mark the unverified root in both the registry probe row and
+/// the footprint row, so the two tables keep agreeing with each other
+/// (`doctor_consistency_test` joins them) while neither claims the
+/// family total.
+///
+/// The registry-swap trick of the file (`doctor_windows_shape_test`)
+/// again makes a foreign platform's shape runnable from any machine: the
+/// claude-code primary's Windows cell is replayed for this platform.
+#[test]
+fn windows_unverified_desktop_cell_keeps_the_measured_cli_count_marked() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let base = tempfile::tempdir().unwrap();
+    let home = windows_shaped_home(base.path());
+    isolate_home(&home);
+    write_windows_desktop_store_registry(&home);
+
+    // Two CLI sessions under the registry-declared primary root, resolved
+    // through the isolated `$HOME` (the shape-mate above replays the
+    // Windows path itself; this test replays the Windows *aggregate*).
+    let claude_projects = home.join(".claude").join("projects").join("repo-abc");
+    fs::create_dir_all(&claude_projects).unwrap();
+    for i in 0..2u8 {
+        fs::write(
+            claude_projects.join(format!("019d5c06-{i:04}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+    }
+    // The desktop Cowork root is deliberately NOT planted: its cell is
+    // `unascertained`, so planting anything there changes nothing — the
+    // probe never looks, which is the point of the fixture.
+
+    let report = doctor::run();
+    assert!(!report.scan_failed, "scratch registry must load");
+
+    let probe = report
+        .probes
+        .iter()
+        .find(|p| p.id == "claude-code")
+        .expect("registry probe row for claude-code");
+    assert_eq!(
+        probe.record_count,
+        Some(2),
+        "the measured CLI count is reported, never erased by the unverified desktop root; note={}",
+        probe.note
+    );
+    assert_eq!(
+        probe
+            .unverified_roots
+            .iter()
+            .map(|root| root.id.as_str())
+            .collect::<Vec<_>>(),
+        ["claude-desktop-cowork"],
+        "the probe row marks the unverified root so the count reads as a lower bound"
+    );
+    assert!(
+        probe.note.contains("lower bound"),
+        "the note qualifies the total; note={}",
+        probe.note
+    );
+
+    let footprint = report
+        .footprints
+        .iter()
+        .find(|f| f.name == "claude-code")
+        .expect("footprint row for claude-code");
+    assert_eq!(
+        footprint.session_count, probe.record_count,
+        "the two doctor tables must keep agreeing on the count"
+    );
+    assert_eq!(
+        footprint.unverified_roots,
+        vec!["claude-desktop-cowork".to_string()],
+        "the footprint row carries the same marking as the probe row"
+    );
+    assert!(
+        footprint.note.contains("lower bound"),
+        "the footprint note qualifies the count too; note={}",
+        footprint.note
+    );
+
+    std::env::remove_var("CHAT_STASHER_REGISTRY");
+}
+
+/// The empty-machine half of the W1006d shape above: the same Windows family
+/// — scannable CLI primary beside an `unascertained` desktop Cowork root —
+/// with **nothing installed at all**. The primary root was still MEASURED
+/// (looked for, found absent), so the scanner's aggregate keeps the measured
+/// zero as the lower bound's floor instead of collapsing the family into an
+/// unknown: `record_count == Some(0)` with the unverified sibling named in
+/// `unverified_roots`, the state that tells the truth about presence staying
+/// `missing`, and doctor's two tables carrying the same marked `>=0` — the
+/// "an absent harness is not an empty one" sentence is spoken by the
+/// marking plus the unknown presence, not by faking the zero as a family
+/// total.
+///
+/// This is the exact shape the `windows-latest` CI run caught through the
+/// shipped registry (claude-code on a bare runner: `footprint session count
+/// must be 'unknown', not Some(0)`); the shipped desktop cell is
+/// `unascertained` on Windows only, so the shipped-registry form of it is
+/// unreachable on macOS and Linux. The replay makes the *invariant* — the
+/// floor is always carried with its qualification — run on every platform,
+/// so the suite cannot again be green everywhere except one OS it never
+/// exercised.
+#[test]
+fn windows_unverified_desktop_cell_empty_machine_keeps_the_floor_marked() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let base = tempfile::tempdir().unwrap();
+    let home = windows_shaped_home(base.path());
+    isolate_home(&home);
+    write_windows_desktop_store_registry(&home);
+
+    let report = doctor::run();
+    assert!(!report.scan_failed, "scratch registry must load");
+
+    let probe = report
+        .probes
+        .iter()
+        .find(|p| p.id == "claude-code")
+        .expect("registry probe row for claude-code");
+    assert_eq!(
+        probe.state,
+        ProbeState::Missing,
+        "the measured primary was found absent; note={}",
+        probe.note
+    );
+    assert_eq!(
+        probe.record_count,
+        Some(0),
+        "the measured zero is kept as the lower bound's floor, never a blanket unknown; note={}",
+        probe.note
+    );
+    assert_eq!(
+        probe
+            .unverified_roots
+            .iter()
+            .map(|root| root.id.as_str())
+            .collect::<Vec<_>>(),
+        ["claude-desktop-cowork"],
+        "the unverified sibling still qualifies the floor; note={}",
+        probe.note
+    );
+
+    let footprint = report
+        .footprints
+        .iter()
+        .find(|f| f.name == "claude-code")
+        .expect("footprint row for claude-code");
+    assert!(
+        !footprint.installed,
+        "nothing is installed; the row must not claim otherwise"
+    );
+    assert!(
+        footprint.presence_unknown,
+        "a family with an unverified root is partially unknown, not a measured 'not installed'"
+    );
+    assert_eq!(
+        footprint.session_count, probe.record_count,
+        "the two doctor tables must keep agreeing on the count (session_count={:?})",
+        footprint.session_count
+    );
+    assert_eq!(
+        footprint.unverified_roots,
+        vec!["claude-desktop-cowork".to_string()],
+        "the footprint row carries the same marking as the probe row"
+    );
+    assert!(
+        footprint.note.contains("lower bound"),
+        "the footprint note qualifies the floor too; note={}",
+        footprint.note
+    );
+
+    std::env::remove_var("CHAT_STASHER_REGISTRY");
+}
+
+/// The registry the qualified-lower-bound test runs against: the shipped
+/// claude-code Windows family's shape — a scannable primary beside an
+/// `unascertained` desktop Cowork root — replayed for every platform so
+/// the aggregate rule for it is exercised wherever the suite runs. The
+/// primary cell uses the portable `~` template on purpose (the sibling
+/// test above already replays the Windows *path* shapes); what is pinned
+/// here is the aggregate: a measured root beside a root the scan refuses
+/// to guess at. The desktop cell keeps the shipped `%APPDATA%` template —
+/// its `unascertained` confidence is what decides the skip, before any
+/// path is ever resolved.
+fn write_windows_desktop_store_registry(home: &Path) -> PathBuf {
+    let primary = r#"{ "template": "~/.claude/projects",
+                      "format": "jsonl", "confidence": "official-docs",
+                      "source": "W1006d test: claude-code primary cell, portable replay" }"#;
+    let desktop = r#"{ "template": "%APPDATA%\\Claude\\local-agent-mode-sessions\\",
+                      "format": "jsonl", "confidence": "unascertained",
+                      "source": "W1006d test: claude-desktop-cowork.windows cell of shipped registry" }"#;
+    let path = home.join("registry.json");
+    fs::write(
+        &path,
+        format!(
+            r#"{{ "schema_version": 1, "generated": "W1006d",
+                  "harnesses": [
+                    {{ "id": "claude-code", "display_name": "Claude Code",
+                       "paths": {{ "macos": {primary}, "linux": {primary}, "windows": {primary} }},
+                       "source_roots": [
+                         {{ "id": "claude-desktop-cowork",
+                            "paths": {{ "macos": {desktop}, "linux": {desktop}, "windows": {desktop} }} }}
+                       ] }}
+                  ] }}"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("CHAT_STASHER_REGISTRY", &path);
+    path
 }

@@ -8,7 +8,7 @@ use std::time::SystemTime;
 /// containing directory (`.claude` vs `.codex`), or — for the registry-driven
 /// scan — from the harness entry whose root is being walked, never guessed
 /// from session content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HarnessSource {
     ClaudeCode,
     Codex,
@@ -27,6 +27,15 @@ pub enum HarnessSource {
     Continue,
     KimiCode,
     DeepSeekHarness,
+    /// Codebuff / Freebuff (`manicode`): one product, one on-disk layout,
+    /// two npm names (ADR-054 D1).
+    Codebuff,
+    /// WorkBuddy desktop app: sqlite session metadata plus JSONL transcripts
+    /// under one `~/.workbuddy` root (W1046).
+    WorkBuddy,
+    /// CodeBuddy CLI: the other build of the same `cbc` core; JSONL
+    /// transcripts below `~/.codebuddy/projects/`, no sqlite store (W1047).
+    CodeBuddy,
 }
 
 /// Layout of a virtual session backed by a structured, read-only local source.
@@ -43,6 +52,11 @@ pub enum SqliteSessionLayout {
     Grok,
     Zed,
     GrokBot,
+    GitHubCopilotCli,
+    /// A WorkBuddy session row joined to its `projects/<slug>/<id>.jsonl`
+    /// transcript at collection time (W1046): the row exports its metadata
+    /// (or its tombstone), the transcript file appends under the same id.
+    WorkBuddy,
 }
 
 impl HarnessSource {
@@ -69,6 +83,9 @@ impl HarnessSource {
             // Not abbreviable to `deepseek`: that id is the deepseek.com web
             // chat platform, a different harness from this local agent.
             HarnessSource::DeepSeekHarness => "deepseek-harness",
+            HarnessSource::Codebuff => "codebuff",
+            HarnessSource::WorkBuddy => "workbuddy",
+            HarnessSource::CodeBuddy => "codebuddy",
         }
     }
 
@@ -94,6 +111,9 @@ impl HarnessSource {
             "continue" => Some(HarnessSource::Continue),
             "kimi-code" => Some(HarnessSource::KimiCode),
             "deepseek-harness" => Some(HarnessSource::DeepSeekHarness),
+            "codebuff" => Some(HarnessSource::Codebuff),
+            "workbuddy" => Some(HarnessSource::WorkBuddy),
+            "codebuddy" => Some(HarnessSource::CodeBuddy),
             _ => None,
         }
     }
@@ -135,4 +155,66 @@ pub struct SessionRecord {
     /// Capture-time dimensions declared by the registry path that found this
     /// source. This never changes the session identity or transcript bytes.
     pub provenance: crate::provenance::SessionProvenance,
+    /// Facts a registry `session_dir` rule (or the multi-root walk above it)
+    /// observed about the record's session directory, collected for their
+    /// capture-time consumers: the codebuff chat-directory start time and its
+    /// cross-check (ADR-054 D4), the whitelist sidecars that seal raw under
+    /// the same session identity (ADR-054 D5/D9), and the registry
+    /// `source_roots[].id` a skip observation names instead of a path
+    /// (ADR-054 D6/D7). Absent for every record a session-directory rule did
+    /// not produce; never identity, never content.
+    pub session_dir: Option<SessionDirFacts>,
+    /// Discovered through a registry source root marked `movable`: a root of
+    /// a store that MOVES its files between the roots of one registry entry
+    /// (codex's `thread/archive` moves a rollout from `sessions/` into
+    /// `archived_sessions/` and `thread/unarchive` moves it back), so the
+    /// file's own name is the session's identity and the same native id seen
+    /// at another path is the same file, never a second copy of the store's
+    /// bytes (W1007, ADR-059 draft D4).
+    ///
+    /// In the collector this is what lets a movable carrier recover its
+    /// position from the stage by content even when the record also declares
+    /// captured dimensions: for a store that moves files, byte-equal
+    /// discovery is the same file — the "byte equality cannot establish
+    /// event identity" ambiguity that makes a fresh provenance-bearing
+    /// source re-seal its whole bytes cannot arise.
+    pub movable_root: bool,
+}
+
+/// Per-session facts the scanner records at discovery for a harness whose
+/// registry cell declares a `session_dir` rule that needs them (only
+/// codebuff does today; ADR-054). Additive on purpose: fields stay optional
+/// or defaulted so adding a fact never rewrites every construction site.
+#[derive(Debug, Clone, Default)]
+pub struct SessionDirFacts {
+    /// The registry `source_roots[].id` whose walk produced the record —
+    /// `codebuff` / `codebuff-dev` / `codebuff-staging` — set by the
+    /// multi-root probe so control records name a root, never a path
+    /// (ADR-054 D6). `None` only on a record no root walk labelled.
+    pub root_id: Option<String>,
+    /// The chat directory name's own RFC 3339 UTC instant, recorded at
+    /// capture and read from that record — never re-parsed from the archive
+    /// id (ADR-054 D4). Absent means the name did not match the accepted
+    /// shape: unknown, never zero, never a file time.
+    pub captured_start: Option<crate::manifest::CapturedStart>,
+    /// The session directory's own mtime (and ctime under Unix, whichever is
+    /// earlier), for the D4 cross-check that it does not precede
+    /// [`Self::captured_start`].
+    pub dir_mtime: Option<SystemTime>,
+    /// Whitelist sidecar files found beside the transcript (ADR-054 D5/D9),
+    /// sealed as raw bytes under the same session identity. Absent-tolerant:
+    /// a session without its sidecars is still archived.
+    pub extra_files: Vec<ExtraFileSource>,
+}
+
+/// One whitelist sidecar file (ADR-054 D5): metadata only at scan time — the
+/// collector alone reads its bytes.
+#[derive(Debug, Clone)]
+pub struct ExtraFileSource {
+    /// Literal file name as declared by the registry rule.
+    pub name: String,
+    /// Absolute path of the file.
+    pub path: PathBuf,
+    /// Byte size at scan time.
+    pub byte_size: u64,
 }

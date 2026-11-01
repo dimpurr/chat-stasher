@@ -331,23 +331,39 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
     create_opencode_db(&opencode_db, &opencode_data);
 
     let registry = fixture_registry();
+    let mut root_overrides: Vec<(String, String)> = vec![
+        (
+            "claude-code".to_string(),
+            claude_root.to_string_lossy().into_owned(),
+        ),
+        (
+            "codex".to_string(),
+            root.join("sources/codex").to_string_lossy().into_owned(),
+        ),
+        (
+            "opencode".to_string(),
+            opencode_db.to_string_lossy().into_owned(),
+        ),
+    ];
+    // The canonical `claude-code` / `codex` keys name each harness's primary
+    // store; their additional source roots (the desktop Cowork store, the
+    // archived rollouts) keep reading wherever this machine really keeps
+    // them unless they are named by their qualified root keys too — so the
+    // fixture has to pin each declared root the same way, or the scan is
+    // not hermetic. An empty directory is what this fixture wants them to
+    // read: the synthetic sessions live under the primary keys above.
+    let empty_roots = root.join("sources/empty-root");
+    fs::create_dir_all(&empty_roots).unwrap();
+    for harness in &registry.harnesses {
+        for source_root in &harness.source_roots {
+            root_overrides.push((
+                format!("{}:{}", harness.id, source_root.id),
+                empty_roots.to_string_lossy().into_owned(),
+            ));
+        }
+    }
     let config = Config {
-        harness_roots: [
-            (
-                "claude-code".to_string(),
-                claude_root.to_string_lossy().into_owned(),
-            ),
-            (
-                "codex".to_string(),
-                root.join("sources/codex").to_string_lossy().into_owned(),
-            ),
-            (
-                "opencode".to_string(),
-                opencode_db.to_string_lossy().into_owned(),
-            ),
-        ]
-        .into_iter()
-        .collect(),
+        harness_roots: root_overrides.into_iter().collect(),
         ..Config::default()
     };
     let scan = scanner::scan_with_registry(&config, &registry).expect("scan synthetic sources");

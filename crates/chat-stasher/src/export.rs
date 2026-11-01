@@ -172,6 +172,10 @@ pub struct ExportOptions {
     pub turns: Turns,
     /// Trim written lines to the selector's window. Rejected without a window.
     pub trim_to_window: bool,
+    /// ADR-061: emit the records the source deleted too, at their original
+    /// positions, each carrying `"deleted": true` (snapshot-source sessions;
+    /// other harnesses ignore the switch).
+    pub include_deleted: bool,
     /// Write into a non-empty `--out`. Nothing is ever deleted either way.
     pub force: bool,
     /// Print the plan and stop.
@@ -928,7 +932,15 @@ pub fn export_sessions(
         .iter()
         .map(|h| (h.machine.clone(), h.session_id.clone()))
         .collect();
-    let dumped = store.read_selected_sessions(mk, &wanted)?;
+    let dumped = store.read_selected_sessions_with_view(
+        mk,
+        &wanted,
+        if opts.include_deleted {
+            crate::opencode_records::BodyView::IncludeDeleted
+        } else {
+            crate::opencode_records::BodyView::Current
+        },
+    )?;
 
     // Everything that could fail before the first byte is now behind us: the
     // archive was read. Only now is the output directory created, so a read
@@ -944,16 +956,32 @@ pub fn export_sessions(
         let bytes = match dumped.get(&(hit.machine.clone(), hit.session_id.clone())) {
             Some((bytes, _shards)) => bytes,
             None => {
-                out.failed.push(FailedSession {
-                    machine: hit.machine.clone(),
-                    session_id: hit.session_id.clone(),
-                    harness: hit.harness.clone(),
-                    why: format!(
+                // Offline (W1053), the walk that did not return this session
+                // read the local mirror copy only, so the sentence below must
+                // not claim snapshots the copy never saw are the whole story:
+                // the destination was not contacted, and its absence here
+                // proves nothing about the archive — the run's exit status
+                // (3, incomplete) and this row carry that untold-ness.
+                let why = if store.is_offline_mirror() {
+                    format!(
+                        "the local mirror copy does not hold this session's shards (--offline; \
+                         the destination was not contacted, so nothing here proves the archive \
+                         lacks it) — the session is absent from this export, which is not the \
+                         same as it being empty",
+                    )
+                } else {
+                    format!(
                         "no snapshot of machine `{}` holds this session's shards, so its bytes \
                          could not be read back — the session is absent from this export, which \
                          is not the same as it being empty",
                         hit.machine
-                    ),
+                    )
+                };
+                out.failed.push(FailedSession {
+                    machine: hit.machine.clone(),
+                    session_id: hit.session_id.clone(),
+                    harness: hit.harness.clone(),
+                    why,
                 });
                 continue;
             }
@@ -1330,6 +1358,7 @@ mod tests {
             out: PathBuf::from("/nonexistent-for-unit-tests"),
             turns,
             trim_to_window: trim,
+            include_deleted: false,
             force: false,
             dry_run: true,
         }

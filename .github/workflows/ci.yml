@@ -207,13 +207,11 @@ jobs:
       # only on macOS.
       #
       #   * Windows: it is a `#!/usr/bin/env bash` script that shells out to
-      #     `target/debug/chat-stasher` (release-gate.sh:25) — no `.exe`
+      #     `target/debug/chat-stasher` (release-gate.sh:35) — no `.exe`
       #     suffix — plus `find`/`dd`/`od`. Not run here.
-      #   * Linux: it uses BSD `stat -f` (release-gate.sh:87 and :258). Both
-      #     call sites sit on the `--real-data` and `--selftest` branches,
-      #     which this workflow does not take, so the synthetic happy path
-      #     *may* work under GNU coreutils — but that has never been executed
-      #     on Linux and is therefore unverified. Not run here.
+      #   * Linux: portability probe (release-gate.sh:71) supports GNU stat -c
+      #     first, but full gate execution remains macOS-only and unverified on
+      #     Linux. Not run here.
       #
       # Making the gate portable means editing scripts/, which is out of scope
       # for this workflow change. Until then these two cells are honestly
@@ -375,6 +373,16 @@ jobs:
       - name: Citation semantic binding regression tests
         run: python3 -m unittest scripts/tests/test_check_citation_drift.py
 
+      # The scanner both the terminology lint and the output inventory read
+      # through. Its malformed-input contract - no reported end may equal the
+      # start position - is what keeps a regeneration pass over an
+      # unparseable source file from spinning forever (the failure a W932
+      # regeneration hit). The spin case runs in a subprocess under a
+      # timeout, so a regression fails in seconds here instead of hanging
+      # this job.
+      - name: User-string scanner regression tests
+        run: python3 -m unittest scripts/tests/test_user_strings.py
+
       # The relocation script's own self-test, for the same reason the two
       # above are here: a gate that cannot prove it still catches anything is
       # worth nothing. It builds throwaway repositories under a temp directory
@@ -445,6 +453,24 @@ jobs:
 
       - name: Support matrix check self-test
         run: python3 scripts/check-support-matrix.py --selftest
+
+      # The per-source pages under docs/sources/ are half generated, half
+      # hand-written. The generated half (page set, id, surface, status, last
+      # verified, the per-OS cells, and the whole index) is derived from the
+      # same three inputs the support tables come from - the harness registry,
+      # the extension's platform table, and the import seam's TakeoutPlatform
+      # enum - so this fails when any of those moved without the pages being
+      # re-derived, when a page exists for no source, or when a hand-written
+      # body lost one of its fixed headings. The written half's prose is never
+      # judged, only its shape. The selftest is here for the same reason as the
+      # others: a gate that cannot prove it still catches staleness is not a
+      # gate. It builds its own throwaway tree under a temp directory, so it
+      # needs no history and cannot leave this checkout dirty.
+      - name: Source pages are up to date
+        run: python3 scripts/check-source-pages.py
+
+      - name: Source pages check self-test
+        run: python3 scripts/check-source-pages.py --selftest
 
       # This probe is synthetic-only. Keep its behavior checks in CI so the
       # input and output bounds and missing/null/empty distinctions stay pinned.
@@ -517,6 +543,18 @@ jobs:
       # anything for real.
       - name: Extension reload script behaves
         run: bash scripts/dev/test-reload-extension.sh
+
+      # W932 · the no-http-port keepalive helper. Same job, same reason: it runs
+      # against a mock DevTools endpoint (HTTP + WebSocket) built into the test
+      # file, so it needs no browser. It does need Node 22 or newer: the helper
+      # speaks WebSocket through the global, as does the mock, and the gates
+      # runner image ships Node 22 by default — unlike the npm launcher step
+      # below, which pins 18 on purpose. The mock records every Page.reload with
+      # its timestamp, which is what makes the two properties that matter
+      # assertable — that only exact-allowlist hosts are reloaded, and that
+      # reloads are spaced — without driving a real browser.
+      - name: Platform-tab keepalive helper behaves
+        run: bash scripts/dev/test-cdp-keep-platform-tabs.sh
 
       # The two W289 guard self-tests. Each drives its script against a
       # throwaway cache root with the parts it cannot own (a real repository or

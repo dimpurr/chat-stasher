@@ -209,6 +209,110 @@ pub struct Config {
     /// 107 MB session cost 22.6 s (W117) — and is one quota shared by every
     /// destination on this machine, never an allowance per destination.
     pub cache: Option<CacheSectionConfig>,
+
+    /// The `[reclaim]` section (ADR-060 D5): the stage reclaim's two knobs —
+    /// the degrade-after window that turns a destination healthy or
+    /// degraded (globally; per-destination overrides in
+    /// [`DestinationConfig::degrade_after_days`]), and the stage cap whose
+    /// only consequence is a red alarm on `status`, `doctor` and the menu
+    /// bar. Absent means both defaults apply: 7 days (the weekly reclaim
+    /// cadence) and 10 GiB.
+    pub reclaim: Option<ReclaimSectionConfig>,
+
+    /// The `[pull]` section: API-pull producers the scheduled pass pulls
+    /// before its collect step (LETTA-P3). Absent means no producer is
+    /// declared and the pass's behaviour is unchanged.
+    pub pull: Option<PullSectionConfig>,
+
+    /// The `[mirror]` section: this machine's local mirror (ADR-062 / LM-2).
+    ///
+    /// One declared destination, copied file by file, byte for byte, into
+    /// `<data root>/mirror/<mirror_of>` — the whole archive of every machine
+    /// that pushes to that destination, ciphertext only, written with the
+    /// destination's existing key (copying `keys/` copies the same encrypted
+    /// master key; it creates no new key and no new plaintext anywhere).
+    ///
+    /// Off by default, and off when absent: nothing changes on a machine
+    /// that never configures one. The hourly pass copies after its push,
+    /// inside the round's leftover budget; a stopped round resumes the next
+    /// pass (the first fill of a large repository spans several rounds), and
+    /// `chat-stasher mirror sync` runs the same copy on demand.
+    pub mirror: Option<MirrorSectionConfig>,
+}
+
+/// The `[reclaim]` section (ADR-060 D5).
+///
+/// Every key is optional; absent keys take the documented defaults. The
+/// section never *acts*: `stage_cap_bytes` is a bounded threshold behind an
+/// alarm only — a stage over the cap is red on `status` / `doctor` / the
+/// menu bar and nothing else happens (not a stop, not a forced reclaim) —
+/// and `degrade_after_days` decides a destination's health, never its push
+/// targeting (a degraded destination keeps receiving pushes exactly as
+/// before).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReclaimSectionConfig {
+    /// A destination whose last successful push is older than this many
+    /// days is degraded: not consulted by the reclaim's proof, alarmed on
+    /// every run. Overridable per destination with
+    /// `[destinations.<name>] degrade_after_days`. Default 7 — the weekly
+    /// reclaim cadence, long enough that a network blip cannot out-age a
+    /// healthy destination, short enough that a misconfigured machine
+    /// alarms instead of quietly growing forever.
+    pub degrade_after_days: Option<u64>,
+    /// The stage-cap alarm threshold: the stage's shard-body bytes (the
+    /// `sessions/` tree only, `meta/` excluded) are compared against this
+    /// and nothing else ever happens with the answer. Default
+    /// [`crate::destdiag::DEFAULT_STAGE_CAP_BYTES`] (10 GiB); written with
+    /// the same dual spelling `cache.max_bytes` accepts — `stage_cap_bytes
+    /// = "10GB"` is 10⁹ bytes and `stage_cap_bytes = "10GiB"` is 2³⁰, so a
+    /// value meant as one thing cannot be read as the other.
+    pub stage_cap_bytes: Option<crate::body_cache::CacheSize>,
+}
+
+/// The `[pull]` section. Only the `letta` producer exists today, and the
+/// section rejects any other key: a declared producer this build does not
+/// know would otherwise look declared while it is silently never pulled.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PullSectionConfig {
+    /// The `[pull.letta]` Letta API-pull producer declaration.
+    pub letta: Option<LettaPullConfig>,
+}
+
+/// The `[pull.letta]` producer declaration for the scheduled pass.
+///
+/// Every key is optional in the *schema* sense; the pass resolves the
+/// declaration through `letta::pass_pull`, which requires the account and the
+/// inbox and validates the pacing band — an invalid declaration stops the
+/// pass's pull with the key named rather than substituting defaults nobody
+/// wrote.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LettaPullConfig {
+    /// Stable provider account ID, independent of the API key. Never logged.
+    pub account_id: Option<String>,
+    /// Local inbox directory the producer's @3 bundles are published into.
+    /// Declaring the producer means naming this inbox; the pass has no
+    /// default for it.
+    pub inbox: Option<String>,
+    /// Durable private producer state; preserve its identity salt across
+    /// restores. Default: the state directory's `api-pull/letta`.
+    pub state: Option<String>,
+    /// The provider credential. Accepts the shared credential-reference
+    /// forms — `file:PATH`, `env-file:PATH:NAME`, `keychain:ACCOUNT` — or a
+    /// literal; a reference that cannot be resolved refuses the config,
+    /// naming this key. This is the form a timer can actually reach: a
+    /// launchd or systemd job sees no login shell, so an exported
+    /// `LETTA_API_KEY` is invisible to exactly the process the declared
+    /// producer runs in. Never logged.
+    pub api_key: Option<String>,
+    /// Serial request pacing in milliseconds. Default: ~1 request/second.
+    pub pace_ms: Option<u64>,
+    /// Whole-pass wall-clock budget in seconds. Default: 600.
+    pub budget_seconds: Option<u64>,
+    /// Rows requested per page. Default: 100; accepted band 100–200.
+    pub page_size: Option<u64>,
 }
 
 /// The `[cache]` section (ADR-034).
@@ -286,6 +390,15 @@ pub struct DestinationConfig {
     pub cache_dir: Option<String>,
     /// Per-destination `rustic_no_cache` (overrides the singular field).
     pub no_cache: Option<bool>,
+    /// Per-destination degrade-after override (ADR-060 D2/D5, review ruling A1): the
+    /// number of days after which a destination with no successful push is
+    /// classified degraded. A hand-pushed destination — an external disk
+    /// pushed about once a month, the shape `destinations.md` recommends —
+    /// declares its own rhythm and stays healthy on it; *past* its own
+    /// threshold it degrades and alarms exactly like the global rule.
+    /// This never removes the destination's protection: it only answers
+    /// "how behind is behind" for this one destination.
+    pub degrade_after_days: Option<u64>,
 }
 
 /// What [`Config::set_native_host_stage`] did to the file.
@@ -898,6 +1011,13 @@ impl Config {
                 dest.options.remove(&key);
             }
         }
+
+        if let Some(pull) = &mut self.pull {
+            if let Some(letta) = &mut pull.letta {
+                expand_opt_field("pull.letta.inbox", &mut letta.inbox, problems);
+                expand_opt_field("pull.letta.state", &mut letta.state, problems);
+            }
+        }
     }
 }
 
@@ -1143,6 +1263,22 @@ fn resolve_option_credential_refs(cfg: &mut Config) -> Result<(), String> {
                     return Err(format!(
                         "destinations.{destination}.options.{key}: {reason}"
                     ));
+                }
+            }
+        }
+    }
+    // The declared pull producer's credential goes through the same
+    // resolver, fail-closed for the same reason: a timer-unreachable
+    // reference would make every scheduled pass exit 3 at the credential
+    // check, which is exactly the invisible failure this refusal exists to
+    // turn into the one sentence the user can act on.
+    if let Some(letta) = cfg.pull.as_mut().and_then(|pull| pull.letta.as_mut()) {
+        if let Some(value) = &letta.api_key {
+            match crate::credentials::resolve(value) {
+                crate::credentials::Resolved::NotReference => {}
+                crate::credentials::Resolved::Value(secret) => letta.api_key = Some(secret),
+                crate::credentials::Resolved::Missing(reason) => {
+                    return Err(format!("pull.letta.api_key: {reason}"));
                 }
             }
         }
@@ -1811,6 +1947,29 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # carrying.
 # dir = "~/Library/Caches/chat-stasher/body"
 
+# ----------------------------------------------------------------- reclaim
+# The stage reclaim's two knobs (ADR-060). Neither one stops anything:
+# a stage over the cap is a red alarm on `status`, `doctor` and the menu bar
+# and nothing else, and a degraded destination keeps receiving pushes exactly
+# as before — degradation only decides who the weekly reclaim asks for proof,
+# and it heals automatically with the next successful push.
+#
+# [reclaim]
+# A destination whose last successful push is older than this many days is
+# degraded: not asked for proof by the weekly stage clean-up, listed with a
+# two-road alarm on every run (repair the push, or remove the destination
+# from the config if it is no longer needed). Default 7 (the weekly cadence).
+# Per destination, `[destinations.<name>] degrade_after_days` overrides this
+# value — use it for a hand-pushed destination with its own rhythm (an
+# external disk pushed about once a month declares something like 35).
+# degrade_after_days = 7
+#
+# The stage's shard-body bytes (the sessions/ tree only; meta is excluded)
+# are compared against this and the answer is an alarm only — collection and
+# the weekly clean-up run exactly as before either way. Same dual spelling as
+# the cache quota: "10GB" is 10 x 10^9, "10GiB" is 10 x 2^30. Default 10 GiB.
+# stage_cap_bytes = "10GiB"
+
 # ---------------------------------------------------------------- harness_roots
 # Tell the tool where a harness actually keeps its sessions, keyed by the
 # registry harness id. Use this when your install is not where the shipped path
@@ -1866,6 +2025,56 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # no_cache = false
 # [destinations.storagebox.options]
 # endpoint = "ssh://example:23"
+
+# ---------------------------------------------------------------- pull
+# API-pull producers the scheduled pass reads before it collects. Declaring
+# one is how the hourly job archives a cloud service whose authoritative
+# record is only reachable through its API, without a separate command.
+#
+# [pull.letta] lets the scheduled Letta pass read the API key from the
+# environment (`LETTA_API_KEY`; see docs/pull.md). Requests are serial and
+# paced (~1 per second by default, tune with pace_ms), pages stay in the
+# 100–200 row band the provider serves, and 429/503 answers honor Retry-After.
+# Local archiving still runs when the pull cannot finish reading; the pass
+# then exits 3 ("did not finish reading") and keeps the unread remainder
+# pending in the producer's state, never reported as "no messages".
+#
+# The account id is a stable label you choose for the account, independent of
+# the API key; the inbox is where the producer's @3 bundles are published.
+# Keep both stable across runs: the producer's durable state derives its
+# identity from the account id, and receipts in the inbox stay pending until
+# every destination proves it holds them.
+#
+# [pull.letta]
+# account_id = "my-letta-account"
+# inbox = "~/stash/chat-stasher/letta-inbox"
+# pace_ms = 1000
+# budget_seconds = 600
+# page_size = 100
+
+# ---------------------------------------------------------------- mirror
+# This machine's local mirror (ADR-062): one declared destination, copied
+# file by file, byte for byte, into the data directory's mirror/<name>.
+# What it holds is ciphertext written with the destination's own existing
+# key — copying the repo also copies its `keys/` directory, which is the
+# same encrypted master key, not a new key and not new plaintext; syncing
+# is "download what the mirror lacks and hash it against its own name",
+# so the copy never decrypts anything either.
+#
+# Default off. With it on, the hourly pass copies after its push inside
+# the round's leftover budget, and `chat-stasher mirror sync` runs the
+# same copy on demand. A first fill of a large repository spans several
+# rounds and `status` shows its progress; an interrupted round resumes on
+# the next one, none of which is a failure. Turning it back off stops the
+# copying and never deletes anything.
+#
+# [mirror]
+# enabled = true
+# mirror_of = "storagebox"
+# Free-disk floor for the mirror's volume, in GiB. Default:
+# max(10, min(5% of the volume's capacity, 20)). Below it the copy
+# pauses rather than writing toward a full disk.
+# min_free_gib = 10
 "#;
 
 #[cfg(test)]
@@ -1993,6 +2202,78 @@ mod tests {
         assert!(!cfg.destinations["d1"].options.contains_key("access_key_id"));
     }
 
+    /// W964: the declared pull producer's credential goes through the same
+    /// shared resolver, fail-closed with the key named — the timer-reachable
+    /// form the `[pull.letta]` section is built around.
+    #[test]
+    fn pull_letta_api_key_resolves_and_refuses_named() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let secret_file = dir.path().join("letta-key");
+        std::fs::write(&secret_file, "synthetic-letta-secret\n").unwrap();
+
+        let declared = format!(
+            "[pull.letta]\naccount_id = \"synthetic-account\"\ninbox = \
+             \"/tmp/w964-synthetic-inbox\"\napi_key = \"file:{}\"\n",
+            secret_file.display()
+        );
+        let cfg = Config::from_text(&declared).expect("a resolvable producer key must load");
+        assert_eq!(
+            cfg.pull
+                .as_ref()
+                .unwrap()
+                .letta
+                .as_ref()
+                .unwrap()
+                .api_key
+                .as_deref(),
+            Some("synthetic-letta-secret"),
+            "the reference must resolve to the file's secret, newline trimmed"
+        );
+        assert!(
+            cfg.pull
+                .as_ref()
+                .unwrap()
+                .letta
+                .as_ref()
+                .unwrap()
+                .api_key
+                .as_deref()
+                .is_some_and(|key| key != "synthetic-letta-secret\n"),
+            "the resolved credential is the trimmed secret, never labeled by form"
+        );
+
+        let missing = format!(
+            "[pull.letta]\naccount_id = \"synthetic-account\"\ninbox = \
+             \"/tmp/w964-synthetic-inbox\"\napi_key = \"file:/no/such/producer-key\"\n"
+        );
+        let err = Config::from_text(&missing)
+            .expect_err("an unreadable producer credential reference must refuse the config");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("pull.letta.api_key"),
+            "the refusal must name the producer key: {text}"
+        );
+        assert!(
+            err.downcast_ref::<CredentialRefused>().is_some(),
+            "the producer credential refusal keeps the typed classification"
+        );
+
+        let literal = "[pull.letta]\naccount_id = \"synthetic-account\"\ninbox = \
+             \"/tmp/w964-synthetic-inbox\"\napi_key = \"synthetic-literal\"\n";
+        let cfg = Config::from_text(literal).expect("a literal credential must pass through");
+        assert_eq!(
+            cfg.pull
+                .as_ref()
+                .unwrap()
+                .letta
+                .as_ref()
+                .unwrap()
+                .api_key
+                .as_deref(),
+            Some("synthetic-literal"),
+            "a literal is a valid declaration, left as written"
+        );
+    }
     #[test]
     fn backend_option_environment_references_resolve_and_missing_values_are_omitted() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -2682,6 +2963,95 @@ max_bytes = "50GB"
         assert!(
             text.contains("50G"),
             "the error must quote the value the user wrote: {text}"
+        );
+    }
+
+    /// ADR-060 D5: the `[reclaim]` section parses with both knobs, keeps the
+    /// dual size spelling `cache.max_bytes` uses (10GB = 10⁹ is not 10GiB
+    /// = 2³⁰, so a value meant as one thing cannot be read as the other),
+    /// and rides beside the unaffected `[cache]` section.
+    #[test]
+    fn reclaim_section_parses_both_knobs_with_the_dual_size_spelling() {
+        let cfg: Config = toml::from_str(
+            "[reclaim]\ndegrade_after_days = 4\nstage_cap_bytes = \"10GB\"\n[cache]\nmax_bytes = \
+             \"50GB\"\n",
+        )
+        .unwrap();
+        let reclaim = cfg.reclaim.as_ref().expect("[reclaim] present");
+        assert_eq!(reclaim.degrade_after_days, Some(4));
+        assert_eq!(
+            reclaim
+                .stage_cap_bytes
+                .map(crate::body_cache::CacheSize::bytes),
+            Some(10_000_000_000),
+            "GB is the power-of-1000 spelling"
+        );
+        assert_eq!(
+            cfg.cache
+                .as_ref()
+                .and_then(|cache| cache.max_bytes)
+                .map(crate::body_cache::CacheSize::bytes),
+            Some(50_000_000_000),
+            "the body cache quota is untouched by the new section"
+        );
+
+        let cfg: Config = toml::from_str("[reclaim]\nstage_cap_bytes = \"10GiB\"\n").unwrap();
+        assert_eq!(
+            cfg.reclaim
+                .as_ref()
+                .unwrap()
+                .stage_cap_bytes
+                .map(crate::body_cache::CacheSize::bytes),
+            Some(10 * 1024 * 1024 * 1024),
+            "GiB is the power-of-1024 spelling"
+        );
+    }
+
+    /// ADR-060 D2/D5: the section and both keys are optional, and a
+    /// destination's `degrade_after_days` override parses beside the
+    /// singular destination knobs — the A1 key, on the destination it
+    /// overrides. Absent everywhere is `None`s, which the reclaim reads as
+    /// the documented defaults (7 days, 10 GiB), never as zeros.
+    #[test]
+    fn reclaim_knobs_and_the_per_destination_override_are_optional() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.reclaim.is_none());
+
+        let cfg: Config = toml::from_str("[destinations.extdisk]\nrepo = \"x\"\n").unwrap();
+        assert!(cfg.reclaim.is_none());
+        assert_eq!(cfg.destinations["extdisk"].degrade_after_days, None);
+
+        let cfg: Config = toml::from_str(
+            "[reclaim]\ndegrade_after_days = 14\n\n[destinations.extdisk]\nrepo = \"x\"\n\
+             degrade_after_days = 35\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.reclaim.as_ref().unwrap().degrade_after_days, Some(14));
+        assert_eq!(
+            cfg.destinations["extdisk"].degrade_after_days,
+            Some(35),
+            "the per-destination override is the A1 key, on its own destination"
+        );
+    }
+
+    /// An unparsable `[reclaim]` value is a config error, quoted like every
+    /// other unusable value — the section never carries the [cache]
+    /// quarantine, because a broken stage cap or a non-numeric
+    /// degrade-after must not quietly run the reclaim under defaults the
+    /// user did not write.
+    #[test]
+    fn an_unparsable_reclaim_value_is_a_config_error() {
+        let err = toml::from_str::<Config>("[reclaim]\nstage_cap_bytes = \"10G\"\n")
+            .expect_err("an unknown unit must not be read as a number");
+        assert!(
+            err.to_string().contains("10G"),
+            "the error must quote the value the user wrote: {err}"
+        );
+        let err = toml::from_str::<Config>("[reclaim]\ndegrade_after_days = \"week\"\n")
+            .expect_err("a day count is a number");
+        assert!(
+            err.to_string().contains("week"),
+            "the error must quote the value the user wrote: {err}"
         );
     }
 
@@ -3541,4 +3911,102 @@ mod line_ending_tests {
             result.as_bytes()
         );
     }
+}
+
+// ——————————————————————————————————————————————————————————————————————————
+// [mirror] (ADR-062 / LM-2). Appended at the file's end so introducing it
+// moved no cited line, for the same reason `store.rs` appends its impl
+// blocks instead of inserting them.
+// ——————————————————————————————————————————————————————————————————————————
+
+/// The `[mirror]` section (ADR-062): one declared destination, copied file
+/// by file onto this machine.
+///
+/// Every key is optional and the whole section is optional; the resolved
+/// defaults live with the consumer ([`crate::mirror::MirrorSettings`]), so
+/// an absent value stays "use this machine's default", never a silent
+/// number.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MirrorSectionConfig {
+    /// The on/off switch for the post-push copy step and `mirror sync`.
+    ///
+    /// Default false — the mirror is a whole-archive copier and nothing
+    /// about a default install opts into one (ADR-062 D1).
+    pub enabled: Option<bool>,
+    /// The declared name of the destination to copy. Uses the exact key
+    /// from the `[destinations]` table; declaring no `[mirror]` section,
+    /// or one without `enabled = true`, leaves the mirror off.
+    pub mirror_of: Option<String>,
+    /// Free-disk floor for the mirror's volume, in GiB (ADR-062 ruling 6).
+    ///
+    /// Default: max(10, min(5% of the volume's capacity, 20)). Below the
+    /// floor the copy pauses instead of writing on — never writing the
+    /// disk full is a rule, not a best effort.
+    pub min_free_gib: Option<f64>,
+}
+
+// -----------------------------------------------------------------------
+// [mirror] (ADR-062 / LM-2).
+// -----------------------------------------------------------------------
+
+/// The `[mirror]` section parses alongside everything else, and one
+/// config can carry destinations and a mirror naming one of them — the
+/// shape every fleet machine will hold (ADR-062 D1).
+#[test]
+fn mirror_section_parses_alongside_destinations() {
+    let cfg: Config = toml::from_str(
+        r#"
+[destinations.storagebox]
+repo = "~/stash/repo"
+key_file = "~/stash/key.json"
+
+[mirror]
+enabled = true
+mirror_of = "storagebox"
+min_free_gib = 12.5
+"#,
+    )
+    .unwrap();
+    let mirror = cfg.mirror.as_ref().expect("the [mirror] section parses");
+    assert_eq!(mirror.enabled, Some(true));
+    assert_eq!(mirror.mirror_of.as_deref(), Some("storagebox"));
+    assert_eq!(mirror.min_free_gib, Some(12.5));
+    assert!(
+        cfg.destinations.contains_key("storagebox"),
+        "the mirrored destination stays a normal destination row"
+    );
+}
+
+/// Every key is optional exactly like the rest of the file: absent means
+/// "this machine does not mirror / use the default floor", never a
+/// silent number (the resolved defaults live in `mirror.rs`, at use
+/// site, per the file's own convention).
+#[test]
+fn mirror_section_defaults_when_absent() {
+    let cfg: Config = toml::from_str("").unwrap();
+    assert!(cfg.mirror.is_none());
+
+    let cfg: Config = toml::from_str("[mirror]\nenabled = true\n").unwrap();
+    let mirror = cfg.mirror.as_ref().unwrap();
+    assert_eq!(mirror.enabled, Some(true));
+    assert_eq!(mirror.mirror_of, None);
+    assert_eq!(mirror.min_free_gib, None);
+}
+
+/// The commented template stays parseable-empty with the mirror block
+/// in it, and the block documents the default the code resolves.
+#[test]
+fn template_documents_the_mirror_and_stays_empty() {
+    let cfg: Config =
+        toml::from_str(DEFAULT_CONFIG_TEMPLATE).expect("the template must still parse");
+    assert!(cfg.mirror.is_none());
+    assert!(
+        DEFAULT_CONFIG_TEMPLATE.contains("# [mirror]"),
+        "the template's mirror block is present as comments"
+    );
+    assert!(
+        DEFAULT_CONFIG_TEMPLATE.contains("mirror_of = \"storagebox\""),
+        "the template names the mirror_of key"
+    );
 }

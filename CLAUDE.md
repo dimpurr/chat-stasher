@@ -39,10 +39,14 @@ not a tradeoff to be argued; it is out of scope.
 ## Language
 
 The public surface is English: commit messages, pull request titles and bodies,
-issues, and the source, comments and docs that ship with the tool. The one
-exception is `apps/extension/locales/zh_CN.yml` — the same exception
-`check-terminology.py`'s T5 rule encodes, and no new Chinese belongs anywhere
-else either. `scripts/hooks/commit-msg` stops a violation before the commit
+issues, and the source, comments and docs that ship with the tool. The
+exceptions are `apps/extension/locales/zh_CN.yml` and, since W1034, one
+production sentence: the constant `UPGRADE_WINDOW_MESSAGE` in
+`crates/chat-stasher/src/destdiag.rs`, the upgrade-window wording shipped
+verbatim after the task that mandated it and defined once so it cannot
+multiply. These are the same exceptions `check-terminology.py`'s T5 rule
+encodes, and no new Chinese belongs anywhere else either.
+`scripts/hooks/commit-msg` stops a violation before the commit
 exists and `scripts/check-commit-messages.py` in CI catches it after. The hook
 only runs if `core.hooksPath` points at `scripts/hooks`; git does not read hooks
 out of a checkout by itself, so set that once per clone (`git config

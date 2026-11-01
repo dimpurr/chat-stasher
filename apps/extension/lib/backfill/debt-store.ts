@@ -80,6 +80,22 @@ export interface DebtRecord {
   at?: number;
   /** Where `at` came from. Both this and `at` are present, or neither is — see `timeOfRow`. */
   atFrom?: DebtTimeSource;
+  /**
+   * 🔴 W984 · **The conversation-level metadata the platform's own list carried for this
+   *    conversation** (title / starred / createTime / modifyTime on grok — `ConversationListing`
+   *    in lib/contract.ts), recorded by the same enumeration pass that owed the row, so the
+   *    body a *later* run delivers can carry it to the bundle. The cross-tick case is the
+   *    normal one, not an edge: bodies drain across days while the list was read once, so
+   *    in-memory state of any single run can never bridge the two.
+   *
+   * Optional, and absent on every row written before this change — which reads as "the list
+   *    named no metadata this build keeps", the same fact as "the platform gave none". Like
+   *    W113's `at`, the field travels on the existing row so **no key path changed, no
+   *    version bump, no migration**: IndexedDB stores it on new rows and old rows read
+   *    exactly as they did. And like `at`, a settle that fails to carry it destroys it at
+   *    the moment of the `put` — see `applyDebtDiff`.
+   */
+  listing?: import('../contract').ConversationListing;
   /** ChatGPT source facts; absent means provenance was not established. */
   chatgptProvenance?: import('./types').ChatGptDebtProvenance;
 }
@@ -173,6 +189,20 @@ export interface DebtSetSnapshot {
    * separately (`unknownTime`) rather than in any month.
    */
   times: Map<string, DebtTime>;
+  /**
+   * 🔴 W984 · **The recorded conversation metadata of this scope, by id** — the
+   * list's own title / starred / createTime / modifyTime, read back through the
+   * same single read as `times` and the two id lists, so a caller can never see
+   * ids from one moment and metadata from another.
+   *
+   * The engine copies this into its run-local map at ledger open, so a body
+   * fetched in a later run than the enumeration that read the list still
+   * carries its conversation's metadata into the delivered bundle. Only rows
+   * with a listing appear; an id missing here has **no recorded metadata**,
+   * which is a fact about the list response (or about a row written before
+   * this change), never about the debt.
+   */
+  listings: Map<string, import('../contract').ConversationListing>;
   provenance?: Map<string, import('./types').ChatGptDebtProvenance>;
 }
 
@@ -424,16 +454,20 @@ export async function readDebtSet(platform: string, scope: string): Promise<Debt
   //    lib/coverage-read.ts for why a bare number is not enough.
   const times = new Map<string, DebtTime>();
   const provenance = new Map<string, import('./types').ChatGptDebtProvenance>();
+  const listings = new Map<string, import('../contract').ConversationListing>();
   for (const row of ordered) {
     const time = timeInRow(row);
     if (time) times.set(row.id, time);
     if (isChatGptProvenance(row.chatgptProvenance)) provenance.set(row.id, row.chatgptProvenance);
+    const listing = listingInRow(row);
+    if (listing) listings.set(row.id, listing);
   }
   return {
     pending: ordered.filter((r) => r.state === 'pending').map((r) => r.id),
     archived: ordered.filter((r) => r.state === 'archived').map((r) => r.id),
     nextSeq: maxSeq + 1,
     times,
+    listings,
     ...(provenance.size > 0 ? { provenance } : {}),
   };
 }
@@ -494,6 +528,34 @@ function timeInRow(row: DebtRecord): DebtTime | null {
 }
 
 /**
+ * W984 · The recorded conversation metadata on one row, or `null`.
+ *
+ * 🔴 Validation is over the **known** fields only, and reads like `timeInRow`:
+ *    a listing this build cannot interpret is not a listing. `title` must be a
+ *    string when present, `starred` a boolean, `createTime`/`modifyTime` a
+ *    scalar (string or number — the platform's own value, never a converted
+ *    one); any known field present in another type refuses the whole listing,
+ *    because delivering half of it is how a renamed or re-typed field would
+ *    masquerade as a real observation.
+ *
+ * 🔴 A key this build does not know is **kept as written**: the object is
+ *    returned verbatim, not re-built from the four names — a newer build's
+ *    field on a row is data a downgrade must not delete, and this reader's job
+ *    is to say "can the known shape be trusted", not to rewrite the record.
+ */
+function listingInRow(row: DebtRecord): import('../contract').ConversationListing | null {
+  const listing = row.listing;
+  if (!listing || typeof listing !== 'object' || Array.isArray(listing)) return null;
+  if (listing.title !== undefined && typeof listing.title !== 'string') return null;
+  if (listing.starred !== undefined && typeof listing.starred !== 'boolean') return null;
+  for (const time of [listing.createTime, listing.modifyTime]) {
+    if (time === undefined) continue;
+    if (typeof time !== 'string' && typeof time !== 'number') return null;
+  }
+  return listing;
+}
+
+/**
  * 🔴 W113 · **Record the list's own times onto rows that are already in the store.**
  *
  * Why this is a separate write rather than part of `applyDebtDiff`, and why that separation is the whole
@@ -532,6 +594,64 @@ export async function recordDebtTimes(
     const time = times.get(row.id);
     if (!time) continue;
     puts.push({ ...row, at: time.at, atFrom: time.from });
+  }
+  if (puts.length === 0) return 0;
+
+  try {
+    const tx = db.transaction(DEBTS_STORE, 'readwrite');
+    const store = tx.objectStore(DEBTS_STORE);
+    for (const record of puts) store.put(record);
+    await txDone(tx);
+  } catch {
+    return null;
+  }
+  for (const record of puts) countWrite('debt', record);
+  return puts.length;
+}
+
+/**
+ * 🔴 W984 · **Record the list's own conversation metadata onto rows that are
+ * already in the store.** Same shape and same reasoning as `recordDebtTimes`
+ * above; the two notes there apply word for word, so only what differs is
+ * written here:
+ *
+ *  · It cannot invent a debt — an id with no row is skipped, for the same
+ *    reason: metadata is only ever *about* a conversation the enumeration
+ *    already owes or has.
+ *  · It never overwrites a listing that is already there. For `createTime`
+ *    that is W113's argument exactly (a property of the conversation; the
+ *    second reading is not better evidence). For `title` it is *stated rather
+ *    than hidden*: a title can change on the platform, so a re-enumeration
+ *    that sees a newer one does not rewrite the first reading, and the row
+ *    keeps the listing of the enumeration that first named it — the observation
+ *    as recorded, never silently re-edited. The bundle that carries it is a
+ *    snapshot of one enumeration's list, not a promise of the current title.
+ *
+ * The engine calls this after the page's own `persist` (the ids only become
+ * rows there — see the W113b placement note at the call site), and it merges
+ * the same map into its run-local copy so a body fetched in the same run gets
+ * its metadata without a second read.
+ *
+ * Returns how many rows it actually changed, and `null` when the store could
+ * not be read at all — a different fact from 0.
+ */
+export async function recordDebtListings(
+  platform: string,
+  scope: string,
+  listings: ReadonlyMap<string, import('../contract').ConversationListing>,
+): Promise<number | null> {
+  if (listings.size === 0) return 0;
+  const db = await openDb();
+  if (!db) return null;
+  const rows = await readRows(platform, scope);
+  if (rows === null) return null;
+
+  const puts: DebtRecord[] = [];
+  for (const row of rows) {
+    if (listingInRow(row)) continue;
+    const listing = listings.get(row.id);
+    if (!listing) continue;
+    puts.push({ ...row, listing });
   }
   if (puts.length === 0) return 0;
 
@@ -626,6 +746,13 @@ export async function applyDebtDiff(
      * 🔴 `timeInRow` decides whether there is a time to carry, and it is deliberately the same
      *    reader `readDebtSet` uses: a bare number, or a source this build does not know, is not
      *    a time, so a settle cannot resurrect a value the reader would refuse to interpret.
+     *
+     * 🔴 W984 · The **listing** rides the same `get` for the same reason: the
+     *    platform's conversation metadata for this conversation exists nowhere
+     *    else once the enumeration that read it is over, and a settle that drops
+     *    it writes the archived row without a fact a future reader (the coverage
+     *    page's titles, an export) may want. `listingInRow` has the same
+     *    rigour here as there: a listing this build cannot read is not carried.
      */
     for (const entry of settled) {
       const request = store.get([platform, scope, entry.id]);
@@ -636,6 +763,10 @@ export async function applyDebtDiff(
         if (time) {
           record.at = time.at;
           record.atFrom = time.from;
+        }
+        if (had) {
+          const listing = listingInRow(had);
+          if (listing) record.listing = listing;
         }
         if (had?.chatgptProvenance) record.chatgptProvenance = had.chatgptProvenance;
         if (provenance[entry.id]) record.chatgptProvenance = provenance[entry.id];

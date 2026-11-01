@@ -171,17 +171,20 @@ These tables are generated from the registry that ships inside the CLI and from 
 | Local | Google Antigravity | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | opencode | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Agent platform | OpenClaw | supported | - |
-| Agent platform | Hermes Agent | supported | - |
+| Agent platform | Hermes Agent | verified end-to-end (2026-10-06) | 2026-10-06 |
 | Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
-| Agent platform | Grok Bot (desktop) | supported | - |
+| Agent platform | Grok Bot (desktop) | verified end-to-end (2026-10-13) | 2026-10-13 |
 | Local | Grok (xAI CLI) | verified end-to-end (2026-10-03) | 2026-10-03 |
-| Local | GitHub Copilot CLI | supported | - |
+| Local | GitHub Copilot CLI | verified end-to-end (2026-10-06) | 2026-10-06 |
 | Local | aider | supported | - |
 | Local | crush | supported | - |
 | Local | Zed | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | Continue | supported | - |
 | Local | Kimi Code | verified end-to-end (2026-10-03) | 2026-10-03 |
-| Local | DeepSeek Harness | supported | - |
+| Local | DeepSeek Harness | verified end-to-end (2026-10-06) | 2026-10-06 |
+| Local | Codebuff / Freebuff | supported | - |
+| Agent platform | WorkBuddy | supported | - |
+| Agent platform | CodeBuddy | supported | - |
 | Web | deepseek | verified end-to-end (2026-09-24) | 2026-09-24 |
 | Web | perplexity | experimental | - |
 | Web | chatgpt | verified end-to-end (2026-09-24) | 2026-09-24 |
@@ -215,7 +218,7 @@ Two things the table cannot show:
 - A tool's sessions may live somewhere else on your machine. Point `[harness_roots]` in the config at the right path and the scanner looks there instead. A path that does not exist is reported as *unknown*, never as "0 sessions".
 - When backfill gets back an incomplete conversation, it records a failure. It never stores the partial copy as if it were whole. A tab that was open before the extension was installed or updated is not captured until you reload it; the popup tells you when this applies.
 
-[docs/support.md](docs/support.md) has the full tables: every operating system, the session path each tool is looked for at with the confidence behind it, and the destination each backend maps to.
+[docs/support.md](docs/support.md) has the full tables: every operating system, the session path each tool is looked for at with the confidence behind it, and the destination each backend maps to. Every local tool, web chat and official-export import also has a page of its own under [docs/sources/](docs/sources/) — what the tool collects from it, how complete that is, its quirks and known issues, and when it was last verified end to end — so you can read one source's whole story without the table's one-line budget.
 
 ## Where the archive lives
 
@@ -326,6 +329,8 @@ Backfill is deliberately gentle: small batches spread through the day, under a d
 | Fix something that looks wrong | [docs/troubleshooting.md](docs/troubleshooting.md) |
 | Do a whole task, start to finish | [docs/use-cases/](docs/use-cases/) |
 | See what is supported, and how sure we are | [docs/support.md](docs/support.md) |
+| Read one source's whole story: what it collects, how complete, its quirks | [docs/sources/](docs/sources/) |
+| Know how a source id is built and why | [docs/id-naming.md](docs/id-naming.md) |
 | Understand the pipeline and the archive | [docs/how-it-works.md](docs/how-it-works.md) |
 | Decide whether to trust it | [docs/privacy-security.md](docs/privacy-security.md) |
 | Work on the code | [CONTRIBUTING.md](CONTRIBUTING.md) · [docs-dev/](docs-dev/) |

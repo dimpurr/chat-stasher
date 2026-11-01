@@ -336,15 +336,44 @@ export interface ChatPlatform {
   eventSourceCapture?: boolean;
   /**
    * 🔴 The editorial facts of the generated support tables (SB-1). None of the
-   * three fields below is read by the extension's own code; they live in this
-   * table because `scripts/gen-support-matrix.py` derives the public README and
-   * docs tables from it, and editorial data kept beside the capture rows cannot
-   * drift from the row it describes. Absent means "nothing recorded", which
-   * the tables render as a dash — never as a guess.
+   * fields in this group is read by the extension's own code; they live in
+   * this table because `scripts/gen-support-matrix.py` derives the public
+   * README and docs tables from it, and editorial data kept beside the
+   * capture rows cannot drift from the row it describes. Absent means
+   * "nothing recorded", which the tables render as a dash — never as a guess.
    */
   devPriority?: DevPriority;
   /** One short public-safe caveat with a pointer (issue number, commit, doc). */
   knownIssue?: string;
+  /**
+   * 🔴 W960 · The account-switch risk (issue #4), as a SECOND caveat, for the
+   * rows whose single `knownIssue` slot above is already spent on a different
+   * issue (W944 §H item 4). The slot holds one issue, and a row could say only
+   * one thing: `gemini` and `grok` spent theirs on a detail-completeness
+   * caveat, so the risk the W126 audit records for them — after a switch to
+   * account B inside the same profile, B's list ids can land in A's run scope
+   * and a same-id B body can be accepted as A (mis-attribution, not deletion)
+   * — stayed invisible from this table while other rows named it.
+   *
+   * Discipline, so this is a scalpel and never a blanket flag:
+   *  · set it only on a row that is actually UNGUARDED on account switch — no
+   *    account identity this build can actually read fires for it. Today that
+   *    fires for `chatgpt` (W303's workspace header lease) and `claude`
+   *    (W239's organization guard + W337's person fingerprint) and nothing
+   *    else: `deepseek`/`perplexity`/`gemini`/`grok` declare a lease
+   *    (`ACCOUNT_LEASE_PLATFORMS`) but no verified account id arrives on
+   *    their wire, so it stays inert (W944 §E).
+   *  · a row whose `knownIssue` already names the account gap must NOT carry
+   *    this field — one fact, one place. (`deepseek`, `perplexity` and `kimi`
+   *    name the gap in their slot; `chatgpt` and `claude` name their residual
+   *    of it, which is the honest state of a platform whose guard fires.)
+   *  · this records the RISK; it does not claim a guard or a fingerprint. The
+   *    real account field names for grok and the other body-scan platforms
+   *    are unverified conjecture (`IDENTITY_KEY_CANDIDATES` below) — when one
+   *    is measured and wired, remove this field from that row: absent is then
+   *    the truth.
+   */
+  accountSwitchRisk?: string;
   /** Present only where a dated end-to-end run of a real conversation exists. */
   lastVerified?: PlatformVerification;
 }
@@ -578,6 +607,15 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
       scope: 'live acceptance: real conversations archived end to end on a real machine (main e71eb33)',
     },
     knownIssue: 'a conversation needing more than 20 detail pages is refused and not archived in part (see docs-dev/privacy.md)',
+    // W960 · The slot above is spent on the completeness caveat, so the
+    // account-switch risk — the same issue #4 path this table shows for every
+    // other unguarded row — lives in the second field. Same sentence the
+    // unguarded-by-default rows carry, because it is the same failure: no
+    // account id gemini's capture exposes is reachable by the identity scan,
+    // so after a switch B's list can enumerate into A's scope and a same-id B
+    // body is accepted as A (W126's gemini row; the lease in
+    // ACCOUNT_LEASE_PLATFORMS cannot fire — it names no account).
+    accountSwitchRisk: 'an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4)',
   },
   {
     id: 'claude',
@@ -869,6 +907,13 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
       scope: 'live acceptance: real conversations archived end to end on a real machine (main e71eb33)',
     },
     knownIssue: 'the body endpoint is not paged; whether a long conversation comes back complete is unverified (see docs-dev/threat-model.md)',
+    // W960 · Same reasoning as gemini's row above: the slot is spent on the
+    // completeness caveat, and the account-switch risk (issue #4) needs its
+    // own place. No verified account field is on grok's wire — the identity
+    // scan's key names are conjecture for this platform — so a lease cannot
+    // fire, and after a switch B's list can enumerate into A's scope and a
+    // same-id B body is accepted as A (W126's grok row).
+    accountSwitchRisk: 'an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4)',
   },
 ];
 
@@ -1015,6 +1060,20 @@ export interface CapturedFetch {
   /** A later observation appended separately; it never rewrites provenance.project. */
   provenanceSupplement?: ChatGptProvenanceSupplement;
   /**
+   * 🔴 W984 · The conversation-level facts the enumeration read from the
+   * platform's conversation-list response about this conversation (see
+   * [`ConversationListing`]). Filled by the backfill engine only — the one leg
+   * that reads the list — and never by a page payload:
+   * `isCapturedFetchShape` **rejects on sight** a page payload carrying it,
+   * exactly like `sessionId` above, for exactly the same reason: naming the
+   * conversation's recorded metadata is choosing what the archive will trust.
+   *
+   * undefined ⇒ this capture's conversation was never enumerated by this
+   * install (a live capture, or a metadata-less list row), and the bundle this
+   * capture builds carries no `listing` key at all.
+   */
+  listing?: ConversationListing;
+  /**
    * 🔴 W299 · The `ChatGPT-Account-Id` value observed on **the exact request whose
    * response this capture is** — transient input to the worker, never a durable field.
    *
@@ -1061,6 +1120,55 @@ export interface ChatGptProvenanceSupplement {
   project: { id: string; name: string } | null;
   source: 'project-list' | 'project-enumeration-complete';
   observedAt: string;
+}
+
+/**
+ * 🔴 W984 · **The conversation-level facts a platform's conversation-LIST
+ * response holds about a conversation, that the captured request's own response
+ * does not.** On grok the list row is
+ * `conversations[].{conversationId, title, starred, createTime, modifyTime}`
+ * while the content response is `{ responses: [...] }` only — measured by the
+ * reference-corpus oracle (27-ORACLE §5.1 finding 3): `title` and `createTime`
+ * dropped on all 38 matched pairs, and `createTime` is **not derivable** from
+ * per-message times (min(response.createTime) == create_time on 0/38 — the
+ * conversation exists before its first message).
+ *
+ * The rules this shape is written under:
+ *  · **Source-backed, verbatim.** The four field names are the ones every
+ *    reviewed source's type declaration carries for the list row
+ *    (`GROK_PLAN`'s provenance). Values are carried byte-for-byte as read:
+ *    the time is **never** converted, re-typed or formatted here, so nothing
+ *    can drift in conversion — the reader gets the platform's own value.
+ *  · **Absent stays absent (invariant 1).** Every field is optional and is
+ *    written only when the list row named it readably; a row without a
+ *    readable `title` yields a listing without a `title` key, never `''`.
+ *    `createTime` is **never synthesised** — not from message times, not from
+ *    the capture time, not from anything else; if the list did not name it,
+ *    the bundle does not have it.
+ *  · **Additive and take-no-part.** On the bundle this is an optional key
+ *    (`InboxBundle.listing`) absent on every older bundle, on every capture
+ *    whose conversation was never enumerated by this install (a live capture
+ *    of an open conversation: the list route is outside the platform row's
+ *    `pathHints` on purpose — see the grok row), and on every value this build
+ *    could not read. It takes no part in the session id, the file name or the
+ *    dedup key — those remain `platform.sessionId` / `file_sha256`.
+ *  · **Extension-authored.** Only the backfill engine writes it (it read it
+ *    out of the enumeration); `isCapturedFetchShape` rejects a page payload
+ *    carrying it, exactly like `sessionId` and `provenance` — a page naming
+ *    conversation metadata is choosing a fact the archive would trust.
+ */
+export interface ConversationListing {
+  /**
+   * The list row's `title`. Present only when a string was read — including an
+   * empty one, which is the platform's own value, never a stand-in for "absent".
+   */
+  title?: string;
+  /** The list row's `starred` flag. Present only when a boolean was read. */
+  starred?: boolean;
+  /** The list row's `createTime` — the platform's own value, unconverted. */
+  createTime?: string | number;
+  /** The list row's `modifyTime` — the platform's own value, unconverted. */
+  modifyTime?: string | number;
 }
 
 /** Normalized provenance dimensions. Values are observations, never guesses. */
@@ -1175,6 +1283,11 @@ export function isCapturedFetchShape(value: unknown): value is CapturedFetch {
   if ('provenance' in value) return false;
   if ('provenanceSupplement' in value) return false;
   if ('dimensions' in value) return false;
+  // 🔴 W984 · `listing` is extension-authored conversation metadata (the
+  //    enumeration read it from the list response). A page payload carrying it
+  //    is a page choosing what the archive will record about a conversation —
+  //    rejected on sight, like `sessionId` above.
+  if ('listing' in value) return false;
   // 🔴 W299 · The transient ChatGPT account header is accepted only on ChatGPT captures.
   //    A forged or malformed value is page-visible metadata and becomes `unknown` in the
   //    fingerprint reader; it cannot discard a valid capture. `platform.id` is checked
@@ -1441,6 +1554,24 @@ export interface InboxBundle {
   provenanceSupplement?: ChatGptProvenanceSupplement;
   /** Optional normalized source provenance, authored by the extension. */
   dimensions?: SessionProvenanceDimensions;
+  /**
+   * 🔴 W984 · The conversation-level facts this install's enumeration read
+   * from the platform's conversation-list response about this conversation
+   * (`title` / `starred` / `createTime` / `modifyTime` on grok — see
+   * [`ConversationListing`]). Carried **verbatim**, because — like `identity`
+   * and `account` — it is not inside `raw.text` and an unparsed drop here
+   * loses it permanently: the content route's own body does not hold it, and
+   * `createTime` (the export's `create_time`) is not derivable from message
+   * times.
+   *
+   * Absent on every bundle written before this change, on every capture whose
+   * conversation was never enumerated by this install (a live capture of an
+   * open conversation), and on every list row that named none of the fields
+   * readably — all three are the same honest "no observation", and none of
+   * them may appear as a value. Takes no part in the id or the dedup key:
+   * those remain `platform.sessionId` / `file_sha256`.
+   */
+  listing?: ConversationListing;
   url: string;
   method: string;
   status: number;
@@ -1704,7 +1835,7 @@ export interface InboxProducer {
   sendKeyId?: string;
 }
 export interface HarnessFileSource {
-  role: 'transcript' | 'subagent' | 'tool-result' | 'other';
+  role: 'transcript' | 'subagent' | 'tool-result' | 'other' | 'api-export';
   relPath: string;
   byteStart: number;
   byteEnd: number;

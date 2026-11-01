@@ -15,6 +15,91 @@ under its own heading below.
 
 #### Added
 
+- **`--offline` on `read`, `export` and `verify` (W1053).** A read-only
+  switch that takes the mirror fallback away: the destination's backend is
+  never constructed — no connection is opened at all, so nothing in the
+  process can dial it — and every byte answers from the local mirror copy,
+  the body cache or rustic's local metadata cache. Every offline output
+  states `served from mirror`, on both its state line and its served
+  line, so a report always names which disk answered. Anything the copy
+  cannot serve is the end of that read in the "did not finish" family
+  (exit `3`): a file the copy lacks refuses by name (with the
+  `mirror sync` repair), a session whose snapshots the copy never synced
+  is worded as unknown rather than as the proof of absence the online
+  walk could claim — never an empty result, never "the archive does not
+  have it". `verify --offline` certifies the **copy**, never the
+  destination's repository, and words the verdict that way
+  (`RESULT: OK` over a verified copy, `FAILED` when the copy fails its
+  own check, `INCOMPLETE` for a session the stage expects that the copy
+  never synced — a `NOT IN THE LOCAL COPY` unknown, not `MISSING IN
+  ARCHIVE`); an online `verify` still never consults the copy. The run
+  keeps W1052's step traces and deadlines — a wedged local disk still
+  gets a named step and an exit code — while skipping the ssh-master
+  teardown entirely (the run opened none). A machine whose mirror cannot
+  serve an offline run — no `[mirror]` section, the switch off, no
+  filled copy, another archive — refuses before anything is read, exit
+  `3`, with the fix named.
+- **Letta pull inside the scheduled pass.** Declaring `[pull.letta]` in the
+  config (account id, inbox; credential, pacing, budget and 100–200-row
+  page size optional) makes every `run-once` pass pull the producer before
+  its collect step, through the same paced, `Retry-After`-honouring pipeline
+  as `chat-stasher pull letta`, with the pass's own machine and stage and
+  its archive proof checked against the repository this pass pushes to.
+  The credential is timer-reachable by construction: `pull.letta.api_key`
+  accepts the shared `file:` / `env-file:` / `keychain:` reference forms
+  (fail-closed, like destination options), and when the declaration is
+  missing — leaving only a shell's `LETTA_API_KEY`, which a timer never
+  sees — `schedule install` warns on the spot and `status`, `doctor` and
+  the menu bar carry the same sentence. A producer that cannot finish
+  reading keeps the pass at exit 3 ("did not finish reading") while the
+  local collect-and-push cycle still runs; the run-state record keeps that
+  fact beside `failed_step` (a pass whose collect also failed keeps both),
+  and `status` renders the two as **two lines** — the archive cycle's
+  health first, the producer's own sentence second, with a fix, or with
+  `pulled N of ~M` progress while a large account backfills. Publication
+  follows the content: a re-read conversation whose content cursors match
+  republishes zero bytes and the unchanged hour is a genuine NOOP. The
+  re-verification is a paced, resumable sweep rather than a metadata
+  shortcut — no conversation is skipped on its listing row's word — so a
+  steady round re-reads a bounded slice (a quarter of the round's
+  requests, derived from the declared budget and pacing and shared across
+  the account's agents — never from the clock that remains mid-round, so
+  a load-slowed round keeps the same slice: about 150 conversations per
+  hour for a single agent at the ~1/s pacing — resuming where the previous
+  round stopped) and every conversation is content-verified within a
+  bounded number of rounds; an account too big for one round persists its
+  position and completes across rounds, each reporting progress — and a
+  round whose conversations are all published but whose agent-level
+  material (window, listing, metadata, capture order) is unwritten still
+  reports progress rather than a premature "caught up", because caught up
+  is a round's claim, not an emptied conversation position's — with the
+  declared path's pacing floored at one request per second and its budget
+  capped at 45 minutes — below the hourly period — a deadline the archive
+  proof shares, opening each destination once per round to ask about every
+  receipt in one batch and retiring a receipt only when every declared
+  destination holds it. See [API pull](docs/pull.md).
+- **User-initiated hide, unhide, and a purge preview (ADR-046 draft, Phase 1).**
+  `hide` and `unhide` append durable one-record control events to this
+  machine's `meta/<machine>/deletion-control-v1.jsonl` stage file; the next
+  push archives them, and every reader (`read --all-machines`, `read --session`
+  as an exit-1 policy refusal, `search`, `export`, the UI, `index build`)
+  folds the destination's control union and omits the identity while it is
+  hidden — reversibly, with no archive byte touched, and with the identity
+  exact to one machine partition (`--target-machine` crosses partitions).
+  A destination whose control stream is unreadable fails reads closed
+  (exit 3), never as "nothing recorded". `purge SESSION --destination|-all-destinations`
+  is the read-only preview of deleting that named session: per destination it
+  reports found (occurrence and byte counts across every snapshot), absent
+  (proved by a complete read) or unknown, in human or `--json` form, writing
+  nothing anywhere; `--confirm` is refused because the destructive purge
+  transaction is a later phase. `redact` exists as a refused surface for the
+  same reason. See [Purge](docs/cli.md#purge) in the command reference.
+- **Letta API pull.** `pull letta` captures conversation exports and agent-window
+  extras through the local inbox @3 sink, including hidden agents discovered
+  from local IDs. Edits and source absence append observations; per-agent
+  cursors wait for destination archive proof. Pages are sized by the new
+  `--page-size` (default 100, accepted band 100–200). See
+  [API pull](docs/pull.md). Local transcript capture remains separate work.
 - **Portable remote inbox posting keys.** `send-key <inbox> --for <platform>
   --credential-file <file>` prints a versioned secret after saving its public
   puller policy. Expiry defaults to 24 hours; `--expires 90d` requests a longer
@@ -49,6 +134,21 @@ under its own heading below.
   a phase the pass never reached reads `0`, which is a measurement of
   "did not run", never a fallback. No pass behaviour changes: the
   timings and counts are recorded, nothing about what the pass does.
+- **A destination that disagrees with its timers and the weekly clean-up is
+  named in `status`.** A `[dest]` or `[reclaim]` line appears when a declared
+  destination disagrees with what the machine's timers and the weekly stage
+  clean-up actually do: no installed timer pushes it, its `env:` credentials a
+  timer cannot resolve, a timer covers it but no push has been recorded
+  against it, its `push-state` record exists but cannot be read, or a reclaim
+  blocked for several weeks running. Each line is the one sentence `doctor`
+  reports and the menu bar app shows, with the fix command beneath it, and the
+  same findings are the `dest_alerts` array of `status --json`, each with its
+  severity and fix; the weekly clean-up's own record — its state, consecutive
+  blocked runs, and what is held back and which destination blocks it — is the
+  `reclaim` field beside it. The lines never change the exit code, which stays
+  the timer verdict; a machine whose destinations are all covered,
+  timer-resolvable, record-successful and currently reclaiming prints none of
+  them.
 - **Repair the duplicated-session read path.** Users who ran `setup` step 4,
   `dest-init`, or added a new destination on `v0.2.0` through `v0.5.0-rc.2`
   may see duplicated turns in those older builds. In `read`, `export`, FTS
@@ -265,18 +365,128 @@ under its own heading below.
   out of a stage nobody pointed it at, and a stage that is not there is refused
   rather than created. Every platform this build knows is offered by
   `--platform`, so a platform whose importer is a later slice is a refusal that
-  names it, and nothing is written; only Claude's `conversations.json` has a
-  parser yet. The exit code keeps the kinds of "no" apart: `3` the file was never
-  read to the end, `2` it was read and is not importable (a manifest, invalid
-  JSON, a platform with no parser), `1` it was read and then a conversation or a
-  write failed — a read that was refused is not a zero-conversation success. Two
-  limits are stated rather than hidden: unlike the `export-files/` object above,
-  this namespace is local for now, not yet wired into `push` or readback, and the
-  archive probe that would suppress a body the archive already holds is not wired
-  either, so every conversation currently gets a body and the run prints the
-  probe's own answer.
+  names it, and nothing is written; Claude's `conversations.json` and Grok's
+  `prod-grok-backend.json` have parsers in this build. The exit code keeps the
+  kinds of "no" apart: `3` the file was never read to the end, `2` it was read
+  and is not importable (a manifest, invalid JSON, a platform with no parser),
+  `1` it was read and then a conversation or a write failed — a read that was
+  refused is not a zero-conversation success. Two limits are stated rather
+  than hidden: unlike the `export-files/` object above, this namespace is
+  local for now, not yet wired into `push` or readback, and the archive probe
+  that would suppress a body the archive already holds is not wired either,
+  so every conversation currently gets a body and the run prints the probe's
+  own answer.
+
+- **Opt-in backfill recovers a Grok Bot conversation's pre-window history
+  through the app itself.** The local cache is a bounded window, and every
+  position that fell out of it is gone from disk for good — but whenever the
+  app opens a conversation it fetches the conversation's whole user-visible
+  span into view, so `backfill grok-bot` relaunches the app with a debugging
+  connection that listens only on this machine, opens one conversation at a
+  time with at least ten seconds between them, waits while the app loads it,
+  and delivers the rows the archive does not already hold: the same
+  session-keyed identity a collect uses, so nothing is added twice and an
+  ordinary collect afterwards stays incremental. Each delivered shard's
+  measurement line records that it came from a backfill, with the run id and
+  the app version; the withheld interior rows the service never sends stay
+  missing, and the session's gap record and `partial` fidelity stand. The
+  default is a dry run — the identical traversal, reports only — and
+  delivery needs the explicit `--i-accept-the-risk`; the risk statement is
+  printed before every run, a dry one included. The run waits for the
+  relaunched app to present its conversation list before its first read, so
+  a booting app is never misread as a zero-conversation traversal; it waits
+  the quitting debug relaunch out — every recorded process fully exited,
+  its debugging port released — before relaunching the app the ordinary
+  way and verifying that the restored app stays running, so the relaunch
+  cannot lose to the dying instance's one-instance lock; a traversal that
+  stopped keeps its stop reason and its exit code even when the close-out
+  fails on top of it. The app is restored to a
+  normal launch at the end of every run, interrupted runs included. macOS
+  only; nothing in it ever calls the vendor's service or touches a
+  credential, and no schedule or daemon path can reach it.
+
+- **Per-machine harness logs: Claude Code's prompt history is captured, and it
+  is not counted as sessions.** `collect` reads the harness's own
+  `~/.claude/history.jsonl` (relocated by `CLAUDE_CONFIG_DIR`, which the
+  official `.claude`-directory documentation says moves every `~/.claude`
+  path) — what you typed on this machine, with its timestamp, project path and
+  pasted text — and seals it with the same incremental JSONL prefix-hash arm a
+  session transcript uses, into a namespace of its own,
+  `machine-logs/<machine>/<harness>/<log-id>/`. It is declared in the path
+  registry as a `machine_logs` role on the `claude-code` entry, so the registry
+  stays the single source of truth, and the entry's session path cells are
+  untouched. The capture is **body tier**: nothing is filtered (slash-command
+  lines such as `/usage` are sealed too) and prompt text never reaches a
+  metadata-only artifact — a capture record beside the sealed generations
+  carries counts, digests and a `raw` capture-time fidelity stamp. A machine log
+  is not a session: it appears in no session list, session count, coverage
+  number or `machine_recall` bucket, and `run-once`/`doctor` report it on a line
+  of its own. If the harness rewrites or truncates the file, the next pass
+  re-reads the current snapshot as a new generation and records why, while every
+  generation already sealed stays in the archive, byte-identical and still
+  extractable; a stage whose only new content is a machine-log generation
+  pushes instead of being refused as empty. The read-side "user prompts only"
+  view is the next phase, not this one.
 
 #### Changed
+
+- **Interrupted-push debris is classified, skipped and worded as debris, never
+  as corruption (ISSUE-006 step A).** A push can be interrupted at any moment,
+  and can leave a half-written pack under its final name — a file no index
+  names, whose own length field describes a header it cannot hold. Before this
+  change the first `mirror sync` over such bytes stopped dead with
+  `exit_code=1 — the source proved corrupt`, reading exactly like a damaged
+  backup; a `prune-orphans` survey counted the debris as an unknown and exited
+  `3` on every run, forever. One classification function
+  (`crates/chat-stasher/src/debris.rs`), shared by `mirror`, `prune-orphans`,
+  `doctor` and `verify`, now decides what a flagged pack is: **torn** — no
+  index names it and it cannot be read as a pack — is debris from the
+  interrupted push itself. `mirror sync` skips it (a reminder with the
+  counts beside the round's own result, exit `0`, and no copy of it ever
+  enters the mirror), `status` and `doctor`'s mirror rows carry the count,
+  `doctor` reports the destination's torn and stranded counts and byte totals
+  separately, and `verify` prints a reminder that never touches its verdict.
+  The same sentence appears on every surface:
+  *An interrupted push left a partial file. It belongs to no backup and can be
+  ignored.* — and no output about the archive calls the debris corrupt.
+  Complete unindexed packs keep today's behaviour exactly: they stay
+  **stranded** and adoptable, `prune-orphans` reports torn and stranded as
+  separate counts, each with its own byte total, and the earliest-seen time is
+  stated as unknown (the backend interface carries no modification time — no
+  field invents a clock). The fail-closed rule holds: an index that names the
+  bad bytes still exits `1` with the same sentence as before, index files that
+  cannot be read classify nothing, and a pack that is neither torn nor
+  verifiable stays `unknown` and still makes the `prune-orphans` survey
+  incomplete. The adopt-on-open's all-or-nothing refusal is deliberately
+  unchanged — the mirror is the reader that skips debris. New user-facing
+  page: [docs/use-cases/interrupted-push.md](docs/use-cases/interrupted-push.md).
+- **Snapshot sources write per record, and their readback assembles the source's
+  final state (ADR-061, SG-3; opencode first).** A changed opencode session no
+  longer re-stores the whole session as a new full-snapshot line on every pass:
+  the first observation still writes one whole-session line
+  (`chat-stasher.opencode.session.v1`), and every later pass writes record lines
+  under `chat-stasher.opencode.session.v2` — the message row without its parts
+  inlined, each part under its own id, a session-row record when the session row
+  itself changed, and an explicit tombstone when the source deleted something
+  (revert or compaction). Unchanged records are never re-serialized, so an hour
+  that grows a session a few percent stages a few percent of it. The collector
+  keeps the per-session record map beside its state file while the state entry
+  carries a bounded digest cache (one digest per record, one overall digest
+  past 5000 records); a map that cannot be proven degrades to exactly one full
+  export — the pre-change behaviour — never to a silent skip. Reading an
+  opencode session now assembles the newest version of every record across all
+  stored lines (whole-file and increments mixed, no conversion of existing
+  shards), so the default view equals a fresh export of the source's final
+  state byte for byte; a legacy multi-copy session reads as its newest copy
+  instead of a concatenation of every copy, and a body that cannot be assembled
+  is a loud exit-3 read failure, never a short session. Deletions are never
+  erased: `read --include-deleted` and `export --include-deleted` emit the
+  deleted messages and parts at their original positions, each carrying
+  `"deleted": true`. The raw shard identity `verify` L3, reclaim and dest-init
+  copy stays exactly what it was — the assembled body is the reader-facing
+  projection, not the proof. The extension/grok per-record follow-ons, the
+  stage-side compression add-on and the one-day live-session
+  write-amplification gate are separate tickets.
 
 - **Fixed clock-time hourly schedule on macOS.** When `backup_interval_secs` is
   the default 3600 (hourly), `schedule` on macOS renders launchd's
@@ -293,6 +503,22 @@ under its own heading below.
   hourly one fires at that machine's minute too. Existing macOS installs need
   `chat-stasher schedule install` (and `schedule install --pull <name>` for pull
   agents) to update their installed plist.
+- **One registry scan and one shard count per `run-once` pass, not two
+  and three.** A pass that pushed used to scan the harness registry
+  twice — once for `collect`, once for the push empty-stage guard — and
+  count the sealed stage shards three times: the stage audit, the push
+  guard and the backup's own setup. The pass now carries collection's
+  validated scan evidence and its sealed-shard count into the push
+  path, so the guard answers from what the pass already read and the
+  backup reuses the audit's count. The count is bound to the stage tree
+  by a freshness token — the mtimes of the sessions root and of every
+  machine and session directory — and a push that finds the tree changed
+  recounts instead of trusting a count taken before files were written,
+  so a shard sealed between collect and push is never omitted, and
+  unreadable or unknown probe states still refuse an empty-stage push
+  exactly as before, because the reused evidence is the scan the pass
+  itself validated. A standalone `push` is unchanged: it performs the
+  full guard itself.
 - **Conversation counts count conversations.** A conversation archived on a
   laptop and a desktop under one id was counted twice, by `overview`'s
   headline, by the dashboard's stat tile and by the host's summary count, and
@@ -593,6 +819,35 @@ under its own heading below.
   machines it was never checked on. The manual Task Scheduler setup was
   always the documented Windows configuration, so no capability is
   withdrawn — the pretence that an installed timer could be checked is.
+- **`run-state.json` dates a pass at the moment it ended, not the moment it
+  started.** The field promises "the moment the pass ended", but `run-once`
+  stamped it when the pass began and never restamped it, so a pass that took
+  three seconds claimed to have finished three seconds before it started, and
+  every reader of that timestamp was off by the whole pass: `status` called
+  the last run staler than it was, the host's `last_push` reported the push
+  as having happened before it did, and `waiting_to_upload` counted the
+  shards that pass itself had just archived as still waiting. The record is
+  stamped again at the only point where the duration and the end are both
+  known — after the pass returns, immediately before the file is written.
+
+- **`collect` no longer re-delivers a Grok Bot session read from a new
+  path.** The delivered-set cursor for Grok Bot answered under its source
+  path, so the same agent session re-entered collection as a first read
+  whenever its persistence directory moved, a `[harness_roots]` rescue feed
+  was scanned, or a second persistence directory existed: every union row
+  was sealed again as a new shard beside the old ones — the cross-shard
+  duplicate turns the audit measured. Delivery state is now keyed by the
+  session identity (`grok-bot.<machine>.<agent-uuid>`) the union and the
+  stage already use, so a new path delivers only rows that session has not
+  delivered. State files from before the change are re-keyed at load: each
+  path entry seeds its session's delivered set, several paths that read one
+  session union theirs, and an entry that never recorded its digests keeps
+  the session unread — one conservative re-delivery, then a measured set —
+  and every merged entry still has to prove itself against the stage or the
+  destination archive before its cursor is reused. No archived id, byte or
+  shard changes, and duplicate shards already in the archive are untouched:
+  raw reads keep every stored byte, while the rendered and full-text views
+  show each turn once.
 
 #### Security
 

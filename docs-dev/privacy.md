@@ -58,7 +58,7 @@ that document is the honest one.
 - **The optional local full-text index is plaintext.** `index build` reads
   changed archived sessions into a destination-scoped SQLite cache under the
   operating-system cache directory; `index clear` removes that cache
-  (`crates/chat-stasher/src/fts.rs:1-6,1468-1688,1690-1705`).
+  (`crates/chat-stasher/src/fts.rs:1-6,1480-1700,1702-1717`).
 - **The snapshot session cache is plaintext too, but holds identifiers rather
   than text.** A repeated `search` keeps each snapshot's session list — session
   ids, the machine partition, shard counts and byte sizes — in a
@@ -75,6 +75,21 @@ that document is the honest one.
   window. See [Known weaknesses](#known-weaknesses). Separately, `export --out`
   writes archived sessions back out decrypted into a directory you name; that
   copy is yours to delete and nothing of ours moves it on (section 9).
+- **The CLI also reads the harnesses' own prompt-history files — one per
+  harness.** Claude Code keeps `~/.claude/history.jsonl` (relocated by
+  `CLAUDE_CONFIG_DIR`) and the CodeBuddy CLI keeps
+  `~/.codebuddy/history.jsonl` — what you typed on this machine, with a
+  timestamp, the project path and any pasted text — and `collect` seals
+  both into the same encrypted archive as machine logs, under
+  `machine-logs/<machine>/claude-code/history/` and
+  `machine-logs/<machine>/codebuddy/history/`. Both are captured whole
+  (slash-command lines such as `/usage` included) and both are **body
+  tier**: your words, not metadata. Neither is ever counted as a session
+  and neither ever enters the session counts a `status` line or a
+  coverage page prints. These two are the complete set; the CodeBuddy
+  one's capture was ruled on and approved (2026-10-31) after a
+  re-verification that it is the same kind of source the Claude Code one
+  is (see section 3).
 - **Contact: `work@team.iopho.com`.**
 
 ## Contents
@@ -108,7 +123,7 @@ the sentence.
    requests **the page itself already made** in your already-logged-in session
    (`apps/extension/lib/page-hook.ts:833`, `:880`, `:674-722`). Only responses
    matching a known platform route are kept
-   (`apps/extension/lib/contract.ts:356-873`, `:1124-1184`).
+   (`apps/extension/lib/contract.ts:385-918`, `:1232-1297`).
    **One exception, on ChatGPT.** When you move between conversations inside
    the page, ChatGPT now loads only the most recent part of a conversation.
    Keeping that part would store an incomplete conversation, so it is never
@@ -143,7 +158,7 @@ the sentence.
    `:404-482`). It does this *before* attempting any delivery, so a service
    worker killed between "the page produced bytes" and "the host answered" cannot
    lose a conversation without a trace
-   (`apps/extension/entrypoints/background.ts:416-433`).
+   (`apps/extension/entrypoints/background.ts:423-440`).
 3. **Deliver to the local host.** The extension hands the bundle to a Native
    Messaging host — the `chat-stasher` binary **you** registered with
    `chat-stasher install-native-host --stage <your-stage>` — with
@@ -158,12 +173,16 @@ the sentence.
    `apps/extension/lib/outbox.ts:485-500`).
 4. **Push.** `push` writes the staged shards into a `rustic` repository —
    encrypted — at a destination **you** configure, local or remote
-   (`crates/chat-stasher/src/main.rs:378-415`;
-   `crates/chat-stasher/src/store.rs:326-427`).
+   (`crates/chat-stasher/src/main.rs:432-469`;
+   `crates/chat-stasher/src/store.rs:368-600`).
 
-Steps 1–3 happen entirely on your machine, in plaintext. Step 4 is the only
-step that can involve a network, and the only destination it can reach is the
-one you put in your own config. The Native Messaging hop in step 3 is a local
+Steps 1–3 happen entirely on your machine, in plaintext. Two steps can
+involve a network: **step 4**, whose only destination is the one you put in
+your own config; and an **API pull** — `chat-stasher pull letta`, or the
+`[pull.letta]` producer a scheduled `run-once` pass reads before its collect
+step — which talks, over HTTPS, to the API you name the account on
+(`crates/chat-stasher/src/letta.rs:236-246`; see [API
+pull](../docs/pull.md)). The Native Messaging hop in step 3 is a local
 process-to-process call: it is not a network connection, and the host it reaches
 is one you registered yourself.
 
@@ -278,17 +297,17 @@ Three places, all of them yours.
 **a. The extension's outbox, an IndexedDB database inside your browser
 profile.** Each captured session is written there as one record holding the
 bundle — a JSON document whose `raw.text` field is the raw response body, that
-is, the conversation itself (`apps/extension/entrypoints/background.ts:269-272`;
+is, the conversation itself (`apps/extension/entrypoints/background.ts:276-279`;
 `apps/extension/lib/outbox.ts:110-127`, `:404-482`). The bundle also carries an
 **account fingerprint** beside the identity described below: not the account id
 and not an email, but a keyed digest of the platform's account id, computed
 in the extension with a random per-install salt
 (`apps/extension/lib/account-fingerprint.ts:422-441`;
-`apps/extension/lib/contract.ts:1390-1399`). Its purpose is to make two accounts
+`apps/extension/lib/contract.ts:1503-1512`). Its purpose is to make two accounts
 distinguishable in your archive; unlike the identity, it cannot be turned back
 into the account id, and when no account id is available the bundle says so
 explicitly rather than carrying a value
-(`apps/extension/lib/contract.ts:1353-1362`).
+(`apps/extension/lib/contract.ts:1466-1475`).
 
 🔴 W239 · **Where a platform files conversations under an _organization_ rather than an
 account, no fingerprint is recorded at all.** claude.ai addresses every conversation by
@@ -357,7 +376,7 @@ the extension still delivers normally and coordination falls back to the
 existing platform scope (`apps/extension/lib/outbox.ts:110-120`,
 `apps/extension/lib/native-host.ts:1099-1143`,
 `crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2881-3096`,
-`crates/chat-stasher/src/inbox.rs:519-529`, `:927-929`).
+`crates/chat-stasher/src/inbox.rs:530-540`, `:971-973`).
 
 The bundle also names the **install** that captured it: three fields — a random
 UUID minted once per extension install, the browser family read from this
@@ -370,13 +389,13 @@ this extension lives in — one user, several machines, several browsers, severa
 profiles per browser: the sealed shard record keeps them beside a `machine`
 name the host itself assigns, so your archive can say which install produced a
 conversation (`crates/chat-stasher/src/inbox.rs:448-453`,
-`:518-526`, `:930-933`). 🔴 A copied browser profile brings its copied
+`:529-537`, `:974-977`). 🔴 A copied browser profile brings its copied
 `install_id` along, and the stage can tell: a delivery whose identity names a
 different browser, or a different label the user actually named, while the same
 `install_id` was already sealed under another is refused — the capture stays in
 your outbox, listed there as rejected with the refusal's own instruction, and
 is never merged with the first install's record
-(`crates/chat-stasher/src/inbox.rs:843-853`, `:975-1036`;
+(`crates/chat-stasher/src/inbox.rs:875-885`, `:1020-1081`;
 `crates/chat-stasher/src/nativehost.rs:3111-3115`;
 `apps/extension/lib/outbox.ts:503-548`). The label is a name you typed, and it
 is plaintext wherever the bundle is — the outbox record, the export file, the
@@ -407,7 +426,7 @@ identity on its own. The repair rewrites no history: captures already archived
 keep the identity they were sealed with
 (`apps/extension/lib/install-identity.ts:71-110`;
 `apps/extension/lib/popup-view.ts:529-545`;
-`apps/extension/entrypoints/background.ts:3331-3344`). This is also why a shared
+`apps/extension/entrypoints/background.ts:3338-3351`). This is also why a shared
 `install_id` on two *different* machines cannot be noticed by either machine: it
 becomes visible only where both records are read together, in your archive
 (`crates/chat-stasher/src/overview.rs:722-779`).
@@ -423,7 +442,7 @@ why a leg is paused, and — for a row that has one — that account's
 install-local fingerprint. Your
 host writes it into the stage as `ext-status/<machine>/<install_id>.json`, and
 `push` puts it into your archive with everything else
-(`apps/extension/entrypoints/background.ts:3099-3128`;
+(`apps/extension/entrypoints/background.ts:3106-3135`;
 `crates/chat-stasher/src/nativehost.rs:2598`, `:2639-2655`;
 `crates/chat-stasher/src/metahash.rs:1-12`). It is metadata only — counts, codes,
 a version string, a build stamp and timestamps — and it carries no conversation text, no session
@@ -439,7 +458,7 @@ already have, and exists so the export-import escape hatch keeps the archive
 able to answer "is this exact content already stored?" for a bundle that never
 reached the host live (`contracts/nativehost-protocol.md` §8, W213): the host
 records it beside the bytes on the sealed shard and compares it as a string
-(`crates/chat-stasher/src/inbox.rs:537-559`).
+(`crates/chat-stasher/src/inbox.rs:548-570`).
 
 A ChatGPT bundle also carries **project provenance**: the workspace the
 conversation was fetched under and the project it belongs to, as the capture leg
@@ -450,12 +469,12 @@ different facts and stay different. A later observation may add a **supplement**
 beside that record: the project a source reported, the source's name, and the
 time it was observed; it never replaces what the capture recorded, so the archive
 shows both what was known then and what was learned afterwards
-(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:2865-2914`). A project name is a label from
+(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:3100-3149`). A project name is a label from
 the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
 — a capture payload carrying provenance is rejected outright
-(`apps/extension/lib/contract.ts:1172-1173`) — and, like the account fingerprint,
+(`apps/extension/lib/contract.ts:1280-1281`) — and, like the account fingerprint,
 these values are written into your own archive and are not transmitted anywhere
 by this extension.
 
@@ -481,7 +500,7 @@ and timestamp, not its content. We do not delete it; `ingest` retires it to
 The CLI makes one plaintext copy too, and it is not a capture but an archive
 session: `chat-stasher export --out <dir>` writes the sessions it selected back
 out **decrypted**, one file per session, into the directory you name
-(`crates/chat-stasher/src/main.rs:735-821`). Nothing moves those files on and
+(`crates/chat-stasher/src/main.rs:838-942`). Nothing moves those files on and
 we keep no record of where they went, so deleting the directory is yours to do.
 The CLI writes no archive content anywhere you did not name.
 
@@ -493,8 +512,8 @@ The activity index carries these fields into the archive, and `search --json`
 returns them with each matched or unplaced session that has a provenance row;
 older archives without one omit the field
 (`crates/chat-stasher/src/activity.rs:132-213`,
-`crates/chat-stasher/src/collect.rs:1253-1266`,
-`crates/chat-stasher/src/main.rs:2807-2815,2891-2899`,
+`crates/chat-stasher/src/collect.rs:2180-2191`,
+`crates/chat-stasher/src/main.rs:3302-3315`,
 `crates/chat-stasher/src/search.rs:749-795`). The parent id is still session
 metadata in plaintext in the stage and inside the encrypted archive; it can link
 a subagent to its parent conversation.
@@ -504,8 +523,8 @@ which is a different fact from where the archive found them. A Claude Code
 transcript names the working directory it ran in and the organization that
 authored it — the account, where there is no organization — and both land on the
 session's row beside the collection-time provenance
-(`crates/chat-stasher/src/activity.rs:2335-2755`,
-`crates/chat-stasher/src/provenance.rs:21-54`). Two things about that are worth
+(`crates/chat-stasher/src/activity.rs:2352-2620`,
+`crates/chat-stasher/src/provenance.rs:22-55`). Two things about that are worth
 stating plainly. A working directory is a **path, not a repository**: it says
 where the harness ran, never which project or repository the work belonged to,
 and a session that `cd`s into a subdirectory records each place it ran rather
@@ -519,19 +538,23 @@ only has room for the first of them. No path is ever inferred: the archive's own
 location, and any directory that appears in the path a transcript was found
 under, are not a working directory the session ran in.
 
-An opencode export states three more facts of its own, read the same way and
+An opencode export states four more facts of its own, read the same way and
 landing on the same row. Its session row — which travels whole inside the sealed
 shard the archive has always held — names the directory the session ran in (the
 same path rule, and the same "each place it ran, not only the last"), the
-**project** it belonged to, and the moment it was archived. A project id is the
-one fact here that *is* a project identity: an opaque key the harness itself
-recorded, not a path and not derived from one, kept as a container precisely so
-a directory is never asked to do that work. The archive fact is a recorded
-moment, not a computed state: a session the source marked archived is indexed
-`archived`, and a session with no marker is indexed as nothing — never `active`,
-which no source states. The sealed export itself did not gain a byte; what is
-new is that these three fields now also sit on the index line beside it, as
-plaintext session metadata like the paths and ids above.
+**project** it belonged to, the **workspace** it ran under where the row names
+one, and the moment it was archived. A project id is the one fact here that *is*
+a project identity: an opaque key the harness itself recorded, not a path and
+not derived from one, kept as a container precisely so a directory is never
+asked to do that work. A workspace id is the same kind of opaque key, and it is
+kept beside the project id as a second container value — a row that names both
+identities states both facts, and a row that names only one records that one.
+The archive fact is a recorded moment, not a computed state: a session the
+source marked archived is indexed `archived`, and a session with no marker is
+indexed as nothing — never `active`, which no source states. The sealed export
+itself did not gain a byte; what is new is that these four fields now also sit
+on the index line beside it, as plaintext session metadata like the paths and
+ids above.
 
 A codex rollout states two facts of its own, read the same way. The
 `session_meta` record that opens it names the directory the session ran
@@ -569,6 +592,93 @@ in is not a workspace the session named. As with the Claude Code and opencode
 readers, the sealed session file gained no byte: what is new is that its
 workspace field also sits on the index line beside it.
 
+A Grok Bot replica states two facts in the name of the persistence key it
+lives under — `sand.client.slice.account.<account
+ref>.transcript.replicas.<agent uuid>`. The `<account ref>` segment is the
+account the desktop app scoped that state to — one account's bots are filed
+separately from another's — so it lands on the session's row as its tenant,
+beside Claude Code's organization and account ids. The `<agent uuid>` the key ends in —
+and the name the app's own roster gives that agent — is the agent the whole
+replica belongs to, recorded as the session's container
+(`crates/chat-stasher/src/grok_bot.rs:232-240`,
+`crates/chat-stasher/src/collect.rs:2736-2743`). A state key without an
+`account.<ref>` segment states no tenancy, so none is recorded — never a
+placeholder — while the agent the key does name still arrives. The sealed
+replica rows did not gain a byte; what is new is that the two facts now also
+sit on the index line beside them, as plaintext session metadata like the
+paths and ids above.
+
+### The harnesses' own prompt-history files (`machine-logs/`)
+
+Besides session transcripts, `collect` reads the prompt-history files that
+harness CLIs keep for themselves. Two exist in the registry, one per
+harness, and this is the complete set — no other harness's own log is
+declared on any platform.
+
+- **Claude Code's `~/.claude/history.jsonl`** (relocated by `CLAUDE_CONFIG_DIR`,
+  which the official `.claude`-directory documentation says moves every
+  `~/.claude` path) is declared in the path registry as a
+  **machine log** — a per-machine input log, not a session: it has no native
+  session id, no session id is minted for it, and it is stored in a namespace of
+  its own, `<stage>/machine-logs/<machine>/<harness>/<log-id>/`, beside
+  `sessions/` and `ext-status/` rather than inside either
+  (`crates/chat-stasher/data/harness-registry-v1.json`;
+  `crates/chat-stasher/src/scanner.rs`; `crates/chat-stasher/src/collect.rs`;
+  `crates/chat-stasher/src/store.rs`).
+- **The CodeBuddy CLI's `~/.codebuddy/history.jsonl`** is declared by its
+  registry entry as the same kind of machine log, with the same role — what
+  you typed on that machine — and gets the same collection: measured by the
+  scan and reported by `doctor` as its own machine-log row, then sealed
+  raw and append-only under `machine-logs/<machine>/codebuddy/history/`,
+  in a namespace of its own beside `sessions/` and `ext-status/`, never
+  inside either and never under a session id. W1047f held this capture
+  back for an owner ruling; the ruling approved it (2026-10-31,
+  W1047f2) after re-verifying the file is the same kind of source the
+  Claude Code log is — the same one-object-per-typed-prompt JSONL shape
+  and the same field names, one key (`sessionId`) short of the Claude
+  Code file's five.
+
+**What the sealed ones hold, and what tier they are.** One JSON object per
+line you typed, with the text you typed, any pasted content, a millisecond
+timestamp, the working directory and — in the Claude Code file only — the
+session id the CLI attributed the prompt to; the CodeBuddy file carries
+the same four keys and no session id at all. That is **your prose**: the
+captures are body tier, exactly like a session transcript. Both are
+sealed into the encrypted archive like any other capture, and their
+plaintext copies are the same ones disclosed above — the local stage, a
+triggered `export --out`, and the destination-scoped index cache — plus
+each harness's own file, which we only read
+(`crates/chat-stasher/src/collect.rs`). Nothing is filtered out at
+capture, so the slash-command lines (the `/usage` a usage poller wrote
+10,000+ times on one machine) are sealed too; hiding them is a read-side
+default, and the raw copy keeps them
+(`crates/chat-stasher/src/collect.rs`).
+
+**What is *not* in the metadata-only tier.** No prompt text and no pasted text
+reach an activity-index row, an `ext-status` file, the snapshot cache, stage
+metadata or the machine-log counters. The only machine-log facts allowed outside
+the sealed bodies are counts and fixed flags — lines, generations, bytes, and
+whether a pass started a new base — and the capture stamp written next to the
+sealed generations holds digests, counts, timestamps and an enum value, never a
+prompt (`crates/chat-stasher/src/collect.rs`; the metadata-only statement about
+`ext-status/<machine>/<install_id>.json` above is unaffected, which is why the
+machine logs are a sibling namespace and not a subdirectory of it). A machine
+log is **never** reported as an archived session: it appears in no session list,
+no session count, no coverage number and no `machine_recall` bucket, and a
+`doctor` or `run-once` line reports it separately
+(`crates/chat-stasher/src/metahash.rs`; `crates/chat-stasher/src/doctor.rs`;
+`crates/chat-stasher/src/main.rs`).
+
+**What happens when the file changes underneath us.** We never rename, move or
+truncate it, and the read is incremental against a stored prefix hash. If the
+harness rewrites or truncates it — `claude purge` filters matching lines, and
+Claude Code does not sweep this file by age unless the HIPAA configuration
+applies — the next pass re-reads the whole current file as a new generation and
+records that it did, while **every previously sealed generation stays in the
+archive, byte-identical and still extractable**. The only deletion mechanism in
+this project remains the user-initiated purge, which this feature does not
+special-case (`crates/chat-stasher/src/collect.rs`).
+
 **b. Your browser's local extension storage** (`storage.local`, never
 `storage.sync`: no `storage.sync` call exists anywhere under `apps/extension`,
 so nothing here is synced to a browser account by this extension).
@@ -578,18 +688,18 @@ What is kept there:
 |---|---|---|
 | `cs_backfill_enabled_v1` | Whether you turned the history-backfill feature on | `apps/extension/lib/backfill/schedule.ts:40` |
 | `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for. 🔴 The target registry is a bounded cache (eight rows): registering a ninth target evicts the seat that has waited longest — an organization row can be the one that leaves — and an eviction follows the same rule as any dropped row: the row leaves *together with* its `cs_backfill_v2:<platform>:<scope>` header, so an evicted scope leaves nothing behind that a lost registry row would otherwise leave hidden; the host archive is untouched and that account's next capture registers it again. 🔴 W54b · Registration also attempts to record each cap eviction in `cs_backfill_evicted_v1` (next row), the receipt the popup reads beside the registry state. This receipt is best effort: if its read or write fails, the code warns and registration still completes, so that eviction may have no durable receipt. | `apps/extension/lib/backfill/alarm.ts:244-245, 832-842, 844-883, 1003-1058, 1062-1100`; `apps/extension/lib/backfill/tab-port.ts:181-184` |
-| `cs_backfill_evicted_v1` | The registry's **eviction record**: one entry per seat the eight-row cap has pushed off — the evicted row's platform, the scope that row held, the reason code (`registry-cap` in this build), and when the evicting registration happened — newest first, bounded at 16 entries, with the number of records that bound has itself pushed off kept as a count on the record. 🔴 Only cap evictions enter it: the deliberate collapse of a non-organization row (the Claude bullet below) is written nowhere near it, because such a row's scope can be a leftover conversation *title* — user content a deliberate replacement must not leave a record of. 🔴 The cap's slice has no such exclusion: it takes the seat that has waited longest without inspecting the row, and the receipt copies the evicted row's scope exactly as the registry held it. A pre-W31 claude.ai row whose scope is such a leftover title can therefore still be sitting in the registry, and the write that pushes it off the cap is a registration for **another** platform: claude.ai is the one platform whose registrations go through the collapse, which removes such a row before the cap ever sees it, while every other platform's capture or start-button registration goes through the plain writer that records whatever its cap pushed off. That is the one case in which this receipt holds user content — a conversation title as one entry's copied scope, in storage and on screen, because the popup's eviction note prints the scope between platform and reason. This build never writes a title as a claude.ai scope — a registration that cannot name the organization stores the `default` sentinel instead — and whether a stored row is a pre-W31 leftover is not something this build can tell: a registry row records platform, origin, scope and a time, nothing that names the build that wrote it. Nothing else of a conversation enters the receipt: the other fields are platform ids, reason codes and timestamps, and no entry ever carries a conversation *body*. The popup shows entries for platforms this build serves; an absent or unparseable outer record produces no note. Malformed entries are skipped, and a missing or invalid dropped-count is read as zero, so malformed stored data can understate the receipt history. | `apps/extension/lib/backfill/alarm.ts:729-744`; `apps/extension/lib/backfill/alarm.ts:876-883`; `apps/extension/lib/backfill/alarm.ts:894-1001`; `apps/extension/lib/backfill/alarm.ts:1003-1058`; `apps/extension/lib/backfill/alarm.ts:1062-1100`; `apps/extension/lib/backfill/alarm.ts:1194-1239`; `apps/extension/entrypoints/background.ts:1379-1409`; `apps/extension/lib/backfill/claude-org.ts:112-138`; `apps/extension/lib/popup-view.ts:1086-1105` |
-| `cs_backfill_v2:<platform>:<scope>` | The backfill progress header: list cursor, counters, daily count, halt record, the record that a platform's id list had to be read again, and — while a stored stop is being re-decided — which build has already spent that one re-decision (a version string and a timestamp, nothing else). Since W128 step 2 it also carries this scope's **account lease** — the same irreversible fingerprint described above, plus the opaque id of the salt it was computed with and which mechanism read the id — and, when the scope was stopped because the responses were coming from a different account, the suspended record that holds it until its own account is seen again; both carry fingerprints and never an account id (`apps/extension/lib/backfill/types.ts:1747-1757`, `:1895-1915`). The **conversation/session ids** themselves (archived and still pending) are kept one record per id in a second IndexedDB database, `chat-stasher-backfill` (object store `debts_by_platform`), so settling one conversation does not rewrite the whole list. 🔴 Each id record is keyed by **platform, account scope and id together**: the platform is part of the key because two platforms can share one scope string, and a key without it let one platform's ordinary ledger write delete another's ids. An older `cs_backfill_v1:<platform>:<scope>` record is migrated once and removed only after the new layout has been written and read back. Ids written before the platform became part of the key sit in the older `debts` store in the same database until the platform that owns them can be established from the rest of your storage; a row whose platform cannot be established is left there, uncounted and undeleted. | `apps/extension/lib/backfill/types.ts:1917-1957, 1968-1994`; `apps/extension/lib/backfill/ledger.ts:738-749, 755-838`; `apps/extension/lib/backfill/debt-store.ts:27-36, 103-130, 846-922` |
+| `cs_backfill_evicted_v1` | The registry's **eviction record**: one entry per seat the eight-row cap has pushed off — the evicted row's platform, the scope that row held, the reason code (`registry-cap` in this build), and when the evicting registration happened — newest first, bounded at 16 entries, with the number of records that bound has itself pushed off kept as a count on the record. 🔴 Only cap evictions enter it: the deliberate collapse of a non-organization row (the Claude bullet below) is written nowhere near it, because such a row's scope can be a leftover conversation *title* — user content a deliberate replacement must not leave a record of. 🔴 The cap's slice has no such exclusion: it takes the seat that has waited longest without inspecting the row, and the receipt copies the evicted row's scope exactly as the registry held it. A pre-W31 claude.ai row whose scope is such a leftover title can therefore still be sitting in the registry, and the write that pushes it off the cap is a registration for **another** platform: claude.ai is the one platform whose registrations go through the collapse, which removes such a row before the cap ever sees it, while every other platform's capture or start-button registration goes through the plain writer that records whatever its cap pushed off. That is the one case in which this receipt holds user content — a conversation title as one entry's copied scope, in storage and on screen, because the popup's eviction note prints the scope between platform and reason. This build never writes a title as a claude.ai scope — a registration that cannot name the organization stores the `default` sentinel instead — and whether a stored row is a pre-W31 leftover is not something this build can tell: a registry row records platform, origin, scope and a time, nothing that names the build that wrote it. Nothing else of a conversation enters the receipt: the other fields are platform ids, reason codes and timestamps, and no entry ever carries a conversation *body*. The popup shows entries for platforms this build serves; an absent or unparseable outer record produces no note. Malformed entries are skipped, and a missing or invalid dropped-count is read as zero, so malformed stored data can understate the receipt history. | `apps/extension/lib/backfill/alarm.ts:729-744`; `apps/extension/lib/backfill/alarm.ts:876-883`; `apps/extension/lib/backfill/alarm.ts:894-1001`; `apps/extension/lib/backfill/alarm.ts:1003-1058`; `apps/extension/lib/backfill/alarm.ts:1062-1100`; `apps/extension/lib/backfill/alarm.ts:1194-1239`; `apps/extension/entrypoints/background.ts:1386-1416`; `apps/extension/lib/backfill/claude-org.ts:112-138`; `apps/extension/lib/popup-view.ts:1086-1105` |
+| `cs_backfill_v2:<platform>:<scope>` | The backfill progress header: list cursor, counters, daily count, halt record, the record that a platform's id list had to be read again, and — while a stored stop is being re-decided — which build has already spent that one re-decision (a version string and a timestamp, nothing else). Since W128 step 2 it also carries this scope's **account lease** — the same irreversible fingerprint described above, plus the opaque id of the salt it was computed with and which mechanism read the id — and, when the scope was stopped because the responses were coming from a different account, the suspended record that holds it until its own account is seen again; both carry fingerprints and never an account id (`apps/extension/lib/backfill/types.ts:1747-1757`, `:1895-1915`). The **conversation/session ids** themselves (archived and still pending) are kept one record per id in a second IndexedDB database, `chat-stasher-backfill` (object store `debts_by_platform`), so settling one conversation does not rewrite the whole list. 🔴 Each id record is keyed by **platform, account scope and id together**: the platform is part of the key because two platforms can share one scope string, and a key without it let one platform's ordinary ledger write delete another's ids. An older `cs_backfill_v1:<platform>:<scope>` record is migrated once and removed only after the new layout has been written and read back. Ids written before the platform became part of the key sit in the older `debts` store in the same database until the platform that owns them can be established from the rest of your storage; a row whose platform cannot be established is left there, uncounted and undeleted. | `apps/extension/lib/backfill/types.ts:1917-1957, 1968-1994`; `apps/extension/lib/backfill/ledger.ts:768-779, 755-838`; `apps/extension/lib/backfill/debt-store.ts:27-36, 103-130, 846-922` |
 | `cs_backfill_day_slow_v1` | The one record this profile keeps when a platform answers a request with **429 Too Many Requests**: for each platform that did so, when the refusal was seen and the instant the slowdown ends — the next **local** midnight. While it is in force every request that platform gets is made more slowly: the gaps of whichever speed preset is chosen are doubled, and one tick fetches at most one body. It holds a platform id and two timestamps — no account, no conversation — is overwritten by the next refusal, and expires on the clock, so nothing has to clear it. | `apps/extension/lib/backfill/day-slow.ts:91, 112-124, 135-150, 181-197, 249-310` |
 | `cs_native_host_status_v1`, `cs_native_host_pause_v1` | The last `hello` answer (stage, machine id, host version, or the named reason it failed) and the record that says the backfill leg is paused | `apps/extension/lib/host-status.ts:24-53`, `:124-148` |
-| `cs_ext_coordination_unavailable_v1` | A Boolean popup note recording whether this profile's most recent backfill tick found coordination unavailable. It is true when the host cannot answer EXT-3 and false after a successful coordination claim; a tick without a request channel preserves the prior result. It stores no platform, account, or conversation data. | `apps/extension/entrypoints/background.ts:946-955` |
+| `cs_ext_coordination_unavailable_v1` | A Boolean popup note recording whether this profile's most recent backfill tick found coordination unavailable. It is true when the host cannot answer EXT-3 and false after a successful coordination claim; a tick without a request channel preserves the prior result. It stores no platform, account, or conversation data. | `apps/extension/entrypoints/background.ts:953-962` |
 | `extension-coordination.sqlite3` in the native host's local state directory | Machine-local backfill coordination metadata: platform ids, install ids, masterkey-derived HMAC account keys when available, last-seen and lease/cooldown/request timestamps, and a per-day detail-request count. It contains no raw account id, conversation id, title, or message content. Install sightings older than 30 days are pruned when coordination runs. | `crates/chat-stasher/src/nativehost.rs:1236-1311`, `:1417-1423`, `:1507-1522` |
 | `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:70-71`, `:668-695` |
-| `cs_account_salt_v1` | The random 32-byte secret every account fingerprint is keyed with, plus an opaque per-install id and the time it was created — nothing else, and no account id in any form. It is what makes a fingerprint irreversible: the value in your archive cannot be turned back into an account id without this secret, which never leaves this browser profile and is never synced. 🔴 Two installs, two profiles, or one install whose record you delete produce **incomparable** fingerprints for the same account; a fingerprint is only ever meant to be compared with one carrying the same id, and a mismatch there is not evidence of an account switch. A stored record this build cannot read is reported as `salt-unreadable` and deliberately **left alone** rather than replaced — re-keying would change every later fingerprint and make one unchanged account look like a switch. | `apps/extension/lib/account-fingerprint.ts:53`, `:156-191`; `apps/extension/lib/contract.ts:1382-1386` |
-| `cs_backfill_lasttick_v1` | The trace of the most recent backfill alarm wake: when it was, whether it ran, the named outcome, and how many backfill targets were registered. 🔴 It also carries **how that tick ended** — the run's own stop reason (`stopped`), the halt it left behind (`halted`) and that halt's `detail`, or, for a tick that stopped before making any request, that tick's own named outcome. And whether that tick **swept open tabs** for a live page the registry had lost (`tabSweep`): `null` if it never swept, `{ looked: false }` if it could not list tabs, `{ looked: true, queried, pruned, pinged, registered, deferred, crowded }` if it did — counts only, so "we looked and found nothing" stays distinct from "we never looked", a sweep that hit its ping cap (`deferred > 0`) stays distinct from one that pinged everything it wanted to, and a sweep that refused an answering tab for want of a slot (`crowded > 0`) stays distinct from both. 🔴 The field also has a fourth value that is **not an outcome**: `{ sweeping: true }`, written by the provisional record the tick saves *before* its sweep starts, says this tick has no sweep result yet. It exists so that an interrupted tick is never recorded as one that never looked — that provisional record is the one that stays if the browser reclaims the worker mid-sweep, if the sweep throws, or if the tick's final save fails, and `null` there would have been a false "this tick never swept" about a tick that did. It is replaced in the same tick by one of the three values above whenever the tick finishes, and the popup says the tick had not finished rather than reading it as a skip. 🔴 W76 · It also carries **which target that wake served, and which ones it passed over and why** (`schedule`): the platform id the wake ran (`served`), and, for each target the walk examined and did not run, that platform's id beside the code it was passed over for — `no-http-port` (no open page for it), `halted` (a stop that still applies) or `waiting-retry` (a transient stop still inside its backoff). The walk orders targets by least-recently-served rank; never-seen targets join at the back and registry order breaks ties. Platform ids and reason codes only: no account scope, no origin, no free text. Metadata only: reason codes, counts and timestamps. The one free-text field is the halt's `detail`, and by construction it names storage keys, paths, HTTP statuses and counts — never a conversation id, title, or body. One record, overwritten by the next wake. | `apps/extension/lib/backfill/alarm.ts:1577-1679`, `:1682-1761`; `apps/extension/entrypoints/background.ts:3026-3091`, `:2996-3066` |
-| `cs_hook_v1:<origin>`, `cs_hook_declined_v1` | A top frame's own report about its capture hook: one record per origin, holding each observation with **when it was first made and when it was last made**. The two differ because a page that stays in one state re-sends that state every few seconds to say it still holds; the latest observation is the state that page is in (an older one is a state it has moved out of), and a capture that arrived after the latest one *began* is evidence about it. A child frame's observation is not stored — it is a statement about that frame, not about the origin. 🔴 And the one report that was **received and not recorded**, with the check that refused it, the origin and observation when they are known, how many times in a row the same refusal has repeated, and when. Metadata only: reason codes, a count, an origin string, timestamps; no URL path, no conversation id, no body, no token. Unlike the per-origin records, the declined one is a single record, overwritten by the next decline. | `apps/extension/lib/hook-status.ts:79-134`, `:292-421`; `apps/extension/entrypoints/background.ts:3432-3501`, `:3414-3488` |
+| `cs_account_salt_v1` | The random 32-byte secret every account fingerprint is keyed with, plus an opaque per-install id and the time it was created — nothing else, and no account id in any form. It is what makes a fingerprint irreversible: the value in your archive cannot be turned back into an account id without this secret, which never leaves this browser profile and is never synced. 🔴 Two installs, two profiles, or one install whose record you delete produce **incomparable** fingerprints for the same account; a fingerprint is only ever meant to be compared with one carrying the same id, and a mismatch there is not evidence of an account switch. A stored record this build cannot read is reported as `salt-unreadable` and deliberately **left alone** rather than replaced — re-keying would change every later fingerprint and make one unchanged account look like a switch. | `apps/extension/lib/account-fingerprint.ts:53`, `:156-191`; `apps/extension/lib/contract.ts:1495-1499` |
+| `cs_backfill_lasttick_v1` | The trace of the most recent backfill alarm wake: when it was, whether it ran, the named outcome, and how many backfill targets were registered. 🔴 It also carries **how that tick ended** — the run's own stop reason (`stopped`), the halt it left behind (`halted`) and that halt's `detail`, or, for a tick that stopped before making any request, that tick's own named outcome. And whether that tick **swept open tabs** for a live page the registry had lost (`tabSweep`): `null` if it never swept, `{ looked: false }` if it could not list tabs, `{ looked: true, queried, pruned, pinged, registered, deferred, crowded }` if it did — counts only, so "we looked and found nothing" stays distinct from "we never looked", a sweep that hit its ping cap (`deferred > 0`) stays distinct from one that pinged everything it wanted to, and a sweep that refused an answering tab for want of a slot (`crowded > 0`) stays distinct from both. 🔴 The field also has a fourth value that is **not an outcome**: `{ sweeping: true }`, written by the provisional record the tick saves *before* its sweep starts, says this tick has no sweep result yet. It exists so that an interrupted tick is never recorded as one that never looked — that provisional record is the one that stays if the browser reclaims the worker mid-sweep, if the sweep throws, or if the tick's final save fails, and `null` there would have been a false "this tick never swept" about a tick that did. It is replaced in the same tick by one of the three values above whenever the tick finishes, and the popup says the tick had not finished rather than reading it as a skip. 🔴 W76 · It also carries **which target that wake served, and which ones it passed over and why** (`schedule`): the platform id the wake ran (`served`), and, for each target the walk examined and did not run, that platform's id beside the code it was passed over for — `no-http-port` (no open page for it), `halted` (a stop that still applies) or `waiting-retry` (a transient stop still inside its backoff). The walk orders targets by least-recently-served rank; never-seen targets join at the back and registry order breaks ties. Platform ids and reason codes only: no account scope, no origin, no free text. Metadata only: reason codes, counts and timestamps. The one free-text field is the halt's `detail`, and by construction it names storage keys, paths, HTTP statuses and counts — never a conversation id, title, or body. One record, overwritten by the next wake. | `apps/extension/lib/backfill/alarm.ts:1577-1679`, `:1682-1761`; `apps/extension/entrypoints/background.ts:3033-3098`, `:3003-3073` |
+| `cs_hook_v1:<origin>`, `cs_hook_declined_v1` | A top frame's own report about its capture hook: one record per origin, holding each observation with **when it was first made and when it was last made**. The two differ because a page that stays in one state re-sends that state every few seconds to say it still holds; the latest observation is the state that page is in (an older one is a state it has moved out of), and a capture that arrived after the latest one *began* is evidence about it. A child frame's observation is not stored — it is a statement about that frame, not about the origin. 🔴 And the one report that was **received and not recorded**, with the check that refused it, the origin and observation when they are known, how many times in a row the same refusal has repeated, and when. Metadata only: reason codes, a count, an origin string, timestamps; no URL path, no conversation id, no body, no token. Unlike the per-origin records, the declined one is a single record, overwritten by the next decline. | `apps/extension/lib/hook-status.ts:79-134`, `:292-421`; `apps/extension/entrypoints/background.ts:3439-3508`, `:3421-3495` |
 | `cs_last_delivered_v1` | One entry per conversation this profile has delivered: the delivery name it went out under, and the **content fingerprint** of the response — a SHA-256 over the response body with that platform's known volatile fields removed, so two views of one unchanged conversation share it. Nothing else: no URL, no title, no account, no conversation text, and — since W50c — no stage or machine id either, because where a copy went is answered by the host from its own archive rather than remembered here. 🔴 Its only use is to decide whether asking the host is worth a round trip (`has`, "What the host answers back" above). It cannot by itself mark a conversation archived: the extension asks the `chat-stasher` binary still, and only a positive answer from the stage the host is writing to now is acted on. Up to 2000 entries, oldest forgotten first — an entry that has been forgotten costs one delivery of a conversation the archive may already hold, never a skipped one. | `apps/extension/lib/recapture.ts:46`, `:103`, `:274-304`, `:342-354` |
-| `cs_live_capture_v1:<platform>` | When a live capture from that platform was last **confirmed to be in your archive**, and how many are **on record as newly stored** — one record per platform. It exists because nothing else said when a live capture had last arrived: `cs_last_delivered_v1` (above) maps a delivery name to the fingerprint of the response it stored and carries no time at all, so "did a capture arrive at time T" was a gap in the record. It is written at the one place the live leg decides a capture was **stored**, so a capture that was merely queued, rejected or refused leaves no record. 🔴 Its two fields change for different reasons, and the popup names both: the **time** moves for every arrival that was stored, including one whose whole content the archive already held (the page re-sent a conversation it had already sent — ChatGPT does this on every view), because that still measures the page-to-archive path; the **count** rises only for an arrival that was **newly** stored, so four views of one conversation are not four stored conversations. Nothing else is in it: a platform id, a timestamp and a count. 🔴 A platform with **no record** is not a platform with zero captures: no writer creates a row out of nothing — a row exists only where a capture reached the archive — so the popup reads an absent record as "nothing has been recorded here", a gap in the record, and never as "no capture arrived". A `count` of `0` *inside* a row is not that absence and is not rounded up either: it says nothing new is on record there, beside a time that says a capture did arrive. | `apps/extension/lib/live-capture.ts:149-151`, `:273-308`; `apps/extension/entrypoints/background.ts:384-386`, `:405,481` |
+| `cs_live_capture_v1:<platform>` | When a live capture from that platform was last **confirmed to be in your archive**, and how many are **on record as newly stored** — one record per platform. It exists because nothing else said when a live capture had last arrived: `cs_last_delivered_v1` (above) maps a delivery name to the fingerprint of the response it stored and carries no time at all, so "did a capture arrive at time T" was a gap in the record. It is written at the one place the live leg decides a capture was **stored**, so a capture that was merely queued, rejected or refused leaves no record. 🔴 Its two fields change for different reasons, and the popup names both: the **time** moves for every arrival that was stored, including one whose whole content the archive already held (the page re-sent a conversation it had already sent — ChatGPT does this on every view), because that still measures the page-to-archive path; the **count** rises only for an arrival that was **newly** stored, so four views of one conversation are not four stored conversations. Nothing else is in it: a platform id, a timestamp and a count. 🔴 A platform with **no record** is not a platform with zero captures: no writer creates a row out of nothing — a row exists only where a capture reached the archive — so the popup reads an absent record as "nothing has been recorded here", a gap in the record, and never as "no capture arrived". A `count` of `0` *inside* a row is not that absence and is not rounded up either: it says nothing new is on record there, beside a time that says a capture did arrive. | `apps/extension/lib/live-capture.ts:149-151`, `:273-308`; `apps/extension/entrypoints/background.ts:391-393`, `:412,488` |
 | `cs_install_identity_v1` | This browser profile's own identity for the extension: a random UUID minted the first time this profile captures (from the browser's own crypto random, written down only after a write-and-read-back confirms it), the detected browser family — `Edge`, `Brave`, `Opera`, `Firefox`, `Vivaldi`, `Arc`, `Chrome`, or `Chromium`, a name read from the navigator and nothing else — and the profile label you typed in the popup, `null` until you name it and then trimmed and cut at 80 characters. No history is kept: writing the UUID is a one-time act, and a rename overwrites the label in place. 🔴 A profile whose storage or random source cannot be used **refuses to capture** rather than inventing a per-session identity, and a stored record this build cannot read is refused rather than replaced — both keep "which install produced this" answered by exactly one stable id, never by a guess. Its values leave this browser profile only inside a capture bundle, whose destinations are section 3a and 3c above and below. | `apps/extension/lib/install-identity.ts:1-5`, `:13-23`, `:39-69`, `:114-124`; `apps/extension/entrypoints/background.ts:245-255` |
 | `cs_report_seq_v1` | This install's own **report counter**: the next number it will send, with the random value minted beside that number, written down before the message carrying it goes out. It exists so that two live copies of one install can be told apart — they start at the same counter position but not with the same future, so both eventually reserve one number and your host sees that number under two different random values, which a single writer cannot produce. 🔴 A number whose record cannot be read is **unknown, never `0`**: a fabricated zero is exactly what a copy's displaced counter would look like, and guessing one would accuse an honest install of being a copy, so the message goes out with no number at all and the host records "no evidence" rather than a reading. Nothing else is in it, and it is never compared against a count of anything you did. | `apps/extension/lib/report-seq.ts:1-36`, `:45`; `apps/extension/lib/native-host.ts:1091-1130` |
 
@@ -618,12 +728,12 @@ Three things in that table deserve to be called out rather than buried:
   by titles or ids) is withheld and shown as a marker, so the shape stays legible
   without the text. The structure is capped in both depth and the number of keys
   named per object
-  (`apps/extension/lib/backfill/enumerate.ts:1488-1556`).
+  (`apps/extension/lib/backfill/enumerate.ts:1506-1574`).
 - For platforms that use response-body identity extraction, the `<scope>` part
   of that key is your **account identifier on that platform** when the extension
   could find one (a user id, an email address, or a handle), and the literal
-  string `default` when it could not (`apps/extension/entrypoints/background.ts:2104-2152`;
-  the identity itself is read by `apps/extension/lib/contract.ts:1628-1644`). It is used to
+  string `default` when it could not (`apps/extension/entrypoints/background.ts:2111-2159`;
+  the identity itself is read by `apps/extension/lib/contract.ts:1759-1775`). It is used to
 
   keep two machines' archives of the same account from colliding. It stays in
   your local browser storage and is written into your own archive; it is not
@@ -634,7 +744,7 @@ Three things in that table deserve to be called out rather than buried:
   one it is using (see the claude.ai bullet below) and records that; only when the
   answer cannot be obtained does the row keep `default`, together with the named
   reason it could not be obtained
-  (`apps/extension/entrypoints/background.ts:1765-1825`).
+  (`apps/extension/entrypoints/background.ts:1772-1832`).
 - **ChatGPT is workspace-scoped.** The extension fingerprints the
   `ChatGPT-Account-Id` header observed on that page's outgoing requests with the
   per-install HMAC key before storing a target, ledger scope, or sending the scope
@@ -650,11 +760,11 @@ Three things in that table deserve to be called out rather than buried:
   records that named refusal and issues no list request; it does not mark the
   unknown workspace empty (`apps/extension/lib/backfill/chatgpt-workspace.ts:1-23`, `:48-72`;
   `apps/extension/lib/backfill/chatgpt-scope-migration.ts:27-110`;
-  `apps/extension/entrypoints/background.ts:2174-2186`;
-  `apps/extension/lib/backfill/engine.ts:1938-1953`;
+  `apps/extension/entrypoints/background.ts:2181-2193`;
+  `apps/extension/lib/backfill/engine.ts:1959-1974`;
   `apps/extension/lib/backfill/types.ts:1762-1779`;
-  `apps/extension/lib/backfill/enumerate.ts:314-384`;
-  `apps/extension/lib/backfill/engine.ts:2597-2624`).
+  `apps/extension/lib/backfill/enumerate.ts:332-402`;
+  `apps/extension/lib/backfill/engine.ts:2642-2669`).
   🔴 W303 · The content bridge keeps only the current raw account header in one
   in-memory slot. A new observation replaces it, and `pagehide` or `unload` clears
   it. Each observation is forwarded immediately to the worker, where it is
@@ -680,20 +790,20 @@ Three things in that table deserve to be called out rather than buried:
   preserve pending debt. The workspace scope remains a
   separate field from the request-header account lease
   (`apps/extension/entrypoints/dw-bridge.content.ts:248-275`, `:616-660`;
-  `apps/extension/entrypoints/background.ts:3266-3280`;
+  `apps/extension/entrypoints/background.ts:3273-3287`;
   `apps/extension/lib/backfill/tab-port.ts:226-245`;
   `apps/extension/lib/backfill/tab-port.ts:816-819`;
   `apps/extension/lib/backfill/tab-port.ts:876-904`;
   `apps/extension/lib/backfill/tab-port.ts:1077-1149`, `:1178-1236`;
-  `apps/extension/lib/backfill/engine.ts:1590-1605`;
-  `apps/extension/lib/backfill/engine.ts:1683-1712`;
-  `apps/extension/lib/backfill/engine.ts:2197-2209`;
-  `apps/extension/lib/backfill/engine.ts:2634-2645`;
-  `apps/extension/lib/backfill/engine.ts:1714-1735`;
-  `apps/extension/lib/backfill/engine.ts:2943-2946`;
-  `apps/extension/lib/backfill/engine.ts:3001-3005`;
-  `apps/extension/lib/backfill/engine.ts:3081-3085`;
-  `apps/extension/lib/backfill/engine.ts:3204-3211`;
+  `apps/extension/lib/backfill/engine.ts:1611-1626`;
+  `apps/extension/lib/backfill/engine.ts:1704-1733`;
+  `apps/extension/lib/backfill/engine.ts:2218-2230`;
+  `apps/extension/lib/backfill/engine.ts:2679-2690`;
+  `apps/extension/lib/backfill/engine.ts:1735-1756`;
+  `apps/extension/lib/backfill/engine.ts:2988-2991`;
+  `apps/extension/lib/backfill/engine.ts:3046-3050`;
+  `apps/extension/lib/backfill/engine.ts:3126-3130`;
+  `apps/extension/lib/backfill/engine.ts:3249-3256`;
   `apps/extension/lib/backfill/chatgpt-workspace.ts:1-35`;
   `apps/extension/lib/backfill/chatgpt-workspace.ts:94-96`).
 - **On claude.ai the scope is not read from a response body: it is the
@@ -707,7 +817,7 @@ Three things in that table deserve to be called out rather than buried:
   list of organizations and nothing else, and it is sent through the same
   allowlisted same-origin channel as every other backfill request
   (`apps/extension/lib/backfill/claude-org.ts:48-49`, `:219-236`;
-  `apps/extension/lib/backfill/enumerate.ts:4059`;
+  `apps/extension/lib/backfill/enumerate.ts:4118`;
   `apps/extension/lib/backfill/claude-page.ts:97-116`). The resolution itself runs
   **in the claude.ai page**, over the channel the backfill already uses, and only
   when the extension actually needs the organization: when you press the popup's
@@ -718,14 +828,14 @@ Three things in that table deserve to be called out rather than buried:
   request is reported to the machine-local host, which stores a platform cooldown
   shared by installs on that machine; if the report fails, this profile pauses
   backfill locally
-  (`apps/extension/entrypoints/background.ts:787-799, :1743-1747, :2111-2120`;
+  (`apps/extension/entrypoints/background.ts:794-806, :1750-1754, :2118-2127`;
   `crates/chat-stasher/src/nativehost.rs:1350-1357`). An account belonging
   to several organizations, with neither of the first two sources naming one, stops
   the leg instead of choosing: the value is never guessed and the organizations
   are never probed one by one, and once **this build** has recorded that answer
   the page is not asked again on every wake-up — the answer is already known
   (`apps/extension/lib/backfill/claude-org.ts:219-273`;
-  `apps/extension/entrypoints/background.ts:1765-1825`). A record an **earlier**
+  `apps/extension/entrypoints/background.ts:1772-1832`). A record an **earlier**
   build left is re-asked once, and only once: a recorded judgement is that
   build's, not this one's, and a refusal that repeats is written back naming the
   build that saw it. 🔴 "Once" is enforced rather than intended: the attempt is
@@ -734,14 +844,14 @@ Three things in that table deserve to be called out rather than buried:
   build. The sentinel
   `default` — "the identifier could not be told" — is refused outright for this
   platform rather than written into a path segment where it would address an
-  organization that does not exist (`apps/extension/lib/backfill/engine.ts:2015-2027`).
+  organization that does not exist (`apps/extension/lib/backfill/engine.ts:2036-2048`).
   🔴 **The organization a backfill is started with is the one it keeps.** The
   scope is written into the platform's progress record and the target registry
   when the backfill is registered, and no later request re-reads it from the page
   — so switching organizations on claude.ai, or having claude.ai open in two tabs
   at once, does not move a backfill that is already running: it keeps writing
   under the organization it started with
-  (`apps/extension/entrypoints/background.ts:2411-2512`). A backfill for a *second*
+  (`apps/extension/entrypoints/background.ts:2418-2519`). A backfill for a *second*
   organization starts by opening a conversation in it and using the extension
   there, which registers that organization as its own target with its own
   progress record — the two runs then advance independently, each under its own
@@ -753,11 +863,11 @@ Three things in that table deserve to be called out rather than buried:
   capture whose path segment is not an organization id, and a wake-up whose
   recorded scope is a title asks the page rather than substituting the title into
   a request (`apps/extension/lib/backfill/claude-org.ts:112-138`;
-  `apps/extension/entrypoints/background.ts:1379-1409`). Collapsing a title cannot
+  `apps/extension/entrypoints/background.ts:1386-1416`). Collapsing a title cannot
   put the unresolved sentinel in front of a live organization — the alarm would
   otherwise halt on `'default'` and never tick the organization
   (`apps/extension/lib/backfill/alarm.ts:1137-1239`;
-  `apps/extension/entrypoints/background.ts:2411-2512`). The host archive is
+  `apps/extension/entrypoints/background.ts:2418-2519`). The host archive is
   append-only and is not touched. The **local** ledger header at
   `cs_backfill_v2:<platform>:<scope>` is a different fact: a run opens it before
   any request, so a title tick has already written `halted` / `failures` /
@@ -779,7 +889,8 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:116`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:326-427,1954-1956,1996-2006`; `crates/chat-stasher/src/main.rs:8170-8175`).
+kept on your machine (`crates/chat-stasher/src/store.rs:368-600,2690-2692,2732-2742`; `crates/chat-stasher/src/main.rs:10201-10206`).
+
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
 
@@ -794,7 +905,7 @@ The parties who *do* see something, stated plainly:
 | Party | What they see | Why |
 |---|---|---|
 | **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:880`, `:674-722`; `apps/extension/lib/gemini-capture.ts:150-238` |
-| **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:326-427`; see `docs-dev/threat-model.md` |
+| **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:368-600`; see `docs-dev/threat-model.md` |
 | **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:633-666` |
 | **Anything else running on your computer as you** | The plaintext bundles in the extension's outbox, the staged shards, the config, and the master key files. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
 | **Us, the authors** | Nothing. | Section 1 |
@@ -802,7 +913,7 @@ The parties who *do* see something, stated plainly:
 One further disclosure about the optional **backfill** feature, which walks your
 conversation history to archive older chats. When you turn it on, it issues
 additional requests to the chat platform, from your own logged-in session
-(`apps/extension/lib/backfill/engine.ts:2903-2946`). That produces a request pattern
+(`apps/extension/lib/backfill/engine.ts:2948-2991`). That produces a request pattern
 the platform can see and which does not look like a human reading their history.
 **We have not investigated** whether any platform's terms of service prohibit
 this, or whether it triggers rate-limiting. Backfill is off unless you enable it
@@ -828,8 +939,8 @@ part; passive capture is a different leg and sends no request of its own, it
 reads the response the page fetches for the conversation you have open). On **Claude** it is a conversation list, one body request per
 conversation, and — only when neither the page's own requests nor the cookie has
 named the organization — **one** `GET /api/organizations`.
-(`apps/extension/lib/backfill/enumerate.ts:4907-4938`;
-`apps/extension/lib/backfill/engine.ts:3042-3115`.) The
+(`apps/extension/lib/backfill/enumerate.ts:4966-4997`;
+`apps/extension/lib/backfill/engine.ts:3087-3160`.) The
 practical reading for you: enabling backfill on Perplexity now produces list
 traffic *and* one body request per conversation the platform can see, and the
 conversations are backed up only as completely as the body endpoint returns — a
@@ -839,19 +950,19 @@ DeepSeek it produces list traffic *and* one body request per conversation, and o
 Grok two (a skeleton call and a content call — a request pattern the platform is
 more likely to notice, although both are the same two calls grok.com's own page
 makes when you open a conversation, separated by a 2-5 second pause,
-`apps/extension/lib/backfill/enumerate.ts:3360-3371`), and on Kimi one body request —
+`apps/extension/lib/backfill/enumerate.ts:3413-3424`), and on Kimi one body request —
 the same call its own page makes when you open a conversation, carrying the page's
-own token as described above (`apps/extension/lib/backfill/enumerate.ts:3375-3437`).
+own token as described above (`apps/extension/lib/backfill/enumerate.ts:3428-3496`).
 On Claude it is a conversation list and one body request per conversation — the
 same call claude.ai's own page makes when you open a past conversation — plus, at
 most once for as long as the organization stays unresolved, the organization-list
 request described above
-(`apps/extension/lib/backfill/enumerate.ts:4492-4501`).
+(`apps/extension/lib/backfill/enumerate.ts:4551-4560`).
 On Gemini, one conversation costs as many requests as it has pages: the leg
 follows the continuation token until the response says there is no more, waiting
 1-3 seconds between pages, and it refuses (and lists as a failure) a conversation
 that would need more than 20
-(`apps/extension/lib/backfill/enumerate.ts:3870-4028`; `apps/extension/lib/backfill/engine.ts:3042-3115`).
+(`apps/extension/lib/backfill/enumerate.ts:3929-4087`; `apps/extension/lib/backfill/engine.ts:3087-3160`).
 Its **passive capture** sends requests too, on the same route: a conversation you
 open is fetched from its first page and followed to the end, one request for the
 first page plus one per remaining page (`apps/extension/lib/gemini-capture.ts:150-238`).
@@ -873,7 +984,7 @@ coordination sentence the extension does show is about *this* machine: when the
 local coordination channel is unavailable — an older host, or a host it cannot
 reach — the leg refuses to run at all, live capture carries on, and the popup
 says exactly that, "Update chat-stasher to enable backfill. Live capture remains
-active in this browser." (`apps/extension/entrypoints/background.ts:2086`;
+active in this browser." (`apps/extension/entrypoints/background.ts:2093`;
 `apps/extension/locales/en.yml:488-489`).
 
 ## 5. Where the extension runs
@@ -881,16 +992,16 @@ active in this browser." (`apps/extension/entrypoints/background.ts:2086`;
 The extension's content scripts are injected on an **explicit, closed list of
 origins** compiled into the code — never `<all_urls>`, never a wildcard:
 
-- `https://chat.deepseek.com` (`apps/extension/lib/contract.ts:359`)
-- `https://www.perplexity.ai` (`apps/extension/lib/contract.ts:440`)
-- `https://chatgpt.com`, `https://chat.openai.com` (`apps/extension/lib/contract.ts:511`)
-- `https://gemini.google.com` (`apps/extension/lib/contract.ts:535`)
-- `https://claude.ai` (`apps/extension/lib/contract.ts:584`)
-- `https://www.kimi.com` (`apps/extension/lib/contract.ts:658`)
-- `https://grok.com` (`apps/extension/lib/contract.ts:783`)
+- `https://chat.deepseek.com` (`apps/extension/lib/contract.ts:388`)
+- `https://www.perplexity.ai` (`apps/extension/lib/contract.ts:469`)
+- `https://chatgpt.com`, `https://chat.openai.com` (`apps/extension/lib/contract.ts:540`)
+- `https://gemini.google.com` (`apps/extension/lib/contract.ts:564`)
+- `https://claude.ai` (`apps/extension/lib/contract.ts:622`)
+- `https://www.kimi.com` (`apps/extension/lib/contract.ts:696`)
+- `https://grok.com` (`apps/extension/lib/contract.ts:821`)
 
 The list the browser is given is derived mechanically from that table
-(`apps/extension/lib/contract.ts:899-934`), so the sites the extension can run
+(`apps/extension/lib/contract.ts:944-979`), so the sites the extension can run
 on and the sites it can capture from are the same set by construction — they
 cannot drift apart.
 
@@ -915,22 +1026,30 @@ launched with, reads that mapping from the two files the browser maintains
 itself: the browser's **Local State**, for the human-readable name of each
 profile, and each profile's **Preferences**, only to test whether this extension
 is installed in that profile
-(`crates/chat-stasher/src/ui/extension_profile.rs:146-177`). Three things out of
+(`crates/chat-stasher/src/ui/extension_profile.rs:235-266`). Three things out of
 those files are used — the profile's name, its directory name, and whether this
 extension is installed in it — and only to build one launch command: nothing
-read from either file is written back, sent to the host, or archived, and a name
-matching more than one profile, or a profile the extension is not installed in,
-resolves to nothing, so the row says no exact match was found instead of
-guessing.
+read from either file is written back, sent to the host, or archived. A row
+earns an action only where that mapping *decides* it: the profile name the
+install reported has to match exactly one profile and be claimed by no other
+install of that browser on this machine, and an install that reported no name is
+matched only when this machine holds exactly one install for that browser **and**
+exactly one local profile has the extension installed. Every other shape — a name
+matching more than one profile, two installs under one name, two unnamed installs
+of one browser, two profiles carrying the extension — resolves to nothing, so the
+row says no exact match was found instead of guessing. That is also why an
+unnamed install's row is labelled with a short form of its own install id rather
+than with a profile: the id is the only handle that is neither invented nor a
+claim about which of your profiles a record came from.
 
 Within those sites, not every request is captured. A response is only kept if it
 matches the platform's expected route *and* method *and* status *and* body shape
-(`apps/extension/lib/contract.ts:1112-1133`, `:1124-1184`). A body over 16 MiB is not
+(`apps/extension/lib/contract.ts:1220-1241`, `:1232-1297`). A body over 16 MiB is not
 captured, and the page console says so rather than dropping it silently
-(`apps/extension/lib/contract.ts:954`; `apps/extension/lib/page-hook.ts:481`). No shipped
+(`apps/extension/lib/contract.ts:999`; `apps/extension/lib/page-hook.ts:481`). No shipped
 platform row reads `WebSocket` frames or `EventSource` messages: every row
 states `webSocketCapture: false` explicitly, and none declares
-`eventSourceCapture` (`apps/extension/lib/contract.ts:356-873`).
+`eventSourceCapture` (`apps/extension/lib/contract.ts:385-918`).
 
 **What running on a site does *not* mean.** Being on this list means the
 extension's content script is injected there. It does not mean your history on
@@ -958,10 +1077,10 @@ tier of that list is easy to misread:
 
 | Platform | What backfill does when you enable it |
 |---|---|
-| **ChatGPT** | Main conversations, archived conversations, project discovery, and each project's conversations use separate cursors inside a workspace-scoped ledger; each page is requested through the current tab (`apps/extension/lib/backfill/types.ts:1762-1779`; `apps/extension/lib/backfill/enumerate.ts:314-384`; `apps/extension/lib/backfill/engine.ts:2596-2623`). | The conversation text, fetched one conversation at a time. Implemented, **not yet observed completing a backfill in a real browser**. Workspace attribution comes from the page's outgoing request header; if the workspace is unknown or ambiguous, enumeration stops with a named refusal and no list request (`apps/extension/entrypoints/background.ts:2174-2186`; `apps/extension/lib/backfill/engine.ts:1937-1952`). |
-| **DeepSeek**, **Gemini**, **Grok**, **Kimi**, **Claude** | Lists your conversations **and fetches their content**, one conversation at a time, handing it to the host (`apps/extension/lib/backfill/enumerate.ts:4959-4983`). All five are **implemented, not yet observed completing a backfill in a real browser**. For **DeepSeek** we have **not verified** whether a long conversation comes back complete either, and it does not page the endpoint (`apps/extension/lib/backfill/enumerate.ts:2980-3007`) — but the response is a tree, the extension walks it from its newest message back to a root, and a walk that reaches a message the response does not carry means that conversation is **not archived**; it is recorded as a failure with its own reason code and the leg carries on. For **Grok and Kimi** the same question is unverified with no such check. **Gemini does page**, so for it the completeness question is answered by following the token to the end; what bounds it instead is the 20-page cap, past which the conversation is refused rather than archived in part (`apps/extension/lib/backfill/engine.ts:3042-3115`). Kimi's routes, by contrast, **were** measured in a logged-in session (2026-09-14) and its one body request carries your page's own login token (`apps/extension/lib/platform-auth.ts:313-350`); whether a **long** Kimi conversation comes back complete is **not verified**, and a response that says it holds only part of a conversation is recorded as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:3250-3284`). Grok is the least verified: its routes were read from public open-source implementations rather than measured in a logged-in session, and **each conversation costs two requests** — a skeleton call, then a content call built only from the ids that skeleton named (`apps/extension/lib/backfill/enumerate.ts:3338-3399`). |
-| **Perplexity** | Lists your conversations **and fetches their content**, one `GET /rest/thread/<slug>` per conversation (`apps/extension/lib/backfill/enumerate.ts:3111-3112`). Each conversation is **checked for completeness before it is stored**: the 2026-09-23 probe found the body carries a stated `has_next_page` / `next_cursor` signal, so a response that declares there is more of the conversation is **not archived** — it is recorded as a failure with its own reason code and the leg carries on, never storing a truncated conversation as a whole one (`apps/extension/lib/backfill/enumerate.ts:2432-2476`). Implemented, **not yet observed completing a backfill in a real browser**. |
-| **Claude** | Lists your conversations **and fetches their content**, addressed by the organization resolved as above. Its routes were read from public open-source implementations, **not** measured in a logged-in claude.ai session — nobody has opened claude.ai with this code — so the route shapes are source-backed rather than observed (`apps/extension/lib/backfill/enumerate.ts:4031-4037`). **Each conversation's body is checked for completeness before it is stored**: the response is a tree, and the extension walks the active branch from its newest message back to the branch root. A parent the response does not carry (the shared tree-root id every real body omits, measured 2026-09-24) is accepted as that root only when the body's own shape corroborates it — one shared absent parent, and a root at the foot of the message `index` counter; a body with a missing middle or a dropped prefix, a body whose newest message is absent, or one whose parent links form a cycle is **not archived** — it is recorded as a failure with its own reason code and the leg carries on (`apps/extension/lib/backfill/enumerate.ts:4278-4356`; `apps/extension/lib/backfill/engine.ts:3327-3347`). Whether a **long** conversation is capped server-side is not established by any source; a body so capped is refused unless it also rewrote the survivor to index 0 and the shared id, which no measurement shows. |
+| **ChatGPT** | Main conversations, archived conversations, project discovery, and each project's conversations use separate cursors inside a workspace-scoped ledger; each page is requested through the current tab (`apps/extension/lib/backfill/types.ts:1762-1779`; `apps/extension/lib/backfill/enumerate.ts:332-402`; `apps/extension/lib/backfill/engine.ts:2641-2668`). | The conversation text, fetched one conversation at a time. Implemented, **not yet observed completing a backfill in a real browser**. Workspace attribution comes from the page's outgoing request header; if the workspace is unknown or ambiguous, enumeration stops with a named refusal and no list request (`apps/extension/entrypoints/background.ts:2181-2193`; `apps/extension/lib/backfill/engine.ts:1958-1973`). |
+| **DeepSeek**, **Gemini**, **Grok**, **Kimi**, **Claude** | Lists your conversations **and fetches their content**, one conversation at a time, handing it to the host (`apps/extension/lib/backfill/enumerate.ts:5018-5042`). All five are **implemented, not yet observed completing a backfill in a real browser**. For **DeepSeek** we have **not verified** whether a long conversation comes back complete either, and it does not page the endpoint (`apps/extension/lib/backfill/enumerate.ts:3029-3056`) — but the response is a tree, the extension walks it from its newest message back to a root, and a walk that reaches a message the response does not carry means that conversation is **not archived**; it is recorded as a failure with its own reason code and the leg carries on. For **Grok and Kimi** the same question is unverified with no such check. **Gemini does page**, so for it the completeness question is answered by following the token to the end; what bounds it instead is the 20-page cap, past which the conversation is refused rather than archived in part (`apps/extension/lib/backfill/engine.ts:3087-3160`). Kimi's routes, by contrast, **were** measured in a logged-in session (2026-09-14) and its one body request carries your page's own login token (`apps/extension/lib/platform-auth.ts:313-350`); whether a **long** Kimi conversation comes back complete is **not verified**, and a response that says it holds only part of a conversation is recorded as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:3295-3329`). Grok is the least verified: its routes were read from public open-source implementations rather than measured in a logged-in session, and **each conversation costs two requests** — a skeleton call, then a content call built only from the ids that skeleton named (`apps/extension/lib/backfill/enumerate.ts:3391-3458`). |
+| **Perplexity** | Lists your conversations **and fetches their content**, one `GET /rest/thread/<slug>` per conversation (`apps/extension/lib/backfill/enumerate.ts:3160-3161`). Each conversation is **checked for completeness before it is stored**: the 2026-09-23 probe found the body carries a stated `has_next_page` / `next_cursor` signal, so a response that declares there is more of the conversation is **not archived** — it is recorded as a failure with its own reason code and the leg carries on, never storing a truncated conversation as a whole one (`apps/extension/lib/backfill/enumerate.ts:2450-2494`). Implemented, **not yet observed completing a backfill in a real browser**. |
+| **Claude** | Lists your conversations **and fetches their content**, addressed by the organization resolved as above. Its routes were read from public open-source implementations, **not** measured in a logged-in claude.ai session — nobody has opened claude.ai with this code — so the route shapes are source-backed rather than observed (`apps/extension/lib/backfill/enumerate.ts:4090-4096`). **Each conversation's body is checked for completeness before it is stored**: the response is a tree, and the extension walks the active branch from its newest message back to the branch root. A parent the response does not carry (the shared tree-root id every real body omits, measured 2026-09-24) is accepted as that root only when the body's own shape corroborates it — one shared absent parent, and a root at the foot of the message `index` counter; a body with a missing middle or a dropped prefix, a body whose newest message is absent, or one whose parent links form a cycle is **not archived** — it is recorded as a failure with its own reason code and the leg carries on (`apps/extension/lib/backfill/enumerate.ts:4337-4415`; `apps/extension/lib/backfill/engine.ts:3372-3392`). Whether a **long** conversation is capped server-side is not established by any source; a body so capped is refused unless it also rewrote the survivor to index 0 and the shared id, which no measurement shows. |
 
 We state this in a privacy policy because the failure mode is a privacy
 expectation, not just a feature gap: a user who believes their Perplexity
@@ -975,12 +1094,12 @@ have not checked a genuinely long conversation against any of them. Kimi is the
 one where that case is at least refused out loud: a body response that says it
 holds only part of a conversation is not archived and is listed as a failure,
 so a long Kimi conversation is missing from your archive rather than silently
-half-there (`apps/extension/lib/backfill/engine.ts:3251-3285`). Grok
+half-there (`apps/extension/lib/backfill/engine.ts:3296-3330`). Grok
 carries a second caveat of its own: where the sources for its list cursor
 disagree, the extension does **not** pick one — a page that repeats what was
 already listed stops the leg and says the response shape changed, rather than
 being read as "you have no more conversations"
-(`apps/extension/lib/backfill/engine.ts:2267-2385`). And because no source says
+(`apps/extension/lib/backfill/engine.ts:2288-2406`). And because no source says
 whether Grok returns a conversation's responses in a stable order, re-opening an
 unchanged Grok conversation is more likely than on other platforms to deliver
 another copy of it: an extra copy in your archive, never a lost one.
@@ -1001,7 +1120,7 @@ web chat carries its conversation over a WebSocket (`wss://…/sydney/ChatHub`),
 and when that was decided the hook above read only `fetch` and
 `XMLHttpRequest` responses, so a row could not have captured anything.
 Copilot therefore has no row in the platform table
-(`apps/extension/lib/contract.ts:356-873`), and that absence was recorded as
+(`apps/extension/lib/contract.ts:385-918`), and that absence was recorded as
 a decision, not a backlog item, in the R20 platform-diff round (§124) of the
 archived status report, 2026-08-16; restated here 2026-10-08. The opt-in
 `webSocketCapture` switch above postdates that decision, and turning it on
@@ -1016,7 +1135,7 @@ The extension declares exactly four permissions and no host permissions
 
 | Permission | Why it is needed | What it does **not** allow |
 |---|---|---|
-| `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. The registration is per user account, not per install: one host manifest per browser, shared by every profile of it, all pointing at the same binary and the same stage (`crates/chat-stasher/src/nativehost.rs:155-168`, `:647-691`, `:3990-4024`, `:499-612`; `crates/chat-stasher/src/main.rs:2255-2270`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
+| `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. The registration is per user account, not per install: one host manifest per browser, shared by every profile of it, all pointing at the same binary and the same stage (`crates/chat-stasher/src/nativehost.rs:155-168`, `:647-691`, `:3990-4024`, `:499-612`; `crates/chat-stasher/src/main.rs:2764-2779`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
 | `storage` | Persists the items listed in [section 3b](#3-where-your-data-is-stored) — the backfill switch and progress header (so an interrupted backfill can resume instead of restarting; the id list itself is in the `chat-stasher-backfill` IndexedDB database), the last host-status answer, the pause record, and the last-export stamp. (`apps/extension/lib/backfill/store.ts:18-27`) | This is `storage.local` only: `localArea()` reads `browser?.storage?.local` / `chrome?.storage?.local` and nothing else (`apps/extension/lib/backfill/store.ts:85-97`). Nothing is written to `storage.sync`, so nothing here is uploaded to your browser account by us. |
 | `alarms` | Gives the backfill leg a periodic heartbeat, so history archiving can finish over days without you having to keep the specific chat tab open — the leg does need *some* open, logged-in page of that platform to fetch through, and the install guide states that precondition in full; since the Native Messaging rewrite the same alarm is also when the outbox is drained and retried. (`apps/extension/wxt.config.ts:103-107`; `apps/extension/lib/backfill/alarm.ts`; `apps/extension/lib/outbox-alarm.ts:22-48`) | It does not grant any network or data access. |
 | `unlimitedStorage` | The outbox is an IndexedDB queue of undelivered bundles, capped at 256 MiB by us (`apps/extension/lib/outbox.ts:54`); the backfill id list (`chat-stasher-backfill`, ids only, no conversation text) is a second IndexedDB database. Without this permission Chrome may evict best-effort IndexedDB data under disk pressure, which would mean silently losing captures the user was told were queued. (`apps/extension/wxt.config.ts:115`) | It removes the browser's eviction path for data the extension already stores. It is not a claim on your disk beyond that, and the outbox refuses new captures rather than growing without bound. |
@@ -1055,7 +1174,7 @@ Chat Stasher does not call any AI model, does not send your conversations to a
 model provider, and does not use your conversations for training anything. The
 word "chat" in this product refers to conversations you already had, on someone
 else's service, that this tool copies into your own archive. The archive format
-is `rustic` encrypted backup objects (`crates/chat-stasher/src/store.rs:326-427`);
+is `rustic` encrypted backup objects (`crates/chat-stasher/src/store.rs:368-600`);
 nothing reads them except you.
 
 ## 9. How long data is kept, and how to delete it
@@ -1073,9 +1192,11 @@ Retention on **your** machine is under your control:
 | Browser download-history entry for that export | Until you clear your browser history | Clear downloads in your browser's own history UI |
 | Extension local storage — the install identity, the report counter, the account-fingerprint salt, backfill progress, the alarm's last-wake trace, the last host status, the pause record, the capture-hook records and the last-export stamp (the full list is the table in [section 3b](#3-where-your-data-is-stored)) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
-| A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:735-821`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
+| Staged session increment maps (`<stage>/meta/<machine>/opencode-session-maps/`) | Retained across stage reclaims as durable baselines for record-increment sources, and pushed to repository backup snapshots under the stage root | Delete the stage directory you chose, or remove `<stage>/meta/<machine>/opencode-session-maps/` |
+| A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:838-942`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
 | The optional full-text index | Until you run `chat-stasher index clear` or remove the OS cache directory. It stores indexed titles and user/assistant text in a local SQLite database. | Run `chat-stasher index clear --destination <name>` or use the explicit `--repo` used to select the index. |
-| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. Grok CLI usage sidecars are retained as a separate shard linked by session id; the original `usage.json` bytes are kept intact, including each model's `modelUsage` object and all counters such as `inputTokens`, `cachedReadTokens`, `outputTokens`, `totalTokens`, and any additional fields the source contains (`crates/chat-stasher/src/scanner.rs:1901-2010`; `crates/chat-stasher/src/collect.rs:2297-2364`). | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:195-1423`). Selective per-conversation deletion inside an archive is not implemented. |
+| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. Grok CLI usage sidecars are retained as a separate shard linked by session id; the original `usage.json` bytes are kept intact, including each model's `modelUsage` object and all counters such as `inputTokens`, `cachedReadTokens`, `outputTokens`, `totalTokens`, and any additional fields the source contains (`crates/chat-stasher/src/scanner.rs:4240-4300`; `crates/chat-stasher/src/collect.rs:4966-5057`). The Grok CLI native transcript, `chat_history.jsonl`, is retained from every session directory on disk — including sessions the search store has no `session_docs` row for — with its typed records (system, user and assistant turns, tool calls and their results, and the `encrypted_content` reasoning ciphertext kept raw) sealed into the session's own body next to the legacy export line, so the raw archive keeps both observations while reading a session that renders native turns does not repeat the legacy plain-text summary (`crates/chat-stasher/src/scanner.rs:4302-4363`, `crates/chat-stasher/src/normalize/grok_cli.rs:24-66`). The CLI also reads local Codebuff / Freebuff sessions: from the harness's own config root (`~/.config/manicode/`, plus the `-dev` and `-staging` build channels, or wherever `FREEBUFF_CONFIG_DIR` points), the `chat-messages.json` transcript of every chat is sealed whole, byte for byte, as body tier — one full generation per pass that saw the file change — and beside it, when present, the `chat-meta.json` sidecar whose `firstPrompt` is a truncated copy of your typed text, so it is body tier too (`crates/chat-stasher/data/harness-registry-v1.json`; `crates/chat-stasher/src/collect.rs:4728-4891`, `:4899-4954`). Nothing else in a chat directory is read: the multi-megabyte run state, the debug log and half-written temp files are excluded by a two-file whitelist. A transcript that cannot be read whole and validated that pass is skipped — nothing is sealed for it, not partial bytes — and the only record it leaves is a bounded, content-free count (a registry root id, the session's directory-name identity, a byte size and a closed-enum reason) while the run reports exit code 3 so an incomplete scan cannot look complete (`crates/chat-stasher/src/codebuff.rs:59-115`; `crates/chat-stasher/src/main.rs`). Per-message times stay unknown (the harness's own display strings carry no date); when a chat's directory name itself states the session's start time, that instant is recorded with its source named and is never re-read out of the archive id (`crates/chat-stasher/src/codebuff.rs:37-39, 148-204`). | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:239-1925`). Selective per-conversation deletion inside an archive is not implemented. |
+| A local mirror copy, if `[mirror]` is enabled | **Until you delete the directory.** A mirror is a second, complete copy of the mirrored destination's repository on this machine's own volume — ciphertext only, never decrypted, but it includes the destination's `keys/` directory, so the encrypted master key and the bytes it opens sit on the same disk (`crates/chat-stasher/src/mirror.rs:1-16`). The records a mirror keeps in the state directory carry ids, counts, times and the declared destination name only — no paths, and no raw error chains (`crates/chat-stasher/src/mirrorstate.rs:30-31`, `crates/chat-stasher/src/mirror.rs:48-50`, `:1873-1876`). | Delete the mirror's directory under the data directory (`mirror/<name>/`); nothing else depends on it and the next sync round refills it. Turning `[mirror]` off stops the copying and deletes nothing. |
 **Uninstalling the extension in one profile stops capture in that profile
 immediately** and removes that profile's local storage, which is where its outbox
 lives, so uninstalling also deletes the captures *that install* had not been
@@ -1088,7 +1209,7 @@ be the worse failure.
 profile is retired.** `chat-stasher install-native-host --uninstall` removes the
 host manifest for every browser on the machine in one pass, so an install you
 left in place can no longer deliver and its captures wait in its outbox instead
-(`crates/chat-stasher/src/main.rs:2306-2344`, `:2413-2419`). Draining each
+(`crates/chat-stasher/src/main.rs:2810-2848`, `:2877-2883`). Draining each
 profile's outbox first is the subject of
 [install.md → Before you remove the host](../docs/install.md#before-you-remove-the-host),
 and it is worth doing because an outbox goes away with its profile.
@@ -1117,16 +1238,19 @@ profile on an encrypted volume.
 running as you can read the plaintext bundles in the extension's outbox, the
 staged shards, your config, and — with your archive — decrypt everything. On a
 single-user desktop this is the normal situation; on a shared machine it is the
-dominant risk.
+dominant risk. This includes the harnesses' own prompt-history files described
+in section 3 — one per harness, the complete set: they were already readable
+by anything running as you, and the sealed copies `collect` makes of both
+are plaintext in the stage exactly like a session's.
 
 **3. A master key file is the only key to the repository it opens, and losing it
 is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
-archive (`crates/chat-stasher/src/store.rs:1954-1956`). The key file
+archive (`crates/chat-stasher/src/store.rs:2690-2692`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
-(`crates/chat-stasher/src/store.rs:1996-2066`).
+(`crates/chat-stasher/src/store.rs:2732-2802`).
 
 There is one key file per repository — `rustic_key_file` for the local archive,
 `key_file` per destination, defaulting to
@@ -1134,7 +1258,7 @@ There is one key file per repository — `rustic_key_file` for the local archive
 that copy alone, and a copy of one does not restore another. A second machine
 reads a destination with that destination's key and does not use the local one,
 which is why every key file has to be backed up
-(`crates/chat-stasher/src/main.rs:8052-8057`).
+(`crates/chat-stasher/src/main.rs:10066-10071`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin

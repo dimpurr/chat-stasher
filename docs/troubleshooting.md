@@ -117,6 +117,36 @@ This is an inventory only: it does not change stored shards or snapshots. Exit
 reported findings as partial and any unreported sessions as unknown, not clear;
 resolve the read error and run the inventory again.
 
+### A push was interrupted, and something mentions torn debris
+
+You will know this when a line uses the word **torn**. The full sentence,
+the same on every surface, is:
+
+> An interrupted push left a partial file. It belongs to no backup and can be ignored.
+
+A push can be interrupted at any moment — a lid closed, a network changed,
+Ctrl-C, a shutdown — and it can leave a half-written pack file behind under
+its final name. No index file names it, so a later push can never resume
+into it, and **nothing it holds belongs to any backup**. The commands that
+scan a repository classify it as what it is: `mirror sync` skips it and
+reports it beside its result, `status` counts it in the `[mirror]` rows,
+`doctor` shows the counts under the destination, `verify` prints it as a
+reminder next to its findings (the verdict itself stays `OK`), and
+`prune-orphans --destination <name>` reports torn and complete-but-unindexed
+packs as separate counts with their byte totals. None of these exits non-zero
+over torn debris.
+
+Nothing needs doing. The debris is never downloaded into the mirror, never
+adopted, never deleted, and every scan re-classifies it from its bytes, so
+closing your laptop mid-push costs you nothing but the interrupted push's
+time. What each surface shows, and what would actually be bad, is
+[use-cases/interrupted-push.md](use-cases/interrupted-push.md).
+
+The one thing torn debris is *not*: a checked-and-failed answer about a
+backup. If a pack an index **does** name fails verification, that is
+corruption of real content, and those commands still exit `1` for it — the
+debris classification only ever applies to what no index names.
+
 ## Web chats and the browser extension
 
 ### A chat is not being captured

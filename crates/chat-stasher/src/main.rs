@@ -19,11 +19,13 @@ use chat_stasher::verify::{CheckSummary, ExpectationBasis, ReconcileReport, Sess
 use clap::{Parser, Subcommand};
 use rustic_core::repofile::{MasterKey, Node, NodeType};
 use rustic_core::{Grouped, LsOptions, SnapshotGroupCriterion};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(test)]
@@ -188,6 +190,48 @@ enum ScheduleAction {
     Uninstall,
 }
 
+/// A harness for the `mirror` group (ADR-062 / LM-2): one action today, run
+/// as its own round under the same budget discipline a pass applies.
+#[derive(Subcommand, Clone, Copy)]
+enum MirrorAction {
+    /// Run one mirror sync round: list the destination, download what the
+    /// mirror lacks, hash every file against its own name, stop where the
+    /// round's budget or the free-disk floor says.
+    Sync {
+        /// This round's budget, in seconds. A round stops cleanly here and
+        /// the next round resumes; it is not a failure when it stops.
+        /// Default 600 — a manual round carries its own budget the way an
+        /// hourly round carries the hour's leftover (ADR-062 C2).
+        #[arg(long)]
+        budget_secs: Option<u64>,
+        /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
+        #[arg(long)]
+        keep_ssh_masters: bool,
+    },
+}
+
+/// A harness for `import --harness` (cache copy) or `backfill` (app-driven).
+///
+/// One variant today: Grok Bot, whose measured local cache (ADR-051 fidelity
+/// `partial`) is the one whose copies needed a first-class door (GB-3/GB-3b)
+/// and whose backfill ADR-058 decided. The enum exists so the offered value
+/// is a named word, not a free string: a harness with no support answers
+/// with this build's list, not with a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum BackupHarness {
+    /// Grok Bot desktop app: copies of its `sand-client-persistence` tree.
+    GrokBot,
+}
+
+impl BackupHarness {
+    /// The harness id, the same one the registry and session ids carry.
+    fn harness_id(self) -> &'static str {
+        match self {
+            Self::GrokBot => "grok-bot",
+        }
+    }
+}
+
 /// Subcommands. `push`/`read` are backed by the BackupStore
 /// (rustic_core); `doctor` answers one question — is a harness silently
 /// deleting your history?
@@ -211,12 +255,16 @@ enum Command {
     /// Encrypt and post an explicit file using an environment posting key.
     /// Creates no archive key or machine identity. Currently opens fs:// inboxes.
     Send(SendArgs),
-    /// Pull a declared fs:// inbox into sealed stage; run-once never pulls.
+    /// Pull a declared fs:// inbox into sealed stage; `run-once` never pulls
+    /// a remote inbox (a declared `[pull.letta]` producer is the pass's own
+    /// separate pull step, not this command).
     /// Archive proof is not wired yet: sealed objects remain queued, exit 3.
     /// Retain <name>.rates.sqlite3 beside the inbox declaration across pulls;
     /// deleting or moving it can reset local hourly accounting. Waiting is the
     /// pre-pull listing count; stored/duplicates refer to sealed stage only.
     InboxPull(InboxPullArgs),
+    /// Pull provider API exports through the local inbox and shared seal sink.
+    Pull(chat_stasher::letta::PullArgs),
     /// Walk through first-run setup: scan, then the local first save (which
     /// creates the encrypted local repository and its masterkey), then the
     /// remote destination (which is written, connected to, and — for a host
@@ -268,9 +316,13 @@ enum Command {
     },
     /// Collect one pass, push only when configured and changed, then exit.
     ///
+    /// A declared `[pull.letta]` producer is pulled before the collect step,
+    /// so the scheduled pass archives it without a separate command; its
+    /// unread or partially-read remainder keeps the pass at exit 3.
+    ///
     /// Normal outcomes return 0: `result: NOOP` means no snapshot was created,
-    /// while `result: COMPLETED` means a snapshot was created. Non-zero means
-    /// a real error. The command is safe to invoke again.
+    /// while `result: COMPLETED` means a snapshot was created. Non-zero means a
+    /// real error. The command is safe to invoke again.
     RunOnce {
         /// Stage directory that holds the sealed session shard tree.
         #[arg(long)]
@@ -311,7 +363,9 @@ enum Command {
     /// there.
     Schedule {
         /// Schedule only inbox-pull for this initialized inbox, independently
-        /// of the archive cycle. run-once never pulls remote inboxes.
+        /// of the archive cycle. run-once never pulls remote inboxes (a
+        /// declared `[pull.letta]` producer is pulled by its own step inside
+        /// the pass, not by inbox-pull).
         #[arg(long, global = true)]
         pull: Option<String>,
         /// Optional action. Without it, only render the templates.
@@ -471,7 +525,7 @@ enum Command {
         /// Backend option `key=value`, repeatable.
         #[arg(long = "option")]
         options: Vec<String>,
-        /// Keep ssh ControlMaster processes open after this run.
+        /// Keep the ssh ControlMaster processes open after this run.
         #[arg(long)]
         keep_ssh_masters: bool,
     },
@@ -508,6 +562,25 @@ enum Command {
         /// identical captured bodies. Nothing is deleted by either policy.
         #[arg(long)]
         no_collapse: bool,
+        /// ADR-061: also emit the records the source deleted, at their
+        /// original positions, each carrying `"deleted": true`. The default
+        /// view stays the source's final state; this switch is how the
+        /// deleted history — still stored, never erased — becomes
+        /// reachable. Snapshot-source sessions (opencode) only; other
+        /// harnesses ignore the switch (their bodies are growth logs).
+        #[arg(long)]
+        include_deleted: bool,
+        /// Serve this read from the local mirror copy only (W1053): the
+        /// destination is never contacted — no connection is opened at all
+        /// — and every byte answers from the mirror, the body cache or
+        /// rustic's local metadata cache. A file none of them holds reports
+        /// "did not finish" (exit `3`) rather than reaching for the
+        /// remote, so an offline absence is unknown, never empty, and the
+        /// report says `served from mirror`. Requires a usable mirror of
+        /// the destination being read; refused before anything is read
+        /// when there is none.
+        #[arg(long)]
+        offline: bool,
         /// Machine partition to read. Uses this machine's id when available;
         /// if it is unavailable, use `--machine` explicitly. Unused by
         /// `--all-machines`, which reads every machine.
@@ -560,6 +633,20 @@ enum Command {
         /// Print full session ids in L3 rows (default: privacy-safe short ids).
         #[arg(long)]
         full_ids: bool,
+        /// Certify the local mirror copy instead of the destination (W1053):
+        /// the destination is never contacted — the copy answers every
+        /// read, and the verdict that comes back certifies **the copy**,
+        /// never the destination's repository, so it is worded that way
+        /// and the report says `served from mirror`. L1/L2 grade the copy's
+        /// own integrity: packs the copy lacks its index name are the
+        /// copy's own finding, exit 1. L3 reconciles the stage against
+        /// what the copy holds, and a session the copy never synced is an
+        /// unknown about the archive — a `NOT IN THE LOCAL COPY` row and
+        /// RESULT INCOMPLETE, exit 3 — never `MISSING IN ARCHIVE`, which a
+        /// not-contacted destination cannot prove. An online `verify` (no
+        /// switch) still never consults the copy.
+        #[arg(long)]
+        offline: bool,
         /// Machine partition (default: config `machine`, else this machine's
         /// identity; use `--machine` explicitly to choose the partition).
         #[arg(long)]
@@ -688,6 +775,18 @@ enum Command {
     /// "0 matched" answer cannot be trusted while any remain, so the exit code
     /// is `3` rather than `1`.
     ///
+    /// `--surface` filters on the **observed** surface dimension (ADR-059):
+    /// a session matches only if its records name the value — claude-code's
+    /// Cowork transcripts record `desktop-cowork` — and a session whose
+    /// records carry no surface at all (the CLI library records none: an
+    /// absent observation is never read as an implicit `cli`) is listed as
+    /// unplaceable while the filter is active. The value must be one the
+    /// registry declares in its `dimensions.surfaces` (`cli`,
+    /// `desktop-cowork`, …); anything else is a usage error, because a typo
+    /// named as a filter must not come back as an empty result. With the
+    /// flag absent every surface is in scope and the search behaves exactly
+    /// as it did before the dimension existed.
+    ///
     /// `--text` searches the local FTS5 trigram index (substring matching for
     /// runs of at least three characters). A shorter query is refused, not
     /// answered: the report says `matched=unknown` and the run exits `3`.
@@ -703,7 +802,7 @@ enum Command {
         /// Destination to search. Required unless an explicit `--repo` is given.
         #[arg(long)]
         destination: Option<String>,
-        /// The shared filters (session / machine / harness / time window).
+        /// The shared filters (session / machine / harness / surface / time window).
         #[command(flatten)]
         filters: chat_stasher::selector::SelectorArgs,
         /// Search indexed titles and user/assistant text with SQLite's trigram tokenizer.
@@ -779,7 +878,9 @@ enum Command {
         /// Directory to write into. Must be empty or absent unless `--force`.
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
-        /// The shared filters (session / machine / harness / time window).
+        /// The shared filters (session / machine / harness / surface / time window),
+        /// resolved by the same code as `search` — a `--surface` value the
+        /// registry does not declare is refused here too.
         #[command(flatten)]
         filters: chat_stasher::selector::SelectorArgs,
         /// Which lines to write: `all` (default), or `user` for only the user's
@@ -793,6 +894,14 @@ enum Command {
         /// manifest's `untimed_lines`. Requires a window.
         #[arg(long)]
         trim_to_window: bool,
+        /// ADR-061: also emit the records the source deleted, at their
+        /// original positions, each carrying `"deleted": true`. The default
+        /// view stays the source's final state; this switch is how the
+        /// deleted history — still stored, never erased — becomes
+        /// reachable. Snapshot-source sessions (opencode) only; other
+        /// harnesses ignore the switch (their bodies are growth logs).
+        #[arg(long)]
+        include_deleted: bool,
         /// Write into a non-empty `--out`. Nothing is ever deleted, so files
         /// from an earlier export stay where they are.
         #[arg(long)]
@@ -807,6 +916,14 @@ enum Command {
         /// written.
         #[arg(long)]
         dry_run: bool,
+        /// Serve the export from the local mirror copy only (W1053): the
+        /// destination is never contacted, and the report says
+        /// `served from mirror`. A selected session whose bytes the copy
+        /// does not hold is listed in the manifest's failed sessions with
+        /// an unknown-worded reason and makes the run exit `3` (incomplete
+        /// — it never reads as "the archive does not have it").
+        #[arg(long)]
+        offline: bool,
         /// Repository path override.
         #[arg(long)]
         repo: Option<String>,
@@ -874,39 +991,112 @@ enum Command {
         #[arg(long)]
         key_file: Option<String>,
     },
-    /// Import one official export: archive the file byte-exact, and write one
-    /// inbox bundle per conversation into a local inbox.
+    /// Import an official export — or one harness's local-cache backup.
     ///
-    /// Reads `<export>` whole, stores it under
-    /// `<stage>/import-raw/<platform>/<sha256>` — a sibling of `sessions/`, so it
-    /// is in no session count — and writes one `chat-stasher/inbox@3`
-    /// `web-capture` bundle per conversation into `--inbox`. A later
-    /// `ingest --inbox` is what seals them; this command never seals, never
-    /// pushes, never reads config, a destination or a machine identity, and never
-    /// modifies or moves the export file.
+    /// Two modes share this command.
     ///
-    /// Only Claude's `conversations.json` has a parser in this build; naming any
-    /// other platform is a refusal, not a guess. The archive comparison that would
-    /// suppress a body already archived is behind a probe that this build ships
-    /// unwired, so every conversation currently gets a body.
+    /// **Takeout mode** (with a `<platform>` and `<export>`): archive the file
+    /// byte-exact, and — where the platform's conversation import is open in
+    /// this build — write one inbox bundle per conversation into a local
+    /// inbox. Claude's run reads `<export>` whole, stores it under
+    /// `<stage>/import-raw/<platform>/<sha256>` — a sibling of `sessions/`,
+    /// so it is in no session count — and writes one `chat-stasher/inbox@3`
+    /// `web-capture` bundle per conversation into `--inbox`, for a later
+    /// `ingest --inbox` to seal. This mode never seals, never pushes, never
+    /// reads the config or a destination, and never modifies or moves the
+    /// export file.
     ///
-    /// Exit codes: 0 = the export was read whole and everything importable in it
-    /// was written; 3 = the export was never read to the end; 2 = it was read and
-    /// is not something this build imports; 1 = it was read, and a conversation or
-    /// a write failed.
+    /// Grok's run is held by this build's development import gate at
+    /// **raw-export archiving only**: the export is parsed and sealed
+    /// byte-exact as its own object under
+    /// `<stage>/export-files/<platform>/<sha256>/<name>`, its index row
+    /// files under `meta/<machine>/`, and **no conversation bundle is
+    /// written** — the refused half is what the run says in its output.
+    /// `--machine` names the partition that index row belongs to and is
+    /// required for such a platform.
+    ///
+    /// Claude's `conversations.json` and Grok's `prod-grok-backend.json`
+    /// have parsers in this build; naming any other platform is a
+    /// refusal, not a guess.
+    ///
+    /// **Backup-restore mode** (`--harness grok-bot --from <dir>`): feed a
+    /// copied Grok Bot cache — one backup directory, several, overlapping
+    /// ones, whatever was copied aside — into the archive once, as a
+    /// first-class pass instead of a `[harness_roots]` workaround. Each
+    /// session found in the backup is delivered through its own delivered-set
+    /// identity (machine + agent uuid), so only rows that session has never
+    /// archived are sealed: a backup that overlaps the live cache or an
+    /// earlier import adds exactly its new rows, once. Re-running the same
+    /// import delivers nothing. The backup is only ever read; the live cache
+    /// is never touched, and the ordinary collect after an import still
+    /// delivers only what is genuinely new. Each sealed shard's `_chat_stasher`
+    /// line records that it came from a backup import, the backup directory's
+    /// basename and the import time. `--dry-run` reports the per-session
+    /// counts and writes nothing anywhere.
+    ///
+    /// Exit codes (both modes): `0` = everything was read to the end and
+    /// imported (takeout mode: everything this build lets the run write was
+    /// written) · `3` = an input was never read to the end, so nothing about
+    /// what it holds is proven · `2` = it was read and is not something this
+    /// build imports, or an argument was missing or unusable · `1` = it was
+    /// read, and a conversation, session, write, or the platform's import
+    /// gate refused the rest — what was written is real but the run is
+    /// incomplete.
     Import {
         /// Which platform's export this is.
-        #[arg(value_enum)]
-        platform: chat_stasher::import::TakeoutPlatform,
-        /// The export file, e.g. the unzipped Claude `conversations.json`.
+        #[arg(value_enum, required_unless_present = "harness")]
+        platform: Option<chat_stasher::import::TakeoutPlatform>,
+        /// The export file, e.g. the unzipped Claude `conversations.json` or
+        /// Grok `prod-grok-backend.json`.
         /// A manifest is refused: its download links are one-time-use credentials.
-        export: PathBuf,
+        #[arg(required_unless_present = "harness")]
+        export: Option<PathBuf>,
         /// Local inbox folder to write bundles into, for a later `ingest --inbox`.
-        #[arg(long)]
-        inbox: PathBuf,
-        /// Existing stage directory receiving the byte-exact export. Never created.
+        #[arg(long, required_unless_present = "harness")]
+        inbox: Option<PathBuf>,
+        /// Existing stage directory receiving the sealed shards (backup-restore
+        /// mode) or the byte-exact export (takeout mode). Never created.
         #[arg(long)]
         stage: PathBuf,
+        /// The harness whose local-cache backup this import reads.
+        /// Only `grok-bot` exists today.
+        #[arg(long, value_enum, requires = "from", conflicts_with_all = ["platform", "export", "inbox"])]
+        harness: Option<BackupHarness>,
+        /// Backup directory of the harness's local cache to import
+        /// (`--harness` mode). Repeatable; backups may overlap.
+        /// Read-only: nothing inside is moved or changed.
+        #[arg(long, value_name = "DIR", requires = "harness")]
+        from: Vec<PathBuf>,
+        /// Report the per-session counts without writing anything.
+        #[arg(long, requires = "harness")]
+        dry_run: bool,
+        /// The machine partition the run writes machine-keyed metadata for.
+        ///
+        /// Takeout mode: required for a platform whose run is held at
+        /// raw-export archiving (grok) — the export object's index row
+        /// files under `meta/<machine>/` — and not read by any other
+        /// platform's run.
+        ///
+        /// Backup-restore mode: the machine partition for
+        /// `sessions/<machine>/…`. Default: config `machine`, else this
+        /// machine's identity (generated on first use).
+        #[arg(long)]
+        machine: Option<String>,
+        /// Maximum sealed shards per bucket (default: 20).
+        #[arg(long, requires = "harness", default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
+        shard_bucket_cap: usize,
+        /// Named destination from the config (backup-restore mode). Read state
+        /// is kept per destination, so a different destination is a different
+        /// delivered set.
+        #[arg(long, requires = "harness")]
+        destination: Option<String>,
+        /// Destination repository to import for, instead of a named
+        /// destination.
+        #[arg(long, requires = "harness")]
+        repo: Option<String>,
+        /// Masterkey file override for the destination above.
+        #[arg(long, requires = "harness")]
+        key_file: Option<String>,
     },
     /// Consume ext inbox bundles into sealed staging shards.
     ///
@@ -1001,18 +1191,26 @@ enum Command {
         shard_bucket_cap: usize,
     },
     /// Reclaim the sealed shard body from the staging tree, but only where the
-    /// archive provably holds every byte (ADR-020 Phase 4).
+    /// archive provably holds every byte (ADR-020 Phase 4; ADR-060's
+    /// health-gated proof).
     ///
     /// The stage is an unbounded local full copy; nothing ever shrinks it.
-    /// This command retires the shard body once every declared destination
-    /// proves it holds each session. Proof means asking the archive itself —
-    /// never the local cursor — for every session's digest triple (shard
-    /// count / concatenated bytes / concatenated sha256) and matching it
-    /// against the stage. A destination that cannot be consulted is
-    /// "unproven" and blocks the reclaim: it is never treated as "does not
-    /// have it". Every declared destination must prove it holds each session,
-    /// or
-    /// nothing is deleted.
+    /// Every declared destination is first classified from its last
+    /// successful push against its degrade-after (per-destination override,
+    /// else the `[reclaim]` global, default 7 days): `healthy` destinations
+    /// — and, fail-safe, a destination whose push record is unreadable —
+    /// must prove; a destination whose last successful push is older than
+    /// its degrade-after, or with no push on record, is degraded: not
+    /// consulted for proof, listed and alarmed on every run with the
+    /// two-road advice (repair the push, or remove the destination from the
+    /// config). The command then retires the shard body once every
+    /// must-prove destination proves it holds each session. Proof means
+    /// asking the archive itself — never the local cursor — for the digest
+    /// triple (shard count / concatenated bytes / concatenated sha256) and
+    /// matching it against the stage. A must-prove destination that cannot
+    /// be consulted is "unproven" and blocks: it is never treated as "does
+    /// not have it". If no destination can prove at all, nothing is deleted
+    /// either — the ≥1 guard.
     ///
     /// Default is a dry run that reports what would be reclaimed and deletes
     /// nothing; pass `--apply` to actually remove the body. `--apply` writes
@@ -1020,9 +1218,14 @@ enum Command {
     /// session, keeping each session's persistent `shard-seq` counter so the
     /// next sequence never falls back onto archived shard names.
     ///
+    /// The stage-cap alarm (`[reclaim] stage_cap_bytes`, default 10 GiB)
+    /// prints when the stage is over it, and it is an alarm only — never a
+    /// stop, never a forced reclaim.
+    ///
     /// Exit codes: 0 = reclaimable (dry run) or reclaimed (apply); 1 =
-    /// blocked — at least one destination is unreachable, partial, or fails
-    /// to hold a session, so nothing was deleted; 2 = usage error.
+    /// blocked — a must-prove destination is unreachable, partial, or fails
+    /// to hold a session, or no destination was healthy to prove at all, so
+    /// nothing was deleted; 2 = usage error.
     ReclaimStage {
         /// Stage directory that holds the sealed `sessions/` tree.
         #[arg(long)]
@@ -1046,6 +1249,46 @@ enum Command {
         #[arg(long)]
         keep_ssh_masters: bool,
     },
+    /// Mirror the declared destination onto this machine (ADR-062 / LM-2).
+    ///
+    /// A mirror is a byte-exact, file-by-file copy of one declared remote
+    /// destination's whole repository, on local disk under the data
+    /// directory, ciphertext only: `config`, `keys/`, `index/`, `snapshots/`
+    /// and `data/` — everything except `locks/`, which this build never
+    /// holds. Copying a repo also copies its encrypted master key, which is
+    /// the same key the destination already uses, not a new one, and the
+    /// copy never decrypts anything: every file except `config` is verified
+    /// by hashing the bytes against the file's own name.
+    ///
+    /// One run is one round (W964's discipline): it lists the remote,
+    /// downloads what the mirror lacks, and stops where the round's budget
+    /// `--budget-secs` (default 600) says, leaving the next round to
+    /// resume from the same listing-diff — progress is recorded every
+    /// round, and a stopped round is reported, never counted as a failure.
+    /// The hourly pass runs the same copy after its push, inside that
+    /// round's leftover budget.
+    ///
+    /// Before a first fill starts it estimates whether the remaining
+    /// download plus the free-disk floor (`[mirror] min_free_gib`, default
+    /// max(10 GiB, min(5% of the volume's capacity, 20 GiB))) fits the
+    /// free space, and refuses with both numbers when it does not.
+    /// Mid-round, free space falling below the floor pauses the copy
+    /// instead of writing toward a full disk.
+    ///
+    /// Exit codes: 0 = the mirror holds everything the remote listed;
+    /// 3 = the round stopped or refused and made no progress it did not
+    /// verify (budget spent, disk floor, remote unreadable, space
+    /// pre-estimate refused — the next round resumes); 1 = a finished
+    /// read that failed (the source proved corrupt, a refused local
+    /// write, or the listing named a file over the whole-file bound);
+    /// 2 = usage error (unconfigured, switch off, an undeclared
+    /// `mirror_of`, an uninitialised destination, or the destination's
+    /// masterkey file missing on this machine or unusable) — nothing
+    /// was read or written there.
+    Mirror {
+        #[command(subcommand)]
+        action: MirrorAction,
+    },
     /// Report the packs one destination's backend holds that **no index file
     /// names** — what a push killed between its packs and its index strands —
     /// and say what the next push would do about each. Deletes nothing; there
@@ -1060,25 +1303,25 @@ enum Command {
     /// depends on it while it stays unindexed on disk — so the gap is real, not
     /// a formality.
     ///
-    /// Every pack it reports is verified the way the adopting open verifies one
-    /// before reusing it: the header must decrypt, every blob it declares must
-    /// decrypt and hash to the id the header gives, and the pack's bytes must
-    /// hash to the id it is stored under. A pack that fails any of those is
-    /// reported **unknown** with the verifier's reason, never as empty and
-    /// never as zero, and its presence makes the whole survey incomplete.
+    /// Every pack it reports gets the shared interrupted-push
+    /// classification: bytes that verify complete are **stranded** — the
+    /// next open adopts them; bytes that cannot be read as a pack at all
+    /// are **torn debris** from an interrupted push, which belongs to no
+    /// backup and can be ignored. Anything else is **unknown**, with the
+    /// verifier's reason — the one state that makes the survey incomplete.
     ///
     /// Reads only: nothing is written to the repository, to an index file or to
-    /// a pack. The report carries the repository fingerprint, the backend
-    /// family, pack and byte totals, the unindexed packs by id prefix and size,
-    /// what the next push would adopt, and any pack an index names that the
-    /// backend does not list. It never carries a path, a host, a machine or an
-    /// account name, or any conversation text.
+    /// a pack. The report carries the repository fingerprint, the backend family,
+    /// pack and byte totals, the unindexed packs by id prefix and size, what the
+    /// next push would adopt, and any pack an index names that the backend does
+    /// not list — and never a path, host, machine, account or conversation text.
     ///
-    /// Exit codes: 0 = the survey finished and read every pack; 1 = the survey
-    /// finished and found a contradiction (an index naming a pack the backend
-    /// does not have); 3 = it did not finish reading — a pack or an index file
-    /// could not be read, the backend was unreachable, or `--apply` was asked
-    /// for — so no absence in the output proves anything; 2 = usage error.
+    /// Exit codes: 0 = the survey read every pack, torn debris included — it
+    /// is a known state, not an unfinished read; 1 = it read everything and
+    /// found an index naming a pack the backend does not list; 3 = it did
+    /// not finish reading — a pack or an index file could not be read, the
+    /// backend was unreachable, or `--apply` was asked for — no absence in
+    /// the output proves anything; 2 = usage error.
     PruneOrphans {
         /// Named destination from the config. Required unless `--repo` is given.
         #[arg(long)]
@@ -1270,11 +1513,22 @@ enum Command {
         /// on first use); use `--machine` explicitly to choose the partition.
         #[arg(long)]
         machine: Option<String>,
-        /// Explicitly rebuild the complete partition index. The command has
-        /// always rebuilt rather than incrementally patched; this spelling is
-        /// provided for repair workflows and makes that intent visible.
+        /// Explicitly rebuild the complete partition index. Repair workflows
+        /// and investigation want the predictable hammer — every session
+        /// re-derived from its bytes, whatever the previous index says — and
+        /// this spelling makes that intent visible. Required for destination
+        /// (`--destination`/`--repo`) rebuilds. A local `--stage` build
+        /// defaults to this and only this unless `--incremental` is passed.
         #[arg(long)]
         rebuild: bool,
+        /// Update the index incrementally instead of rebuilding it: sessions
+        /// whose bodies and inputs provably did not change since the last
+        /// build keep their measured row; everything else is re-derived as a
+        /// full rebuild would. Local `--stage` builds only; the result must
+        /// stay byte-identical to a full rebuild. `run-once` uses this path
+        /// for its pre-push index build.
+        #[arg(long, requires = "stage", conflicts_with = "rebuild")]
+        incremental: bool,
         /// Destination to rebuild from. Requires `--rebuild`; either this or
         /// `--repo` must be named. Appends the repaired snapshot when the named
         /// `--machine` is this machine's own partition and `--stage` is a
@@ -1423,6 +1677,250 @@ enum Command {
     Index {
         #[command(subcommand)]
         action: IndexAction,
+    },
+    /// Backfill an opt-in source's older history through its own app
+    /// (ADR-058 D1). Only Grok Bot exists today.
+    ///
+    /// The Grok Bot local cache is a bounded window, and every position
+    /// that fell out of it is gone from disk for good — but the server
+    /// still holds the conversation, and whenever the app opens one, the
+    /// app itself fetches the conversation's whole user-visible span into
+    /// view. `backfill grok-bot` relaunches the app with a debugging
+    /// connection that listens only on this machine, opens one
+    /// conversation at a time exactly as a person clicking the sidebar
+    /// would, waits while the app loads it, and delivers the rows the
+    /// archive does not already hold — marked as backfilled, through the
+    /// same session identity a collect uses, so nothing is added twice and
+    /// an ordinary collect after a backfill stays incremental.
+    ///
+    /// **The default is a dry run**: with no extra flags the same
+    /// read-only traversal runs — it too relaunches and drives the app —
+    /// and it only reports (per conversation: rows it would add, the
+    /// loaded span versus the locally held span, and the positions that
+    /// will stay missing). Rows are delivered only with
+    /// `--i-accept-the-risk`, which is what the public doc names, and the
+    /// risk statement is printed before every run, a dry run included.
+    ///
+    /// The run is user-started only: no schedule, daemon or config path
+    /// can reach it. The app is restored to a normal launch at the end of
+    /// every run — including Ctrl-C, where what has been delivered stays
+    /// delivered. The interior positions the vendor's service never sends
+    /// the app stay missing and the session's gap record and `partial`
+    /// fidelity stand: the archive never claims completeness.
+    ///
+    /// Exit codes: `0` every selected conversation loaded and was
+    /// reported (or delivered) · `1` the traversal finished with findings
+    /// — a conversation that never finished loading within its wait and
+    /// was skipped whole, a `--conversation` prefix that matched nothing,
+    /// a restore that could not be verified — or the app could not be
+    /// restored to a normal launch · `2` usage (including a `--stage`
+    /// that is not a directory) · `3` the run refused (macOS only, app
+    /// not installed, a signed-in app unconfirmable, the debug endpoint
+    /// unusable) or stopped before finishing — a user interrupt or an
+    /// app-layout change; partial work is kept and reported.
+    Backfill {
+        /// The harness whose app-driven backfill this runs.
+        /// Only `grok-bot` exists today.
+        #[arg(value_enum)]
+        harness: BackupHarness,
+        /// Existing stage directory receiving the sealed shards. Never
+        /// created.
+        #[arg(long)]
+        stage: PathBuf,
+        /// Deliver the rows the run finds (a real run). Without this flag
+        /// the run is a dry run: the identical traversal, reports only.
+        #[arg(long = "i-accept-the-risk")]
+        i_accept_the_risk: bool,
+        /// Restrict the run to the conversations named by these id
+        /// prefixes (repeatable) — the prefixes the dry run prints.
+        /// Default: every conversation the app's sidebar lists.
+        #[arg(long = "conversation", value_name = "PREFIX")]
+        conversations: Vec<String>,
+        /// Machine partition for `sessions/<machine>/…`, as for `collect`.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Maximum sealed shards per bucket (default: 20).
+        #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
+        shard_bucket_cap: usize,
+        /// Named destination from the config, as for `collect` — the
+        /// destination whose delivered state the run extends.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Destination repository to backfill for, instead of a named
+        /// destination.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override for the destination above.
+        #[arg(long)]
+        key_file: Option<String>,
+    },
+    /// Hide one archived session from ordinary readers (ADR-046 draft,
+    /// Phase 1). Reversible: `unhide` restores it and no archive byte is
+    /// touched — `read`, `search`, `export`, the UI and the full-text index
+    /// omit the session while the state is in force.
+    ///
+    /// The state is a durable control record appended to this machine's
+    /// `meta/<machine>/deletion-control-v1.jsonl` in the stage; the next
+    /// ordinary `push` archives it with the stage, and every machine honors
+    /// it from the destination's control stream. The identity is exact: the
+    /// session id as named, in one machine partition — a session with the
+    /// same id in another partition is not affected, and no id is ever
+    /// prefix-matched.
+    ///
+    /// Exit codes: `0` the state is recorded (or the local stream already
+    /// holds it — idempotent, no new record) · `1` the record could not be
+    /// appended durably · `2` usage (`--stage` missing or not a directory,
+    /// an invalid identity, a reason over 80 bytes) · `3` this machine's
+    /// identity could not be established, or the existing control stream is
+    /// unreadable — a failed-closed append that never writes over an
+    /// unknown state.
+    Hide {
+        /// Stage directory whose meta tree receives the control record.
+        /// Must already exist; a stage is never created by this command.
+        #[arg(long)]
+        stage: PathBuf,
+        /// Exact session id to hide, as it appears in the archive. Never
+        /// prefix-matched.
+        session_id: String,
+        /// Machine partition of the recording writer (`meta/<machine>/`),
+        /// as for every stage-writing command; also the partition of the
+        /// target identity unless `--target-machine` names another one.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Machine partition of the target identity
+        /// (`sessions/<machine>/<session-id>/`) when it is not the
+        /// recording machine's own partition. Default: the value of
+        /// `--machine`, else this machine's partition.
+        #[arg(long)]
+        target_machine: Option<String>,
+        /// Short reason label recorded with the state. It is metadata the
+        /// user chose to keep; at most 80 bytes on one line, never
+        /// conversation text.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Restore one hidden session to ordinary readers (ADR-046 draft,
+    /// Phase 1). Appends a later control record; it rewrites nothing, and the
+    /// session's archived bytes were never touched by `hide`.
+    ///
+    /// Exit codes as for `hide`: `0` recorded or already visible · `1` the
+    /// record could not be appended durably · `2` usage · `3` identity or
+    /// control stream unreadable.
+    Unhide {
+        /// Stage directory whose meta tree receives the control record.
+        #[arg(long)]
+        stage: PathBuf,
+        /// Exact session id to unhide, as it appears in the archive.
+        session_id: String,
+        /// Machine partition of the recording writer, as for every
+        /// stage-writing command; also the partition of the target identity
+        /// unless `--target-machine` names another one.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Machine partition of the target identity when it is not the
+        /// recording machine's own partition.
+        #[arg(long)]
+        target_machine: Option<String>,
+        /// Short reason label recorded with the state.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Purge one named session from selected destinations — a dry-run
+    /// preview only (W402 interaction design). It reads every selected
+    /// destination and reports, per destination, whether the exact named
+    /// identity was **found** (with shard-file and byte counts across every
+    /// snapshot that holds it), **absent** (proved by a complete read of
+    /// every snapshot), or **unknown** (the destination could not be read to
+    /// completion — never spelled "absent"). It deletes nothing and writes
+    /// nothing: no archive, stage, destination or index is changed.
+    ///
+    /// **The default is the dry run, and this build has no other mode.**
+    /// The destructive purge — the exclusive maintenance gate, the tombstone
+    /// publication barrier, snapshot rewrite, forget and prune (ADR-046
+    /// draft Phase 3) — is not implemented. `--confirm SESSION` exists so
+    /// that asking for the real deletion gets the phase boundary, not an
+    /// unknown-flag error; it is refused and this build deletes nothing,
+    /// ever.
+    ///
+    /// The identity is exact: the session id as named, in one machine
+    /// partition (`--machine`; default this machine's) — same-id sessions
+    /// in other partitions are not the target. Destinations are explicit:
+    /// repeat `--destination`, or pass `--all-destinations`; there is no
+    /// implicit destination set.
+    ///
+    /// Exit codes: `0` every selected destination was read to completion
+    /// (each reported `found`, a would-purge inventory, or `absent`) ·
+    /// `2` usage (no destinations selected, both selection modes at once, an
+    /// unknown destination name, a `--confirm` value that does not name
+    /// the exact session) · `3` `--confirm` was refused (the destructive
+    /// transaction does not exist in this build), or a destination could
+    /// not be read to completion — the target's status there is unknown,
+    /// and an absence proves nothing. `1` is not used by this command.
+    Purge {
+        /// Exact session id to purge. Never prefix-matched.
+        session_id: String,
+        /// Machine partition of the target identity. Default: this
+        /// machine's partition.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Named destination to inspect, repeatable. Required unless
+        /// `--all-destinations` is given (or a single-destination config).
+        #[arg(long = "destination", value_name = "NAME")]
+        destinations: Vec<String>,
+        /// Inspect every destination the config declares. Explicit: with
+        /// no `--destination` and no `--all-destinations` the command is a
+        /// usage error, because there is no implicit destination set.
+        #[arg(long)]
+        all_destinations: bool,
+        /// Preview and stop. This is also what happens without the
+        /// flag; the flag exists so a script can say what it expected.
+        #[arg(long)]
+        dry_run: bool,
+        /// Real execution — refused in this build. The value must name the
+        /// exact session being confirmed; anything else is a usage error
+        /// either way.
+        #[arg(long = "confirm", value_name = "SESSION")]
+        confirm: Option<String>,
+        /// Print exactly one JSON object on stdout and nothing else there.
+        #[arg(long)]
+        json: bool,
+        /// Repository path override (single-destination mode only).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override (single-destination mode only).
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override (single-destination mode only).
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable (single-destination mode
+        /// only).
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Keep the ssh ControlMaster processes open after this run.
+        #[arg(long)]
+        keep_ssh_masters: bool,
+    },
+    /// Redact an archived session by cutting it at a cutoff and re-sealing
+    /// user-edited content as a new version. **Not implemented; refused.**
+    ///
+    /// The command surface exists because the design names it
+    /// (`docs-dev/redaction-and-recollection.md`, ADR-046 draft §5):
+    /// redaction is the destructive transaction of a later phase — record
+    /// the cutoff tombstone, remove the old scoped occurrences from stage
+    /// and every destination, then seal the replacement. Until that phase
+    /// ships, asking for it gets this refusal rather than an unknown-flag
+    /// error, and nothing is read or changed.
+    ///
+    /// Exit codes: `2` always — a deliberate refusal, not a failure to run:
+    /// the operation does not exist in this build.
+    Redact {
+        /// Exact session id to redact. Never prefix-matched.
+        session_id: String,
+        /// Machine partition of the target identity. Default: this
+        /// machine's partition.
+        #[arg(long)]
+        machine: Option<String>,
     },
 }
 
@@ -1706,6 +2204,7 @@ fn run() -> ExitCode {
         Command::SendKey(args) => cmd_send_key(args),
         Command::Send(args) => cmd_send(args),
         Command::InboxPull(args) => cmd_inbox_pull(args),
+        Command::Pull(args) => cmd_api_pull(args),
         Command::Setup {
             stage,
             destination,
@@ -1803,6 +2302,7 @@ fn run() -> ExitCode {
             &options,
             keep_ssh_masters,
             None,
+            None,
         ),
         Command::Status {
             sessions,
@@ -1829,6 +2329,8 @@ fn run() -> ExitCode {
             all_machines,
             full_ids,
             no_collapse,
+            include_deleted,
+            offline,
             machine,
             destination,
             repo,
@@ -1842,6 +2344,8 @@ fn run() -> ExitCode {
             all_machines,
             full_ids,
             no_collapse,
+            include_deleted,
+            offline,
             machine.as_deref(),
             destination,
             repo,
@@ -1857,6 +2361,7 @@ fn run() -> ExitCode {
             level,
             stage,
             full_ids,
+            offline,
             machine,
             destination,
             repo,
@@ -1868,6 +2373,7 @@ fn run() -> ExitCode {
             level,
             &stage,
             full_ids,
+            offline,
             machine.as_deref(),
             destination,
             repo,
@@ -1915,7 +2421,55 @@ fn run() -> ExitCode {
             export,
             inbox,
             stage,
-        } => cmd_import(platform, &export, &inbox, &stage),
+            harness,
+            from,
+            dry_run,
+            machine,
+            shard_bucket_cap,
+            destination,
+            repo,
+            key_file,
+        } => match harness {
+            Some(harness) => cmd_import_backup(
+                harness,
+                &from,
+                &stage,
+                dry_run,
+                machine.as_deref(),
+                shard_bucket_cap,
+                destination.as_deref(),
+                repo.as_deref(),
+                key_file.as_deref(),
+            ),
+            None => cmd_import(
+                platform.expect("clap requires a platform unless --harness was given"),
+                &export.expect("clap requires an export unless --harness was given"),
+                &inbox.expect("clap requires an inbox unless --harness was given"),
+                &stage,
+                machine.as_deref(),
+            ),
+        },
+        Command::Backfill {
+            harness,
+            stage,
+            i_accept_the_risk,
+            conversations,
+            machine,
+            shard_bucket_cap,
+            destination,
+            repo,
+            key_file,
+        } => cmd_backfill_grok_bot(
+            harness,
+            &stage,
+            i_accept_the_risk,
+            &conversations,
+            machine.as_deref(),
+            shard_bucket_cap,
+            destination.as_deref(),
+            repo.as_deref(),
+            key_file.as_deref(),
+        ),
         Command::Ingest {
             inbox,
             stage,
@@ -1993,9 +2547,11 @@ fn run() -> ExitCode {
             filters,
             turns,
             trim_to_window,
+            include_deleted,
             force,
             no_collapse,
             dry_run,
+            offline,
             repo,
             key_file,
             connections,
@@ -2007,9 +2563,11 @@ fn run() -> ExitCode {
             &filters,
             turns,
             trim_to_window,
+            include_deleted,
             force,
             no_collapse,
             dry_run,
+            offline,
             repo,
             key_file,
             connections,
@@ -2056,6 +2614,12 @@ fn run() -> ExitCode {
             &options,
             keep_ssh_masters,
         ),
+        Command::Mirror { action } => match action {
+            MirrorAction::Sync {
+                budget_secs,
+                keep_ssh_masters,
+            } => cmd_mirror_sync(budget_secs, keep_ssh_masters),
+        },
         Command::PruneOrphans {
             destination,
             dry_run,
@@ -2105,6 +2669,7 @@ fn run() -> ExitCode {
             stage,
             machine,
             rebuild,
+            incremental,
             destination,
             repo,
             key_file,
@@ -2115,6 +2680,7 @@ fn run() -> ExitCode {
             stage.as_deref(),
             machine.as_deref(),
             rebuild,
+            incremental,
             destination,
             repo,
             key_file,
@@ -2152,6 +2718,66 @@ fn run() -> ExitCode {
             &options,
             keep_ssh_masters,
         ),
+        Command::Hide {
+            stage,
+            session_id,
+            machine,
+            target_machine,
+            reason,
+        } => cmd_control_state(
+            "hide",
+            chat_stasher::deletion_control::ControlAction::Hide,
+            &stage,
+            &session_id,
+            machine.as_deref(),
+            target_machine.as_deref(),
+            reason.as_deref(),
+        ),
+        Command::Unhide {
+            stage,
+            session_id,
+            machine,
+            target_machine,
+            reason,
+        } => cmd_control_state(
+            "unhide",
+            chat_stasher::deletion_control::ControlAction::Unhide,
+            &stage,
+            &session_id,
+            machine.as_deref(),
+            target_machine.as_deref(),
+            reason.as_deref(),
+        ),
+        Command::Purge {
+            session_id,
+            machine,
+            destinations,
+            all_destinations,
+            dry_run: _,
+            confirm,
+            json,
+            repo,
+            key_file,
+            connections,
+            options,
+            keep_ssh_masters,
+        } => cmd_purge(
+            &session_id,
+            machine.as_deref(),
+            &destinations,
+            all_destinations,
+            confirm.as_deref(),
+            json,
+            repo,
+            key_file,
+            connections,
+            &options,
+            keep_ssh_masters,
+        ),
+        Command::Redact {
+            session_id: _,
+            machine: _,
+        } => cmd_redact(),
     }
 }
 
@@ -2531,13 +3157,17 @@ fn cmd_native_host(self_test: bool) -> ExitCode {
     nativehost::serve_stdin()
 }
 
-/// Outcome of a full activity-index rebuild for one machine partition.
+/// Outcome of an activity-index build for one machine partition.
 #[derive(Debug)]
 struct ActivityIndexOutcome {
     /// Number of sessions whose rows were written to the index.
     sessions_indexed: usize,
     /// Number of sessions indexed with an unknown harness.
     sessions_without_harness: usize,
+    /// Number of sessions an incremental build carried forward from the
+    /// previous index without re-reading their bodies (SYNC-D). Always zero
+    /// in a full rebuild.
+    sessions_carried: usize,
     /// Absolute path of the written index.
     out_path: PathBuf,
     /// Wall-clock time the rebuild took.
@@ -2601,7 +3231,417 @@ fn redact_local_activity_index_message(message: &str, stage: &Path) -> String {
     redact_activity_index_paths(message, &StoreConfig::default(), Some(stage))
 }
 
-/// Rebuild the activity index for one machine partition (ADR-017).
+/// Which sessions an activity-index build re-derives (SYNC-D).
+enum ActivityIndexBuild {
+    /// Full rebuild: every session's row is derived from its bytes, whatever
+    /// the previous index says. The `activity-index` command and every repair
+    /// workflow run this — the predictable hammer, always available.
+    FullRebuild,
+    /// Incremental: a session whose inputs provably did not change since the
+    /// last build keeps the row that build measured, and everything else is
+    /// derived exactly as a full rebuild would derive it.
+    IncrementalUpdate,
+}
+
+/// One shard's recorded identity, as the writer recorded it and a build
+/// validated against the bytes it read.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ActivityIndexShardState {
+    seq: u64,
+    bytes: u64,
+    sha256: String,
+}
+
+/// What an incremental build needs to know about one session it already
+/// covered: the recorded identity of every shard of its body, the
+/// `measured_body` the row it emitted carried, and a fingerprint of the
+/// provenance observations it saw.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ActivityIndexSessionState {
+    shards: Vec<ActivityIndexShardState>,
+    measured: activity::MeasuredBody,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observations: Option<String>,
+}
+
+/// The previous build's per-session facts, written beside the index after it
+/// is published. A dot-file: `metahash` skips dot-files, so this working
+/// record never influences the push decision, and it is not part of the
+/// archive — it describes only what the *local* stage's last build saw.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ActivityIndexState {
+    format: u32,
+    policy: String,
+    sessions: BTreeMap<String, ActivityIndexSessionState>,
+}
+
+/// Format of [`ActivityIndexState`]. A file that names a different format is
+/// a different contract's, and is discarded rather than parsed leniently.
+const ACTIVITY_INDEX_STATE_FORMAT: u32 = 1;
+
+/// Name of the incremental state file inside `meta/<machine>/`.
+const ACTIVITY_INDEX_STATE_FILE: &str = ".activity-index-state-v1.json";
+
+/// The per-machine inputs an index build needs, shared by both modes so the
+/// decisions an incremental build adds sit next to — not on top of — the code
+/// a full rebuild runs.
+#[derive(Debug)]
+struct ActivityIndexContext {
+    machine: String,
+    print_skips: bool,
+    policy: store::DuplicateShardPolicy,
+    previous: Option<BTreeMap<String, activity::ActivityRow>>,
+    provenance_by_session: BTreeMap<String, Vec<chat_stasher::provenance::ProvenanceObservation>>,
+    recorded_bodies: Option<BTreeMap<String, activity::MeasuredBody>>,
+    session_provenance: BTreeMap<String, activity::SessionProvenance>,
+    sessions_without_harness: usize,
+    shard_bytes_read_hashed: u64,
+}
+
+impl ActivityIndexContext {
+    /// The row's `session_provenance` stamp, written identically by every
+    /// path that emits a derived row: the collection-time sidecar's value when
+    /// there is one, else the value the previous row carried.
+    fn stamp_session_provenance(
+        &self,
+        row: &mut activity::ActivityRow,
+        previous_row: Option<&activity::ActivityRow>,
+    ) {
+        row.session_provenance = self
+            .session_provenance
+            .get(&row.session_id)
+            .cloned()
+            .or_else(|| previous_row.and_then(|previous| previous.session_provenance.clone()));
+    }
+
+    /// A fingerprint of what the provenance observations file says about one
+    /// session, or `None` when it says nothing. `merge_verified_*` only merges
+    /// observations that verify against the body's bytes, so a body that did
+    /// not change would merge the same way again — but a *newly appended*
+    /// observation can still verify against unchanged bytes, so the
+    /// incremental path must see the file move, not trust the digest to have
+    /// stayed irrelevant.
+    fn observations_fingerprint(&self, session_id: &str) -> Option<String> {
+        let observations = self.provenance_by_session.get(session_id)?;
+        if observations.is_empty() {
+            return None;
+        }
+        let mut body = String::new();
+        for observation in observations {
+            body.push_str(&serde_json::to_string(observation).unwrap_or_else(|error| {
+                panic!("serializing a provenance observation cannot fail: {error}")
+            }));
+            body.push('\n');
+        }
+        Some(hex_digest(&Sha256::digest(body.as_bytes())))
+    }
+
+    /// Resolve (and, on failure, count) the session's harness. Resolved for
+    /// carried rows too, so a session whose row is kept is still counted —
+    /// and announced — exactly as a derived one would be.
+    fn harness_for_session(&mut self, session_id: &str) -> String {
+        let inferred = sidecar::infer_harness(session_id);
+        if inferred.is_none() {
+            self.sessions_without_harness += 1;
+            if self.print_skips {
+                eprintln!(
+                    "activity-index: session `{}` has no inferable harness — indexed with unknown time",
+                    chat_stasher::id::short_session_id(session_id)
+                );
+            }
+        }
+        // reason: "unknown" is the recorded harness of a session whose id
+        // names none this build knows; the row stays honest about it and the
+        // count above keeps it visible to the build's report.
+        inferred.unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// The previous state entry a session may be carried forward with, or
+    /// `None` when anything it depends on moved — in which case the caller
+    /// derives the row exactly as a full rebuild would.
+    fn carryable_state_entry(
+        &self,
+        session_id: &str,
+        shards: &[(u64, PathBuf)],
+        facts: Option<&BTreeMap<u64, chat_stasher::shard_facts::ShardFact>>,
+        state: Option<&ActivityIndexState>,
+    ) -> Option<ActivityIndexSessionState> {
+        let state = state?;
+        let entry = state.sessions.get(session_id)?;
+        // A policy flip re-lines every session: which shards collapse into
+        // the row's lines is a build-wide decision, not a per-session one.
+        if state.policy != duplicate_policy_token(self.policy) {
+            return None;
+        }
+        let previous_row = self.previous.as_ref()?.get(session_id)?;
+        // The row and the state must be the same build's products: the state
+        // is written after the index, so a row that does not carry the
+        // `measured_body` the state records is not the row this state
+        // describes.
+        let measured = previous_row.measured_body.as_ref()?;
+        if measured != &entry.measured {
+            return None;
+        }
+        if entry.shards.len() != shards.len() || shards.is_empty() {
+            return None;
+        }
+        // Every shard must be covered by a writer-recorded digest that still
+        // reads today exactly as it read at the last build. Size is checked
+        // — it needs no hashing — but never *believed*: a same-size rewrite
+        // is precisely the case the digests below exist for.
+        let facts = facts?;
+        for ((seq, path), recorded) in shards.iter().zip(&entry.shards) {
+            let size = fs::metadata(path).ok()?.len();
+            let fact = facts.get(seq)?;
+            if fact.seq != *seq
+                || recorded.seq != *seq
+                || fact.sha256 != recorded.sha256
+                || fact.bytes != size
+                || recorded.bytes != size
+            {
+                return None;
+            }
+        }
+        // Observations move independently of bodies; a fingerprint change
+        // means a verified merge may now merge differently.
+        if self.observations_fingerprint(session_id) != entry.observations {
+            return None;
+        }
+        Some(entry.clone())
+    }
+
+    /// Derive one body-carrying session's row from its bytes — the code both
+    /// builds share, so an incremental session that cannot be proven
+    /// unchanged is measured by exactly the code a full rebuild measures it
+    /// with.
+    fn derived_row(
+        &mut self,
+        session_id: &str,
+        shards: &[(u64, PathBuf)],
+        facts: Option<&BTreeMap<u64, chat_stasher::shard_facts::ShardFact>>,
+    ) -> Result<(activity::ActivityRow, Option<ActivityIndexSessionState>), ActivityIndexError>
+    {
+        let harness = self.harness_for_session(session_id);
+
+        // The identity of the bytes this row measures, computed the same way
+        // `manifest::generate_manifest` computes it for the manifest: the shard
+        // count, and the sha256 of the shards concatenated in sequence order.
+        // The digest is over the raw shard bytes, not the decoded lines, so it
+        // is the same digest `reclaim-stage` proves when it deletes this body.
+        let mut hasher = Sha256::new();
+        let mut shard_bodies = Vec::with_capacity(shards.len());
+        for (_, shard) in shards {
+            let bytes = match fs::read(shard) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(ActivityIndexError::Read(format!(
+                        "cannot read shard {}: {e}",
+                        shard.display()
+                    )));
+                }
+            };
+            hasher.update(&bytes);
+            // W880: shard-body bytes read and hashed for the row's
+            // measured body.
+            self.shard_bytes_read_hashed += bytes.len() as u64;
+            shard_bodies.push(bytes);
+        }
+        let duplicate_indices: BTreeSet<_> = if self.policy.collapses() {
+            store::duplicate_shard_indices(&shard_bodies)
+                .into_iter()
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        let mut selected_bodies: Vec<&Vec<u8>> = Vec::with_capacity(shard_bodies.len());
+        for (index, bytes) in shard_bodies.iter().enumerate() {
+            if duplicate_indices.contains(&index) {
+                continue;
+            }
+            selected_bodies.push(bytes);
+        }
+        // ADR-061: a snapshot-source session indexes as its assembled
+        // current-state body — the measured body above stays a function of
+        // the raw shard bytes (it is what the manifest and reclaims prove),
+        // while the analyzed lines are the assembled view, so an
+        // increment-era session keeps an honest line count and deleted
+        // turns stay out of the index (reachable through
+        // `read`/`export --include-deleted` instead). An assembly failure
+        // is a read failure, never a short index row.
+        let lines: Vec<String> = if chat_stasher::opencode_records::harness_is_opencode(session_id)
+        {
+            let owned: Vec<Vec<u8>> = selected_bodies.into_iter().cloned().collect();
+            let assembled = chat_stasher::opencode_records::project_session_body(
+                session_id,
+                &owned,
+                chat_stasher::opencode_records::BodyView::Current,
+            )
+            .map_err(|error| {
+                ActivityIndexError::Read(format!(
+                    "cannot assemble session {}: {error}",
+                    chat_stasher::id::short_session_id(session_id)
+                ))
+            })?;
+            String::from_utf8_lossy(&assembled)
+                .lines()
+                .map(|line| line.to_string())
+                .collect()
+        } else {
+            let mut collected: Vec<String> = Vec::with_capacity(selected_bodies.len());
+            for bytes in selected_bodies {
+                for line in String::from_utf8_lossy(bytes).lines() {
+                    collected.push(line.to_string());
+                }
+            }
+            collected
+        };
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let mut row = activity::build_row(session_id, &self.machine, &harness, &refs);
+        // Merged, not assigned: `build_row` has already read what the harness's
+        // own records say about this session (claude-code's `cwd` and owning
+        // organization/account), and the typed `dimensions` a capture envelope
+        // carries are *another* origin's observation of the same session rather
+        // than a replacement for it. Assigning here would discard the first
+        // reading every time the second was empty.
+        chat_stasher::provenance::merge(
+            &mut row.dimensions,
+            &chat_stasher::provenance::dimensions_from_jsonl(refs.iter().copied()),
+        );
+        if let Some(observations) = self.provenance_by_session.get(session_id) {
+            let sequence_bodies: Vec<(Option<u64>, Vec<u8>)> = shards
+                .iter()
+                .zip(&shard_bodies)
+                .map(|((sequence, _), body)| (Some(*sequence), body.clone()))
+                .collect();
+            chat_stasher::provenance::merge_verified_shard_sequence_observations(
+                &mut row.dimensions,
+                session_id,
+                observations,
+                &sequence_bodies,
+            );
+        }
+        let measured = activity::MeasuredBody {
+            shard_count: shards.len(),
+            concat_sha256: hex_digest(&hasher.finalize()),
+        };
+        row.measured_body = Some(measured.clone());
+        self.stamp_session_provenance(
+            &mut row,
+            self.previous.as_ref().and_then(|rows| rows.get(session_id)),
+        );
+
+        // The state entry this derivation can hand the next incremental build:
+        // the *recorded* identity of every shard, kept only when the record
+        // agrees with the bytes just read. A shard the writer never recorded
+        // is not carried as measured truth — the next build re-reads it, the
+        // ADR-034 disposable stance applied at shard grain.
+        let mut recorded: Vec<ActivityIndexShardState> = Vec::with_capacity(shards.len());
+        for ((seq, _shard_path), body) in shards.iter().zip(&shard_bodies) {
+            let Some(fact) = facts.as_ref().and_then(|facts| facts.get(seq)) else {
+                recorded.clear();
+                break;
+            };
+            let digest = hex_digest(&Sha256::digest(body));
+            if fact.seq == *seq && fact.bytes == body.len() as u64 && fact.sha256 == digest {
+                recorded.push(ActivityIndexShardState {
+                    seq: *seq,
+                    bytes: fact.bytes,
+                    sha256: digest,
+                });
+            } else {
+                // A record that disagrees with the bytes it claims to
+                // describe is worth nothing to the next build: drop the
+                // whole entry, never a partially trusted one.
+                recorded.clear();
+                break;
+            }
+        }
+        let state_entry = (!recorded.is_empty() && recorded.len() == shards.len()).then(|| {
+            ActivityIndexSessionState {
+                shards: recorded,
+                measured,
+                observations: self.observations_fingerprint(session_id),
+            }
+        });
+        Ok((row, state_entry))
+    }
+}
+
+/// One word for the join policy a build ran under, written into the state so
+/// a flip cannot be carried through silently.
+fn duplicate_policy_token(policy: store::DuplicateShardPolicy) -> &'static str {
+    if policy.collapses() {
+        "collapse"
+    } else {
+        "keep-all"
+    }
+}
+
+/// The previous build's state, if it is one this code understands.
+///
+/// Any reason not to trust the file — absent, unreadable, a format this
+/// version does not know — reads as `None`, and the caller derives every
+/// session. The state is a working record, never authority: the honest
+/// degradation is the full-rebuild cost, never a stale row.
+fn read_activity_index_state(meta_dir: &Path) -> Option<ActivityIndexState> {
+    let raw = match fs::read_to_string(meta_dir.join(ACTIVITY_INDEX_STATE_FILE)) {
+        Ok(raw) => raw,
+        Err(_) => return None,
+    };
+    let state: ActivityIndexState = serde_json::from_str(&raw).ok()?;
+    if state.format != ACTIVITY_INDEX_STATE_FORMAT {
+        return None;
+    }
+    Some(state)
+}
+
+/// Write the state beside the index it describes (temp file → sync → rename,
+/// the same publication contract the index itself holds). Called only after
+/// the index has been published, so a crash in between leaves the next build
+/// deriving sessions it could have carried — never carrying sessions it
+/// should have derived.
+fn write_activity_index_state(
+    meta_dir: &Path,
+    state: &ActivityIndexState,
+) -> Result<(), std::io::Error> {
+    let body = serde_json::to_string_pretty(state)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tmp = meta_dir.join(format!(".{ACTIVITY_INDEX_STATE_FILE}.tmp"));
+    {
+        let mut file = fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, body.as_bytes())?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, meta_dir.join(ACTIVITY_INDEX_STATE_FILE))?;
+    Ok(())
+}
+
+fn rebuild_activity_index(
+    stage: &Path,
+    machine: &str,
+    print_skips: bool,
+) -> Result<ActivityIndexOutcome, ActivityIndexError> {
+    build_activity_index(stage, machine, print_skips, ActivityIndexBuild::FullRebuild)
+}
+
+/// The incremental counterpart of [`rebuild_activity_index`] (SYNC-D): the
+/// same bytes on the same stage as a full rebuild — asserted by the acceptance
+/// gate, `tests/syncd_incremental_equivalence_test.rs` — reading strictly
+/// fewer shard bodies when some sessions provably did not change.
+fn update_activity_index_incrementally(
+    stage: &Path,
+    machine: &str,
+    print_skips: bool,
+) -> Result<ActivityIndexOutcome, ActivityIndexError> {
+    build_activity_index(
+        stage,
+        machine,
+        print_skips,
+        ActivityIndexBuild::IncrementalUpdate,
+    )
+}
+
+/// Build the activity index for one machine partition (ADR-017).
 ///
 /// Reads every sealed shard of every session under
 /// `<stage>/sessions/<machine>/`, concatenates each session's shards in global
@@ -2609,46 +3649,69 @@ fn redact_local_activity_index_message(message: &str, stage: &Path) -> String {
 /// for conversation-time extraction. One `ActivityRow` per session is written
 /// as JSONL to `<stage>/meta/<machine>/activity-v1.jsonl`.
 ///
-/// Deliberately a **full rebuild**, never an incremental update: the index is
-/// derived from the stage, so after a full rebuild "the index says" and "the
-/// archive holds" can never diverge, while an incremental scheme would have to
-/// track exactly which shards changed since the last build — and any bug in
-/// that tracking produces a stale index that looks authoritative. The measured
-/// cost of a full rebuild is ~6.5 s on a 759-session stage (0.18% of the 3600 s
-/// run-once period), which is nothing next to the correctness it buys.
+/// Rows are written in one canonical order — ascending `session_id` — so the
+/// same stage bytes always rebuild to the same index bytes; the order
+/// `fs::read_dir` answers in is filesystem-defined and never reaches the
+/// output (T0 of the SYNC-D groundwork:
+/// `tests/syncd_index_determinism_test.rs`).
 ///
-/// 🆕 One exception, and it is the whole reason this function reads the index
-/// it is about to replace: **a session whose body this stage no longer holds
-/// keeps the row it already had — while that row is still bound to the body
-/// the manifest records.** ADR-020 Phase 4 reclaims a session's shard bodies
-/// once every declared destination has proved it holds every byte, and leaves
-/// the session directory (with only its `shard-seq` counter) behind. A rebuild
-/// that measured that empty directory would rewrite a known row as zero lines
-/// and an unknown time (field measurement: 2,832 of m3's 2,835 claude-code
-/// sessions). That is not a missing measurement — it is a measured row being
-/// replaced by the absence of a body, which is invariant 1's failure exactly.
-/// So the previous index is carried forward for those sessions, and a reclaimed
-/// session with no previous row is recorded as
-/// [`activity::TimeSource::Unknown`] naming the reclaim rather than as "no
-/// conversation content", which the empty directory would otherwise look like.
+/// Both modes are defined by their relation to a full rebuild
+/// ([`ActivityIndexBuild`]). A full rebuild re-derives every session, so
+/// after one, "the index says" and "the stage holds" cannot diverge. The
+/// incremental mode re-derives every session it cannot *prove* unchanged, by
+/// running the same per-session code a full rebuild runs, and keeps the
+/// previous row only for sessions whose every input reads identical: the
+/// digest a writer recorded at seal, the body's byte size, the duplicate
+/// policy, and the provenance observations for that session. The proof is the
+/// only thing that changed relative to the historical always-rebuild design
+/// (`measured_body` already bound each row to the bytes it measured); its
+/// contract is byte equality with a full rebuild, asserted by the gate test,
+/// so a missed change is a red test rather than a stale row that looks
+/// authoritative.
+///
+/// A body a writer never recorded a digest for — every shard sealed before
+/// the records existed — is re-read on every build, by design: the
+/// alternative is trusting a size check, which cannot see a same-size
+/// rewrite. The cost such bodies keep is the cost they always had.
+///
+/// 🆕 One exception, unchanged from the original design and the reason both
+/// modes read the index they are about to replace: **a session whose body this
+/// stage no longer holds keeps the row it already had — while that row is
+/// still bound to the body the manifest records.** ADR-020 Phase 4 reclaims a
+/// session's shard bodies once every declared destination has proved it holds
+/// every byte, and leaves the session directory (with only its `shard-seq`
+/// counter) behind. A rebuild that measured that empty directory would
+/// rewrite a known row with zero lines and an unknown time, which is
+/// invariant 1's failure exactly. So the previous index is carried forward
+/// for those sessions, and a reclaimed session with no previous row is
+/// recorded as [`activity::TimeSource::Unknown`] naming the reclaim rather
+/// than as "no conversation content", which the empty directory would
+/// otherwise look like.
 ///
 /// "Bound" is what keeps the carry from becoming a lie one re-seal later: each
 /// row records the body it was measured from ([`activity::MeasuredBody`]) and
 /// is carried only when the manifest still records that same body for the
 /// session. A row whose identity no longer matches — or that records none, as
-/// every row written before the binding existed does — describes a body that is
-/// not the one this stage can account for, and is written as an explicit
-/// [`activity::TimeSource::Unknown`] naming which of the two it is. Carrying it
-/// instead would report the previous conversation's times for the new one, and
-/// every later rebuild would carry them again.
+/// every row written before the binding existed does — describes a body that
+/// is not the one this stage can account for, and is written as an explicit
+/// [`activity::TimeSource::Unknown`] naming which of the two it is. Carrying
+/// it instead would report the previous conversation's times for the new one,
+/// and every later rebuild of every kind would carry them again.
 ///
 /// `print_skips` controls the per-session "no inferable harness" stderr line:
 /// `activity-index` wants it (it is part of its existing output), `run-once`
 /// only wants the count.
-fn rebuild_activity_index(
+///
+/// Both modes publish the same way — the complete body reaches a sibling
+/// temporary file, is synced, and is renamed over the index — and then write
+/// the incremental state beside it. The state is a dot-file working record:
+/// `metahash` skips it, the push does not carry it, and the next build treats
+/// its absence as a full rebuild, never as a shorter answer.
+fn build_activity_index(
     stage: &Path,
     machine: &str,
     print_skips: bool,
+    mode: ActivityIndexBuild,
 ) -> Result<ActivityIndexOutcome, ActivityIndexError> {
     let started = std::time::Instant::now();
     // An activity index has no `--no-collapse` flag; its opt-out is the
@@ -2705,6 +3768,17 @@ fn rebuild_activity_index(
         }
     }
 
+    // Canonical row order: ascending `session_id`, which is the session
+    // directory's own name — every path here shares `sessions_root`, so
+    // sorting the paths sorts the names. `fs::read_dir` order is
+    // filesystem-defined (the live index measured 4,526 ascending and
+    // 4,520 descending id transitions), so without this the same stage
+    // could rebuild to different bytes on a different readdir answer.
+    // Readers are position-independent (see
+    // [`read_previous_activity_rows`], keyed by session id), so only a
+    // row's position can change here, never its content.
+    session_dirs.sort();
+
     let meta_dir = stage.join("meta").join(machine);
     if let Err(e) = fs::create_dir_all(&meta_dir) {
         return Err(ActivityIndexError::Write(format!(
@@ -2713,7 +3787,7 @@ fn rebuild_activity_index(
         )));
     }
     let out_path = meta_dir.join("activity-v1.jsonl");
-    // The rows the last rebuild measured, and which sessions the manifest says
+    // The rows the last build measured, and which sessions the manifest says
     // once had a body here. Both are read before the index is replaced: they
     // are the only records of a reclaimed session's times that this stage still
     // holds (see the doc comment above).
@@ -2737,15 +3811,32 @@ fn rebuild_activity_index(
         activity::load_session_provenance(stage, machine).map_err(|error| {
             ActivityIndexError::Read(format!("cannot read session provenance: {error}"))
         })?;
+    let mut ctx = ActivityIndexContext {
+        machine: machine.to_string(),
+        print_skips,
+        policy: index_shard_policy,
+        previous,
+        provenance_by_session,
+        recorded_bodies,
+        session_provenance,
+        sessions_without_harness: 0,
+        shard_bytes_read_hashed: 0,
+    };
+    // The last build's working record: the increment's only shortcut, and a
+    // record a full rebuild refreshes rather than resets wherever the stage
+    // really did not move.
+    let prior_state = read_activity_index_state(&meta_dir);
+    let mut state = ActivityIndexState {
+        format: ACTIVITY_INDEX_STATE_FORMAT,
+        policy: duplicate_policy_token(index_shard_policy).to_string(),
+        sessions: BTreeMap::new(),
+    };
     let mut index_temp = tempfile::Builder::new()
         .prefix(".activity-index-")
         .tempfile_in(&meta_dir)
         .map_err(|e| ActivityIndexError::Write(format!("cannot create activity index: {e}")))?;
     let mut rows_written = 0usize;
-    let mut sessions_without_harness = 0usize;
-    // W880: shard-body bytes read and hashed across every
-    // indexed session.
-    let mut shard_bytes_read_hashed = 0u64;
+    let mut sessions_carried = 0usize;
     for session_dir in session_dirs {
         let session_id = session_dir
             .file_name()
@@ -2765,69 +3856,61 @@ fn rebuild_activity_index(
             }
         };
         shards.sort_by_key(|(seq, _)| *seq);
-        let shard_count = shards.len();
-
-        // Resolved on demand, because a row carried forward from the previous
-        // index needs no harness at all — and must not be counted, or announced,
-        // as one whose harness this build could not read.
-        let mut harness_for_session = || {
-            let inferred = sidecar::infer_harness(&session_id);
-            if inferred.is_none() {
-                sessions_without_harness += 1;
-                if print_skips {
-                    eprintln!(
-                        "activity-index: session `{}` has no inferable harness — indexed with unknown time",
-                        chat_stasher::id::short_session_id(&session_id)
-                    );
-                }
-            }
-            inferred.unwrap_or_else(|| "unknown".to_string())
-        };
 
         // No body in this stage: either reclaimed, or a session that never had
         // one. Neither may be measured from the empty directory — the row the
-        // last rebuild wrote is the last measurement there was, and the manifest
-        // is what tells a reclaimed body apart from an empty session.
+        // last build wrote is the last measurement there was, and the manifest
+        // is what tells a reclaimed body apart from an empty session. Both
+        // builds run this branch identically; it reads no shard bytes.
         if shards.is_empty() {
-            // The row the last rebuild wrote for this session, if there is one,
-            // and the body the stage's manifest records for it.
-            let previous_row = previous.as_ref().and_then(|rows| rows.get(&session_id));
-            let measured = previous_row.and_then(|row| row.measured_body.as_ref());
-            let recorded = recorded_bodies
-                .as_ref()
-                .and_then(|bodies| bodies.get(&session_id));
+            // The row the last build wrote for this session, if there is one,
+            // and the body the stage's manifest records for it. Snapshotted
+            // owned copies, so nothing holds the context borrowed across the
+            // arm bodies below.
+            let (carried_row, measured, has_previous_row, recorded) = {
+                let previous_row = ctx.previous.as_ref().and_then(|rows| rows.get(&session_id));
+                let measured = previous_row.and_then(|row| row.measured_body.clone());
+                let has_previous_row = previous_row.is_some();
+                let recorded = ctx
+                    .recorded_bodies
+                    .as_ref()
+                    .and_then(|bodies| bodies.get(&session_id))
+                    .cloned();
+                let carried_row = match (&measured, &recorded) {
+                    (Some(measured), Some(recorded)) if measured == recorded => {
+                        previous_row.cloned()
+                    }
+                    _ => None,
+                };
+                (carried_row, measured, has_previous_row, recorded)
+            };
             // An unreadable manifest (`None`) also counts as reclaimed: the
             // conservative direction is "this body is not here", never "this
-            // session holds no conversation".
-            let reclaimed = recorded.is_some() || recorded_bodies.is_none();
+            // session holds no conversation". `recorded_bodies` being `None`
+            // is that unreadable case, distinct from an empty map.
+            let manifest_unreadable = ctx.recorded_bodies.is_none();
+            let reclaimed = recorded.is_some() || manifest_unreadable;
 
-            // Carried forward **only** while the row is still bound to the body
-            // the manifest records here. `reclaim-stage` writes that manifest
-            // row immediately before it deletes the body, so an identity that
-            // still matches is proof the row measured exactly the body that was
-            // reclaimed. An identity that does not — or a row that records none
-            // — is a row nothing in this stage vouches for, and carrying it
-            // would report times for a body that is not the one being indexed
-            // (SRCH-2 review, High 1: re-seal then reclaim).
-            let carried = match (measured, recorded) {
-                (Some(measured), Some(recorded)) if measured == recorded => previous_row.cloned(),
-                _ => None,
-            };
-            let mut row = match carried {
+            let mut row = match carried_row {
                 // Verbatim. Re-deriving it is impossible (the bytes are gone)
                 // and replacing it with zeros is the defect this rule fixes.
+                // The row is carried forward **only** while it is still bound
+                // to the body the manifest records here: `reclaim-stage`
+                // writes that manifest row immediately before it deletes the
+                // body, so an identity that still matches is proof the row
+                // measured exactly the body that was reclaimed.
                 Some(row) => row,
                 // A previous row that cannot be bound. It is not written
                 // forward, and its own span is not repeated either: which
                 // conversation it described is exactly what is now unknown.
                 // The two causes send an operator to two different repairs, so
                 // they are two different sentences.
-                None if previous_row.is_some() => {
+                None if has_previous_row => {
                     let why = match (measured, recorded) {
                         (Some(_), Some(_)) => RESEALED_BODY_WHY,
                         _ => UNBOUND_PREVIOUS_ROW_WHY,
                     };
-                    let harness = harness_for_session();
+                    let harness = ctx.harness_for_session(&session_id);
                     let mut row = activity::build_row(&session_id, machine, &harness, &[]);
                     row.time_source = activity::TimeSource::Unknown {
                         why: why.to_string(),
@@ -2835,7 +3918,7 @@ fn rebuild_activity_index(
                     row
                 }
                 None if reclaimed => {
-                    let harness = harness_for_session();
+                    let harness = ctx.harness_for_session(&session_id);
                     let mut row = activity::build_row(&session_id, machine, &harness, &[]);
                     row.time_source = activity::TimeSource::Unknown {
                         why: RECLAIMED_BODY_WHY.to_string(),
@@ -2846,104 +3929,85 @@ fn rebuild_activity_index(
                 // was ever sealed here, and `build_row`'s empty-input reading
                 // (no conversation content) is the honest one.
                 None => {
-                    let harness = harness_for_session();
+                    let harness = ctx.harness_for_session(&session_id);
                     activity::build_row(&session_id, machine, &harness, &[])
                 }
             };
-            row.session_provenance = session_provenance
+            row.session_provenance = ctx
+                .session_provenance
                 .get(&session_id)
                 .cloned()
-                .or(row.session_provenance);
+                .or(row.session_provenance.clone());
             index_temp
                 .write_all(activity::to_jsonl(&row).as_bytes())
                 .map_err(|e| {
                     ActivityIndexError::Write(format!("cannot append activity row: {e}"))
                 })?;
             rows_written += 1;
+            // A body-less session has no shard facts; its row is cheap to
+            // produce, so the next build re-runs this branch rather than
+            // recording anything about it.
             continue;
         }
 
-        let harness = harness_for_session();
+        // The recorded identity of this session's shards, as a writer wrote
+        // it next to the bodies it sealed.
+        let facts = chat_stasher::shard_facts::read_in_dir(&session_dir);
 
-        // The identity of the bytes this row measures, computed the same way
-        // `manifest::generate_manifest` computes it for the manifest: the shard
-        // count, and the sha256 of the shards concatenated in sequence order.
-        // The digest is over the raw shard bytes, not the decoded lines, so it
-        // is the same digest `reclaim-stage` proves when it deletes this body.
-        use sha2::{Digest, Sha256};
-        let mut lines: Vec<String> = Vec::new();
-        let mut hasher = Sha256::new();
-        let mut shard_bodies = Vec::with_capacity(shards.len());
-        for (_, shard) in &shards {
-            let bytes = match fs::read(&shard) {
-                Ok(b) => b,
-                Err(e) => {
-                    return Err(ActivityIndexError::Read(format!(
-                        "cannot read shard {}: {e}",
-                        shard.display()
-                    )));
-                }
-            };
-            hasher.update(&bytes);
-            // W880: shard-body bytes read and hashed for the row's
-            // measured body.
-            shard_bytes_read_hashed += bytes.len() as u64;
-            shard_bodies.push(bytes);
-        }
-        let duplicate_indices: BTreeSet<_> = if index_shard_policy.collapses() {
-            store::duplicate_shard_indices(&shard_bodies)
-                .into_iter()
-                .collect()
-        } else {
-            BTreeSet::new()
-        };
-        for (index, bytes) in shard_bodies.iter().enumerate() {
-            if duplicate_indices.contains(&index) {
-                continue;
-            }
-            for line in String::from_utf8_lossy(&bytes).lines() {
-                lines.push(line.to_string());
-            }
-        }
-        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-        let mut row = activity::build_row(&session_id, machine, &harness, &refs);
-        // Merged, not assigned: `build_row` has already read what the harness's
-        // own records say about this session (claude-code's `cwd` and owning
-        // organization/account), and the typed `dimensions` a capture envelope
-        // carries are *another* origin's observation of the same session rather
-        // than a replacement for it. Assigning here would discard the first
-        // reading every time the second was empty.
-        chat_stasher::provenance::merge(
-            &mut row.dimensions,
-            &chat_stasher::provenance::dimensions_from_jsonl(refs.iter().copied()),
-        );
-        if let Some(observations) = provenance_by_session.get(&session_id) {
-            let sequence_bodies: Vec<(Option<u64>, Vec<u8>)> = shards
-                .iter()
-                .zip(&shard_bodies)
-                .map(|((sequence, _), body)| (Some(*sequence), body.clone()))
-                .collect();
-            chat_stasher::provenance::merge_verified_shard_sequence_observations(
-                &mut row.dimensions,
+        // The incremental decision. Only a session whose every input is
+        // proven unchanged keeps its previous row; anything else — no state,
+        // a moved observation file, a policy flip, a record a legacy writer
+        // never wrote, a digest that no longer matches — is derived by the
+        // same code a full rebuild uses.
+        let carried = match &mode {
+            ActivityIndexBuild::IncrementalUpdate => ctx.carryable_state_entry(
                 &session_id,
-                observations,
-                &sequence_bodies,
-            );
-        }
-        row.measured_body = Some(activity::MeasuredBody {
-            shard_count,
-            concat_sha256: hex_digest(&hasher.finalize()),
-        });
-        row.session_provenance = session_provenance.get(&session_id).cloned().or_else(|| {
-            previous
-                .as_ref()
-                .and_then(|rows| rows.get(&session_id))
-                .and_then(|previous_row| previous_row.session_provenance.clone())
-        });
+                &shards,
+                facts.as_ref(),
+                prior_state.as_ref(),
+            ),
+            ActivityIndexBuild::FullRebuild => None,
+        };
+        let (row, state_entry) = match carried {
+            Some(entry) => {
+                let mut row = ctx
+                    .previous
+                    .as_ref()
+                    .and_then(|rows| rows.get(&session_id))
+                    .expect(
+                        "a carryable session always has a previous row, checked in the same \
+                         decision that granted the carry",
+                    )
+                    .clone();
+                // The one cheap input that can move without the body moving:
+                // recomputed here exactly as a derivation recomputes it, so a
+                // collection-time provenance record appended since the last
+                // build reaches the carried row just as it would a derived
+                // one.
+                row.session_provenance = ctx
+                    .session_provenance
+                    .get(&session_id)
+                    .cloned()
+                    .or_else(|| row.session_provenance.clone());
+                // The harness still has to be resolved: a session whose row
+                // is kept is still counted — and announced — exactly as a
+                // derived one would be.
+                ctx.harness_for_session(&session_id);
+                sessions_carried += 1;
+                (row, Some(entry))
+            }
+            None => {
+                let (row, entry) = ctx.derived_row(&session_id, &shards, facts.as_ref())?;
+                (row, entry)
+            }
+        };
         index_temp
             .write_all(activity::to_jsonl(&row).as_bytes())
             .map_err(|e| ActivityIndexError::Write(format!("cannot append activity row: {e}")))?;
         rows_written += 1;
+        if let Some(entry) = state_entry {
+            state.sessions.insert(session_id.clone(), entry);
+        }
     }
 
     // A complete read is published only after every session row is on disk.
@@ -2955,13 +4019,26 @@ fn rebuild_activity_index(
     index_temp.persist(&out_path).map_err(|e| {
         ActivityIndexError::Write(format!("cannot publish activity index: {}", e.error))
     })?;
+    // The working record is written after the index it describes, and a
+    // failure to write it costs only work: the next build re-derives what it
+    // could have carried. It must never fail — or be reported as failing —
+    // the build that already published a complete index.
+    if let Err(error) = write_activity_index_state(&meta_dir, &state) {
+        eprintln!(
+            "activity-index: warning: cannot write the incremental state (the next build will \
+             re-derive unchanged sessions): {error}"
+        );
+    }
 
     Ok(ActivityIndexOutcome {
         sessions_indexed: rows_written,
-        sessions_without_harness,
+        sessions_without_harness: ctx.sessions_without_harness,
+        sessions_carried,
         out_path,
         elapsed: started.elapsed(),
-        shard_bytes_read_hashed,
+        // reason: the counter accumulated inside the context is the measured
+        // bytes this build read; nothing here is inferred or defaulted.
+        shard_bytes_read_hashed: ctx.shard_bytes_read_hashed,
     })
 }
 
@@ -3121,6 +4198,7 @@ fn cmd_activity_index(
     stage: Option<&Path>,
     machine: Option<&str>,
     rebuild: bool,
+    incremental: bool,
     destination: Option<String>,
     repo: Option<String>,
     key_file: Option<String>,
@@ -3138,6 +4216,13 @@ fn cmd_activity_index(
     };
     let remote_mode = destination.is_some() || repo.is_some();
     if remote_mode {
+        if incremental {
+            eprintln!(
+                "activity-index: --incremental updates a local --stage; a destination \
+                 rebuild is always a full one"
+            );
+            return ExitCode::from(2);
+        }
         if !rebuild {
             eprintln!("activity-index: destination repair requires --rebuild");
             return ExitCode::from(2);
@@ -3285,12 +4370,32 @@ fn cmd_activity_index(
         eprintln!("activity-index: pass --stage for a local stage rebuild");
         return ExitCode::from(2);
     };
-    match rebuild_activity_index(stage, &machine, true) {
+    // `--incremental` is refused below for every destination shape, and
+    // clap's `conflicts_with = "rebuild"` + `requires = "stage"` already
+    // guarantee a local build cannot reach here with both or neither named.
+    let build = if incremental {
+        update_activity_index_incrementally(stage, &machine, true)
+    } else {
+        rebuild_activity_index(stage, &machine, true)
+    };
+    match build {
         Ok(outcome) => {
             println!("[activity-index] stage    : {}", stage.display());
             println!("[activity-index] machine  : {machine}");
             println!("[activity-index] sessions : {}", outcome.sessions_indexed);
+            println!("[activity-index] carried  : {}", outcome.sessions_carried);
+            println!(
+                "[activity-index] hashed  : {} B",
+                outcome.shard_bytes_read_hashed
+            );
             println!("[activity-index] index    : {}", outcome.out_path.display());
+            if outcome.sessions_without_harness > 0 {
+                println!(
+                    "[activity-index] no-harness: {} session(s) name no harness this build knows \
+                     — indexed with unknown time",
+                    outcome.sessions_without_harness
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(ActivityIndexError::Read(message)) => {
@@ -3601,6 +4706,13 @@ fn rebuild_activity_index_from_archive(
     // once the walk is over. The walk keeps going so the message names the
     // first failure rather than the last.
     let mut write_error: Option<String> = None;
+    // The archive walk may re-run whole once on a READ-RACE index-miss (the
+    // reloaded open cannot resume the raced attempt), and with it this
+    // callback for sessions the raced attempt already delivered. The derived
+    // index is one row per session and the counters below count sessions, so
+    // a re-delivered session is skipped: re-writing its row would publish the
+    // session twice and re-counting it would report one session as two.
+    let mut sessions_answered: BTreeSet<String> = BTreeSet::new();
     let walk = store.for_each_archived_session_shards_with_policy(
         mk,
         machine,
@@ -3609,14 +4721,35 @@ fn rebuild_activity_index_from_archive(
             if write_error.is_some() {
                 return Ok(());
             }
+            if !sessions_answered.insert(session_id.to_string()) {
+                return Ok(());
+            }
             let harness = sidecar::infer_harness(session_id).unwrap_or_else(|| {
                 sessions_without_harness += 1;
                 "unknown".to_string()
             });
-            let bytes: Vec<u8> = shard_bodies
-                .iter()
-                .flat_map(|(_, body)| body.iter().copied())
-                .collect();
+            // ADR-061: a snapshot-source session indexes as its assembled
+            // current-state body, so an increment-era session keeps its
+            // line count and timeline instead of counting every record
+            // several times (and deleted turns stay out of the index —
+            // they remain reachable through `read`/`export --include-deleted`).
+            // An assembly failure is a read failure, never a short count.
+            let bytes: Vec<u8> = if chat_stasher::opencode_records::harness_is_opencode(session_id)
+            {
+                chat_stasher::opencode_records::project_session_body(
+                    session_id,
+                    &shard_bodies
+                        .iter()
+                        .map(|(_, body)| body.clone())
+                        .collect::<Vec<_>>(),
+                    chat_stasher::opencode_records::BodyView::Current,
+                )?
+            } else {
+                shard_bodies
+                    .iter()
+                    .flat_map(|(_, body)| body.iter().copied())
+                    .collect()
+            };
             let text = String::from_utf8_lossy(&bytes);
             let owned: Vec<String> = text.lines().map(|line| line.to_string()).collect();
             let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
@@ -4538,9 +5671,13 @@ fn cmd_search(
         }
     }
     // Resolve the filter before touching the network: a date that is not a
-    // date, or a window that cannot be satisfied, is a usage error and must
-    // cost nothing and read nothing.
-    let resolved = match filters.resolve() {
+    // date, a window that cannot be satisfied, or a surface value the
+    // registry does not declare (`--surface`, ADR-059 — a value no source
+    // records can never match a session, so it must not come back dressed
+    // as an empty result), is a usage error and must cost nothing and read
+    // nothing of the destination. The registry read the surface check needs
+    // happens here, only when a surface was named.
+    let resolved = match chat_stasher::scanner::resolve_selector_flags(filters) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("search: {e}");
@@ -4583,13 +5720,22 @@ fn cmd_search(
     // cache. The cache changes no answer: it stands in for a tree walk whose
     // result a snapshot's own id proves cannot have changed, and a miss (cold,
     // damaged, or a snapshot whose tree cannot be read) walks as before.
-    let store = BackupStore::for_metadata_query(cfg.clone()).with_snapshot_cache(
-        chat_stasher::snapshot_cache::SnapshotCache::for_identity(&index_identity(
-            destination.as_deref(),
-            repo.as_deref(),
-            &cfg.repo_root,
-        )),
-    );
+    // ADR-062 D3 (LM-3): `search` reads mirror-first when this destination is
+    // mirrored. Announced on stderr — `search --text`'s stdout is the parsed
+    // mode/JSON surface, and a status line inside it would be pollution
+    // exactly the way the ssh-reap line was (W253 C1).
+    let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
+    if let Some(line) = mirror_decision.state_line() {
+        // rev2 ⑤: `[search]`'s label column is 13 wide (`destination  :`,
+        // `matched      :`) — the mirror lines join that family, not
+        // `read`/`verify`'s 15-wide one.
+        eprintln!("[search] mirror       : {line}");
+    }
+    let store = BackupStore::for_metadata_query(cfg.clone())
+        .with_mirror_reads(mirror_decision.handle())
+        .with_snapshot_cache(chat_stasher::snapshot_cache::SnapshotCache::for_identity(
+            &index_identity(destination.as_deref(), repo.as_deref(), &cfg.repo_root),
+        ));
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -4615,6 +5761,9 @@ fn cmd_search(
             return ExitCode::from(3);
         }
     };
+    if let Some(mirror) = store.mirror_reads() {
+        eprintln!("[search] mirror served: {}", mirror.served_line());
+    }
 
     if let Some(query) = text.as_deref() {
         let code = cmd_search_text(
@@ -4709,7 +5858,26 @@ fn cmd_search_text(
                 Ok(dumped) => {
                     let found = dumped.len();
                     for (session, shards) in dumped {
-                        let raw: Vec<u8> = shards.into_iter().flatten().collect();
+                        let raw: Vec<u8> =
+                            if chat_stasher::opencode_records::harness_is_opencode(&session) {
+                                // ADR-061: a snapshot-source session is searched
+                                // as its assembled current-state body — searching
+                                // the raw set would weight repeated whole-file
+                                // copies and count deleted turns as hits.
+                                match chat_stasher::opencode_records::project_session_body(
+                                    &session,
+                                    &shards,
+                                    chat_stasher::opencode_records::BodyView::Current,
+                                ) {
+                                    Ok(body) => body,
+                                    Err(_) => {
+                                        read_failures += 1;
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                shards.into_iter().flatten().collect()
+                            };
                         let id = format!("{machine}/{session}");
                         let extracted = chat_stasher::fts::extract_index_document_for(
                             chat_stasher::fts::harness_of_document_id(&id),
@@ -5074,16 +6242,22 @@ fn cmd_export(
     filters: &chat_stasher::selector::SelectorArgs,
     turns: TurnsArg,
     trim_to_window: bool,
+    include_deleted: bool,
     force: bool,
     no_collapse: bool,
     dry_run: bool,
+    offline: bool,
     repo: Option<String>,
     key_file: Option<String>,
     connections: Option<usize>,
     options: &[String],
     keep_ssh_masters: bool,
 ) -> ExitCode {
-    let resolved = match filters.resolve() {
+    // Same resolve as `search` — including the DSK-5 surface-vocabulary
+    // check, so the dry run and this command cannot disagree about what a
+    // flag means: the flags are resolved by the one function, before any
+    // network is touched.
+    let resolved = match chat_stasher::scanner::resolve_selector_flags(filters) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("export: {e}");
@@ -5125,13 +6299,65 @@ fn cmd_export(
     } else {
         store::DuplicateShardPolicy::Collapse
     };
-    let store = BackupStore::for_metadata_query(cfg.clone()).with_shard_policy(shard_policy);
+    // ADR-062 D3 (LM-3, ruling 7): `export` reads the mirror — it is a body
+    // tier, not a cache — and what it reads there never enters the body cache
+    // (this store keeps none anyway: ADR-034 holds bulk readers out of it).
+    // The lines go to stderr: `export`'s stdout carries the plan and report.
+    // Offline (W1053) the seam is the mirror-only twin and no remote backend
+    // is ever built; the two states that can keep the offline promise are the
+    // serving mirror and the copy itself, and every other one refuses before
+    // the scan — nothing read, exit 3, never "selected nothing".
+    let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
+    if offline {
+        if let Some(refusal) = mirror_decision.offline_refusal() {
+            eprintln!("export: --offline cannot serve this export — {refusal}");
+            eprintln!(
+                "export: nothing was read and no remote connection was opened — this is not an \
+                 empty selection"
+            );
+            return ExitCode::from(3);
+        }
+    }
+    if offline {
+        // `served from mirror` on every offline output (W1053), before the
+        // plan: stdout's report tells what was written, stderr's lines tell
+        // where every byte came from. The copy itself keeps the long-standing
+        // warning line — the copy *is* the mirror.
+        match &mirror_decision {
+            chat_stasher::mirror_read::MirrorReadDecision::Serving(reads) => {
+                eprintln!("[export] mirror         : {}", reads.offline_state_line());
+            }
+            chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { .. } => {
+                if let Some(line) = mirror_decision.state_line() {
+                    eprintln!("[export] mirror         : {line}");
+                }
+            }
+            _ => {}
+        }
+    } else if let Some(line) = mirror_decision.state_line() {
+        eprintln!("[export] mirror         : {line}");
+    }
+    let store = {
+        let store = BackupStore::for_metadata_query(cfg.clone()).with_shard_policy(shard_policy);
+        match (&mirror_decision, offline) {
+            (chat_stasher::mirror_read::MirrorReadDecision::Serving(reads), true) => {
+                store.with_offline_mirror(Arc::clone(reads))
+            }
+            (_, true) => store,
+            _ => store.with_mirror_reads(mirror_decision.handle()),
+        }
+    };
+    let reap_once = |off: bool| {
+        if !off {
+            reap_remote(&cfg, keep_ssh_masters);
+        }
+    };
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
             eprintln!("export: {e}");
             eprintln!("export: without the key nothing was read — this is not an empty export");
-            reap_remote(&cfg, keep_ssh_masters);
+            reap_once(offline);
             // 3, not 1: the archive was never consulted.
             return ExitCode::from(3);
         }
@@ -5139,7 +6365,7 @@ fn cmd_export(
 
     if let Err(error) = chat_stasher::export::check_out(out, force) {
         eprintln!("export: {error}");
-        reap_remote(&cfg, keep_ssh_masters);
+        reap_once(offline);
         return ExitCode::from(2);
     }
 
@@ -5147,7 +6373,7 @@ fn cmd_export(
         Ok(report) => report,
         Err(error) => {
             eprintln!("export: destination scan failed before planning: {error:#}");
-            reap_remote(&cfg, keep_ssh_masters);
+            reap_once(offline);
             return ExitCode::from(3);
         }
     };
@@ -5159,6 +6385,7 @@ fn cmd_export(
         out: out.to_path_buf(),
         turns: turns.to_turns(),
         trim_to_window,
+        include_deleted,
         force,
         dry_run,
     };
@@ -5185,7 +6412,7 @@ fn cmd_export(
                     );
                     }
                 }
-                reap_remote(&cfg, keep_ssh_masters);
+                reap_once(offline);
                 return ExitCode::from(code);
             }
         };
@@ -5193,7 +6420,28 @@ fn cmd_export(
     for line in chat_stasher::export::print_report(&report) {
         println!("{line}");
     }
-    reap_remote(&cfg, keep_ssh_masters);
+    // The visible-status half, offline-rewilded the same way as `read`'s
+    // (W1053): the served line always states which disk answered, including
+    // over the copy itself, where no handle exists to count with.
+    if offline {
+        match &mirror_decision {
+            chat_stasher::mirror_read::MirrorReadDecision::Serving(reads) => {
+                eprintln!("[export] mirror served  : {}", reads.offline_served_line());
+            }
+            chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { name } => {
+                eprintln!(
+                    "[export] mirror served  : served from mirror `{name}` itself — every byte \
+                     came from the copy on this machine's disk; this run opened no remote \
+                     connection"
+                );
+            }
+            // Unreachable: every other decision refused before the scan.
+            _ => {}
+        }
+    } else if let Some(mirror) = store.mirror_reads() {
+        eprintln!("[export] mirror served  : {}", mirror.served_line());
+    }
+    reap_once(offline);
     ExitCode::from(report.exit_status())
 }
 
@@ -5445,11 +6693,13 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
             }
         }
     }
-    let resolved = match filters.resolve() {
+    let resolved = match chat_stasher::scanner::resolve_selector_flags(&filters) {
         Ok(r) => r,
         Err(e) => {
             // Same rule as `search`: a filter that cannot be resolved is a
-            // usage error, never an empty result.
+            // usage error, never an empty result — and the surface check is
+            // part of the resolve, so a launch `--surface` the registry does
+            // not declare is refused before any destination is read (DSK-5).
             eprintln!("ui: {e}");
             return ExitCode::from(2);
         }
@@ -5497,6 +6747,24 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
                     &index_identity(name.as_deref(), repo_override.as_deref(), &cfg.repo_root),
                 )
             });
+        // ADR-062 D3 (LM-3): the dashboard reads mirror-first when this
+        // destination is mirrored — every route except the payload tier is
+        // metadata, and `/content` reopens the store per request, so it rides
+        // the same seam. `verify` is not here because no verify store ever
+        // carries a seam (47 §5.5).
+        let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
+        if let Some(line) = mirror_decision.state_line() {
+            eprintln!("[ui] destination `{label}` mirror: {line}");
+        }
+        let mirror_behindness = match &mirror_decision {
+            chat_stasher::mirror_read::MirrorReadDecision::Serving(reads) => {
+                Some(chat_stasher::mirror_read::behindness_sentence(
+                    &chat_stasher::collect::default_state_dir(),
+                    &reads.mirror_of,
+                ))
+            }
+            _ => None,
+        };
         // ADR-034: the dashboard is the other single-session body reader. Every
         // route except `load` is metadata-tier, and only `load` reaches this cache.
         //
@@ -5504,6 +6772,7 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         // every refresh, which is precisely the repeat over the same snapshots
         // the snapshot cache exists for. Same identity as the text index above.
         let store = BackupStore::for_metadata_query(cfg.clone())
+            .with_mirror_reads(mirror_decision.handle())
             .with_body_cache(
                 chat_stasher::body_cache::for_operation(
                     &config,
@@ -5569,6 +6838,7 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
             unread_at_all: false,
             extension_installs,
             extension_status_read,
+            mirror_behindness,
         });
     }
     // ssh masters are reaped before the server starts, not after: the serve loop
@@ -5666,6 +6936,12 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         .collect();
     let mut data =
         chat_stasher::ui::UiData::from_reports(&reads, resolved.selector.clone(), now_unix);
+    // ADR-062 D3: the behindness sentence rides the destination states the
+    // merge built — same order as `parts` (the merge keeps destination
+    // order), set here so the merge stays a pure function of the reads.
+    for (state, part) in data.destinations.iter_mut().zip(&parts) {
+        state.mirror = part.mirror_behindness.clone();
+    }
     data.remote_inboxes = chat_stasher::inbox_status::inspect_default();
     data.local_machine_id = query_machine(&config, None);
     data.extension_status_read = parts.iter().all(|part| part.extension_status_read);
@@ -5869,6 +7145,10 @@ struct UiDestination {
     unread_at_all: bool,
     extension_installs: Vec<serde_json::Value>,
     extension_status_read: bool,
+    /// ADR-062 D3: this destination's mirror behindness sentence, carried onto
+    /// the page's per-destination state after the merge. `None` while no
+    /// mirror serves this destination.
+    mirror_behindness: Option<String>,
 }
 
 impl UiDestination {
@@ -5887,6 +7167,7 @@ impl UiDestination {
             unread_at_all: true,
             extension_installs: Vec::new(),
             extension_status_read: false,
+            mirror_behindness: None,
         }
     }
 }
@@ -5974,7 +7255,6 @@ impl chat_stasher::ui::ContentSource for MergedContent<'_> {
 
 fn cmd_doctor(json: bool) -> ExitCode {
     let mut report = chat_stasher::doctor::run();
-    let inboxes = chat_stasher::inbox_status::inspect_default();
     // ADR-023 — the one place `doctor` opens a real connection. Kept out of
     // `doctor::run()` because a dozen integration tests call that entry point
     // directly and a test may not reach the network; the CLI is where a real
@@ -5983,9 +7263,45 @@ fn cmd_doctor(json: bool) -> ExitCode {
     // Only when the config could be read at all: with none, there is no declared
     // destination to dial, and an empty probe list would read as "no destination
     // answered" — a claim about a destination list nobody managed to read.
-    if let Ok(config) = Config::load() {
-        report.destinations = chat_stasher::doctor::probe_destinations(&config);
+    //
+    // W1043: the CLI-side steps run through the same traced, deadlined harness
+    // the library's checks use, so the remote-inbox observation and every
+    // destination probe answer within their own budgets or leave a note in
+    // `report.timed_out` instead of freezing the command.
+    let mut cli_checks = chat_stasher::doctor::CheckRunner::new();
+    let inboxes = match cli_checks.run(
+        chat_stasher::doctor::INBOX_STATUS_CHECK,
+        chat_stasher::doctor::INBOX_BUDGET_SECS,
+        chat_stasher::inbox_status::inspect_default,
+    ) {
+        Some(report) => report,
+        // reason: the empty `Report` is the did-not-look shape —
+        // `inspect_default`'s own "declarations unknown" rendering and the
+        // `incomplete()` verdict below word it; the `timed_out` note that
+        // replaces this section's numbers rides in `cli_checks`.
+        None => chat_stasher::inbox_status::Report {
+            state: "unknown",
+            inboxes: Vec::new(),
+        },
+    };
+    // W1043f: the probes reuse the config `doctor::run()` already read behind
+    // its own deadline — `DoctorReport::config` — instead of issuing a second
+    // `Config::load()`. That second read had no deadline, no thread and no
+    // cache: a config file that had just been reported as timed out got a
+    // fresh, unbounded chance to hang the command (the rev0 review's High),
+    // and a file edited mid-run could disagree with the rest of the report.
+    // Reusing the one config keeps the surfaces telling one story: with no
+    // usable config there is nothing to probe, so `destinations` stays empty
+    // exactly when `config_error` says nothing config-derived was inspected.
+    let probed = report
+        .config
+        .as_ref()
+        .map(chat_stasher::doctor::probe_destinations);
+    if let Some((probes, timed_out)) = probed {
+        report.destinations = probes;
+        report.timed_out.extend(timed_out);
     }
+    report.timed_out.extend(cli_checks.notes().to_vec());
     if json {
         let mut value = chat_stasher::doctor::report_to_json(&report);
         value["remote_inboxes"] = serde_json::json!(&inboxes);
@@ -5993,6 +7309,19 @@ fn cmd_doctor(json: bool) -> ExitCode {
     } else {
         chat_stasher::doctor::print_report(&report);
         inboxes.print();
+    }
+    // W1043: one line per timed-out check, naming the culprit the trace
+    // already named before it hung. Printed before every exit-3 branch
+    // below, because the states can coexist — a config that never answered
+    // and a settings read that wedged beside it each owe their own line,
+    // and a reader of either kind of run sees every wedged check named
+    // (W1043f).
+    for note in &report.timed_out {
+        eprintln!(
+            "doctor: INCOMPLETE exit_code=3 — the {} check did not answer within {}s, so its \
+             section is UNKNOWN, not zero; the other checks' printed results stand.",
+            note.check, note.budget_secs
+        );
     }
     if let Some(error) = &report.config_error {
         // The one command that does not refuse on an unusable config, because
@@ -6006,6 +7335,16 @@ fn cmd_doctor(json: bool) -> ExitCode {
              reads it was NOT performed (those are listed above and in `not_checked` under `--json`). \
              Absent results there are unknown, not zero."
         );
+        return ExitCode::from(3);
+    }
+    // W1043: a check that outlived its own deadline is the same family as an
+    // unreadable config — "did not finish", the 3 this tool's exit-code
+    // table gives to a diagnosis that did not complete — never exit 0 for a
+    // machine only half of which was inspected, and never a generic
+    // failure that hides the sections that did answer: they are printed
+    // above and stand. The per-check INCOMPLETE lines above already carry
+    // the details, so this branch only decides the exit code.
+    if !report.timed_out.is_empty() {
         return ExitCode::from(3);
     }
     if inboxes.incomplete() {
@@ -6054,11 +7393,49 @@ fn cmd_import(
     export: &Path,
     inbox: &Path,
     stage: &Path,
+    machine: Option<&str>,
 ) -> ExitCode {
     use chat_stasher::import::ArchiveNotWired;
     use chat_stasher::import::ImportError;
 
-    let report = match chat_stasher::import::run(platform, export, inbox, stage, &ArchiveNotWired) {
+    // The machine label's own checks, stated here once more for a caller
+    // that hand-builds the arguments — the run refuses the same pair on the
+    // same terms, exactly the way cmd_import_backup re-states `--from`.
+    // Both are usage errors, and both stand before any read so an argument
+    // problem is never reported as a file problem.
+    let gated = platform.observation_plan().refusal().is_some();
+    match (gated, machine) {
+        (true, None) => {
+            eprintln!(
+                "import: FAILED exit_code=2 — `--machine <name>` is required for a {} import in \
+                 this build: the platform is held at raw-export archiving by the development \
+                 import gate, and the export object that run writes files its index row under \
+                 that machine's stage partition. Nothing was read, nothing was sealed.",
+                platform.slug()
+            );
+            return ExitCode::from(2);
+        }
+        (false, Some(_)) => {
+            eprintln!(
+                "import: FAILED exit_code=2 — `--machine` is not read by a {} import in this \
+                 build: this platform's run archives the export under `import-raw/`, not as an \
+                 export object, so there is no index row to file. Nothing was read, nothing was \
+                 sealed.",
+                platform.slug()
+            );
+            return ExitCode::from(2);
+        }
+        _ => {}
+    }
+
+    let report = match chat_stasher::import::run_with_machine(
+        platform,
+        export,
+        inbox,
+        stage,
+        &ArchiveNotWired,
+        machine,
+    ) {
         Ok(report) => report,
         Err(error) => {
             let (code, kind) = match &error {
@@ -6076,6 +7453,41 @@ fn cmd_import(
 
     println!("[import] platform         : {}", report.platform);
     println!("[import] export           : {}", export.display());
+    if let Some(reason) = report.observation_refusal {
+        println!(
+            "[import] raw archive      : {} ({} bytes, {})",
+            report.raw.path.display(),
+            report.raw.bytes,
+            if report.raw.newly_stored {
+                "newly archived"
+            } else {
+                "already archived byte-for-byte; nothing new stored"
+            }
+        );
+        println!("[import] raw sha256       : {}", report.raw.sha256);
+        println!(
+            "[import] inbox            : {} (no bundle was written — see the gate line below)",
+            inbox.display()
+        );
+        println!(
+            "[import] conversations    : {} (read; none imported)",
+            report.conversations_seen
+        );
+        println!("[import] bundles written  : 0 (refused by the platform's import gate)");
+        println!("[import] observations     : 0");
+        println!("[import] archive probe    : {}", report.archive_probe);
+        println!("[import] gate             : {reason}");
+        println!("[import] rejected         : {}", report.rejections.len());
+        for rejection in &report.rejections {
+            println!("  - {rejection}");
+        }
+        eprintln!(
+            "import: FAILED exit_code=1 — {reason} The export above was archived exactly once, \
+             byte-exact, as its own object — the half the gate permits; the inbox was not \
+             touched, and no observation of these conversations exists."
+        );
+        return ExitCode::from(1);
+    }
     println!(
         "[import] raw archive      : {} ({} bytes, {})",
         report.raw.path.display(),
@@ -6110,6 +7522,385 @@ fn cmd_import(
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// `import --harness <id> --from <dir>`: feed copied local-cache backups in
+/// through the collector's own delivery state (GB-3b, W988).
+///
+/// Mirrors `collect`'s resolution rules — config, machine partition,
+/// destination — because the delivered set it extends is the live
+/// collector's; and the takeout import's stage rule: an existing `--stage`
+/// is required and never created for you.
+fn cmd_import_backup(
+    harness: BackupHarness,
+    from: &[std::path::PathBuf],
+    stage: &Path,
+    dry_run: bool,
+    machine: Option<&str>,
+    shard_bucket_cap: usize,
+    destination: Option<&str>,
+    repo: Option<&str>,
+    key_file: Option<&str>,
+) -> ExitCode {
+    if !stage.is_dir() {
+        eprintln!(
+            "import: FAILED exit_code=2 — stage {} is not a directory; import never creates a stage",
+            stage.display()
+        );
+        return ExitCode::from(2);
+    }
+    if from.is_empty() {
+        // Clap's `requires` already enforces --from; this is the same refusal
+        // stated once more for a caller that hand-builds the arguments.
+        eprintln!("import: FAILED exit_code=2 — no backup directory was given (--from <dir>)");
+        return ExitCode::from(2);
+    }
+    let config = match config_or_refuse("import") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let machine = match resolve_machine("import", &config, machine) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let store_cfg = resolve_store_config(
+        &config,
+        destination,
+        repo.map(String::from),
+        key_file.map(String::from),
+        None,
+        &[],
+    );
+    let view = destination_view(&store_cfg, &machine);
+    let report = match chat_stasher::collect::import_grok_bot_backups(
+        from,
+        stage,
+        &machine,
+        &state_dir,
+        shard_bucket_cap,
+        &view,
+        dry_run,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!(
+                "import: FAILED exit_code=3 — a backup was never read to the end, so nothing \
+                 about what it holds is proven and nothing was imported: {error:#}"
+            );
+            return ExitCode::from(3);
+        }
+    };
+
+    println!("[import] harness         : {}", harness.harness_id());
+    println!(
+        "[import] mode            : {}",
+        if dry_run { "dry-run" } else { "import" }
+    );
+    println!("[import] backups         : {}", from.len());
+    for backup in &report.empty_backups {
+        println!("[import] backup {backup}        : holds no sessions; nothing to import");
+    }
+    println!("[import] stage           : {}", stage.display());
+    println!("[import] state           : {}", state_dir.display());
+    println!("[import] machine         : {machine}");
+    println!(
+        "[import] destination     : sha256={} (delivered state is kept per destination)",
+        report.destination_id
+    );
+    println!("[import] sessions seen   : {}", report.sessions_seen);
+    println!("[import] rows new        : {}", report.rows_new);
+    println!(
+        "[import] rows already    : {}",
+        report.rows_already_delivered
+    );
+    println!(
+        "[import] shards {}  : {}",
+        if dry_run { "to seal" } else { "written" },
+        report.shards_written
+    );
+    for session in &report.sessions {
+        println!(
+            "[import] session {} : rows_new={} rows_already_delivered={} shards_{}={}",
+            session.session_prefix,
+            session.rows_new,
+            session.rows_already_delivered,
+            if dry_run { "to_seal" } else { "written" },
+            session.shards_written,
+        );
+        if session.reread {
+            println!(
+                "[import]   {} could not be verified, so its whole union was re-delivered and is \
+                 measured from now on",
+                session.session_prefix
+            );
+        }
+    }
+    if dry_run {
+        println!("[import] dry-run        : nothing was written");
+    }
+    if !report.errors.is_empty() {
+        eprintln!(
+            "import: FAILED exit_code=1 — {} session(s) in the backups were read and could not be \
+             imported. The import above is real but incomplete; a re-run after fixing the input \
+             imports the rest.",
+            report.errors.len()
+        );
+        for error in &report.errors {
+            eprintln!("  - {error}");
+        }
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// `backfill grok-bot`: the user-started, app-driven recovery of a
+/// conversation's pre-window history (ADR-058 D1). The command shell: the
+/// library owns the run; this function resolves the collector context the
+/// run needs (machine, destination, state, persistence root), registers the
+/// interrupt handler, prints the report and maps the outcome's exit code.
+/// The macOS-only gate is this shell's too — the platform question belongs
+/// where the real driver is built, so nothing on an unmeasured platform
+/// reaches the run at all.
+#[allow(clippy::too_many_arguments)]
+fn cmd_backfill_grok_bot(
+    harness: BackupHarness,
+    stage: &Path,
+    deliver: bool,
+    conversations: &[String],
+    machine: Option<&str>,
+    shard_bucket_cap: usize,
+    destination: Option<&str>,
+    repo: Option<&str>,
+    key_file: Option<&str>,
+) -> ExitCode {
+    // Exhaustive by construction: adding a harness here must decide what
+    // this command does for it, and the compiler enforces that now rather
+    // than a runtime guess answering later.
+    let BackupHarness::GrokBot = harness;
+    // The macOS-only gate lives here, at the registration that builds the
+    // real, platform-specific driver: the route was measured on macOS and
+    // a build for any other platform refuses to drive it. The library run
+    // beneath is neutral orchestration over an injected driver, so its
+    // suite exercises it identically on every platform.
+    if !cfg!(target_os = "macos") {
+        println!("{}", chat_stasher::backfill::RISK_STATEMENT);
+        eprintln!(
+            "backfill: refused exit_code=3 — {}",
+            chat_stasher::backfill::MACOS_ONLY_REFUSAL
+        );
+        return ExitCode::from(3);
+    }
+    if !stage.is_dir() {
+        eprintln!(
+            "backfill: FAILED exit_code=2 — stage {} is not a directory; backfill never \
+             creates a stage",
+            stage.display()
+        );
+        return ExitCode::from(2);
+    }
+    let config = match config_or_refuse("backfill") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let machine = match resolve_machine("backfill", &config, machine) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let store_cfg = resolve_store_config(
+        &config,
+        destination,
+        repo.map(String::from),
+        key_file.map(String::from),
+        None,
+        &[],
+    );
+    let view = destination_view(&store_cfg, &machine);
+    let Some(persistence_root) = chat_stasher::scanner::grok_bot_persistence_root(&config) else {
+        eprintln!(
+            "backfill: REFUSED exit_code=3 — the grok-bot persistence root could not be \
+             resolved the way a scan resolves it; nothing was touched"
+        );
+        return ExitCode::from(3);
+    };
+
+    // The interrupt flag: a SIGINT/SIGTERM sets it and the run restores the
+    // app before exiting. One registration per process; an already-set
+    // handler (impossible for the CLI, which runs one command per process)
+    // leaves the flag unset, so the callback simply never fires.
+    let interrupt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let registered = {
+        let flag = interrupt.clone();
+        ctrlc::set_handler(move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .is_ok()
+    };
+
+    let driver = chat_stasher::backfill::CdpAppDriver::new(
+        chat_stasher::backfill::Clock::wall(),
+        &persistence_root,
+    );
+    let request = chat_stasher::backfill::BackfillRequest {
+        stage,
+        machine: &machine,
+        state_dir: &state_dir,
+        shard_bucket_cap,
+        destination: &view,
+        deliver,
+        conversation_prefixes: conversations.to_vec(),
+        persistence_root: &persistence_root,
+        interrupt: &interrupt,
+        clock: chat_stasher::backfill::Clock::wall(),
+        driver: Box::new(driver),
+    };
+    let mut stdout = std::io::stdout();
+    let outcome = chat_stasher::backfill::run_grok_bot_backfill(request, &mut stdout);
+    let code = outcome.exit_code();
+
+    match &outcome {
+        chat_stasher::backfill::BackfillOutcome::Refused(refusal) => {
+            let kind = if refusal.usage { "usage" } else { "refused" };
+            eprintln!("backfill: {kind} exit_code={code} — {}", refusal.reason);
+            if !registered {
+                eprintln!(
+                    "backfill: note — the interrupt handler could not be registered, so \
+                     Ctrl-C restores nothing; interrupting anyway stops the run where it \
+                     stands"
+                );
+            }
+        }
+        chat_stasher::backfill::BackfillOutcome::Completed(report) => {
+            print_backfill_report(report);
+        }
+        chat_stasher::backfill::BackfillOutcome::CompletedWithFindings(report, findings) => {
+            print_backfill_report(report);
+            eprintln!(
+                "backfill: exit_code={code} — the traversal finished with findings; a \
+                 re-run of this command tries again and adds nothing twice:"
+            );
+            for finding in findings {
+                eprintln!("  - {finding}");
+            }
+        }
+        chat_stasher::backfill::BackfillOutcome::Stopped(report, why) => {
+            print_backfill_report(report);
+            if report.restore.failure.is_some() {
+                // The stop text already carries the restore's failure
+                // (a stalled traversal is exit 3 and the close-out's
+                // verdict rides along in it); the old tail would
+                // claim an attempted restore that in fact failed.
+                eprintln!("backfill: STOPPED exit_code={code} — {why}");
+            } else {
+                eprintln!(
+                    "backfill: STOPPED exit_code={code} — {why}; what has been delivered stays \
+                     delivered and the app was restored where the restore was attempted"
+                );
+            }
+        }
+        chat_stasher::backfill::BackfillOutcome::RestoreFailed(report, why) => {
+            print_backfill_report(report);
+            eprintln!("backfill: FAILED exit_code={code} — {why}");
+        }
+    }
+    std::process::ExitCode::from(code)
+}
+
+fn print_backfill_report(report: &chat_stasher::backfill::BackfillReport) {
+    println!(
+        "[backfill] mode            : {}",
+        if report.dry_run {
+            "dry-run (no flag: reports only, delivers nothing)"
+        } else {
+            "deliver (--i-accept-the-risk given)"
+        }
+    );
+    println!("[backfill] run id          : {}", report.run_id);
+    if let Some(version) = &report.app_version_start {
+        println!("[backfill] app version     : {version}");
+    }
+    println!("[backfill] debug port      : {}", report.debug_port);
+    for conversation in &report.conversations {
+        println!("{}", conversation.summary_line());
+    }
+    println!(
+        "[backfill] conversations    : {}",
+        report.conversations.len()
+    );
+    let delivered: u64 = report
+        .conversations
+        .iter()
+        .map(|item| item.rows_delivered)
+        .sum();
+    let already: u64 = report
+        .conversations
+        .iter()
+        .map(|item| item.rows_already_delivered)
+        .sum();
+    println!(
+        "[backfill] rows {} : {delivered}",
+        if report.dry_run {
+            "would add"
+        } else {
+            "delivered"
+        }
+    );
+    println!("[backfill] rows already    : {already}");
+    if report.dry_run {
+        println!("[backfill] dry-run        : nothing was written");
+    }
+    let restore = &report.restore;
+    if restore.attempted {
+        if let Some(failure) = &restore.failure {
+            println!(
+                "[backfill] restore         : not restored to a normal launch — {failure} \
+                 (debug pid {:?}, port {})",
+                restore.debug_pid, restore.debug_port,
+            );
+        } else if restore.relaunch_owed {
+            println!(
+                "[backfill] restore         : app restored to a normal launch (debug pid {:?}, \
+                 port {}, relaunch running verified: {}, port closed verified: {}, sync \
+                 resumed observed: {}, previous conversation re-selected: {})",
+                restore.debug_pid,
+                restore.debug_port,
+                // reason: a verification that could not be made displays
+                // as "false" — the report columns answer "was it
+                // verified?", and "unverified" must not read as "yes"
+                restore.relaunch_running.unwrap_or(false),
+                // reason: the port column answers "was it verified
+                // closed?", and an unverified check must not display
+                // as "yes"
+                restore.port_closed.unwrap_or(false),
+                restore
+                    .sync_resumed
+                    .map(|seen| seen.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                match restore.conversation_reselected {
+                    Some(true) => "yes".to_string(),
+                    Some(false) => "no".to_string(),
+                    // reason: no conversation was open when the run began
+                    // (nothing to re-select) or the re-selection could not
+                    // be attempted — an absence of the attempt, not a
+                    // failed one
+                    None => "not attempted".to_string(),
+                },
+            );
+        } else {
+            println!(
+                "[backfill] restore         : debug relaunch quit, no plain relaunch owed \
+                 because the app was not running before the run (debug pid {:?}, port {}, \
+                 port closed verified: {})",
+                restore.debug_pid,
+                restore.debug_port,
+                // reason: the port column answers "was it verified
+                // closed?", and an unverified check must not display
+                // as "yes"
+                restore.port_closed.unwrap_or(false),
+            );
+        }
+    }
 }
 
 fn cmd_ingest(
@@ -6172,7 +7963,7 @@ fn destination_view<'a>(
     cfg: &'a StoreConfig,
     machine: &'a str,
 ) -> chat_stasher::collect::DestinationView<'a> {
-    chat_stasher::collect::DestinationView::new(
+    chat_stasher::collect::DestinationView::with_machine_logs(
         chat_stasher::collect::destination_id(&cfg.repo_root),
         move |wanted| {
             let store = BackupStore::new(cfg.clone(), machine.to_string());
@@ -6182,6 +7973,22 @@ fn destination_view<'a>(
             let mk = store::load_key_file(cfg)?;
             let observation = store.read_cumulative_sessions(&mk, Some(wanted))?;
             Ok(chat_stasher::collect::archive_facts_from_readback(
+                &observation,
+            ))
+        },
+        move || {
+            // ADR-053 C1: the same archive, asked about its machine-log
+            // generations. No session is wanted here — this read exists only
+            // for a machine-log cursor that could not prove itself locally, and
+            // the machine-log generations are reported whichever session set
+            // the read was asked with.
+            let store = BackupStore::new(cfg.clone(), machine.to_string());
+            if !store.repository_exists()? {
+                anyhow::bail!("destination repository is not initialised");
+            }
+            let mk = store::load_key_file(cfg)?;
+            let observation = store.read_cumulative_sessions(&mk, Some(&BTreeSet::new()))?;
+            Ok(chat_stasher::collect::machine_log_facts_from_readback(
                 &observation,
             ))
         },
@@ -6816,10 +8623,21 @@ fn cmd_collect(
     };
 
     print_collect_report(&report, stage, &state_dir, &machine);
-    // Precedence is deliberate: a session we tried to read and failed on (1)
-    // outranks a harness this build cannot archive at all (3). The first says
-    // "this pass failed", the second says "this pass did not fail — and it did
-    // not finish either".
+    collect_exit_code(&report)
+}
+
+/// The `collect` exit ladder, split from `cmd_collect` (W1047f Medium 5) so
+/// the precedence itself is pinnable by a test. Precedence is deliberate: a
+/// session we tried to read and failed on (1) outranks a harness this build
+/// cannot archive at all (3). The first says "this pass failed", the second
+/// says "this pass did not fail — and it did not finish either". An
+/// entry-level unknown — a source whose recognized-session count could not be
+/// taken (`record_count = None`) — is in neither bucket: `archive_gaps`
+/// keeps it out (its `None` arm is prose, never a gap), the printed report
+/// narrates it ([`collect_narrates_unknown`]), and the exit code stays 0:
+/// the pass finished, said what it could not measure, and no absence it
+/// carries proves an attempt failed.
+fn collect_exit_code(report: &chat_stasher::collect::CollectReport) -> ExitCode {
     if !report.errors.is_empty() {
         return ExitCode::FAILURE;
     }
@@ -6841,7 +8659,45 @@ fn cmd_collect(
         // surface that does.
         return ExitCode::from(3);
     }
+    if !report.codebuff_torn_skips.is_empty() {
+        // ADR-054 D6: a transcript the pass read but could not validate as
+        // a JSON array skipped its session — sealed nothing, skipped with a
+        // bounded observation in the control stream. Silence here would
+        // make an incomplete scan look complete, the exact "unknown ≠
+        // empty" failure this exit-code family exists to prevent, so the
+        // run reports 3 ("did not finish reading") even though every other
+        // session archived cleanly and nothing failed outright.
+        eprintln!(
+            "collect: PARTIAL exit_code=3 — {} codebuff session(s) could not be read whole and \
+             skipped this pass (nothing sealed for them; bounded skip observations recorded; retry \
+             next pass)",
+            report.codebuff_torn_skips.len()
+        );
+        return ExitCode::from(3);
+    }
     ExitCode::SUCCESS
+}
+
+/// The prose marker the collect report appends to a machine-log line whose
+/// body capture a build flag holds back (W1047f High 1). A counted fact
+/// beside counted zeros: the source exists and was measured by the scan,
+/// the pass sealed none of it, and nothing about that is a read failure or
+/// an absence. No declared log is held back in this build (W1047f2).
+const MACHINE_LOG_CONTENT_WITHHELD: &str =
+    " content_withheld=true (measured, not sealed: body capture pending review)";
+
+/// The scan tallies that make the printed collect report carry an unknown:
+/// any one of them turns the report's own prose into the `scan partial` line
+/// below, and none of them enters the exit ladder — W1047f Medium 5 pins
+/// the two halves together. This is the fleet-wide convention that keeps
+/// "the count could not be taken" out of the success/failure axis: the report
+/// above already says the run is incomplete, so the exit code says only what
+/// the pass proved about what it did archive.
+fn collect_narrates_unknown(report: &chat_stasher::collect::CollectReport) -> bool {
+    report.scanner_unreadable_count > 0
+        || report.scanner_unreadable_unknown > 0
+        || report.scanner_unreadable_entry_count > 0
+        || report.scanner_unlooked_harnesses > 0
 }
 
 fn print_collect_report(
@@ -6878,9 +8734,26 @@ fn print_collect_report(
         report.scanned_cursor_records
     );
     println!(
-        "[collect] grok records    : {} (session_docs rows plus linked usage.json files)",
+        "[collect] grok records    : {} (session_docs rows, linked usage.json files, and native chat_history.jsonl transcripts)",
         report.scanned_grok_records
     );
+    if !report.codebuff_torn_skips.is_empty() {
+        // Bounded vocabulary only: how many sessions skipped, which reasons.
+        // The control stream holds the per-session records; this line and the
+        // exit code are what keep a run with skips from looking complete.
+        let mut reasons: Vec<&str> = report
+            .codebuff_torn_skips
+            .iter()
+            .map(|skip| skip.reason)
+            .collect();
+        reasons.sort_unstable();
+        reasons.dedup();
+        println!(
+            "[collect] codebuff skips : {} session(s) not archived this pass ({}); sealed nothing, recorded a bounded observation, retried next pass",
+            report.codebuff_torn_skips.len(),
+            reasons.join(",")
+        );
+    }
     println!(
         "[collect] not archivable  : {} harness(es) recognised sessions without enough SessionRecord values",
         report.archive_gaps.len()
@@ -6891,11 +8764,7 @@ fn print_collect_report(
     // B82: `unlooked_harnesses` joins the same line rather than getting one of
     // its own — and, like the other two, only when it is non-zero, so a clean
     // pass prints exactly what it printed before.
-    if report.scanner_unreadable_count > 0
-        || report.scanner_unreadable_unknown > 0
-        || report.scanner_unreadable_entry_count > 0
-        || report.scanner_unlooked_harnesses > 0
-    {
+    if collect_narrates_unknown(report) {
         // B90: `unreadable_sessions` is a sum over the tallies that exist, so
         // when one of them could not be taken the sum is a floor, not a total.
         // The extra field says how many harnesses that applies to; it stays
@@ -6954,12 +8823,66 @@ fn print_collect_report(
             outcome.compressed,
         );
     }
+    // ADR-053 D4: a machine log's own counters, on its own line — never summed
+    // into the session counters above. One line per declared log that exists on
+    // this machine, so `run-once` narrates it the way it narrates a session.
+    for outcome in &report.machine_logs {
+        // W1047f High 1: a log whose body capture is withheld says so on its
+        // own line, so a measured-but-not-sealed log can never read as one
+        // that was found empty. One constant so the sentence exists in one
+        // place only.
+        let withheld = if outcome.content_withheld {
+            MACHINE_LOG_CONTENT_WITHHELD
+        } else {
+            ""
+        };
+        println!(
+            "[collect] machine log      : {} {} lines={} generations={} read_bytes={} prefix_bytes={} sealed={} reset={} unproven={}{}",
+            outcome.harness,
+            outcome.log_id,
+            outcome.sealed_lines,
+            outcome.generations,
+            outcome.bytes_read,
+            outcome.prefix_bytes_validated,
+            outcome.shard.as_deref().unwrap_or("none"),
+            outcome.reset,
+            outcome.unproven.unwrap_or("none"),
+            withheld,
+        );
+    }
+    if report.machine_logs_unlooked > 0
+        || report.machine_logs_indeterminate > 0
+        || report.machine_logs_errors > 0
+    {
+        // A declared log that was not looked at, that could not be established,
+        // or that failed to read is an unknown — never a log that was found
+        // empty.
+        println!(
+            "[collect] machine logs     : unlooked={} indeterminate={} errors={} source_not_collected=true",
+            report.machine_logs_unlooked, report.machine_logs_indeterminate, report.machine_logs_errors
+        );
+    }
     if !report.errors.is_empty() {
         println!("[collect] errors          : {}", report.errors.len());
         for error in &report.errors {
             println!(
                 "  ! session={} path_sha256={} source_not_collected=true",
                 error.session_prefix, error.source_path_sha256
+            );
+        }
+    }
+    // W1049: a mid-pass relocation the pass itself resolved, bounded like
+    // the errors above — prefixes and digests, never a path. Printed only
+    // when one exists, so an ordinary pass prints what it printed before.
+    if !report.moved_away.is_empty() {
+        println!(
+            "[collect] moved away     : {} source(s) vanished mid-pass and were found by session identity inside roots this pass already collects; collected at the new location this pass or the next, never counted toward collect_incomplete",
+            report.moved_away.len()
+        );
+        for notice in &report.moved_away {
+            println!(
+                "  ! session={} path_sha256={} relocated_path_sha256={} moved_away=true",
+                notice.session_prefix, notice.source_path_sha256, notice.relocated_path_sha256
             );
         }
     }
@@ -6999,6 +8922,9 @@ fn cmd_run_once(
         keep_ssh_masters,
     );
     state.duration_ms = started.elapsed().as_millis() as u64;
+    // The record was built when the pass began; `finished_at_unix` promises
+    // the moment it ended, and this is the last point where that is known.
+    state.mark_finished();
     let state_dir = chat_stasher::collect::default_state_dir();
     // W880: the write is timed, then the record is rewritten once more
     // so the file on disk carries the write's own timing — the same
@@ -7171,7 +9097,80 @@ fn run_once_pass(
             );
         }
     };
-    let machine_name = match resolve_machine("run-once", &config, machine.as_deref()) {
+    run_once_pass_with(
+        &config,
+        stage,
+        machine,
+        shard_bucket_cap,
+        destination,
+        repo,
+        key_file,
+        connections,
+        options,
+        verify,
+        keep_ssh_masters,
+        &run_once_letta_pull,
+    )
+}
+
+/// The declared Letta producer step of a scheduled pass: the same one-pipeline
+/// pull `chat-stasher pull letta` runs, with the `[pull.letta]` declaration
+/// resolved for the pass and the pass's own machine, stage and destination.
+/// This is the production seam target; the tests inject a recording one so
+/// the wiring is provable without a credential or any network.
+fn run_once_letta_pull(
+    pull: &chat_stasher::letta::PassPull,
+    pull_destinations: &[StoreConfig],
+    machine: &str,
+    stage: &Path,
+) -> anyhow::Result<chat_stasher::letta::Report> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .context("local agent home unavailable")?;
+    letta_producer_pull(
+        &pull.account,
+        &pull.inbox,
+        &pull.state,
+        stage,
+        machine,
+        pull.pace_ms,
+        pull.budget_seconds,
+        pull.page_size,
+        pull.api_key.as_deref(),
+        pull_destinations,
+        &home.join(".letta/agents"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_once_pass_with(
+    config: &Config,
+    stage: &Path,
+    machine: Option<String>,
+    shard_bucket_cap: usize,
+    destination: Option<String>,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    verify: bool,
+    keep_ssh_masters: bool,
+    letta_pull: &dyn Fn(
+        &chat_stasher::letta::PassPull,
+        &[StoreConfig],
+        &str,
+        &Path,
+    ) -> anyhow::Result<chat_stasher::letta::Report>,
+) -> (ExitCode, chat_stasher::runstate::RunState) {
+    use chat_stasher::runstate::{RunOutcome, RunState};
+
+    // W964's budget anchor (applied to the mirror step by ADR-062 C2): the
+    // pass is one round and the wall clock starts here, at the first line,
+    // so every step — including the post-push mirror — spends out of the
+    // same interval, never past it.
+    let pass_started = std::time::Instant::now();
+    let machine_name = match resolve_machine("run-once", config, machine.as_deref()) {
         Ok(machine) => machine,
         Err(code) => {
             let state = RunState::new(
@@ -7191,7 +9190,7 @@ fn run_once_pass(
     // to, so `collect` accrues debt against the repository `push` settles it
     // against — not against whatever the config happens to default to.
     let collect_cfg = resolve_store_config(
-        &config,
+        config,
         destination.as_deref(),
         repo.clone(),
         key_file.clone(),
@@ -7199,8 +9198,108 @@ fn run_once_pass(
         options,
     );
     let view = destination_view(&collect_cfg, &machine_name);
+
+    // The declared producer's archive proof checks the repository THIS pass
+    // pushes to — the same resolved destination `collect` accrues debt
+    // against and `push` settles against — not whatever the config would
+    // default the standalone command to. Without this, a pass named
+    // `--destination x` would prove its receipts against a different
+    // repository than the one it archived to, which is the one mismatch
+    // the proof phase exists to rule out.
+    let pull_destinations = vec![collect_cfg.clone()];
+
+    // LETTA-P3: pull the declared `[pull.letta]` producer before the collect
+    // step, so what it seals into the stage is archived by this same pass and
+    // no separate command is needed. The step deliberately does not stop the
+    // pass on its own failure: the pass's local duty (collect, then push what
+    // it holds) also settles the producer's pending receipts — a later push
+    // followed by a later pull is how an unproven pass proves — so halting
+    // here would deadlock the producer instead of helping it. What a failed or
+    // partially-read pull must never do is let the pass report success: the
+    // unread remainder stays pending in the producer's journal and the pass
+    // ends with exit 3 ("did not finish reading"), never a clean 0 that would
+    // read "no messages".
+    let mut pull_letta_unread = false;
+    match chat_stasher::letta::pass_pull(config) {
+        Err(e) => {
+            eprintln!("[run-once] result: ERROR exit_code=3 pull_letta_config={e:#}");
+            pull_letta_unread = true;
+        }
+        Ok(None) => {}
+        Ok(Some(pull)) => {
+            let started = std::time::Instant::now();
+            let outcome = letta_pull(&pull, &pull_destinations, &machine_name, stage);
+            state.phases.letta_pull_ms = started.elapsed().as_millis() as u64;
+            match outcome {
+                Ok(report) => {
+                    println!(
+                        "[run-once] pull letta: agents={}; local_id_only={}; bundles={}; \
+                         passes_proven={}; incomplete={}",
+                        report.agents,
+                        report.local_only,
+                        report.bundles,
+                        report.committed,
+                        report.incomplete
+                    );
+                    if let Some(backfill) = &report.backfill {
+                        println!(
+                            "[run-once] pull letta backfill: pulled={}; estimated_total={}",
+                            backfill.pulled, backfill.estimated_total
+                        );
+                        state.pull_letta_backfill =
+                            Some(chat_stasher::runstate::PullLettaBackfill {
+                                pulled: backfill.pulled,
+                                estimated_total: backfill.estimated_total,
+                            });
+                    } else {
+                        state.pull_letta_backfill = None;
+                    }
+                    if report.incomplete > 0 {
+                        eprintln!(
+                            "[run-once] pull letta incomplete: {} agent pass(es) did not finish \
+                             reading or proving; their unread remainder stays pending in the \
+                             producer state, never \"no messages\"",
+                            report.incomplete
+                        );
+                        pull_letta_unread = true;
+                    }
+                }
+                Err(error) => {
+                    if error.is::<chat_stasher::letta::ProducerBusy>() {
+                        // With one timer per destination and one producer
+                        // state, every pass but the one that won the lock
+                        // lands here, every hour. Deferring is a recorded
+                        // hand-off, not a read failure: the winner reports
+                        // the producer's own unread/progress result, the
+                        // shared stage carries the pull to every
+                        // destination, and this pass never claimed to have
+                        // read what it did not.
+                        eprintln!(
+                            "[run-once] pull letta deferred: another pass of this machine held \
+                             the producer; this pass did not read it — the winning pass reports \
+                             the producer's result, never \"no messages\""
+                        );
+                        state.pull_letta_deferred = true;
+                    } else {
+                        eprintln!(
+                            "[run-once] pull letta incomplete: source, state, publication or \
+                             archive proof unavailable; counts unknown"
+                        );
+                        pull_letta_unread = true;
+                    }
+                }
+            }
+        }
+    }
+    // The producer's fact is recorded the moment it is known, so the local
+    // steps below cannot erase it: a pass whose collect fails while the
+    // producer also went unread keeps both in the durable record, and
+    // `status` renders them as two lines (W964 #5: both are recorded,
+    // neither wins the `failed_step` slot alone).
+    state.pull_letta_unread = pull_letta_unread;
+
     let report = match chat_stasher::collect::collect(
-        &config,
+        config,
         stage,
         &machine_name,
         &state_dir,
@@ -7217,6 +9316,9 @@ fn run_once_pass(
     state.shards_written = report.shards_written;
     state.collect_errors = report.errors.len();
     state.archive_gaps = report.archive_gaps.len();
+    // ADR-054 D6: skipped codebuff sessions are an incomplete read, so the
+    // same pass-status surface that carries errors and gaps carries them.
+    state.torn_skips = report.codebuff_torn_skips.len();
     // W880: the collect-phase record the report already measured.
     state.phases.scan_ms = report.scan_ms;
     state.phases.collect_ms = report.collect_ms;
@@ -7227,13 +9329,24 @@ fn run_once_pass(
     state.phases.shard_bytes_read_hashed = report.shard_bytes_read_hashed;
     state.phases.sqlite_sessions_queried = report.sqlite_sessions_queried;
     state.phases.sqlite_sessions_exported = report.sqlite_sessions_exported;
+    // ADR-061 (SG-3): the increment era's own counters, into the durable
+    // run-state the live-day gate reads (D6's written-vs-growth rule).
+    state.phases.sqlite_full_exports = report.sqlite_full_exports;
+    state.phases.sqlite_increment_passes = report.sqlite_increment_passes;
+    state.phases.sqlite_increment_records = report.sqlite_increment_records;
+    state.phases.sqlite_increment_bytes = report.sqlite_increment_bytes;
+    state.phases.sqlite_growth_bytes = report.sqlite_growth_bytes;
     state.phases.state_saves = report.state_saves;
     print_collect_report(&report, stage, &state_dir, &machine_name);
-    if !report.errors.is_empty() || !report.archive_gaps.is_empty() {
+    if !report.errors.is_empty()
+        || !report.archive_gaps.is_empty()
+        || !report.codebuff_torn_skips.is_empty()
+    {
         eprintln!(
-            "[run-once] result: ERROR exit_code=1 collect_incomplete errors={} archive_gaps={}",
+            "[run-once] result: ERROR exit_code=1 collect_incomplete errors={} archive_gaps={} codebuff_torn_skips={}",
             report.errors.len(),
-            report.archive_gaps.len()
+            report.archive_gaps.len(),
+            report.codebuff_torn_skips.len()
         );
         state.failed_step = Some("collect-incomplete".to_string());
         return (ExitCode::FAILURE, state);
@@ -7241,8 +9354,8 @@ fn run_once_pass(
 
     // W880: stage audit — counting the sealed shards in the stage.
     let audit_started = std::time::Instant::now();
-    let stage_shards = match store::sealed_shard_count(stage) {
-        Ok(count) => count,
+    let counted = match store::CountedStageShards::count(stage) {
+        Ok(counted) => counted,
         Err(e) => {
             eprintln!("[run-once] result: ERROR exit_code=1 stage_audit={e:#}");
             state.failed_step = Some("stage-audit".to_string());
@@ -7250,7 +9363,15 @@ fn run_once_pass(
         }
     };
     state.phases.stage_audit_ms = audit_started.elapsed().as_millis() as u64;
-    state.stage_shards = stage_shards;
+    state.stage_shards = counted.count;
+    // The push path reuses the scan evidence and shard count this pass already
+    // produced, so `inspect_stage_for_push` does not rescan the registry and
+    // the stage is not counted again — unless the freshness token says the
+    // stage tree changed since, in which case the push recounts.
+    let collected = chat_stasher::collect::CollectedStageEvidence {
+        scan: report.scan,
+        stage_shards: counted.clone(),
+    };
     // This guard used to refuse any shard-less stage: while readers looked only at the
     // newest snapshot per machine, an empty snapshot made the machine look as if it
     // held nothing. ADR-021 made those readers cumulative, so the guard now refuses
@@ -7262,8 +9383,10 @@ fn run_once_pass(
         stage,
         &machine_name,
         &state_dir,
-        stage_shards,
-        report.changed_records > 0 || report.shards_written > 0,
+        counted.count,
+        report.changed_records > 0
+            || report.shards_written > 0
+            || report.machine_log_generations_written > 0,
     ) {
         Ok(pair) => pair,
         Err(e) => {
@@ -7278,14 +9401,14 @@ fn run_once_pass(
     if !should_push {
         println!(
             "[run-once] push skipped: changed={} push_only_if_changed={} stage_shards={}",
-            changed, only_if_changed, stage_shards
+            changed, only_if_changed, counted.count
         );
         // A pass that pushes rebuilds the index on the way (see below), so the
         // archived index can only be stale when the pass pushes nothing — which
         // is exactly what happens after an upgrade on a quiet machine, and what
         // used to need a hand-run `activity-index --rebuild`. Repair it here.
         repair_stale_archive_index(
-            &config,
+            config,
             destination.as_deref(),
             repo.clone(),
             key_file.clone(),
@@ -7297,7 +9420,7 @@ fn run_once_pass(
         );
         if verify {
             let cfg = resolve_store_config(
-                &config,
+                config,
                 destination.as_deref(),
                 repo.clone(),
                 key_file.clone(),
@@ -7310,6 +9433,7 @@ fn run_once_pass(
                     let code = cmd_verify(
                         VerifyLevel::L1,
                         &None,
+                        false,
                         false,
                         Some(&machine_name),
                         destination.clone(),
@@ -7335,6 +9459,20 @@ fn run_once_pass(
                 }
             }
         }
+        mirror_step_after_push(config, pass_started, &mut state.phases, keep_ssh_masters);
+        // A partially-read or halted declared producer keeps this pass from
+        // reporting health even though the local cycle archived cleanly:
+        // the run-state record carries the failed step, `status` reports the
+        // pass as failed, and the exit code keeps the 3 = "did not finish
+        // reading" distinction instead of a clean 0 that would read "no
+        // messages".
+        if pull_letta_unread {
+            state.outcome = RunOutcome::Error;
+            state.failed_step = Some("pull-letta".to_string());
+            state.snapshot_created = false;
+            eprintln!("[run-once] result: ERROR exit_code=3 pull_letta snapshot=not-created");
+            return (ExitCode::from(3), state);
+        }
         println!("[run-once] result: NOOP snapshot=not-created exit_code=0");
         state.outcome = RunOutcome::Noop;
         state.failed_step = None;
@@ -7342,20 +9480,25 @@ fn run_once_pass(
         return (ExitCode::SUCCESS, state);
     }
 
-    // Rebuild the activity index before pushing, so the snapshot that leaves
+    // Update the activity index before pushing, so the snapshot that leaves
     // this stage carries an index that reflects what was just collected —
     // otherwise the archived overview stays frozen at the last manual build.
-    // Always a full rebuild, never an incremental update: the index is derived
-    // from the stage, so after a full rebuild "the index says" and "the
-    // archive holds" can never diverge, while an incremental scheme would have
-    // to track exactly which shards changed since the last build — and any bug
-    // in that tracking produces a stale index that looks authoritative. The
-    // measured cost is ~6.5 s on a 759-session stage (0.18% of the 3600 s
-    // period), which is nothing next to the correctness it buys.
-    match rebuild_activity_index(stage, &machine_name, false) {
+    // Incrementally (SYNC-D), but on the exact contract that made the
+    // full rebuild safe: a session that cannot be *proven* unchanged —
+    // wrong-or-absent writer digest, moved observations, a policy flip, no
+    // previous row — is re-derived by the same code the full rebuild uses,
+    // and the acceptance gate
+    // (`tests/syncd_incremental_equivalence_test.rs`) asserts the result
+    // stays byte-identical to a full rebuild. Bodies sealed before writers
+    // recorded digests are re-derived every pass until they are re-sealed or
+    // restored. Phase timings for either path land in `run-state.json`, so
+    // which share of the pass the index costs is a measurement, not this
+    // comment.
+    match update_activity_index_incrementally(stage, &machine_name, false) {
         Ok(outcome) => {
             state.phases.activity_index_ms = outcome.elapsed.as_millis() as u64;
             state.phases.shard_bytes_read_hashed += outcome.shard_bytes_read_hashed;
+            state.phases.activity_index_sessions_carried = outcome.sessions_carried as u64;
             println!(
                 "[run-once] activity-index: sessions={} unknown_harness={} index={} elapsed={}ms",
                 outcome.sessions_indexed,
@@ -7387,6 +9530,7 @@ fn run_once_pass(
         options,
         keep_ssh_masters,
         Some(&mut state.phases),
+        Some(&collected),
     );
     if push_code != ExitCode::SUCCESS {
         eprintln!("[run-once] result: ERROR exit_code=1 push_failed");
@@ -7398,6 +9542,7 @@ fn run_once_pass(
         let code = cmd_verify(
             VerifyLevel::L1,
             &None,
+            false,
             false,
             Some(&machine_name),
             destination,
@@ -7413,11 +9558,258 @@ fn run_once_pass(
             return (ExitCode::FAILURE, state);
         }
     }
+    // ADR-062 D2: the hourly copy runs after this pass's push completed —
+    // never during it, never before it — inside the round's leftover budget.
+    // Its pauses and refusals belong to the mirror, not to the pass: the
+    // W964 reading C2 fixes is that an unfinished fill is progress, not the
+    // failure of a collect-and-push round. It runs before the producer's
+    // exit-3 return below for the same reason: the mirror copies the remote
+    // and is independent of whether this pass finished reading the producer.
+    mirror_step_after_push(config, pass_started, &mut state.phases, keep_ssh_masters);
+    // Same discipline as the no-push exit above: the snapshot was created,
+    // which the record says, but a pass whose declared producer did not
+    // finish reading is a failed pass with "did not finish reading" exit 3 —
+    // never a clean 0 that would read "nothing new from Letta".
+    if pull_letta_unread {
+        state.outcome = RunOutcome::Error;
+        state.failed_step = Some("pull-letta".to_string());
+        state.snapshot_created = true;
+        eprintln!("[run-once] result: ERROR exit_code=3 pull_letta snapshot=created");
+        return (ExitCode::from(3), state);
+    }
     println!("[run-once] result: COMPLETED snapshot=created exit_code=0");
     state.outcome = RunOutcome::Completed;
     state.failed_step = None;
     state.snapshot_created = true;
     (ExitCode::SUCCESS, state)
+}
+
+/// The pass's mirror step (ADR-062 D2 / LM-2): the copy that runs after the
+/// push, inside this round's leftover budget.
+///
+/// Silent when no mirror is configured or the switch is off — the same
+/// byte-silence rule the key alerts keep, so an unchanged machine sees no
+/// new line. It can *pause* (budget, disk floor, remote readability) or
+/// refuse (free-space pre-estimate), print why, and it never moves the
+/// pass's own outcome: a stopped fill round is the mirror's progress
+/// statement, not a failed collect-and-push (W964's principle, applied to
+/// the mirror by ruling C2). A hard engine error — the checked-and-failed
+/// class — is a loud warning whose wording follows the class: nothing
+/// holds the mirror stopped between rounds, so the warning says each
+/// round re-checks the source — the only thing that heals corruption is
+/// fixing it, and the re-check is how the next round *sees* the fix —
+/// instead of claiming a hold no code keeps. The archive push already
+/// succeeded and the stage is protected, which is this pass's primary
+/// duty.
+///
+/// On any round that touched the remote it reaps the ssh ControlPersist
+/// masters the mirror's own reads opened (reap.rs says every opendal SFTP
+/// operation opens a new one): the pass runs hourly, and a mirror enabled
+/// against an ssh destination would otherwise leak one live master per
+/// remote read, every hour. `keep_ssh_masters` is the pass's own flag,
+/// threaded here exactly the way `cmd_push` threads its own.
+fn mirror_step_after_push(
+    config: &Config,
+    pass_started: std::time::Instant,
+    phases: &mut chat_stasher::runstate::PassMetrics,
+    keep_ssh_masters: bool,
+) {
+    let Some(settings) = chat_stasher::mirror::MirrorSettings::for_config(config) else {
+        return;
+    };
+    if !settings.enabled {
+        return;
+    }
+    if !config.destinations.contains_key(&settings.mirror_of) {
+        eprintln!(
+            "[run-once] mirror-sync warning: `[mirror] mirror_of = \"{}\"` names no declared \
+             destination; the copy step is skipped this pass",
+            settings.mirror_of
+        );
+        return;
+    }
+    let step_started = std::time::Instant::now();
+    phases.mirror_sync_ms = 0;
+    let remote = match resolve_store_config_checked(
+        config,
+        Some(&settings.mirror_of),
+        None,
+        None,
+        None,
+        &[],
+    ) {
+        Ok(cfg) => cfg,
+        Err(problem) => {
+            eprintln!(
+                "[run-once] mirror-sync warning: the mirror destination could not be \
+                 resolved ({problem}); the copy step is skipped this pass"
+            );
+            return;
+        }
+    };
+    let mk = match store::load_key_file_state(&remote) {
+        store::KeyFileState::Loaded(mk) => mk,
+        store::KeyFileState::Missing => {
+            eprintln!(
+                "[run-once] mirror-sync warning: the masterkey for `{}` is not on this \
+                 machine ({}), so the mirror cannot be verified; the copy step is skipped \
+                 this pass",
+                settings.mirror_of,
+                remote.key_file.display()
+            );
+            return;
+        }
+        store::KeyFileState::Unusable(_) => {
+            eprintln!(
+                "[run-once] mirror-sync warning: the masterkey for `{}` cannot be read \
+                 ({}), so the mirror cannot be verified; the copy step is skipped this pass",
+                settings.mirror_of,
+                remote.key_file.display()
+            );
+            return;
+        }
+    };
+    let interval = chat_stasher::schedule::interval_secs(config)
+        // reason: interval_secs refuses a zero interval, so this arm is
+        // the unreachable guard band — 3600 is the same hourly default
+        // the scheduler installs and the pass itself runs under.
+        .unwrap_or(chat_stasher::config::DEFAULT_BACKUP_INTERVAL_SECS);
+    let deadline = pass_started + std::time::Duration::from_secs(interval);
+    if std::time::Instant::now() >= deadline {
+        println!(
+            "[run-once] mirror-sync: skipped — the pass spent its round budget; the next \
+             pass's mirror round resumes"
+        );
+        return;
+    }
+    let data_root = chat_stasher::config::default_data_root();
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let mirror_root = chat_stasher::mirror::mirror_dir(&data_root, &settings.mirror_of);
+    // One floor for the whole round (rev2's finding): the step's stop-rule
+    // and the engine's pre-estimate share the value computed here, so the
+    // round cannot promise the pre-estimate's floor and then enforce a
+    // different one mid-copy.
+    let min_free_bytes = settings.min_free_bytes(&mirror_root);
+    let round_ends =
+        chat_stasher::mirror::DeadlineAndDisk::new(Some(deadline), min_free_bytes, mirror_root);
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // reason: same clock-before-1970 branch `runstate::now_unix`
+        // documents — the record would date itself 1970-01-01, which reads
+        // as ancient rather than fresh in every staleness surface.
+        .unwrap_or(0);
+    let request = chat_stasher::mirror::SyncRequest {
+        settings: &settings,
+        remote: &remote,
+        data_root: &data_root,
+        state_dir: &state_dir,
+        master_key: &mk,
+        now_unix,
+        min_free_bytes,
+        round_ends: &round_ends,
+    };
+    match chat_stasher::mirror::sync_once(&request) {
+        Ok((report, outcome)) => match outcome {
+            chat_stasher::mirror::SyncOutcome::Completed => println!(
+                "[run-once] mirror-sync: complete — {} of {} snapshots covered, {} \
+                     file(s) / {} downloaded",
+                report.covered_snapshots,
+                report.snapshots_remote,
+                report.downloaded_files,
+                fmt_bytes(report.downloaded_bytes)
+            ),
+            chat_stasher::mirror::SyncOutcome::Stopped(end) => match end {
+                chat_stasher::mirror::RoundEnd::BudgetSpent => println!(
+                    "[run-once] mirror-sync: paused — this pass's round budget is \
+                             spent, {}; the next pass resumes",
+                    chat_stasher::mirror::first_fill_numbers(
+                        // The pair as one drawn tri-state — the very state
+                        // the record this round already wrote
+                        // (`write_progress` runs inside `sync_once`)
+                        // carries, so the result line and the record
+                        // behind it cannot disagree (rev1 ②/L5).
+                        &chat_stasher::mirror::report_downloaded_state(&report),
+                        report.present_bytes + report.downloaded_bytes,
+                        report.remote_total_bytes
+                    )
+                ),
+                chat_stasher::mirror::RoundEnd::DiskBelowThreshold {
+                    free_bytes,
+                    min_free_bytes,
+                } => println!(
+                    "[run-once] mirror-sync: paused — free disk fell below the \
+                             mirror's floor ({} free, floor {}); it resumes when space frees",
+                    fmt_bytes(free_bytes),
+                    fmt_bytes(min_free_bytes)
+                ),
+                chat_stasher::mirror::RoundEnd::RemoteRead { why } => println!(
+                    "[run-once] mirror-sync: paused — the destination could not be \
+                             read: {}",
+                    why
+                ),
+            },
+            chat_stasher::mirror::SyncOutcome::RefusedSpace {
+                needed_bytes,
+                free_bytes,
+                ..
+            } => eprintln!(
+                "[run-once] mirror-sync warning: refused — the mirror's remaining fill \
+                     needs {} and only {} is free, so this round copied nothing; `status` shows \
+                     the refusal",
+                fmt_bytes(needed_bytes),
+                fmt_bytes(free_bytes)
+            ),
+        },
+        Err(e) => {
+            if e.is::<chat_stasher::mirror::MirrorUsageError>() {
+                eprintln!(
+                    "[run-once] mirror-sync warning: the mirror's declaration or \
+                     destination is unusable; the copy step does not run until the config \
+                     is fixed: {e:#}"
+                );
+            } else if let Some(hard) = e.downcast_ref::<chat_stasher::mirror::HardFailure>() {
+                let wait = match hard.class {
+                    // No state holds the mirror stopped between rounds: the
+                    // step re-runs on every pass and each round re-checks
+                    // the source itself, so the wait worded here is what
+                    // the rounds do. Corruption and an over-bound listing
+                    // are cured only by fixing the source — surviving a
+                    // retry heals nothing — but the re-check is also how
+                    // the next round *sees* the fix, which is why the
+                    // wording claims the re-check and never a hold
+                    // (claiming "stays stopped" for behavior no code kept
+                    // was the rev2 review's finding).
+                    chat_stasher::mirror::HardClass::SourceCorrupt
+                    | chat_stasher::mirror::HardClass::OversizeListing => {
+                        "the mirror re-checks the source every round until it is \
+                         fixed — a retry alone does not heal it"
+                    }
+                    chat_stasher::mirror::HardClass::LocalWrite => {
+                        "each round retries the write and completes once the local \
+                         cause is fixed"
+                    }
+                };
+                eprintln!(
+                    "[run-once] mirror-sync warning: {}: {hard}; {}",
+                    hard.class.sentence(),
+                    wait
+                );
+            } else {
+                eprintln!(
+                    "[run-once] mirror-sync warning: the mirror step failed this round and the \
+                     pass's result stands; the next round retries: {e:#}"
+                );
+            }
+        }
+    }
+    // Every path that resolved the remote and ran a round ends here —
+    // completed, paused, refused, or failed — so the ssh masters the
+    // mirror's own reads opened are reaped on all of them (issue 2 of the
+    // rev0 review: a mirror enabled against an ssh destination used to leak
+    // one live master per remote read, every hour, forever).
+    reap_remote(&remote, keep_ssh_masters);
+    phases.mirror_sync_ms = step_started.elapsed().as_millis() as u64;
 }
 
 /// The refusal message `schedule` prints on an OS this build has no supported
@@ -7738,6 +10130,14 @@ fn cmd_schedule(
                         results.len() - unchanged
                     );
                 }
+                // W1012 / SG-1 C1, the acceptance item: the install just changed the
+                // machine's timer set, so the declared set is re-reconciled
+                // against it while the user is still watching. `schedule
+                // install` succeeds and stays quiet about nothing it can
+                // see: a declared destination this machine's timers then
+                // never push is the misconfiguration whose consequence
+                // surfaces nowhere else until the disk fills.
+                warn_after_schedule_install(&config, unit, format);
                 return ExitCode::SUCCESS;
             }
             Err(error) => {
@@ -7792,6 +10192,23 @@ fn cmd_schedule(
         println!("{}", schedule::install_command(unit, format, &paths));
     }
     ExitCode::SUCCESS
+}
+
+/// W1012 / SG-1 C1, the `schedule install` half: after an install changes
+/// the machine's timer set, the declared destinations are reconciled
+/// against what was just written while the operator is still watching.
+///
+/// The wording lives in [`chat_stasher::destdiag::install_warnings`] — the
+/// library function is what the wording-level test pins, and this wiring
+/// is printing rather than deciding. Warnings, not refusals: the install
+/// did what it was asked to, and the finding is about the declared set's
+/// shape — the same reason this repo's diagnostics report rather than
+/// fail.
+fn warn_after_schedule_install(config: &Config, unit: schedule::Unit, format: schedule::Format) {
+    for line in chat_stasher::destdiag::install_warnings(config, unit, format, &config::home_dir())
+    {
+        eprintln!("{line}");
+    }
 }
 
 /// Pull schedules are explicit named jobs; destination selection and archive
@@ -8390,7 +10807,6 @@ fn store_config_from(
     connections: Option<usize>,
     options: &[String],
 ) -> StoreConfig {
-    let data_root = data_root();
     let options = options
         .iter()
         .map(|kv| {
@@ -8405,13 +10821,22 @@ fn store_config_from(
             for (k, v) in &mut options {
                 *v = expand_path_arg(&format!("option {k}"), v);
             }
+            // The repository and key file of a machine that configured
+            // neither — the pre-ADR-013 defaults — have one definition, in
+            // the lib (`home_repository_store_config`), so the CLI wrapper
+            // and the destdiag proof cannot drift about which directory a
+            // destination-less machine reads (W1034f2, rev4 Low 1). This
+            // wrapper still expands every config-sourced half, which the
+            // lib does not: expanding is this side's own exit-2 gate on a
+            // value the user typed.
+            let base = chat_stasher::doctor::home_repository_store_config(config);
             let repo_root = match repo.or_else(|| config.rustic_repo.clone()) {
                 Some(raw) => expand_path_arg("repo", &raw),
-                None => data_root.join("repo").to_string_lossy().into_owned(),
+                None => base.repo_root,
             };
             let key_file = match key_file.or_else(|| config.rustic_key_file.clone()) {
                 Some(raw) => PathBuf::from(expand_path_arg("key_file", &raw)),
-                None => data_root.join("masterkey.json"),
+                None => base.key_file,
             };
             StoreConfig {
                 repo_root,
@@ -8550,6 +10975,12 @@ fn cmd_push(
     // backup land in it. A standalone `push` has no such record
     // and passes `None`.
     mut metrics: Option<&mut chat_stasher::runstate::PassMetrics>,
+    // W881: when a `run-once` pass drives the push, collection's
+    // validated scan evidence and sealed-shard count are handed in
+    // so the preflight neither rescans the registry nor recounts the
+    // stage. A standalone `push` passes `None` and performs the full
+    // guard itself.
+    collected: Option<&chat_stasher::collect::CollectedStageEvidence>,
 ) -> ExitCode {
     let config = match config_or_refuse("push") {
         Ok(config) => config,
@@ -8560,6 +10991,16 @@ fn cmd_push(
         Err(code) => return code,
     };
     let state_dir = chat_stasher::collect::default_state_dir();
+    let pushed_destination = destination
+        .clone()
+        .unwrap_or_else(|| chat_stasher::pushstate::DEFAULT_DESTINATION.to_string());
+    if let Err(e) = chat_stasher::test_identity_guard::refuse_fixture_write(
+        &[&machine, &pushed_destination],
+        &state_dir,
+    ) {
+        eprintln!("push: refusing write to state directory: {e:#}");
+        return ExitCode::FAILURE;
+    }
     let cfg = resolve_store_config(
         &config,
         destination.as_deref(),
@@ -8570,14 +11011,24 @@ fn cmd_push(
     );
     // W880: push preflight — the empty-stage safety scan.
     let preflight_started = std::time::Instant::now();
-    let stage_check =
-        match chat_stasher::collect::inspect_stage_for_push(&config, stage, &state_dir, &machine) {
-            Ok(check) => check,
-            Err(e) => {
-                eprintln!("push: cannot establish empty-stage safety: {e:#}");
-                return ExitCode::FAILURE;
-            }
-        };
+    // A run-once pass reuses the scan evidence and shard count collection
+    // already produced; a standalone push performs the full guard itself.
+    let stage_check = match collected {
+        Some(evidence) => chat_stasher::collect::inspect_stage_for_push_with_evidence(
+            &evidence.scan,
+            stage,
+            &state_dir,
+            &evidence.stage_shards,
+        ),
+        None => chat_stasher::collect::inspect_stage_for_push(&config, stage, &state_dir, &machine),
+    };
+    let stage_check = match stage_check {
+        Ok(check) => check,
+        Err(e) => {
+            eprintln!("push: cannot establish empty-stage safety: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.push_preflight_ms = preflight_started.elapsed().as_millis() as u64;
     }
@@ -8757,14 +11208,15 @@ fn cmd_push(
     };
     // W880: backup — the rustic traversal and snapshot write.
     let backup_started = std::time::Instant::now();
-    let summary = match store.push(stage, &mk) {
-        Ok(s) => s,
-        Err(e) => {
-            chat_stasher::remote_err::eprint_remote_error("push", &e, &cfg);
-            reap_remote(&cfg, keep_ssh_masters);
-            return ExitCode::FAILURE;
-        }
-    };
+    let summary =
+        match store.push_with_count(stage, &mk, collected.map(|evidence| &evidence.stage_shards)) {
+            Ok(s) => s,
+            Err(e) => {
+                chat_stasher::remote_err::eprint_remote_error("push", &e, &cfg);
+                reap_remote(&cfg, keep_ssh_masters);
+                return ExitCode::FAILURE;
+            }
+        };
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.backup_ms = backup_started.elapsed().as_millis() as u64;
     }
@@ -8828,6 +11280,32 @@ fn cmd_push(
         meta_hash_before.as_deref(),
     ) {
         eprintln!("[push] warning: could not save pushed meta hash: {e:#}");
+    }
+    // W1012 / SG-1 C1③: this success is the durable fact "last successful
+    // push to this destination", which `status` and `doctor` reconcile
+    // against the declared set. Filed only on the success path: a push that
+    // failed must not move any destination's "last successful push" forward.
+    // Failure to record is a warning, not a failed push — the archive write
+    // already happened and undoing it for the sake of a state file would be
+    // backwards.
+    let finished_at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // reason: NOT an honest default — same (a)-fragile clock-before-1970
+        // branch `runstate::now_unix` documents; a wrong stamp here can only
+        // make the reconciler report the push as ancient, not as fresh.
+        .unwrap_or(0);
+    if let Err(e) = chat_stasher::pushstate::record_success(
+        &state_dir,
+        &pushed_destination,
+        &machine,
+        summary.snapshots_in_repo as u64,
+        finished_at_unix,
+    ) {
+        eprintln!(
+            "[push] warning: last-successful-push record not written, so `status` will not \
+             know this destination was just pushed: {e:#}"
+        );
     }
     reap_remote(&cfg, keep_ssh_masters);
     ExitCode::SUCCESS
@@ -9092,6 +11570,76 @@ fn cmd_repair_duplicates(
     }
 }
 
+/// One `read` step that outlived its deadline (W1052): the human verdict and
+/// the exit code, in one place so every bounded step words the clock the same
+/// way `doctor`'s checks do (W1043).
+///
+/// The wording keeps the three states apart that `CLAUDE.md` holds invariant:
+/// a deadline is a decision about the clock, so the step is *unknown* — never
+/// worded as unreachable (a measured refusal the remote made), never as a
+/// failure of the thing being read, and never as an absent session. The exit
+/// code follows the exit-code table already in `docs/cli.md` for "did not
+/// finish": `3`, which is what an unanswered step owes — anything printed
+/// before it stands, and nothing after it is a statement about the archive.
+fn read_step_timed_out(
+    timed_out: &chat_stasher::readstep::StepTimedOut,
+    consequence: &str,
+) -> ExitCode {
+    eprintln!(
+        "read: 🔴 {} did not answer within {} — {}. This is unknown, not a measurement: retry, \
+         and if a healthy read on this machine truly needs longer, lift every read budget at \
+         once with {}=<seconds>.",
+        timed_out.step,
+        timed_out.budget_word(),
+        consequence,
+        chat_stasher::readstep::READ_STEP_BUDGET_ENV,
+    );
+    eprintln!(
+        "read: INCOMPLETE exit_code=3 — {} did not answer within {}, so the read did not finish \
+         and nothing below is a statement about the archive.",
+        timed_out.step,
+        timed_out.budget_word(),
+    );
+    ExitCode::from(3)
+}
+
+/// `read`'s bounded ssh-master teardown: [`reap_remote`] housekeeping, run
+/// behind its own small deadline so the exit after a finished read cannot
+/// become the hang the report already survived (W1052).
+///
+/// A reap that outlives its budget is *not* a read failure: the command's
+/// answer has already printed, so the verdict is a note that the masters stay
+/// open — the exact state `--keep-ssh-masters` leaves on purpose — and the
+/// run's real exit code stands unchanged. The trace prints only when there is
+/// reaping to do (an endpoint the run dialed), so a local read never sees a
+/// line about ssh masters it never had. An offline run (W1053) skips the
+/// whole step for the same reason it skips the remote: no master was ever
+/// opened, so there is nothing of *this run's* to shut down.
+fn reap_read_remote(cfg: &store::StoreConfig, keep_ssh_masters: bool, offline: bool) {
+    if offline {
+        return;
+    }
+    if keep_ssh_masters || !cfg.options.contains_key("endpoint") {
+        reap_remote(cfg, keep_ssh_masters);
+        return;
+    }
+    let worker_cfg = cfg.clone();
+    match chat_stasher::readstep::run_behind_deadline(
+        "[read] reap          : shutting down this run's ssh master processes",
+        "shutting down this run's ssh masters",
+        chat_stasher::readstep::SSH_REAP_BUDGET_SECS,
+        move || reap_remote(&worker_cfg, keep_ssh_masters),
+    ) {
+        Ok(()) => {}
+        Err(timed_out) => eprintln!(
+            "read: reaping this run's ssh masters did not answer within {} — the masters stay \
+             open and the run's answer above stands; a later `chat-stasher doctor` reaps them, \
+             or `--keep-ssh-masters` leaves them on purpose.",
+            timed_out.budget_word()
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_read(
     stage: &Option<PathBuf>,
@@ -9099,6 +11647,8 @@ fn cmd_read(
     all_machines: bool,
     full_ids: bool,
     no_collapse: bool,
+    include_deleted: bool,
+    offline: bool,
     machine: Option<&str>,
     destination: Option<String>,
     repo: Option<String>,
@@ -9107,16 +11657,70 @@ fn cmd_read(
     options: &[String],
     keep_ssh_masters: bool,
 ) -> ExitCode {
-    let config = match config_or_refuse("read") {
-        Ok(config) => config,
-        Err(code) => return code,
+    // W1052: every step below prints what it is doing before it runs, and
+    // every step that can block on something this machine does not control —
+    // a file on a wedged filesystem, a backend call with no timeout of its
+    // own — runs behind its own deadline, the DOCTOR-HANG fix (W1043) applied
+    // to this command. A step that outlives its budget is abandoned (its
+    // worker is detached, never joined) and the run ends in the "did not
+    // finish" family instead of sitting silent: the observed incident hung a
+    // 1373-byte session read for 120 s with five printed lines and no exit
+    // code, because nothing in this path bounded the archive walk.
+    let config = match chat_stasher::readstep::run_behind_deadline(
+        "[read] config         : reading the configuration file",
+        "reading the configuration file",
+        chat_stasher::readstep::CONFIG_FILE_BUDGET_SECS,
+        || config_or_refuse("read"),
+    ) {
+        Ok(Ok(config)) => config,
+        // The refusal below is `config_or_refuse`'s own: it already worded the
+        // unusable config and chose the exit code, and a config that answered
+        // "unusable" is not a timeout to re-word.
+        Ok(Err(code)) => return code,
+        Err(timed_out) => {
+            // No store config exists yet, so there is nothing to reap and
+            // nothing that was dialed.
+            return read_step_timed_out(
+                &timed_out,
+                "the configuration is unknown, so this machine's destinations and archive \
+                 layout are unknown",
+            );
+        }
     };
     let machine = if all_machines {
-        query_machine(&config, machine)
+        let query_cfg = config.clone();
+        let explicit_machine = machine.map(str::to_string);
+        match chat_stasher::readstep::run_behind_deadline(
+            "[read] identity       : resolving this machine's archive partition",
+            "resolving this machine's archive partition",
+            chat_stasher::readstep::IDENTITY_BUDGET_SECS,
+            move || query_machine(&query_cfg, explicit_machine.as_deref()),
+        ) {
+            Ok(machine) => machine,
+            Err(timed_out) => {
+                return read_step_timed_out(
+                    &timed_out,
+                    "which archive partition this machine reads through is unknown",
+                );
+            }
+        }
     } else {
-        match resolve_machine("read", &config, machine) {
-            Ok(machine) => Some(machine),
-            Err(code) => return code,
+        let identity_cfg = config.clone();
+        let identity_machine = machine.map(str::to_string);
+        match chat_stasher::readstep::run_behind_deadline(
+            "[read] identity       : resolving this machine's archive partition",
+            "resolving this machine's archive partition",
+            chat_stasher::readstep::IDENTITY_BUDGET_SECS,
+            move || resolve_machine("read", &identity_cfg, identity_machine.as_deref()),
+        ) {
+            Ok(Ok(machine)) => Some(machine),
+            Ok(Err(code)) => return code,
+            Err(timed_out) => {
+                return read_step_timed_out(
+                    &timed_out,
+                    "which archive partition this machine writes under is unknown",
+                );
+            }
         }
     };
     let cfg = resolve_store_config(
@@ -9136,49 +11740,152 @@ fn cmd_read(
     } else {
         chat_stasher::body_cache::Policy::ReadThrough
     };
-    let body_cache = chat_stasher::body_cache::for_operation(&config, cache_policy);
+    // The body cache and the mirror decision walk this machine's own
+    // directories before the archive is touched; doctor bounds its equivalent
+    // local walks (D6/D9), and a stale mounted-storage handle can wedge a
+    // local stat the same way a destination wedges a list — so the tier runs
+    // traced and bounded like everything else.
+    let (body_cache, mirror_decision) = {
+        let tiers_cfg = cfg.clone();
+        let tiers_config = config.clone();
+        let tiers_data_root = data_root();
+        match chat_stasher::readstep::run_behind_deadline(
+            "[read] tiers          : the body cache directory and the mirror decision",
+            "the body cache and mirror lookups",
+            chat_stasher::readstep::LOCAL_TIERS_BUDGET_SECS,
+            move || {
+                let body_cache =
+                    chat_stasher::body_cache::for_operation(&tiers_config, cache_policy);
+                let mirror_decision =
+                    chat_stasher::mirror_read::decide(&tiers_config, &tiers_cfg, &tiers_data_root);
+                (body_cache, mirror_decision)
+            },
+        ) {
+            Ok(tiers) => tiers,
+            Err(timed_out) => {
+                reap_read_remote(&cfg, keep_ssh_masters, offline);
+                return read_step_timed_out(
+                    &timed_out,
+                    "whether this read could use the local body cache or mirror is unknown, and \
+                     nothing was read from the archive",
+                );
+            }
+        }
+    };
     let shard_policy = if no_collapse {
         store::DuplicateShardPolicy::KeepAll
     } else {
         store::DuplicateShardPolicy::Collapse
     };
-    let store = match machine.as_deref() {
-        Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
-        None => BackupStore::for_metadata_query(cfg.clone()),
+    // W1053: `--offline` names a promise this machine state has to be able
+    // to keep — no remote connection — and only two states can: a serving
+    // mirror (the store below attaches the offline seam instead of the
+    // mirror-first one) and the copy itself (already a local repository,
+    // which a plain read serves without a seam). Every other state refuses
+    // *before* anything is read, in the "did not finish" family like the
+    // missing-key case — nothing was consulted, so nothing here may read
+    // as an empty archive or a measured absence.
+    if offline {
+        if let Some(refusal) = mirror_decision.offline_refusal() {
+            eprintln!("read: --offline cannot serve this read — {refusal}");
+            eprintln!(
+                "read: nothing was read and no remote connection was opened — this is not an \
+                 empty result"
+            );
+            return ExitCode::from(3);
+        }
     }
-    .with_body_cache(body_cache.handle())
-    .with_shard_policy(shard_policy);
+    // ADR-062 D3 (LM-3): `read` is a mirror-first reader. `verify` is the one
+    // reader that never attaches one (47 §5.5: a copy may not certify itself),
+    // which is also why the seam is an opt-in per store, not a property of
+    // [`resolve_store_config`]. Offline (W1053) the seam is the mirror-only
+    // twin, which never builds the destination's backend at all; the
+    // copy-itself state carries no seam either way, because there is no
+    // handle for the store to attach (the copy has no copy).
+    let store = {
+        let store = match machine.as_deref() {
+            Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
+            None => BackupStore::for_metadata_query(cfg.clone()),
+        }
+        .with_body_cache(body_cache.handle())
+        .with_shard_policy(shard_policy);
+        match (&mirror_decision, offline) {
+            // The offline seam keeps the same `MirrorReads` handle, so the
+            // counters this run moves still reach the served line reworded
+            // below.
+            (chat_stasher::mirror_read::MirrorReadDecision::Serving(reads), true) => {
+                store.with_offline_mirror(Arc::clone(reads))
+            }
+            (_, true) => store,
+            _ => store.with_mirror_reads(mirror_decision.handle()),
+        }
+    };
     println!(
         "[read] body cache     : {}",
         body_cache_state_line(&body_cache)
     );
-    let mk = match store::load_key_file(&cfg) {
-        Ok(mk) => mk,
-        Err(e) => {
-            eprintln!("read: {e}");
-            reap_remote(&cfg, keep_ssh_masters);
-            // Deliberately 3, not 1. A missing key means the archive was never
-            // consulted, which is "did not finish / never started", not
-            // "read it all and failed". Keep `read` aligned with `search` and
-            // `collect`: 3 means the archive was not read; 1 means reading
-            // completed and the result itself failed.
-            return ExitCode::from(3);
+    if offline {
+        // `served from mirror` on every offline output (W1053), stated before
+        // any step can wedge: the pre-flight family a hung run leaves on
+        // screen names its sources. The copy-itself state keeps its own
+        // long-standing warning line — the copy *is* the mirror, and the
+        // line's own wording says a verdict here certifies the copy.
+        match &mirror_decision {
+            chat_stasher::mirror_read::MirrorReadDecision::Serving(reads) => {
+                println!("[read] mirror         : {}", reads.offline_state_line());
+            }
+            chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { .. } => {
+                if let Some(line) = mirror_decision.state_line() {
+                    println!("[read] mirror         : {line}");
+                }
+            }
+            _ => {}
+        }
+    } else if let Some(line) = mirror_decision.state_line() {
+        println!("[read] mirror         : {line}");
+    }
+    let mk = {
+        let key_cfg = cfg.clone();
+        match chat_stasher::readstep::run_behind_deadline(
+            "[read] master key     : reading the master key file",
+            "reading the master key file",
+            chat_stasher::readstep::KEY_FILE_BUDGET_SECS,
+            move || store::load_key_file(&key_cfg),
+        ) {
+            Ok(Ok(mk)) => mk,
+            Ok(Err(e)) => {
+                eprintln!("read: {e}");
+                reap_read_remote(&cfg, keep_ssh_masters, offline);
+                // Deliberately 3, not 1. A missing key means the archive was never
+                // consulted, which is "did not finish / never started", not
+                // "read it all and failed". Keep `read` aligned with `search` and
+                // `collect`: 3 means the archive was not read; 1 means reading
+                // completed and the result itself failed.
+                return ExitCode::from(3);
+            }
+            Err(timed_out) => {
+                reap_read_remote(&cfg, keep_ssh_masters, offline);
+                return read_step_timed_out(
+                    &timed_out,
+                    "the master key was not read, so nothing in the archive could be decrypted",
+                );
+            }
         }
     };
 
     let code = if all_machines {
-        cmd_read_all_machines(&store, &mk, full_ids)
+        cmd_read_all_machines(store.owned_twin(), &mk, full_ids, offline)
     } else {
         let Some(machine) = machine.as_deref() else {
             eprintln!("read: local machine identity is required unless --all-machines is set");
-            reap_remote(&cfg, keep_ssh_masters);
+            reap_read_remote(&cfg, keep_ssh_masters, offline);
             return ExitCode::from(3);
         };
         let session = match session {
             Some(s) => s,
             None => {
                 eprintln!("read: `--session` is required unless `--all-machines` is set");
-                reap_remote(&cfg, keep_ssh_masters);
+                reap_read_remote(&cfg, keep_ssh_masters, offline);
                 // Deliberately 2, not 1 or 3. The command is missing required
                 // syntax, so this is a usage error before any archive read;
                 // repository semantics reserve 2 for usage errors.
@@ -9189,7 +11896,12 @@ fn cmd_read(
         println!("[read] repo           : {}", store.cfg.repo_root);
         println!(
             "[read] ssh reap       : {}",
-            if keep_ssh_masters {
+            if offline {
+                // No master was opened (W1053): the line owes the run's own
+                // state, not the family's default — a greppable "no reap
+                // because nothing was dialed" beats a silent absence.
+                "N/A (--offline; this run opened no ssh master)"
+            } else if keep_ssh_masters {
                 "OFF (--keep-ssh-masters)"
             } else {
                 "ON"
@@ -9208,18 +11920,101 @@ fn cmd_read(
         // the prefix it wanted nor the prefix the archive holds (W253 C3). The
         // stage root is only useful locally, as the thing to compare the read
         // against, so that is the one job it keeps below.
-        let (bytez, hashes) = match chat_stasher::reader_guard::catching_panic("read", || {
-            store.read_session_concat(machine, session, &mk)
-        }) {
-            Ok(v) => v,
-            Err(e) => {
+        //
+        // The read itself runs behind its own deadline (W1052): this is the
+        // one step that dials the destination, and an archive walk on a
+        // backend whose calls carry no timeout is the step that held a
+        // 1373-byte session hostage before this fix. The store the worker
+        // reads through is an owned twin: a detached worker cannot borrow
+        // this one, and a wedged worker must not stop the run from exiting.
+        // The twin shares the body-cache and mirror handles, so every counter
+        // the read moves still shows up in the lines below. Offline (W1053)
+        // the step cannot dial anything — the twin's backends are the copy
+        // — but a wedged local disk still deserves the same named exit, so
+        // the step keeps its trace and its deadline with the mirror in the
+        // wording.
+        let archive_trace = if offline {
+            format!(
+                "[read] archive        : reading session {} (machine {}) served from mirror, \
+                 cumulatively, newest snapshot first — the destination is not contacted",
+                chat_stasher::id::short_session_id(session),
+                machine
+            )
+        } else {
+            format!(
+                "[read] archive        : reading session {} (machine {}), cumulatively, newest \
+                 snapshot first",
+                chat_stasher::id::short_session_id(session),
+                machine
+            )
+        };
+        let archive_step_label = if offline {
+            "reading the session from the local mirror copy"
+        } else {
+            "reading the session from the archive"
+        };
+        let step_store = store.owned_twin();
+        let step_machine = machine.to_string();
+        let step_session = session.to_string();
+        let step_mk = mk.clone();
+        let step_view = if include_deleted {
+            store::BodyView::IncludeDeleted
+        } else {
+            store::BodyView::Current
+        };
+        let (bytez, hashes) = match chat_stasher::readstep::run_behind_deadline(
+            &archive_trace,
+            archive_step_label,
+            chat_stasher::readstep::ARCHIVE_READ_BUDGET_SECS,
+            move || {
+                chat_stasher::reader_guard::catching_panic("read", move || {
+                    step_store.read_session_concat_with_view(
+                        &step_machine,
+                        &step_session,
+                        &step_mk,
+                        step_view,
+                    )
+                })
+            },
+        ) {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                // A finished read that an effective control state refuses is
+                // a deliberate omission (ADR-046 draft Phase 1), not a read
+                // that did not finish: 1, never 3, so the user can tell a
+                // policy refusal from an unreachable archive. The typed
+                // error distinguishes it; reading the message back would be
+                // the string-matching this codebase refuses elsewhere.
+                if e.downcast_ref::<chat_stasher::deletion_control::SessionOmitted>()
+                    .is_some()
+                {
+                    eprintln!("read: {e}");
+                    eprintln!(
+                        "read: the control stream was read to completion; this refusal is the answer, not a read failure. `unhide` restores a hidden session."
+                    );
+                    reap_read_remote(&cfg, keep_ssh_masters, offline);
+                    return ExitCode::FAILURE;
+                }
                 chat_stasher::remote_err::eprint_remote_error("read", &e, &cfg);
-                reap_remote(&cfg, keep_ssh_masters);
+                reap_read_remote(&cfg, keep_ssh_masters, offline);
                 // Deliberately 3, not 1. A session readback that does not
                 // finish cannot claim a complete result; this is the same
                 // "did not finish" family as `search` and `collect`, while 1
                 // is reserved for a read that completed and then failed.
+                // Offline the same code carries the seam's refusals (a file
+                // the copy lacks, a session the copy's snapshots do not
+                // hold), which are unknowns about the archive by
+                // construction — the exact shape this exit family owns.
                 return ExitCode::from(3);
+            }
+            Err(timed_out) => {
+                reap_read_remote(&cfg, keep_ssh_masters, offline);
+                return read_step_timed_out(
+                    &timed_out,
+                    "the session's shards were not read to the end, so the shard list, the \
+                     length and the sha256 are all unknown — the session is neither confirmed \
+                     nor absent",
+                );
             }
         };
         if let Some(line) = body_cache_stats_line(&body_cache) {
@@ -9234,6 +12029,11 @@ fn cmd_read(
             bytez.len(),
             sha256_hex(&bytez)
         );
+        if include_deleted {
+            println!(
+                "[read] view            : include-deleted (deleted records are marked inline)"
+            );
+        }
         // Only when the operator named a local stage, and never fatal: this
         // line is a comparison aid, not part of the read. `expected_concat_sha`
         // needs the shards on this machine's disk, which the archive read above
@@ -9251,7 +12051,34 @@ fn cmd_read(
         }
         ExitCode::SUCCESS
     };
-    reap_remote(&cfg, keep_ssh_masters);
+    // The visible-status half of the fallback rule: what served says so, with the
+    // numbers this run moved. Unreachable on the `did not finish` paths —
+    // their exit already says the read did not happen, and a half-answer's
+    // counters would read as a measurement. Offline (W1053) the served line
+    // always prints — the ruling's "served from mirror" is the phrase that
+    // says which disk answered, and it prints over the copy itself too,
+    // where no `MirrorReads` handle exists to count with (the copy has no
+    // copy).
+    if offline {
+        match &mirror_decision {
+            chat_stasher::mirror_read::MirrorReadDecision::Serving(reads) => {
+                println!("[read] mirror served  : {}", reads.offline_served_line());
+            }
+            chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { name } => {
+                println!(
+                    "[read] mirror served  : served from mirror `{name}` itself — every byte \
+                     came from the copy on this machine's disk; this run opened no remote \
+                     connection"
+                );
+            }
+            // Unreachable: every other decision returned before the store was
+            // built (`--offline`'s refusal above is the only other exit).
+            _ => {}
+        }
+    } else if let Some(mirror) = store.mirror_reads() {
+        println!("[read] mirror served  : {}", mirror.served_line());
+    }
+    reap_read_remote(&cfg, keep_ssh_masters, offline);
     code
 }
 
@@ -9547,7 +12374,15 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                     return ExitCode::from(3);
                 }
             };
-            let backup = BackupStore::for_metadata_query(cfg.clone());
+            // ADR-062 D3 / 47 §5.6: with the mirror on, the FTS build reads the
+            // copy — fast, no remote connections for the body reads, no new
+            // plaintext (the per-destination SQLite topology is untouched).
+            let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
+            if let Some(line) = mirror_decision.state_line() {
+                eprintln!("[index] mirror         : {line}");
+            }
+            let backup = BackupStore::for_metadata_query(cfg.clone())
+                .with_mirror_reads(mirror_decision.handle());
             let backends = match backup.backends() {
                 Ok(backends) => backends,
                 Err(error) => {
@@ -9574,6 +12409,17 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                 let snapshots = repo
                     .get_all_snapshots()
                     .context("list archive snapshots for FTS")?;
+                // ADR-046 (draft) Phase 1: the index is a reader cache of the
+                // archive, so it is built from the same folded control policy
+                // every read applies. Hidden identities never enter the index,
+                // which — because the query path reads only this database —
+                // keeps `ui /search` and `index query` from resurrecting them.
+                // `index build` must be re-run after a hide or unhide for the
+                // index to reflect it; the commands say so.
+                let control_policy = chat_stasher::deletion_control::load_strict_reader_policy(
+                    &repo,
+                    &readback::snapshots_by_host_newest_first(snapshots.clone()),
+                )?;
                 let mut entries_all = Vec::new();
                 let mut paths_by_id = BTreeMap::<String, Vec<usize>>::new();
                 let mut titles = BTreeMap::<String, String>::new();
@@ -9603,9 +12449,11 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                                 continue;
                             }
                             if let Some((machine, session, _)) = readback::bucket_shard_path(path) {
-                                let id = format!("{machine}/{session}");
-                                if snapshot_sessions.contains(&id) {
-                                    paths_by_id.entry(id).or_default().push(entries_all.len());
+                                if !control_policy.omitted_from_readers(&machine, &session) {
+                                    let id = format!("{machine}/{session}");
+                                    if snapshot_sessions.contains(&id) {
+                                        paths_by_id.entry(id).or_default().push(entries_all.len());
+                                    }
                                 }
                             } else if let Some(machine) = sidecar::activity_index_machine(path) {
                                 let mut bytes = Vec::new();
@@ -9672,10 +12520,33 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                         bytes_read += shard.len() as u64;
                         shard_bodies.push(shard);
                     }
-                    let raw = store::select_shard_bodies(shard_bodies, fts_shard_policy)
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>();
+                    let selected: Vec<Vec<u8>> =
+                        store::select_shard_bodies(shard_bodies, fts_shard_policy);
+                    // ADR-061: a snapshot-source session is indexed as its
+                    // assembled current-state body, so repeated whole-file
+                    // copies cannot inflate the text and deleted turns stay
+                    // out of the searchable index (they remain reachable
+                    // through `read`/`export --include-deleted`). An
+                    // assembly failure is a load failure, never an empty
+                    // document.
+                    let raw: Vec<u8> = match id.split_once('/') {
+                        Some((_machine, session))
+                            if chat_stasher::opencode_records::harness_is_opencode(session) =>
+                        {
+                            chat_stasher::opencode_records::project_session_body(
+                                session,
+                                &selected,
+                                chat_stasher::opencode_records::BodyView::Current,
+                            )
+                            .map_err(|error| {
+                                LoadFailure::new(
+                                    bytes_read,
+                                    anyhow::anyhow!("assembling `{id}`: {error}"),
+                                )
+                            })?
+                        }
+                        _ => selected.into_iter().flatten().collect(),
+                    };
                     // The shard was read in full before it was handed to the
                     // extractor, so those bytes are part of what this build read
                     // whatever comes back (C6). Only a *read* that failed is
@@ -9725,6 +12596,9 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                     );
                     for (id, reason) in &stats.not_indexable {
                         println!("[index] not indexable `{id}`: {reason}");
+                    }
+                    if let Some(mirror) = backup.mirror_reads() {
+                        eprintln!("[index] mirror served  : {}", mirror.served_line());
                     }
                     reap_remote(&cfg, args.keep_ssh_masters);
                     ExitCode::SUCCESS
@@ -9949,21 +12823,61 @@ fn body_cache_stats_line(availability: &chat_stasher::body_cache::Availability) 
 ///
 /// This reads the whole destination: unlike `search` it downloads and hashes
 /// every shard it lists. It is therefore expensive by design, and the header
-/// says so rather than describing itself as a listing.
-fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey, full_ids: bool) -> ExitCode {
+/// says so rather than describing itself as a listing. The walk still runs
+/// behind its own deadline (W1052) — a bulk read is a *deliberately* slow
+/// operation, so its budget is an hour, but it is not an unbounded one, and a
+/// walk that stops part-way is worded as the unknown it is, never as an empty
+/// archive.
+fn cmd_read_all_machines(
+    store: BackupStore,
+    mk: &MasterKey,
+    full_ids: bool,
+    offline: bool,
+) -> ExitCode {
     println!("[read] mode           : all-machines (every snapshot, cumulatively)");
     println!("[read] repo           : {}", store.cfg.repo_root);
-    let report =
-        match chat_stasher::reader_guard::catching_panic("read", || store.read_all_machines(mk)) {
-            Ok(r) => r,
-            Err(e) => {
-                chat_stasher::remote_err::eprint_remote_error("read", &e, &store.cfg);
-                // Deliberately 3, not 1. `read_all_machines` failed before it
-                // produced a complete archive report, so the archive was not read
-                // to completion; 1 is for a completed read whose result failed.
-                return ExitCode::from(3);
-            }
-        };
+    // The twin shares this store's handles, so the counters the walk moves
+    // reach the report; an owned store, because the deadline's worker must
+    // survive being detached without borrowing this one.
+    let step_store = store.owned_twin();
+    let step_mk = mk.clone();
+    let (trace, step_label) = if offline {
+        (
+            "[read] archive        : reading every snapshot of every machine (downloads and \
+             hashes every shard served from mirror — the destination is not contacted)",
+            "the all-machines read from the local mirror copy",
+        )
+    } else {
+        (
+            "[read] archive        : reading every snapshot of every machine (downloads and hashes every shard)",
+            "the all-machines archive read",
+        )
+    };
+    let report = match chat_stasher::readstep::run_behind_deadline(
+        trace,
+        step_label,
+        chat_stasher::readstep::ALL_MACHINES_READ_BUDGET_SECS,
+        move || {
+            chat_stasher::reader_guard::catching_panic("read", move || {
+                step_store.read_all_machines(&step_mk)
+            })
+        },
+    ) {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            chat_stasher::remote_err::eprint_remote_error("read", &e, &store.cfg);
+            // Deliberately 3, not 1. `read_all_machines` failed before it
+            // produced a complete archive report, so the archive was not read
+            // to completion; 1 is for a completed read whose result failed.
+            return ExitCode::from(3);
+        }
+        Err(timed_out) => {
+            return read_step_timed_out(
+                &timed_out,
+                "the walk stopped part-way, so every machine's session counts are unknown",
+            );
+        }
+    };
     println!(
         "[read] snapshots read : {} (get_all_snapshots lists every snapshot file)",
         report.snapshots_in_repo
@@ -10018,6 +12932,7 @@ fn cmd_verify(
     level: VerifyLevel,
     stage: &Option<PathBuf>,
     full_ids: bool,
+    offline: bool,
     machine: Option<&str>,
     destination: Option<String>,
     repo: Option<String>,
@@ -10039,15 +12954,50 @@ fn cmd_verify(
         connections,
         options,
     );
-    let store = match machine.as_deref() {
-        Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
-        None => BackupStore::for_metadata_query(cfg.clone()),
+    // W1053: `--offline` decides before the store is built, the same two
+    // states `read` accepts (a serving mirror; the copy itself, whose
+    // plain local read is the offline shape already). Every other state
+    // refuses before a level runs — "did not finish", nothing checked, so
+    // no verdict below could be mistaken for one about the archive. The
+    // decision the copy-detection line prints below is the same object.
+    let mirror_decision = match offline {
+        true => match chat_stasher::mirror_read::decide(&config, &cfg, &data_root()) {
+            decision if decision.offline_capable() => decision,
+            refused => {
+                eprintln!(
+                    "verify: --offline cannot certify anything here — {}",
+                    refused
+                        .offline_refusal()
+                        .unwrap_or_else(|| "no usable local mirror".to_string())
+                );
+                eprintln!(
+                    "verify: nothing was checked and no remote connection was opened — this \
+                     is not a verdict, and an online `verify` still never consults the copy"
+                );
+                return ExitCode::from(3);
+            }
+        },
+        false => chat_stasher::mirror_read::decide(&config, &cfg, &data_root()),
+    };
+    let store = {
+        let store = match machine.as_deref() {
+            Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
+            None => BackupStore::for_metadata_query(cfg.clone()),
+        };
+        match (&mirror_decision, offline) {
+            (chat_stasher::mirror_read::MirrorReadDecision::Serving(reads), true) => {
+                store.with_offline_mirror(Arc::clone(reads))
+            }
+            _ => store,
+        }
     };
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
             eprintln!("verify: {e}");
-            reap_remote(&cfg, keep_ssh_masters);
+            if !offline {
+                reap_remote(&cfg, keep_ssh_masters);
+            }
             return ExitCode::from(3);
         }
     };
@@ -10056,7 +13006,9 @@ fn cmd_verify(
         (true, Some(s)) => s.clone(),
         (true, None) => {
             eprintln!("verify: `--stage` is required for level l3 / all");
-            reap_remote(&cfg, keep_ssh_masters);
+            if !offline {
+                reap_remote(&cfg, keep_ssh_masters);
+            }
             return ExitCode::from(2);
         }
         (false, _) => PathBuf::from("."),
@@ -10069,12 +13021,39 @@ fn cmd_verify(
     );
     println!(
         "[verify] ssh reap       : {}",
-        if keep_ssh_masters {
+        if offline {
+            "N/A (--offline; this run opened no ssh master)"
+        } else if keep_ssh_masters {
             "OFF (--keep-ssh-masters)"
         } else {
             "ON"
         }
     );
+    // ADR-062 D3 keeps `verify` off the mirror seam entirely, so no other
+    // mirror state prints here: a serving machine's copy is not in this
+    // read's way, and the lines above describe the store being verified.
+    // The one spelling that must state itself is the copy —
+    // `verify --repo <data root>/mirror/<name>` certifies this machine's
+    // copy, never the copied destination, and silence would let a copy's
+    // verdict pass as the archive's own (47 §5.5: a copy may not certify
+    // itself). W1053's `--offline` is the same stance with the copy named
+    // up front: the switch certifies the copy (it cannot reach anything
+    // else), so its line says so before a verdict can be read.
+    let copy_line = match (&mirror_decision, offline) {
+        (chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { .. }, _) => {
+            mirror_decision.state_line()
+        }
+        (chat_stasher::mirror_read::MirrorReadDecision::Serving(reads), true) => Some(format!(
+            "served from mirror `{}` — verifying the local mirror copy only, so the verdict \
+             certifies the copy, never the destination's repository; the destination is not \
+             contacted",
+            reads.mirror_of
+        )),
+        _ => None,
+    };
+    if let Some(line) = copy_line {
+        println!("[verify] mirror         : {line}");
+    }
 
     let mut failed = 0usize;
     let mut unreadable = 0usize;
@@ -10107,7 +13086,29 @@ fn cmd_verify(
         }
     }
 
-    reap_remote(&cfg, keep_ssh_masters);
+    // The ruling's phrase on every offline output (W1053): an offline run
+    // answers from the copy, and the RESULT lines below are honest about
+    // the copy only if this line has said so first.
+    if offline {
+        match &mirror_decision {
+            chat_stasher::mirror_read::MirrorReadDecision::Serving(reads) => {
+                println!("[verify] mirror served  : {}", reads.offline_served_line());
+            }
+            chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { name } => {
+                println!(
+                    "[verify] mirror served  : served from mirror `{name}` itself — every byte \
+                     came from the copy on this machine's disk; this run opened no remote \
+                     connection"
+                );
+            }
+            // Unreachable: every other decision returned before a level
+            // ran (`--offline`'s refusal above is the only other exit).
+            _ => {}
+        }
+    }
+    if !offline {
+        reap_remote(&cfg, keep_ssh_masters);
+    }
     if unreadable > 0 {
         if not_attempted > 0 {
             println!("[verify] RESULT         : INCOMPLETE ({unreadable} level(s) unreadable, {not_attempted} not attempted)");
@@ -10209,6 +13210,18 @@ fn print_check_summary(s: &CheckSummary, name: &str) {
         s.warns,
         s.duration
     );
+    // Torn debris (ISSUE-006 step A): a reminder, printed beside the findings
+    // without being one — never counted into them, and never worded as
+    // corruption of a backup.
+    if s.torn_packs > 0 {
+        println!(
+            "[verify] {:<16} {} torn pack(s) ({}) — {}",
+            "torn",
+            s.torn_packs,
+            fmt_bytes(s.torn_bytes),
+            chat_stasher::debris::INTERRUPTED_PUSH_SENTENCE
+        );
+    }
     for detail in &s.details {
         println!("  ! {detail}");
     }
@@ -10232,7 +13245,16 @@ fn run_reconcile(
     }) {
         Ok(report) => {
             print_reconcile(&report, full_ids);
-            if !report.ok() {
+            // W1053: offline, a row the expected manifest wants that the
+            // copy does not hold is an unknown about the archive, and this
+            // level could not answer for it — the level is unreadable
+            // (RESULT INCOMPLETE, exit 3), never "checked and failed": a
+            // copy that is behind the newest push cannot grade what it has
+            // not synced. Online the same rows stay MissingInArchive and
+            // count as failures exactly as before.
+            if store.is_offline_mirror() && report.absent_from_mirror_copy() > 0 {
+                *unreadable += 1;
+            } else if !report.ok() {
                 *failed += 1;
             }
             LevelOutcome::Read
@@ -10257,6 +13279,7 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
         let mark = match &row.outcome {
             SessionOutcome::Match => "ok ",
             SessionOutcome::Unverifiable { .. } => "?? ",
+            SessionOutcome::AbsentFromMirrorCopy => "?? ",
             _ => "!! ",
         };
         match &row.outcome {
@@ -10273,6 +13296,11 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
             }
             SessionOutcome::MissingInArchive => println!(
                 "  {mark} {:<12} {:<20} MISSING IN ARCHIVE",
+                row.machine, session
+            ),
+            SessionOutcome::AbsentFromMirrorCopy => println!(
+                "  {mark} {:<12} {:<20} NOT IN THE LOCAL COPY (--offline; unknown whether the \
+                 archive holds it — the remote was not contacted)",
                 row.machine, session
             ),
             SessionOutcome::ShardCountMismatch { expected, observed } => println!(
@@ -10349,7 +13377,18 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
              `chat-stasher repair-duplicates` for the read-only inventory)"
         );
     }
-    let verdict = if r.ok() {
+    let absent_from_copy = r.absent_from_mirror_copy();
+    let verdict = if absent_from_copy > 0 {
+        // W1053: the offline rows are unknowns, and an L3 that could not
+        // answer for every expected row is INCOMPLETE by the same rule an
+        // unreadable one is — the run's RESULT line takes this count into
+        // its unreadable levels and exits 3.
+        format!(
+            "INCOMPLETE ({} expected row(s) not in the local mirror copy --offline; unknown \
+             whether the archive holds them — the remote was not contacted)",
+            absent_from_copy
+        )
+    } else if r.ok() {
         if r.possible_duplicate_seals.is_empty() {
             "OK".to_string()
         } else {
@@ -10383,14 +13422,53 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
     println!("[verify] L3 verdict       : {verdict}");
 }
 
-/// `reclaim-stage` — reclaim the sealed shard body once every declared
-/// destination proves it holds each session (ADR-020 Phase 4).
+/// The ③ fact in the one wording the health lines print beside: the age of
+/// the last successful push in `destdiag`'s bands, or the absence / unknown
+/// phrasings D2 keeps apart.
+fn last_push_age_words(last_push: &chat_stasher::destdiag::LastPush, now_unix: u64) -> String {
+    match last_push {
+        chat_stasher::destdiag::LastPush::At {
+            finished_at_unix, ..
+        } => chat_stasher::destdiag::human_age(now_unix.saturating_sub(*finished_at_unix)),
+        chat_stasher::destdiag::LastPush::NoRecord => "not on record".to_string(),
+        chat_stasher::destdiag::LastPush::Unknown { .. } => {
+            "unknown (record unreadable)".to_string()
+        }
+    }
+}
+
+/// ADR-060 A2's two roads, printed by `reclaim-stage` under every degraded
+/// destination on every run: repair the push, or remove the destination
+/// from the config if it is no longer needed — never one road only. The
+/// surfaces' alarms (`destdiag`) give the same pair in their own wording,
+/// one advice everywhere.
+fn print_degraded_two_roads(name: &str) {
+    println!(
+        "[reclaim-stage]     two roads: repair the push — `chat-stasher push --destination \
+         {name} --stage <stage>` (health heals automatically with the next successful push),"
+    );
+    println!(
+        "[reclaim-stage]     or remove `[destinations.{name}]` from the config if this \
+         destination is no longer needed"
+    );
+}
+
+/// `reclaim-stage` — reclaim the sealed shard body once every **healthy**
+/// declared destination proves it holds each session (ADR-020 Phase 4, as
+/// amended by ADR-060 D1/D3).
 ///
-/// The destination set is the whole debt set: with a `destinations` table the
-/// command proves against *every* declared destination; without one it proves
-/// against the single default repository. A destination that is unreachable or
-/// read only partially is "unproven" and blocks the reclaim — never "does
-/// not have it" and never "has it". A blocked reclaim deletes nothing and
+/// The destination set is the whole declared set, partitioned by derived
+/// health (ADR-060 D2): with a `destinations` table every declared
+/// destination is classified from its last successful push against its
+/// degrade-after; without one the single default repository is. A
+/// degraded destination (`lagging` / no push on record) is not consulted
+/// and never blocks on account of the consult itself — the reclaim
+/// proceeds against the healthy set and the degraded rows are listed with
+/// the two-road alarm on every run. A must-prove destination that is
+/// unreachable or read only partially is "unproven" and blocks — never
+/// "does not have it" and never "has it" — and the whole run deletes
+/// nothing. With no destination healthy enough to prove at all, nothing is
+/// deleted either (the ≥1 guard). A blocked reclaim deletes nothing and
 /// exits 1.
 fn cmd_reclaim_stage(
     stage: &PathBuf,
@@ -10413,23 +13491,90 @@ fn cmd_reclaim_stage(
             );
         }
     }
-    let destinations: Vec<NamedStore> = if multi {
+
+    // ADR-060 D2/D7: classify every destination's health before the proof —
+    // through the one classifier in `destdiag`, fed by the same durable
+    // push record `status` / `doctor` / the menu bar read, so the reclaim
+    // and the surfaces can never disagree about health on the same
+    // minute. The `now` is read once here, never inside the computation
+    // (the destdiag testability rule).
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // reason: NOT an honest default — the same (a)-fragile
+        // pre-1970-clock branch `runstate` documents. Reached only by a
+        // clock before the epoch; a 1970 `now` ages every record by
+        // decades, so every destination would classify as lagging —
+        // the refusal direction, never the deletion-permission one.
+        .unwrap_or(0);
+    let push_records = chat_stasher::pushstate::load(&state_dir);
+    let global_degrade_after_days = config
+        .reclaim
+        .as_ref()
+        .and_then(|reclaim| reclaim.degrade_after_days);
+    let stage_cap_bytes = config
+        .reclaim
+        .as_ref()
+        .and_then(|reclaim| reclaim.stage_cap_bytes)
+        .map(chat_stasher::body_cache::CacheSize::bytes)
+        // reason: absence of the key is ADR-060 D5's documented default
+        // (10 GiB) — a configured default like the body cache's quota,
+        // never an unknown read as a number.
+        .unwrap_or(chat_stasher::destdiag::DEFAULT_STAGE_CAP_BYTES);
+
+    // One (store, its ③ fact, its effective degrade-after) per declared
+    // destination, classified at read time; the `NamedStore` handed to the
+    // proof carries the derived health with it.
+    let mut classified: Vec<(NamedStore, chat_stasher::destdiag::LastPush, u64)> = if multi {
         config
             .destinations
             .keys()
-            .map(|name| NamedStore {
-                name: name.clone(),
-                cfg: resolve_store_config(&config, Some(name), None, None, None, &[]),
+            .map(|name| {
+                let last_push = chat_stasher::destdiag::last_push_of(&push_records, name);
+                let degrade_after_days = chat_stasher::destdiag::effective_degrade_after_days(
+                    global_degrade_after_days,
+                    config.destinations[name].degrade_after_days,
+                );
+                let health = chat_stasher::destdiag::classify_destination_health(
+                    &last_push,
+                    degrade_after_days,
+                    now_unix,
+                );
+                (
+                    NamedStore {
+                        name: name.clone(),
+                        cfg: resolve_store_config(&config, Some(name), None, None, None, &[]),
+                        health,
+                    },
+                    last_push,
+                    degrade_after_days,
+                )
             })
             .collect()
     } else {
-        vec![NamedStore {
-            name: "default".to_string(),
-            cfg: store_config_from(&config, repo, key_file, connections, options),
-        }]
+        let name = chat_stasher::pushstate::DEFAULT_DESTINATION.to_string();
+        let last_push = chat_stasher::destdiag::last_push_of(&push_records, &name);
+        let degrade_after_days =
+            chat_stasher::destdiag::effective_degrade_after_days(global_degrade_after_days, None);
+        let health = chat_stasher::destdiag::classify_destination_health(
+            &last_push,
+            degrade_after_days,
+            now_unix,
+        );
+        vec![(
+            NamedStore {
+                name,
+                cfg: store_config_from(&config, repo, key_file, connections, options),
+                health,
+            },
+            last_push,
+            degrade_after_days,
+        )]
     };
-    let mut destinations = destinations;
-    destinations.sort_by(|a, b| a.name.cmp(&b.name));
+    classified.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+    let destinations: Vec<NamedStore> =
+        classified.iter().map(|(dest, _, _)| dest.clone()).collect();
 
     println!("[reclaim-stage] stage        : {}", stage.display());
     println!(
@@ -10445,24 +13590,131 @@ fn cmd_reclaim_stage(
             .join(", ")
     );
 
-    let report = match stagereclaim::reclaim_stage(stage, &destinations, apply) {
-        Ok(report) => report,
-        Err(e) => {
-            let primary_cfg = destinations
-                .iter()
-                .find(|d| {
-                    d.cfg.repo_root.starts_with("opendal:")
-                        || d.cfg.options.contains_key("endpoint")
-                })
-                .map(|d| &d.cfg)
-                .unwrap_or(&destinations[0].cfg);
-            chat_stasher::remote_err::eprint_remote_error("reclaim-stage", &e, primary_cfg);
-            for dest in &destinations {
-                reap_remote(&dest.cfg, keep_ssh_masters);
+    // ADR-060 D1/D7: every declared destination is listed with its health
+    // and its push-record fact **on every run** — including the degraded
+    // ones the proof will not consult, which is the whole point of listing
+    // them. The two degraded states carry the two-road advice [A2]; an
+    // unreadable record carries the W1012g alarm, co-appearing with the
+    // reclaim's own refusal when it produces one.
+    for (dest, last_push, degrade_after_days) in &classified {
+        let age = last_push_age_words(last_push, now_unix);
+        match &dest.health {
+            chat_stasher::destdiag::DestinationHealth::Healthy => println!(
+                "[reclaim-stage]   health: {} — healthy; last successful push {}, within its \
+                 degrade-after of {degrade_after_days} day(s); role: must-prove",
+                dest.name, age,
+            ),
+            chat_stasher::destdiag::DestinationHealth::Lagging => {
+                println!(
+                    "[reclaim-stage]   health: {name} — degraded (lagging); last successful \
+                     push {age}, past its degrade-after of {degrade_after_days} day(s); not \
+                     consulted this run",
+                    name = dest.name,
+                );
+                print_degraded_two_roads(&dest.name);
             }
-            return ExitCode::FAILURE;
+            chat_stasher::destdiag::DestinationHealth::NeverPushed => {
+                // Prose keeps the absence rule (D2): "no push on record",
+                // never "never pushed" — the slug in the durable record is
+                // `never-pushed`, and the human line does not repeat it.
+                //
+                // W1034's upgrade window narrows the absence sentence: no
+                // push record on this machine but the repository provably
+                // holds snapshots, so an older binary pushed before the
+                // record existed. The proof stays local (rev3): only a
+                // repository `repository_is_local` recognises on this
+                // machine's own, un-mounted filesystem is checked, because
+                // this listing is degraded-set bookkeeping, not a consult,
+                // and a backend's `list()` — or a stale SMB/NFS mount's
+                // `stat`, the second half the gate carries since W1034f2 —
+                // is I/O with no timeout this row must not wait for. A
+                // backend-shaped or mounted repository keeps the
+                // record-based sentence; an unreadable one keeps it too.
+                let upgrade_window = chat_stasher::store::repository_is_local(&dest.cfg)
+                    && chat_stasher::store::destination_has_snapshots(&dest.cfg);
+                let absence = if upgrade_window {
+                    chat_stasher::destdiag::UPGRADE_WINDOW_MESSAGE.to_string()
+                } else {
+                    "no push on record".to_string()
+                };
+                println!(
+                    "[reclaim-stage]   health: {} — degraded; {absence}; not consulted \
+                     this run",
+                    dest.name
+                );
+                // A2 holds whichever absence the row printed — the degraded
+                // set never sees one road only.
+                print_degraded_two_roads(&dest.name);
+            }
+            chat_stasher::destdiag::DestinationHealth::Unknown { why } => {
+                println!(
+                    "[reclaim-stage]   health: {} — unknown; the push-state record exists but \
+                     is unreadable ({why}); role: must-prove — an unreadable record may never \
+                     become deletion permission, so this destination is consulted and can only \
+                     block, never vouch",
+                    dest.name,
+                );
+                println!(
+                    "[reclaim-stage]     fix: the next successful push rebuilds the record — \
+                     chat-stasher push --destination {} --stage <stage>",
+                    dest.name
+                );
+            }
         }
-    };
+    }
+
+    // ADR-060 D6(ii) / 47 §5.3: a configured-and-on mirror makes the proof's
+    // snapshot part of the deletion precondition. The caller states the
+    // mirror — the declared destination, the copy's directory under the data
+    // root, and the durable completed-round record as this run read it —
+    // and the proof decides; nothing mirror-shaped is loaded inside the
+    // proof, so its fixtures can state any record. `None` is the no-mirror
+    // machine (no section, switch off): the reclaim runs exactly as it ran
+    // before mirrors existed, and a mirror whose `mirror_of` this run does
+    // not consult (degraded, not declared) binds nothing inside the proof.
+    let data_root = chat_stasher::config::default_data_root();
+    let mirror_holdback = chat_stasher::mirror::MirrorSettings::for_config(&config)
+        .filter(|settings| settings.enabled)
+        .map(|settings| chat_stasher::stagereclaim::MirrorHoldback {
+            mirror_of: settings.mirror_of.clone(),
+            mirror_root: chat_stasher::mirror::mirror_dir(&data_root, &settings.mirror_of),
+            state: chat_stasher::mirrorstate::load(&state_dir),
+        });
+
+    let report =
+        match stagereclaim::reclaim_stage(stage, &destinations, apply, mirror_holdback.as_ref()) {
+            Ok(report) => report,
+            Err(e) => {
+                let primary_cfg = destinations
+                    .iter()
+                    .find(|d| {
+                        d.cfg.repo_root.starts_with("opendal:")
+                            || d.cfg.options.contains_key("endpoint")
+                    })
+                    .map(|d| &d.cfg)
+                    .unwrap_or(&destinations[0].cfg);
+                chat_stasher::remote_err::eprint_remote_error("reclaim-stage", &e, primary_cfg);
+                // The refusal is durably recorded too (SG-1): a run that ends
+                // here is a week the stage was not reclaimed, and the
+                // consecutive-streak counter must not reset on it. The counts
+                // stay absent — this run ended before it surveyed the stage —
+                // while the health snapshot is present: the classification
+                // happened before the failure, and the record says what the
+                // run saw (ADR-060 D7).
+                record_reclaim_state(
+                    apply,
+                    chat_stasher::reclaimstate::ReclaimOutcome::Refused,
+                    Vec::new(),
+                    Some(stagereclaim::destination_states_as_state(&destinations)),
+                    None,
+                    None,
+                );
+                for dest in &destinations {
+                    reap_remote(&dest.cfg, keep_ssh_masters);
+                }
+                return ExitCode::FAILURE;
+            }
+        };
     for dest in &destinations {
         reap_remote(&dest.cfg, keep_ssh_masters);
     }
@@ -10479,35 +13731,150 @@ fn cmd_reclaim_stage(
         );
     }
 
+    // ADR-060 D5's stage cap, reported on the run itself — even while the
+    // reclaim is blocked, so the held-back backlog and the cap are two
+    // visible, separately-worded facts, and never an input to this run's
+    // outcome: over the cap is an alarm, not a stop and not a forced
+    // reclaim. The basis is the sessions tree only (stat-only, `meta/`
+    // excluded); a tree that could not be walked is an unknown, not zero.
+    match chat_stasher::destdiag::stage_shard_body_bytes(stage) {
+        Ok(bytes) if bytes > stage_cap_bytes => {
+            println!(
+                "[reclaim-stage] warning      : the stage holds {} of shard body (sessions tree \
+                 only; meta is excluded) — over the configured cap {}",
+                fmt_bytes(bytes),
+                fmt_bytes(stage_cap_bytes),
+            );
+            println!(
+                "[reclaim-stage]               this is an alarm, not a block: collection and this \
+                 run continue exactly as before; the bytes stay until a proven reclaim removes \
+                 them — run `chat-stasher status` for the standing red alert and its fix \
+                 commands"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => println!(
+            "[reclaim-stage] stage cap     : unknown — the sessions tree could not be walked: {e}"
+        ),
+    }
+
+    // D7's empty-proof-set refusal, the ≥1 guard's own blocked shape: with
+    // every declared destination degraded there is nothing to consult and
+    // nothing to prove, so nothing is deleted — never 0-with-success, never
+    // silence, and the exit code stays the refusal code. The health lines
+    // above have already named every degraded destination and its two
+    // roads; this line says what that adds up to.
+    if report.no_healthy_prover {
+        println!(
+            "[reclaim-stage] RESULT       : BLOCKED — no healthy destination to prove against; \
+             nothing was deleted; restoration path: fix pushes, health heals automatically"
+        );
+        record_reclaim_state(
+            apply,
+            chat_stasher::reclaimstate::ReclaimOutcome::Blocked,
+            Vec::new(),
+            Some(stagereclaim::destination_states_as_state(&destinations)),
+            Some(report.candidates.len()),
+            Some(report.candidate_bytes),
+        );
+        return ExitCode::FAILURE;
+    }
+
     if report.blocked() {
         for block in &report.blocked {
             let word = match &block.kind {
-                BlockedKind::Unreachable { .. } => "unreachable",
-                BlockedKind::PartialRead { .. } => "could not be fully read",
-                BlockedKind::SessionNotHeld => "does not hold the archived session(s)",
-                BlockedKind::TripleMismatch => "holds a different digest for the session(s)",
+                BlockedKind::Unreachable { kind, .. } => match kind {
+                    // SG-1 C3: a classified failure is named, so the
+                    // weekly log's signature line stops reading "some
+                    // network thing" for what is usually a credential
+                    // reference a timer cannot resolve.
+                    Some(k) => format!("unreachable ({})", k.label()),
+                    None => "unreachable".to_string(),
+                },
+                BlockedKind::PartialRead { .. } => "could not be fully read".to_string(),
+                BlockedKind::SessionNotHeld => "does not hold the archived session(s)".to_string(),
+                BlockedKind::TripleMismatch => {
+                    "holds a different digest for the session(s)".to_string()
+                }
+                // ADR-062 D6.3's fixed human phrase, spelled by the one
+                // constant every surface repeats, so the weekly log cannot
+                // grow a second wording for the same hold-back.
+                BlockedKind::NotMirrored => chat_stasher::mirror::HELD_BACK_SENTENCE.to_string(),
             };
+            // rev2 ⑤: the colon ends the destination's noun phrase, so
+            // each kind's word reads as an assertion about it —
+            // predicate ("does not hold the archived session(s)") or
+            // whole sentence (`HELD_BACK_SENTENCE`, whose own subject is
+            // the mirror, which is why it cannot follow the bare
+            // juxtaposition the sibling words can).
             println!(
-                "  blocked: destination \"{}\" {word} — {} session(s) / {} held back",
+                "  blocked: destination \"{}\": {word} — {} session(s) / {} held back",
                 block.destination,
                 block.sessions,
                 fmt_bytes(block.bytes)
             );
+            let dest_cfg = destinations
+                .iter()
+                .find(|d| d.name == block.destination)
+                .map(|d| &d.cfg);
             match &block.kind {
-                BlockedKind::Unreachable { error } => {
-                    println!("    reason: could not read the destination: {error}");
+                BlockedKind::Unreachable { error, .. } => {
+                    match dest_cfg {
+                        // The advice leads for a classified failure (SG-1
+                        // C3); the original chain keeps whatever the
+                        // third-party crate said, whole, underneath it.
+                        Some(cfg) => {
+                            for line in chat_stasher::remote_err::wrap_rendered_error(
+                                "reclaim-stage",
+                                error,
+                                cfg,
+                            )
+                            .lines()
+                            {
+                                println!("    {line}");
+                            }
+                        }
+                        None => println!("    reason: could not read the destination: {error}"),
+                    }
                 }
                 BlockedKind::PartialRead { detail } => {
                     println!("    reason: destination was read but not to completion: {detail}");
                 }
                 BlockedKind::SessionNotHeld | BlockedKind::TripleMismatch => {}
+                // The mirror leg's own advice: the block clears itself on
+                // the copy's next completed round — never a re-run alone,
+                // and never a manual delete.
+                BlockedKind::NotMirrored => {
+                    println!(
+                        "    fix: a completed `chat-stasher mirror sync` round takes the copy \
+                         over the proof's snapshot; the body stays until the row's round \
+                         completes, then re-run the reclaim"
+                    );
+                }
             }
         }
         println!(
             "[reclaim-stage] RESULT       : BLOCKED — nothing was deleted; fix the destination(s) above and re-run"
         );
+        record_reclaim_state(
+            apply,
+            chat_stasher::reclaimstate::ReclaimOutcome::Blocked,
+            stagereclaim::blocks_as_state(&report.blocked),
+            Some(stagereclaim::destination_states_as_state(&destinations)),
+            Some(report.candidates.len()),
+            Some(report.candidate_bytes),
+        );
         return ExitCode::FAILURE;
     }
+
+    record_reclaim_state(
+        apply,
+        chat_stasher::reclaimstate::ReclaimOutcome::Ok,
+        Vec::new(),
+        Some(stagereclaim::destination_states_as_state(&destinations)),
+        Some(report.candidates.len()),
+        Some(report.candidate_bytes),
+    );
 
     if !apply {
         println!(
@@ -10529,6 +13896,14 @@ fn cmd_reclaim_stage(
             fmt_bytes(r.bytes)
         );
     }
+    for omitted in &report.map_omitted {
+        println!(
+            "  whole-content: {} {} — reclaimed without an increment map; the body family is a \
+             sealed capture bundle, not snapshot records, so there is no map to make",
+            omitted.machine,
+            short_session_id(&omitted.session_id)
+        );
+    }
     println!(
         "[reclaim-stage] reclaimed    : {} session(s) / {}",
         report.reclaimed.len(),
@@ -10539,6 +13914,334 @@ fn cmd_reclaim_stage(
     );
     println!("[reclaim-stage] RESULT       : OK");
     ExitCode::SUCCESS
+}
+
+/// `mirror sync` — one copy round against the declared mirror destination
+/// (ADR-062 / LM-2). The engine ([`chat_stasher::mirror::sync_once`]) holds
+/// the semantics; this command pins the CLI contract around it: usage
+/// errors for a mirror that is not configured on, a destination that is
+/// not a repository, or the destination's masterkey being missing or
+/// unusable on this machine (exit 2, nothing done), and the trichotomy the
+/// command's doc states (0 complete / 3 stopped or refused / 1 a finished
+/// read that failed: verified source corruption, a refused local write, or
+/// a listing over the whole-file bound — each with its class's own
+/// sentence). A remote read error is not classified as corruption here — it
+/// stops the round the same way a budget does, because a read failure says
+/// "unknown, retry", never "checked and failed" ([`chat_stasher::remote_err`]
+/// owns the ADR-023 family).
+fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode {
+    let config = match config_or_refuse("mirror sync") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let Some(settings) = chat_stasher::mirror::MirrorSettings::for_config(&config) else {
+        eprintln!(
+            "mirror: no [mirror] section in the config — this machine mirrors nothing; \
+             see `chat-stasher` config docs (ADR-062)"
+        );
+        return ExitCode::from(2);
+    };
+    if !settings.enabled {
+        eprintln!(
+            "mirror: [mirror] enabled is false; set `enabled = true` to sync {}",
+            settings.mirror_of
+        );
+        return ExitCode::from(2);
+    }
+    if !config.destinations.contains_key(&settings.mirror_of) {
+        let declared = config
+            .destinations
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "mirror: `[mirror] mirror_of = \"{}\"` names no declared destination{}",
+            settings.mirror_of,
+            if declared.is_empty() {
+                String::new()
+            } else {
+                format!("; declared: {declared}")
+            }
+        );
+        return ExitCode::from(2);
+    }
+    let remote = match resolve_store_config_checked(
+        &config,
+        Some(&settings.mirror_of),
+        None,
+        None,
+        None,
+        &[],
+    ) {
+        Ok(cfg) => cfg,
+        Err(problem) => {
+            eprintln!("mirror: {problem}");
+            return ExitCode::from(2);
+        }
+    };
+    let mk = match store::load_key_file_state(&remote) {
+        store::KeyFileState::Loaded(mk) => mk,
+        // Both key refusals answer with exit 2 (usage), never 1: the
+        // round never ran — nothing was read or written — so exit 1
+        // would report a checked answer for a check that never happened
+        // (`docs/cli.md` keeps exit 1 for finished reads that failed;
+        // rev2's fix, the key half rev0 issue 10's destination fix left
+        // at exit 1).
+        store::KeyFileState::Missing => {
+            eprintln!(
+                "mirror: the masterkey file for `{}` is not on this machine ({}); \
+                 a mirror copies ciphertext but cannot verify what it copied without \
+                 the destination's key — restore it first",
+                settings.mirror_of,
+                remote.key_file.display()
+            );
+            eprintln!("mirror: exit_code=2 — usage error; nothing was done");
+            return ExitCode::from(2);
+        }
+        store::KeyFileState::Unusable(_) => {
+            eprintln!(
+                "mirror: the masterkey file for `{}` cannot be read ({}); fix the \
+                 access or I/O problem and re-run",
+                settings.mirror_of,
+                remote.key_file.display()
+            );
+            eprintln!("mirror: exit_code=2 — usage error; nothing was done");
+            return ExitCode::from(2);
+        }
+    };
+    let data_root = chat_stasher::config::default_data_root();
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let mirror_root = chat_stasher::mirror::mirror_dir(&data_root, &settings.mirror_of);
+    let deadline_secs = budget_secs
+        // reason: a manual round owns a budget the way an hourly round owns
+        // the hour's leftover; 600 s is a whole round by the same W964
+        // reading that gives the letta pull its 600 s.
+        .unwrap_or(600);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(deadline_secs);
+    // One floor for the whole round (rev2's finding): the stop-rule and the
+    // engine's pre-estimate share this value, and `min_free_bytes` measures
+    // the nearest existing ancestor when the mirror directory does not
+    // exist yet — so a first round's mid-copy floor is the documented
+    // max(10 GiB, min(5% of capacity, 20 GiB)), not the flat 10 GiB the
+    // unmeasurable path used to fall back to while the pre-estimate
+    // promised more.
+    let min_free_bytes = settings.min_free_bytes(&mirror_root);
+    let round_ends = chat_stasher::mirror::DeadlineAndDisk::new(
+        Some(deadline),
+        min_free_bytes,
+        mirror_root.clone(),
+    );
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // reason: same clock-before-1970 branch `runstate::now_unix`
+        // documents — reached only on a machine whose clock predates the
+        // epoch, and the record would claim a 1970 finish, which the
+        // staleness check reports as ancient rather than fresh.
+        .unwrap_or(0);
+    let request = chat_stasher::mirror::SyncRequest {
+        settings: &settings,
+        remote: &remote,
+        data_root: &data_root,
+        state_dir: &state_dir,
+        master_key: &mk,
+        now_unix,
+        min_free_bytes,
+        round_ends: &round_ends,
+    };
+    println!(
+        "[mirror] syncing      : `{}` into {} (budget: {}s)",
+        settings.mirror_of,
+        mirror_root.display(),
+        deadline_secs
+    );
+    let outcome = chat_stasher::mirror::sync_once(&request);
+    reap_remote(&remote, keep_ssh_masters);
+    let (report, outcome) = match outcome {
+        Ok(pair) => pair,
+        Err(e) if e.is::<chat_stasher::mirror::MirrorUsageError>() => {
+            // The declaration or the destination it names cannot be used:
+            // usage (exit 2), nothing was read or written, and the message
+            // already names what to change. Checked before everything else
+            // so no later classifier can re-word a usage problem as a read
+            // failure.
+            eprintln!("mirror: {e:#}");
+            eprintln!("mirror: exit_code=2 — usage error; nothing was done");
+            return ExitCode::from(2);
+        }
+        Err(e) if e.is::<chat_stasher::mirror::HardFailure>() => {
+            // The checked-and-failed class (invariant 2, `CLAUDE.md`):
+            // verified source corruption, a refused local write, an
+            // over-bound listing. Exit 1 with the class's own sentence —
+            // never "did not finish" (exit 3), which a later round cannot
+            // heal its way out of for the corruption half.
+            if let Some(hard) = e.downcast_ref::<chat_stasher::mirror::HardFailure>() {
+                eprintln!("mirror: exit_code=1 — {}: {hard}", hard.class.sentence());
+            }
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            // ADR-023: a remote-classified error says "unknown, retry next
+            // round", never "checked and failed" — so this branch reports
+            // with exit 3 and lets the next round resume, while anything
+            // else is a finished read the mirror genuinely failed on.
+            chat_stasher::remote_err::eprint_remote_error("mirror", &e, &remote);
+            if chat_stasher::remote_err::classify_error_str(&format!("{e:#}")).is_some() {
+                eprintln!(
+                    "mirror: exit_code=3 — this round did not finish; the next round resumes"
+                );
+                return ExitCode::from(3);
+            }
+            eprintln!("mirror: exit_code=1 — {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "[mirror] remote       : {} files / {} ({} snapshots)",
+        report.remote_files,
+        fmt_bytes(report.remote_total_bytes),
+        report.snapshots_remote
+    );
+    // Torn debris (ISSUE-006 step A): what this round classified and never
+    // copied. A reminder beside the outcome, never a failure of it — the
+    // debris belongs to no backup and the copy's completeness is untouched,
+    // because no index file names these bytes either.
+    if report.torn_files > 0 {
+        println!(
+            "[mirror] torn         : {} file(s) / {} skipped as interrupted-push debris — {}",
+            report.torn_files,
+            fmt_bytes(report.torn_bytes),
+            chat_stasher::debris::INTERRUPTED_PUSH_SENTENCE
+        );
+    }
+    match outcome {
+        chat_stasher::mirror::SyncOutcome::Completed => {
+            println!(
+                "[mirror] result       : complete — {} of {} snapshots' closures covered, {} file(s) / {} downloaded this round",
+                report.covered_snapshots,
+                report.snapshots_remote,
+                report.downloaded_files,
+                fmt_bytes(report.downloaded_bytes)
+            );
+            ExitCode::SUCCESS
+        }
+        chat_stasher::mirror::SyncOutcome::RefusedSpace {
+            needed_bytes,
+            missing_bytes,
+            headroom_bytes,
+            free_bytes,
+        } => {
+            eprintln!(
+                "mirror: not starting — not enough free space for what the sync would \
+                 write: needs {} (the missing {} plus the {} free-disk floor), only {} free, \
+                 short by {}; free space (larger disk, or a floor you are willing to \
+                 lower in [mirror] min_free_gib) and re-run",
+                fmt_bytes(needed_bytes),
+                fmt_bytes(missing_bytes),
+                fmt_bytes(headroom_bytes),
+                fmt_bytes(free_bytes),
+                fmt_bytes(needed_bytes.saturating_sub(free_bytes))
+            );
+            eprintln!(
+                "mirror: exit_code=3 — this round moved nothing; the refusal is recorded \
+                 so `status` shows why the first fill is not progressing"
+            );
+            ExitCode::from(3)
+        }
+        chat_stasher::mirror::SyncOutcome::Stopped(end) => {
+            match &end {
+                chat_stasher::mirror::RoundEnd::BudgetSpent => {
+                    // The fill's two numbers, one spelling, downloaded
+                    // first (ADR-062 C2): the on-disk half is the number
+                    // a watch on the mirror directory reconciles with;
+                    // the verified half rides as its "of which" subset so
+                    // a mid-fill pause can never read as two competing
+                    // totals. An unmeasured walk words unknown, never 0,
+                    // and the downloaded half arrives as the one drawn
+                    // tri-state (rev1 ②/L5) — the very state the record
+                    // this round wrote already carries.
+                    let numbers = chat_stasher::mirror::first_fill_numbers(
+                        &chat_stasher::mirror::report_downloaded_state(&report),
+                        report.present_bytes + report.downloaded_bytes,
+                        report.remote_total_bytes,
+                    );
+                    println!(
+                        "[mirror] result       : paused — this round's budget is spent; \
+                         {numbers}, the next round resumes"
+                    );
+                }
+                chat_stasher::mirror::RoundEnd::DiskBelowThreshold {
+                    free_bytes,
+                    min_free_bytes,
+                } => println!(
+                    "[mirror] result       : paused — free space fell below the mirror's \
+                     floor ({} free, floor {}); this round stopped rather than write toward a \
+                     full disk, and the next round resumes once space frees",
+                    fmt_bytes(*free_bytes),
+                    fmt_bytes(*min_free_bytes)
+                ),
+                chat_stasher::mirror::RoundEnd::RemoteRead { why } => println!(
+                    "[mirror] result       : paused — the destination could not be read \
+                     mid-round: {why}; the next round retries"
+                ),
+            }
+            eprintln!(
+                "mirror: exit_code=3 — the round stopped early, which is a pause, not a \
+                 failure; progress is recorded and the next round resumes"
+            );
+            ExitCode::from(3)
+        }
+    }
+}
+
+/// Persist one reclaim attempt's durable record (W1012 / SG-1 C1④ + C2).
+///
+/// Erasure is the failure mode this file exists against: before it, a blocked
+/// weekly reclaim left exactly one trace — lines in a log nobody reads (46
+/// §2) — so `status`, `doctor` and the menu bar read this record instead of
+/// the log, and the menu bar counts `consecutive_blocked` here for its
+/// two-blocks-in-a-row notification.
+///
+/// A failure to write the record is a warning, never a failed reclaim: the
+/// reclaim itself already ran (or already refused) and its data decision is
+/// what must not be undone — the state file is observability, so a broken
+/// state dir degrades the *alarm*, and loudly, not the reclaim.
+fn record_reclaim_state(
+    apply: bool,
+    outcome: chat_stasher::reclaimstate::ReclaimOutcome,
+    blocks: Vec<chat_stasher::reclaimstate::ReclaimBlock>,
+    destination_health: Option<Vec<chat_stasher::reclaimstate::ReclaimDestinationHealth>>,
+    candidates: Option<usize>,
+    candidate_bytes: Option<u64>,
+) {
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let finished_at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // reason: NOT an honest default — same (a)-fragile clock-before-1970
+        // branch `runstate::now_unix` documents. Reached only by a machine
+        // whose clock predates the epoch; the record would then claim a
+        // 1970-01-01 finish, which is wrong in the harmless direction (the
+        // staleness check reports it as ancient rather than as fresh).
+        .unwrap_or(0);
+    let attempt = chat_stasher::reclaimstate::ReclaimAttempt {
+        version: chat_stasher::reclaimstate::RECLAIM_STATE_VERSION,
+        finished_at_unix,
+        apply,
+        outcome,
+        blocked: blocks,
+        destination_health,
+        consecutive_blocked: 0,
+        candidates,
+        candidate_bytes,
+    };
+    if let Err(e) = chat_stasher::reclaimstate::record(&state_dir, &attempt) {
+        eprintln!(
+            "[reclaim-stage] warning: reclaim state not recorded, so `status` / the menu bar \
+             cannot report this run: {e:#}"
+        );
+    }
 }
 
 /// The capability gaps that make `prune-orphans --apply` a refusal rather than a
@@ -10675,20 +14378,26 @@ fn prune_orphans_json(inventory: &chat_stasher::prune_orphans::Inventory) -> ser
     let candidates: Vec<serde_json::Value> = inventory
         .candidates
         .iter()
-        .map(|pack| match &pack.verdict {
-            Verdict::Verified => serde_json::json!({
+        .map(|pack| {
+            serde_json::json!({
                 "id": pack.id,
                 "id_prefix": pack.id_prefix(),
                 "bytes": pack.bytes,
-                "status": "verified",
-            }),
-            Verdict::Unverified { reason } => serde_json::json!({
-                "id": pack.id,
-                "id_prefix": pack.id_prefix(),
-                "bytes": pack.bytes,
-                "status": "unknown",
-                "reason": reason,
-            }),
+                "status": pack.status_word(),
+                // torn/stranded only: the reason decided the status; unknown packs
+                // carry their reason in `reason` below.
+                "reason": match &pack.verdict {
+                    Verdict::Torn { reason } | Verdict::Unverified { reason } => reason,
+                    Verdict::Stranded => "verified complete",
+                },
+                // The earliest-seen time is unknown for every candidate: the
+                // backend interface carries no modification time, and no field
+                // here may fabricate a clock (ISSUE-006 step A).
+                "first_seen": {
+                    "kind": "unknown",
+                    "why": chat_stasher::debris::NO_MTIME_SENTENCE,
+                },
+            })
         })
         .collect();
 
@@ -10725,18 +14434,21 @@ fn prune_orphans_json(inventory: &chat_stasher::prune_orphans::Inventory) -> ser
             "bytes": inventory.total_bytes,
             "unindexed": inventory.candidate_packs(),
             "unindexed_bytes": inventory.candidate_bytes(),
-            "verified": inventory.verified_packs(),
-            "verified_bytes": inventory.verified_bytes(),
+            "torn": inventory.torn_packs(),
+            "torn_bytes": inventory.torn_bytes(),
+            "stranded": inventory.stranded_packs(),
+            "stranded_bytes": inventory.stranded_bytes(),
             "unknown": inventory.unknown_packs(),
             "unknown_bytes": inventory.unknown_bytes(),
         },
+        "torn_sentence": chat_stasher::debris::INTERRUPTED_PUSH_SENTENCE,
         "missing_packs": {
             "count": inventory.missing.len(),
             "ids": inventory.missing,
         },
         "next_push": next_push,
         "candidates": candidates,
-        "exit_semantics": "0 = the survey read every pack · 1 = it finished and found an index naming a pack the backend does not list · 3 = it did not finish reading, or `--apply` was asked for · 2 = usage error",
+        "exit_semantics": "0 = the survey read every pack (torn debris included: it is a known state, not an unfinished read) · 1 = it finished and found an index naming a pack the backend does not list · 3 = it did not finish reading, or `--apply` was asked for · 2 = usage error",
     })
 }
 
@@ -10772,15 +14484,37 @@ fn print_prune_orphans(inventory: &chat_stasher::prune_orphans::Inventory, dry_r
         inventory.total_packs,
         fmt_bytes(inventory.total_bytes)
     );
+    // Torn debris and stranded content are two different facts about the same
+    // unindexed set (ISSUE-006 step A), so the counts and byte totals print
+    // apart — folding them would word interrupted-push debris as if it were
+    // adoptable content, or the reverse.
     println!(
-        "[prune] unindexed   : {} ({}) — {} verified ({}), {} unknown ({})",
+        "[prune] unindexed   : {} ({}) — {} torn ({}), {} stranded ({}), {} unknown ({})",
         inventory.candidate_packs(),
         fmt_bytes(inventory.candidate_bytes()),
-        inventory.verified_packs(),
-        fmt_bytes(inventory.verified_bytes()),
+        inventory.torn_packs(),
+        fmt_bytes(inventory.torn_bytes()),
+        inventory.stranded_packs(),
+        fmt_bytes(inventory.stranded_bytes()),
         inventory.unknown_packs(),
         fmt_bytes(inventory.unknown_bytes()),
     );
+    if inventory.torn_packs() > 0 {
+        println!(
+            "[prune] torn        : {} file(s) belong to no backup — {}",
+            inventory.torn_packs(),
+            chat_stasher::debris::INTERRUPTED_PUSH_SENTENCE
+        );
+    }
+    // The earliest-seen time of any torn or stranded pack: unknown, stated as
+    // such — the backend interface carries no modification time, and a
+    // fabricated clock is the lie the tri-state rules exist against.
+    if inventory.torn_packs() > 0 || inventory.stranded_packs() > 0 {
+        println!(
+            "[prune] first seen  : unknown — {}",
+            chat_stasher::debris::NO_MTIME_SENTENCE
+        );
+    }
     println!(
         "[prune] missing     : {} pack(s) an index names that the backend does not list",
         inventory.missing.len()
@@ -10805,8 +14539,16 @@ fn print_prune_orphans(inventory: &chat_stasher::prune_orphans::Inventory, dry_r
     }
     for pack in &inventory.candidates {
         match &pack.verdict {
-            chat_stasher::prune_orphans::Verdict::Verified => println!(
-                "[prune] pack {}  {}  verified",
+            chat_stasher::prune_orphans::Verdict::Stranded => println!(
+                "[prune] pack {}  {}  stranded (verified; the next open adopts it)",
+                pack.id_prefix(),
+                fmt_bytes(pack.bytes)
+            ),
+            // The reason is the probe's own (header does not fit / will not
+            // decrypt); the sentence itself rode the summary lines above, so
+            // one candidate list does not repeat it once per pack.
+            chat_stasher::prune_orphans::Verdict::Torn { reason } => println!(
+                "[prune] pack {}  {}  torn ({reason})",
                 pack.id_prefix(),
                 fmt_bytes(pack.bytes)
             ),
@@ -10900,7 +14642,6 @@ mod decision_surface_tests {
         );
     }
     use super::*;
-    use clap::CommandFactory;
     use std::fs;
 
     #[test]
@@ -10932,7 +14673,7 @@ mod decision_surface_tests {
 
     #[test]
     fn search_text_modes_parse_and_scan_requires_text() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli_on_worker_stack(&[
             "chat-stasher",
             "search",
             "--repo",
@@ -10950,7 +14691,7 @@ mod decision_surface_tests {
                 ..
             }
         ));
-        assert!(Cli::try_parse_from([
+        assert!(parse_cli_on_worker_stack(&[
             "chat-stasher",
             "search",
             "--repo",
@@ -11458,7 +15199,7 @@ mod decision_surface_tests {
 
     #[test]
     fn setup_has_no_secret_valued_argv_options() {
-        let cli = Cli::command();
+        let cli = cli_command_on_worker_stack();
         let setup = cli
             .find_subcommand("setup")
             .expect("setup subcommand exists");
@@ -12312,7 +16053,7 @@ mod decision_surface_tests {
 
     #[test]
     fn seal_help_and_active_guard_follow_decision() {
-        let mut command = Cli::command();
+        let mut command = cli_command_on_worker_stack();
         let seal_command = command
             .find_subcommand_mut("seal")
             .expect("seal subcommand must remain user-visible");
@@ -12346,12 +16087,18 @@ mod decision_surface_tests {
             records: Vec::new(),
             missing_roots: Vec::new(),
             indeterminate_roots: Vec::new(),
+            machine_logs: Vec::new(),
+            machine_logs_unlooked: 0,
+            machine_logs_indeterminate: 0,
+            machine_logs_unlooked_reasons: Vec::new(),
             probes: vec![scanner::HarnessProbe {
                 id: "opencode".to_string(),
                 display_name: "fixture harness".to_string(),
                 root: Some(dir.path().join("store.db")),
                 confidence: scanner::Confidence::Confirmed,
                 state: scanner::ProbeState::FileTarget,
+                unverified_roots: Vec::new(),
+                source_roots: Vec::new(),
                 record_count: Some(1),
                 candidate_count: Some(1),
                 unreadable_count: Some(0),
@@ -12379,6 +16126,8 @@ mod decision_surface_tests {
             compressed: false,
             sqlite_layout: Some(chat_stasher::models::SqliteSessionLayout::OpenCode),
             provenance: Default::default(),
+            session_dir: None,
+            movable_root: false,
         });
         let output = render_archive_gap_notice(&report);
         assert!(
@@ -12400,10 +16149,16 @@ mod decision_surface_tests {
                     compressed: false,
                     sqlite_layout: None,
                     provenance: Default::default(),
+                    session_dir: None,
+                    movable_root: false,
                 })
                 .collect(),
             missing_roots: Vec::new(),
             indeterminate_roots: Vec::new(),
+            machine_logs: Vec::new(),
+            machine_logs_unlooked: 0,
+            machine_logs_indeterminate: 0,
+            machine_logs_unlooked_reasons: Vec::new(),
             probes: Vec::new(),
         }
     }
@@ -12440,6 +16195,54 @@ mod decision_surface_tests {
             detailed.lines().count() > 500,
             "--sessions must still print one line per session, got {} lines",
             detailed.lines().count()
+        );
+    }
+
+    /// W1006d (ADR-059 draft D6): when a harness family's combined total is
+    /// a qualified lower bound — a measured root beside a declared root the
+    /// scan never verified — `status` must not let its session counts read
+    /// as machine totals. Both bodies carry the same clause, naming each
+    /// unverified root and pointing at `doctor`; a machine with no marked
+    /// family must see the byte-for-byte body it saw before, which is what
+    /// the tests around this one pin for plain, unmarked reports.
+    #[test]
+    fn status_marks_lower_bound_totals_with_their_unverified_roots() {
+        let mut report = report_with_sessions(0);
+        report.probes.push(scanner::HarnessProbe {
+            id: "claude-code".to_string(),
+            display_name: "Claude Code".to_string(),
+            root: None,
+            confidence: scanner::Confidence::Confirmed,
+            state: scanner::ProbeState::Scanned,
+            unverified_roots: vec![scanner::UnverifiedRoot {
+                id: "claude-desktop-cowork".to_string(),
+                state: scanner::ProbeState::SkipUnascertained,
+            }],
+            source_roots: Vec::new(),
+            record_count: Some(0),
+            candidate_count: None,
+            unreadable_count: Some(0),
+            unreadable_entry_count: Some(0),
+            earliest: None,
+            latest: None,
+            bytes: None,
+            recognized_files: Vec::new(),
+            note: String::new(),
+        });
+        for body in [render_status(&report, false), render_status(&report, true)] {
+            assert!(
+                body.contains("lower bounds") && body.contains("1 unverified source root(s)")
+                    && body.contains("claude-code: claude-desktop-cowork"),
+                "both status bodies must qualify the total and name the unverified root; got:\n{body}"
+            );
+        }
+        // A report without a marked family: the clause is absent, so the
+        // default body stays what `default_status_body_does_not_grow_with_
+        // session_count` pins.
+        let unmarked = render_status(&report_with_sessions(0), false);
+        assert!(
+            !unmarked.contains("lower bound"),
+            "an unmarked family keeps the pre-W1006d body byte-for-byte; got:\n{unmarked}"
         );
     }
 
@@ -17114,6 +20917,17 @@ fn cmd_status(
     };
     let info = run_state_info(&config);
     eprintln!("[run-once] {}", info.verdict.line);
+    // The second line of the two-line split: the archive cycle's health is
+    // the verdict above; when the last pass left the declared Letta producer
+    // unread, the producer's own sentence and its fix print here instead of
+    // being folded into a single unhealthy verdict. When there is none to
+    // say, status prints nothing extra.
+    if let Some(letta) = &info.verdict.letta {
+        eprintln!("[pull-letta] {}", letta.sentence);
+        if let Some(fix) = &letta.fix {
+            eprintln!("[pull-letta]     fix: {fix}");
+        }
+    }
 
     let scan = scanner::scan(&config);
     // Deliberately 3, not 1, when the scan fails. Nothing was scanned, so
@@ -17279,6 +21093,33 @@ fn cmd_status(
     for line in chat_stasher::doctor::key_alert_lines(&config) {
         eprintln!("{line}");
     }
+    // W1012 / SG-1 C1: the four-fact destination reconciliation, surfaced
+    // instead of leaving the weekly log as its only address. Same rules as
+    // the key alerts above: one line per finding, byte-identical silence on
+    // a machine whose destinations are all covered, timer-resolvable,
+    // recorded and currently reclaiming; and it does not move the exit
+    // code, which this command documents as "is the timer healthy" — a
+    // destination that cannot be reached is a fact about coverage, and
+    // `doctor` is the command that fails on it.
+    for alert in dest_reconciliation(&config, &info).all_alerts() {
+        eprintln!("{}", alert.sentence);
+        if let Some(fix) = &alert.fix {
+            eprintln!("    fix: {fix}");
+        }
+    }
+    // ADR-062 (LM-2/LM-4) / C2: the mirror's rows — first-fill progress
+    // phrased as progress, never as red, and the steady row (size, last
+    // sync, snapshots behind, orphans) once the fill is complete. Same
+    // family as the key alerts: empty when no mirror is configured,
+    // never moving the exit code, and readable after every round because
+    // each round leaves a progress record behind.
+    for line in chat_stasher::mirror::mirror_status_lines(
+        &config,
+        &chat_stasher::config::default_data_root(),
+        &chat_stasher::collect::default_state_dir(),
+    ) {
+        eprintln!("{line}");
+    }
     if let Some(error) = &writer_version_error {
         eprintln!("[status] writer versions unavailable: {error}");
     }
@@ -17355,6 +21196,7 @@ fn run_state_info(config: &Config) -> RunStateInfo {
                     "backup_interval_secs is invalid: {error}. It is impossible to tell whether the timer is running as configured."
                 ),
                 healthy: false,
+                letta: None,
             },
             read,
             now_unix: now,
@@ -17523,7 +21365,7 @@ fn local_layer_json(config: &Config, info: &RunStateInfo) -> serde_json::Value {
         }
     };
 
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "schedule": {
             "kind": schedule_kind,
             "installed": installed,
@@ -17538,6 +21380,74 @@ fn local_layer_json(config: &Config, info: &RunStateInfo) -> serde_json::Value {
             info.stale_after_secs,
         ),
         "stage": stage_json,
+    });
+    // W1012 / SG-1 C1: the destination reconciliation rides the local layer
+    // because every fact it reads is machinery on this machine (installed
+    // timer files, state records) — the archived half never could answer
+    // them. `destinations` and `reclaim` are the machine-readable facts;
+    // `dest_alerts` carries the alert sentences already worded, so the
+    // menu bar app displays the same words `status` prints.
+    let reconciled = chat_stasher::destdiag::destinations_json(&dest_reconciliation(config, info));
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "destinations".to_string(),
+            reconciled["destinations"].clone(),
+        );
+        object.insert("dest_alerts".to_string(), reconciled["alerts"].clone());
+        object.insert("reclaim".to_string(), reconciled["reclaim"].clone());
+        // ADR-060 D5: the stage-cap fact rides the same layer — the
+        // measured bytes, the cap and `exceeded` are what the menu bar
+        // needs to show the alarm the surfaces print, and an unknown
+        // stays an unknown here too, never a zero.
+        object.insert("stage_cap".to_string(), reconciled["stage_cap"].clone());
+        // ADR-062 (LM-2/LM-4): the mirror rides the same local layer for the
+        // same reason the reconciliation does — every fact is machinery on
+        // this machine (its records and its directory), an unconfigured or
+        // complete mirror must be an explicit `not_applicable` shape, never
+        // a zero that reads as measured, and the rows carry the already
+        // worded sentences so the menu bar prints what `status` prints.
+        object.insert(
+            "mirror".to_string(),
+            chat_stasher::mirror::status_json(
+                config,
+                &chat_stasher::config::default_data_root(),
+                &chat_stasher::collect::default_state_dir(),
+                info.now_unix,
+            ),
+        );
+    }
+    value
+}
+
+/// W1012 / SG-1 C1: the four-fact destination reconciliation `status`
+/// reports — the same computation the prose half prints and `doctor` shows,
+/// from the one function that owns the wording. Computed once per half;
+/// both read the same machine state, so a prose line and a `--json` alert
+/// cannot disagree.
+fn dest_reconciliation(
+    config: &Config,
+    info: &RunStateInfo,
+) -> chat_stasher::destdiag::Reconciliation {
+    chat_stasher::destdiag::reconcile(&chat_stasher::destdiag::Inputs {
+        config,
+        format: setup_schedule_format(),
+        home: &config::home_dir(),
+        state_dir: &chat_stasher::collect::default_state_dir(),
+        now_unix: info.now_unix,
+        // The same fact `schedule::scheduler_readable_on` encodes one command
+        // over: a platform whose scheduler this build cannot read must not
+        // have the reconciliation read its silence as "no timer".
+        scheduler_readable: chat_stasher::schedule::scheduler_readable_on(std::env::consts::OS),
+        // ADR-060 D5's cap fact needs the one stage the config itself
+        // names (`[native_host] stage`, expanded at load) — the same
+        // source doctor's stage-duplicate scan reads, so the two walk the
+        // same tree. A config without a stage keeps its own state, never a
+        // guessed path.
+        stage: config
+            .native_host
+            .as_ref()
+            .and_then(|native_host| native_host.stage.as_deref())
+            .map(Path::new),
     })
 }
 
@@ -17642,6 +21552,9 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
         // and an empty string here means a clean machine sees the byte-for-
         // byte output it saw before.
         let unreadable = unreadable_notice(report);
+        // W1006d: the same line's lower-bound qualification — empty, and
+        // therefore byte-invisible, on a machine with no marked family.
+        let lower_bound = lower_bound_notice(report);
         if report.records.is_empty() {
             // B82: "No sessions were found on this machine" is a claim about the whole
             // machine, and this branch used to make it from
@@ -17649,14 +21562,18 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
             // this run never got to look at. Zero records plus places we did
             // not look is not "there is nothing here".
             out.push_str(&format!(
-                "[scan] No sessions were found on this machine.{}{unreadable}",
-                unlooked_notice(report)
+                "[scan] No sessions were found on this machine.{}{}{}",
+                lower_bound,
+                unlooked_notice(report),
+                unreadable
             ));
             out.push('\n');
         } else {
             out.push_str(&format!(
-                "[scan] {} session(s) ({compressed} compressed): {breakdown}{unreadable}",
-                report.records.len()
+                "[scan] {} session(s) ({compressed} compressed): {breakdown}{}{}",
+                report.records.len(),
+                lower_bound,
+                unreadable
             ));
             out.push('\n');
         }
@@ -17707,6 +21624,14 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
             "  (unreadable root, existence unknown: {})\n",
             unknown.display()
         ));
+    }
+    // W1006d: the per-session table's total is a lower bound when a family
+    // still has unverified roots; say so in place, not only in the JSON —
+    // the same clause the default body carries on its `[scan]` line.
+    let lower_bound = lower_bound_notice(report);
+    if !lower_bound.is_empty() {
+        out.push_str(&lower_bound);
+        out.push('\n');
     }
     out.push_str(&render_archive_gap_notice(report));
     out.push('\n');
@@ -17782,6 +21707,47 @@ fn unlooked_notice(report: &scanner::ScanReport) -> String {
         "  ⚠ but {} harness(es) were not probed at all ({}) — \"did not scan\" is not \"there is none\"; see chat-stasher doctor",
         unlooked.len(),
         unlooked.join(" · ")
+    )
+}
+
+/// The clause `status` appends to its `[scan]` line when a harness family's
+/// combined total is a *qualified lower bound* (W1006d, ADR-059 draft D6):
+/// at least one of the family's roots was measured while another declared
+/// root stayed unverified — never looked at, so the scan counts only what
+/// it measured. The notice keeps the printed count from reading as the
+/// machine total: it names each marked harness and its unverified roots,
+/// and points at `doctor`, where the same marking rides the probe rows and
+/// the footprint rows.
+///
+/// Text-shape rules shared with [`unreadable_notice`] and
+/// [`unlooked_notice`]: the clause is separated from the number before it
+/// (it qualifies that count, it is not part of it), each unverified root is
+/// named, and the string is empty on a machine with no marked family — a
+/// healthy scan keeps the byte-for-byte output it had before.
+fn lower_bound_notice(report: &scanner::ScanReport) -> String {
+    let marked: Vec<String> = report
+        .probes
+        .iter()
+        .filter(|p| !p.unverified_roots.is_empty())
+        .map(|p| {
+            format!(
+                "{}: {}",
+                p.id,
+                p.unverified_roots
+                    .iter()
+                    .map(|root| root.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect();
+    if marked.is_empty() {
+        return String::new();
+    }
+    let total_roots: usize = report.probes.iter().map(|p| p.unverified_roots.len()).sum();
+    format!(
+        "  ⚠ the totals are lower bounds — {total_roots} unverified source root(s) ({}); see chat-stasher doctor",
+        marked.join(" · ")
     )
 }
 
@@ -18507,10 +22473,8 @@ fn cmd_inbox_pull_observed(
         }
         destinations
     };
-    let archive = chat_stasher::remote_inbox_archive::DestinationArchive {
-        stage: &args.stage,
-        destinations: &destinations,
-    };
+    let archive =
+        chat_stasher::remote_inbox_archive::DestinationArchive::new(&args.stage, &destinations);
     let result = (|| -> anyhow::Result<remote_inbox::PullReport> {
         let runtime = tokio::runtime::Runtime::new()?;
         let entered = runtime.enter();
@@ -18565,5 +22529,1489 @@ fn cmd_inbox_pull_observed(
             eprintln!("inbox-pull incomplete: listing unavailable; waiting count unknown");
             ExitCode::from(3)
         }
+    }
+}
+
+fn cmd_api_pull(args: chat_stasher::letta::PullArgs) -> ExitCode {
+    let config = match config_or_refuse("pull") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    cmd_api_pull_with(
+        args,
+        &config,
+        home,
+        |args, config, machine, local_agents| {
+            // The interactive command has no destination overrides, so its
+            // proof covers every declared destination (or the
+            // single-destination repository while none is declared) and
+            // its credential is the environment's, exactly as before.
+            letta_producer_pull(
+                &args.account_id,
+                &args.inbox,
+                &args.state,
+                &args.stage,
+                machine,
+                args.pace_ms,
+                args.budget_seconds,
+                args.page_size,
+                None,
+                &letta_producer_destinations(config)?,
+                local_agents,
+            )
+        },
+    )
+}
+
+/// The one Letta pull pipeline, shared by the `pull letta` command and the
+/// scheduled pass's declared producer: every destination it is given must
+/// prove it holds the sealed bytes, the credential comes from the resolved
+/// `[pull.letta].api_key` declaration when the pass supplies one and from
+/// the environment otherwise, and the pass itself keeps its own pacing,
+/// `Retry-After` and receipt-journal discipline. No caller-specific second
+/// pipeline exists on purpose.
+#[allow(clippy::too_many_arguments)]
+fn letta_producer_pull(
+    account_id: &str,
+    inbox: &Path,
+    state: &Path,
+    stage: &Path,
+    machine: &str,
+    pace_ms: u64,
+    budget_seconds: u64,
+    page_size: u64,
+    api_key: Option<&str>,
+    destinations: &[StoreConfig],
+    local_agents: &Path,
+) -> anyhow::Result<chat_stasher::letta::Report> {
+    use chat_stasher::remote_inbox_archive::DestinationArchive;
+    let proof = DestinationArchive::new(stage, destinations);
+    let mut api = chat_stasher::letta::Api::environment(
+        api_key.map(str::to_owned),
+        std::time::Duration::from_millis(pace_ms),
+        std::time::Duration::from_secs(budget_seconds),
+        page_size,
+    )?;
+    chat_stasher::letta::run(
+        &mut api,
+        account_id,
+        local_agents,
+        inbox,
+        state,
+        stage,
+        machine,
+        &proof,
+    )
+}
+
+/// Every destination the producer's archive proof must cover: each declared
+/// destination, resolved the way every command resolves it, or the
+/// single-destination mode repository while none is declared.
+fn letta_producer_destinations(config: &Config) -> anyhow::Result<Vec<StoreConfig>> {
+    if config.destinations.is_empty() {
+        Ok(vec![store_config_from(config, None, None, None, &[])])
+    } else {
+        config
+            .destinations
+            .keys()
+            .map(|name| {
+                resolve_store_config_checked(config, Some(name), None, None, None, &[])
+                    .map_err(|_| anyhow::anyhow!("destination configuration unavailable"))
+            })
+            .collect::<anyhow::Result<_>>()
+    }
+}
+
+fn cmd_api_pull_with(
+    args: chat_stasher::letta::PullArgs,
+    config: &Config,
+    home: Option<std::ffi::OsString>,
+    capture: impl FnOnce(
+        &chat_stasher::letta::PullArgs,
+        &Config,
+        &str,
+        &Path,
+    ) -> anyhow::Result<chat_stasher::letta::Report>,
+) -> ExitCode {
+    let machine = match resolve_machine("pull", config, args.machine.as_deref()) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
+    let result = (|| {
+        anyhow::ensure!(
+            !args.account_id.trim().is_empty(),
+            "Letta account identity unavailable"
+        );
+        let home = home.ok_or_else(|| anyhow::anyhow!("local agent home unavailable"))?;
+        capture(
+            &args,
+            config,
+            &machine,
+            &PathBuf::from(home).join(".letta/agents"),
+        )
+    })();
+    match result {
+        Ok(report) => {
+            println!("pull letta: agents={}; local_id_only={}; bundles={}; passes_proven={}; incomplete={}", report.agents, report.local_only, report.bundles, report.committed, report.incomplete);
+            if report.incomplete > 0 {
+                ExitCode::from(3)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(_) => {
+            eprintln!("pull letta incomplete: source, state, publication or archive proof unavailable; counts unknown");
+            ExitCode::from(3)
+        }
+    }
+}
+
+/// `hide` / `unhide` share one change flow (ADR-046 draft Phase 1): resolve
+/// this machine's writer partition and the exact target identity, refuse
+/// invalid input as usage, read the existing local control stream (never
+/// append over an unreadable one), and append one durable record unless the
+/// local stream already holds the requested state.
+fn cmd_control_state(
+    command: &str,
+    action: chat_stasher::deletion_control::ControlAction,
+    stage: &Path,
+    session_id: &str,
+    machine: Option<&str>,
+    target: Option<&str>,
+    reason: Option<&str>,
+) -> ExitCode {
+    let config = match config_or_refuse(command) {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    if session_id.is_empty()
+        || session_id.contains(['/', '\\'])
+        || session_id == "."
+        || session_id == ".."
+    {
+        eprintln!("{command}: `{}` is not a valid session id", session_id);
+        return ExitCode::from(2);
+    }
+    if let Some(reason) = reason {
+        if reason.len() > chat_stasher::deletion_control::MAX_REASON_BYTES
+            || reason.contains(['\n', '\r'])
+        {
+            eprintln!(
+                "{command}: --reason is a metadata label of at most {} bytes on one line, \
+                 never conversation text",
+                chat_stasher::deletion_control::MAX_REASON_BYTES
+            );
+            return ExitCode::from(2);
+        }
+    }
+    if !stage.is_dir() {
+        eprintln!(
+            "{command}: --stage {} is not an existing directory; a stage is never created by this command",
+            stage.display()
+        );
+        return ExitCode::from(2);
+    }
+    // The recording partition follows the house rule (`--machine`, config,
+    // else this machine's identity); the target identity defaults to it and
+    // `--target-machine` names another partition's copy of the id (W402's
+    // exact-identity rule: same id, other partition, is a different
+    // identity).
+    let actor = match resolve_machine(command, &config, machine) {
+        Ok(actor) => actor,
+        Err(code) => return code,
+    };
+    let target_machine = target.unwrap_or(&actor).to_string();
+    let current = match chat_stasher::deletion_control::read_stage_events(stage, &actor) {
+        Ok(chat_stasher::deletion_control::StageControlRead::Absent) => {
+            chat_stasher::deletion_control::Visibility::Visible
+        }
+        Ok(chat_stasher::deletion_control::StageControlRead::Events(events)) => {
+            match chat_stasher::deletion_control::fold_events(events) {
+                Ok(policy) => policy.visibility(&target_machine, session_id),
+                Err(issue) => {
+                    eprintln!("{command}: the local control stream refuses a policy: {issue}");
+                    eprintln!("{command}: nothing was written — an unknown control state is never appended over.");
+                    return ExitCode::from(3);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{command}: {e}");
+            eprintln!("{command}: nothing was written — an unreadable control stream is unknown, and unknown is never \"nothing recorded\".");
+            return ExitCode::from(3);
+        }
+    };
+    let requested = match action {
+        chat_stasher::deletion_control::ControlAction::Hide
+            if matches!(
+                current,
+                chat_stasher::deletion_control::Visibility::Hidden
+                    | chat_stasher::deletion_control::Visibility::Purged
+            ) =>
+        {
+            true
+        }
+        chat_stasher::deletion_control::ControlAction::Unhide
+            if matches!(current, chat_stasher::deletion_control::Visibility::Visible) =>
+        {
+            true
+        }
+        _ => false,
+    };
+    let verb = match action {
+        chat_stasher::deletion_control::ControlAction::Hide => "hide",
+        chat_stasher::deletion_control::ControlAction::Unhide => "unhide",
+        _ => unreachable!("state commands take only hide and unhide"),
+    };
+    println!("[{command}] action         : {verb}");
+    println!("[{command}] session        : {session_id}");
+    println!("[{command}] machine        : {target_machine}");
+    println!(
+        "[{command}] state          : {}",
+        match current {
+            chat_stasher::deletion_control::Visibility::Visible => "visible",
+            chat_stasher::deletion_control::Visibility::Hidden => "hidden",
+            chat_stasher::deletion_control::Visibility::Purged => "purged by tombstone",
+            chat_stasher::deletion_control::Visibility::RedactedThroughCutoff { .. } => {
+                "under a redaction tombstone"
+            }
+        }
+    );
+    if requested {
+        println!(
+            "[{command}] record         : not appended — the local control stream already holds this state"
+        );
+        return ExitCode::SUCCESS;
+    }
+    if matches!(current, chat_stasher::deletion_control::Visibility::Purged) {
+        eprintln!(
+            "{command}: this identity is under a whole-session purge tombstone, which no state record can undo (ADR-046 draft); nothing was written."
+        );
+        return ExitCode::from(2);
+    }
+    let event = match chat_stasher::deletion_control::new_state_event(
+        action,
+        &actor,
+        &target_machine,
+        session_id,
+        reason,
+    ) {
+        Ok(event) => event,
+        Err(e) => {
+            eprintln!("{command}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let site = chat_stasher::deletion_control::control_path(stage, &actor);
+    match chat_stasher::deletion_control::append_stage_event(stage, &event) {
+        Ok(()) => {
+            println!(
+                "[{command}] record         : appended to {}",
+                site.display()
+            );
+            println!("[{command}] operation id   : {}", event.operation_id);
+            if let Some(reason) = event.reason.as_deref() {
+                println!("[{command}] reason         : {reason}");
+            }
+            println!(
+                "[{command}] next           : the next `push` archives it with the stage; readers honor it from the destination's control stream"
+            );
+            println!(
+                "[{command}] note           : run `index build` after the next push so the full-text index reflects the state"
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{command}: {e:#}");
+            // Deliberately 1, not 3: the failure is a completed write attempt,
+            // not an unfinished read. The site line below states what exists.
+            eprintln!(
+                "{command}: nothing is claimed written; the stream at {} is the state on disk",
+                site.display()
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `purge SESSION` — the W402 dry-run preview over explicitly selected
+/// destinations. Per destination: was the exact identity `found` (with
+/// counts), proved `absent`, or `unknown` because the read did not finish.
+/// This build has no destructive mode at all; `--confirm` names the phase that
+/// does not exist yet and is refused before any destination is read.
+#[allow(clippy::too_many_arguments)]
+fn cmd_purge(
+    session_id: &str,
+    machine: Option<&str>,
+    destinations: &[String],
+    all_destinations: bool,
+    confirm: Option<&str>,
+    json: bool,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    keep_ssh_masters: bool,
+) -> ExitCode {
+    let config = match config_or_refuse("purge") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    if let Some(confirmed) = confirm {
+        // Refused before anything is read, exactly like `prune-orphans
+        // --apply`: naming the missing capability honestly beats an
+        // unknown-flag error, and nothing in this build can delete.
+        if confirmed != session_id {
+            eprintln!(
+                "purge: --confirm must name the exact session being purged (`{session_id}`), not `{confirmed}`"
+            );
+            return ExitCode::from(2);
+        }
+        eprintln!("purge: --confirm is refused, and nothing was read or changed.");
+        eprintln!(
+            "purge: the destructive purge transaction (exclusive maintenance gate, tombstone publication barrier, snapshot rewrite, forget, prune — ADR-046 draft Phase 3) does not exist in this build."
+        );
+        eprintln!(
+            "purge: exit_code=3 — the requested deletion could not be performed, so nothing was deleted and no absence in any output proves otherwise. Run without --confirm for the read-only preview."
+        );
+        return ExitCode::from(3);
+    }
+    if session_id.is_empty()
+        || session_id.contains(['/', '\\'])
+        || session_id == "."
+        || session_id == ".."
+    {
+        eprintln!("purge: `{}` is not a valid session id", session_id);
+        return ExitCode::from(2);
+    }
+    let multi = !config.destinations.is_empty();
+    if all_destinations && !destinations.is_empty() {
+        eprintln!(
+            "purge: --all-destinations and --destination both given; select one (each destination is inspected once)"
+        );
+        return ExitCode::from(2);
+    }
+    if !all_destinations && destinations.is_empty() && repo.is_none() {
+        eprintln!(
+            "purge: no destinations selected. Pass `--destination <name>` (repeatable) or `--all-destinations`; there is no implicit destination set."
+        );
+        return ExitCode::from(2);
+    }
+    let target_machine = match resolve_machine("purge", &config, machine) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
+    let mut selected: Vec<(String, StoreConfig)> = Vec::new();
+    if !destinations.is_empty() {
+        if !multi {
+            eprintln!(
+                "purge: --destination names the config's destinations, and this config declares none; use `--repo` for a single repository"
+            );
+            return ExitCode::from(2);
+        }
+        for name in destinations {
+            if selected.iter().any(|(prior, _)| prior == name) {
+                continue;
+            }
+            let cfg = resolve_store_config(&config, Some(name.as_str()), None, None, None, &[]);
+            selected.push((name.clone(), cfg));
+        }
+    } else if all_destinations {
+        if multi {
+            for name in config.destinations.keys() {
+                let cfg = resolve_store_config(&config, Some(name), None, None, None, &[]);
+                selected.push((name.clone(), cfg));
+            }
+        } else {
+            selected.push((
+                "default".to_string(),
+                store_config_from(
+                    &config,
+                    repo.clone(),
+                    key_file.clone(),
+                    connections,
+                    options,
+                ),
+            ));
+        }
+    } else {
+        if multi && repo.is_some() {
+            eprintln!(
+                "purge: `--repo` only applies to a single-destination config; this run inspects the config's destinations, so pass `--destination` or `--all-destinations`"
+            );
+            return ExitCode::from(2);
+        }
+        selected.push((
+            "default".to_string(),
+            store_config_from(&config, repo, key_file, connections, options),
+        ));
+    }
+    selected.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut rows: Vec<(String, DestinationPreview, String)> = Vec::new();
+    for (name, cfg) in &selected {
+        let store = BackupStore::for_metadata_query(cfg.clone());
+        let row = match store::load_key_file(cfg) {
+            Ok(mk) => {
+                match chat_stasher::reader_guard::catching_panic("purge", || {
+                    chat_stasher::deletion_control::occurrence_inventory(
+                        &store,
+                        &mk,
+                        &target_machine,
+                        session_id,
+                    )
+                }) {
+                    Ok(inventory) => {
+                        let status = if inventory.shard_occurrences > 0 {
+                            chat_stasher::deletion_control::DestinationStatus::Found
+                        } else {
+                            chat_stasher::deletion_control::DestinationStatus::Absent
+                        };
+                        DestinationPreview {
+                            status,
+                            why: None,
+                            inventory,
+                        }
+                    }
+                    Err(e) => {
+                        chat_stasher::remote_err::eprint_remote_error("purge", &e, cfg);
+                        DestinationPreview {
+                            status: chat_stasher::deletion_control::DestinationStatus::Unknown,
+                            why: Some(format!("{e:#}")),
+                            inventory: chat_stasher::deletion_control::OccurrenceInventory::default(
+                            ),
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // Never created here (that masterkey() does), and never
+                // treated as absent: an unopenable destination is unknown.
+                eprintln!("purge: destination `{name}`: cannot load the key: {e:#}");
+                DestinationPreview {
+                    status: chat_stasher::deletion_control::DestinationStatus::Unknown,
+                    why: Some("the destination key could not be loaded".to_string()),
+                    inventory: chat_stasher::deletion_control::OccurrenceInventory::default(),
+                }
+            }
+        };
+        rows.push((name.clone(), row, cfg.repo_root.clone()));
+        reap_remote(cfg, keep_ssh_masters);
+    }
+
+    let unknown = rows
+        .iter()
+        .filter(|(_, preview, _)| {
+            preview.status == chat_stasher::deletion_control::DestinationStatus::Unknown
+        })
+        .count();
+    let would_delete = rows.iter().any(|(_, preview, _)| {
+        preview.status == chat_stasher::deletion_control::DestinationStatus::Found
+    });
+
+    let code = if unknown > 0 {
+        ExitCode::from(3)
+    } else {
+        ExitCode::SUCCESS
+    };
+    if json {
+        let shard_state = |preview: &DestinationPreview| match preview.status {
+            chat_stasher::deletion_control::DestinationStatus::Unknown => {
+                chat_stasher::json_out::CountState::unknown(preview.why.clone().unwrap_or_else(
+                    || "the destination could not be read to completion".to_string(),
+                ))
+            }
+            _ => chat_stasher::json_out::CountState::known(
+                preview.inventory.shard_occurrences as u64,
+            ),
+        };
+        let byte_state = |preview: &DestinationPreview| match preview.status {
+            chat_stasher::deletion_control::DestinationStatus::Unknown => {
+                chat_stasher::json_out::CountState::unknown(preview.why.clone().unwrap_or_else(
+                    || "the destination could not be read to completion".to_string(),
+                ))
+            }
+            _ => {
+                // reason: bytes are tree metadata sizes summed over a complete
+                // walk; the unknown/known vocabulary is kept anyway so the
+                // shape cannot silently become a bare number later.
+                chat_stasher::json_out::CountState::known(preview.inventory.bytes)
+            }
+        };
+        let destinations_json: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(name, preview, root)| {
+                let mut value = serde_json::json!({
+                    "name": name,
+                    "repo_root": root,
+                    "status": match preview.status {
+                        chat_stasher::deletion_control::DestinationStatus::Found => "found",
+                        chat_stasher::deletion_control::DestinationStatus::Absent => "absent",
+                        chat_stasher::deletion_control::DestinationStatus::Unknown => "unknown",
+                    },
+                    "snapshots_in_repo": preview.inventory.snapshots_in_repo,
+                    "snapshots_scanned": if preview.status
+                        == chat_stasher::deletion_control::DestinationStatus::Unknown
+                    {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(preview.inventory.snapshots_scanned)
+                    },
+                    "snapshots_with_target":
+                        preview.inventory.snapshots_with_target.len(),
+                    "shard_occurrences": shard_state(preview),
+                    "bytes": byte_state(preview),
+                    "would_delete": matches!(
+                        preview.status,
+                        chat_stasher::deletion_control::DestinationStatus::Found
+                    ),
+                });
+                if let Some(why) = &preview.why {
+                    value["why"] = serde_json::json!(why);
+                }
+                let snapshots: Vec<serde_json::Value> = preview
+                    .inventory
+                    .snapshots_with_target
+                    .iter()
+                    .map(|snap| {
+                        serde_json::json!({
+                            "snapshot_id": snap.snapshot_id,
+                            "shard_files": snap.shard_files,
+                            "bytes": snap.bytes,
+                        })
+                    })
+                    .collect();
+                value["snapshots"] = serde_json::json!(snapshots);
+                value
+            })
+            .collect();
+        let exit_code_u8 = if unknown > 0 { 3 } else { 0 };
+        let summary = if unknown > 0 {
+            "unknown"
+        } else if would_delete {
+            "would-purge"
+        } else {
+            "absent"
+        };
+        let document = serde_json::json!({
+            "schema_version": 1,
+            "command": "purge",
+            "cli_version": env!("CARGO_PKG_VERSION"),
+            "mode": "dry-run",
+            "session_id": session_id,
+            "machine_partition": target_machine,
+            "scope": "the exact named session id under the named machine partition",
+            "summary": summary,
+            "would_delete_any": would_delete,
+            "destinations": destinations_json,
+            "selected_destinations": rows.len(),
+            "unknown_destinations": unknown,
+            "exit_code": exit_code_u8,
+            "exit_semantics": status_exit_semantics(exit_code_u8),
+        });
+        println!("{}", json_string(&document));
+        return code;
+    }
+
+    println!("[purge] mode           : dry-run (preview; nothing is deleted)");
+    println!("[purge] session        : {session_id}");
+    println!("[purge] machine        : {target_machine}");
+    println!(
+        "[purge] scope          : the exact named session id under the named machine partition"
+    );
+    println!(
+        "[purge] destinations   : {} selected ({})",
+        rows.len(),
+        rows.iter()
+            .map(|(name, _, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for (name, preview, root) in &rows {
+        match preview.status {
+            chat_stasher::deletion_control::DestinationStatus::Found => {
+                println!(
+                    "[purge] destination {name} : status=found shard-occurrences={} bytes={} ({}) across {} of {} snapshot(s)",
+                    preview.inventory.shard_occurrences,
+                    fmt_bytes(preview.inventory.bytes),
+                    preview.inventory.snapshots_with_target.len(),
+                    preview.inventory.snapshots_scanned,
+                    preview.inventory.snapshots_in_repo
+                );
+                for snap in preview.inventory.snapshots_with_target.iter().take(5) {
+                    println!(
+                        "[purge]   snapshot {} : shard-files={} bytes={}",
+                        snap.snapshot_id,
+                        snap.shard_files,
+                        fmt_bytes(snap.bytes)
+                    );
+                }
+                if preview.inventory.snapshots_with_target.len() > 5 {
+                    println!(
+                        "[purge]   and {} more snapshot(s) holding the target (counts above include every occurrence)",
+                        preview.inventory.snapshots_with_target.len() - 5
+                    );
+                }
+            }
+            chat_stasher::deletion_control::DestinationStatus::Absent => {
+                println!(
+                    "[purge] destination {name} : status=absent (a complete read of every one of {} snapshot(s) holds no occurrence)",
+                    preview.inventory.snapshots_in_repo
+                );
+            }
+            chat_stasher::deletion_control::DestinationStatus::Unknown => {
+                let why = preview.why.as_deref().unwrap_or("unread");
+                println!(
+                    "[purge] destination {name} : status=unknown ({why}) — not \"absent\": this destination was not read to completion"
+                );
+            }
+        }
+        println!("[purge]   repo root    : {root}");
+    }
+    println!(
+        "[purge] unknown        : {unknown} of {} selected destination(s)",
+        rows.len()
+    );
+    if unknown > 0 {
+        println!(
+            "[purge] RESULT         : UNKNOWN — {unknown} destination(s) were not read to completion; an absence there proves nothing and nothing was deleted."
+        );
+        println!(
+            "[purge] exit_code=3 — {}/{} destination(s) could not be checked; run again once they are reachable, and treat every count above as partial.",
+            unknown,
+            rows.len()
+        );
+        return code;
+    }
+    if would_delete {
+        println!(
+            "[purge] RESULT         : WOULD-PURGE — a real purge would remove every listed occurrence above, and only those. Applying it is not possible in this build."
+        );
+        println!("[purge] exit_code=0 — every selected destination was read to completion.");
+        return code;
+    }
+    println!(
+        "[purge] RESULT         : ABSENT — every selected destination was read to completion and none holds the target."
+    );
+    println!(
+        "[purge] exit_code=0 — a complete read of every snapshot in every selected destination proved the absence."
+    );
+    code
+}
+
+/// One destination's preview outcome plus the privacy-safe reason an unknown
+/// carries. Counts stay per-destination; no conversation text exists at this
+/// tier (the preview never dumps a shard).
+struct DestinationPreview {
+    status: chat_stasher::deletion_control::DestinationStatus,
+    why: Option<String>,
+    inventory: chat_stasher::deletion_control::OccurrenceInventory,
+}
+
+/// `redact SESSION` — deliberately refused: redaction is the destructive
+/// transaction of a later phase, and the surface exists so asking for it gets
+/// the phase boundary rather than an unknown-flag error. Nothing is read or
+/// changed.
+fn cmd_redact() -> ExitCode {
+    eprintln!("redact: not implemented — refused, and nothing was read or changed.");
+    eprintln!(
+        "redact: redaction is the destructive transaction of a later phase (record the cutoff tombstone, remove the old scoped occurrences, then seal the replacement — ADR-046 draft Phase 4, docs-dev/redaction-and-recollection.md)."
+    );
+    eprintln!(
+        "redact: until that phase ships there is no redact action to run. `purge SESSION` without --confirm previews a whole-session purge; `hide SESSION` hides one session reversibly."
+    );
+    eprintln!(
+        "redact: exit_code=2 — deliberate refusal: the operation does not exist in this build."
+    );
+    ExitCode::from(2)
+}
+
+#[cfg(test)]
+mod api_pull_boundary_tests {
+    use super::*;
+    fn args(account: &str, root: &Path) -> chat_stasher::letta::PullArgs {
+        let cli = parse_cli_on_worker_stack(&[
+            "chat-stasher",
+            "pull",
+            "letta",
+            "--account-id",
+            account,
+            "--inbox",
+            root.join("inbox").to_str().unwrap(),
+            "--state",
+            root.join("state").to_str().unwrap(),
+            "--stage",
+            root.join("stage").to_str().unwrap(),
+            "--machine",
+            "synthetic-machine",
+        ])
+        .unwrap();
+        let Command::Pull(args) = cli.command else {
+            panic!("pull command required")
+        };
+        args
+    }
+    #[test]
+    fn api_pull_boundary_maps_proof_and_source_results_and_resolves_local_home() {
+        let sandbox = test_support::Sandbox::new();
+        let root = sandbox.root();
+        for (incomplete, expected) in [(0, ExitCode::SUCCESS), (1, ExitCode::from(3))] {
+            let code = cmd_api_pull_with(
+                args("synthetic-account", root),
+                &Config::default(),
+                Some(root.as_os_str().to_owned()),
+                |args, _, machine, local| {
+                    assert_eq!(machine, "synthetic-machine");
+                    assert_eq!(local, root.join(".letta/agents"));
+                    assert_eq!(args.inbox, root.join("inbox"));
+                    Ok(chat_stasher::letta::Report {
+                        incomplete,
+                        ..Default::default()
+                    })
+                },
+            );
+            assert_eq!(code, expected);
+        }
+        assert_eq!(
+            cmd_api_pull_with(
+                args("synthetic-account", root),
+                &Config::default(),
+                Some(root.as_os_str().to_owned()),
+                |_, _, _, _| anyhow::bail!("synthetic source unavailable")
+            ),
+            ExitCode::from(3)
+        );
+    }
+    #[test]
+    fn api_pull_boundary_refuses_empty_account_before_capture() {
+        let sandbox = test_support::Sandbox::new();
+        for account in ["", "   "] {
+            let code = cmd_api_pull_with(
+                args(account, sandbox.root()),
+                &Config::default(),
+                Some(sandbox.root().as_os_str().to_owned()),
+                |_, _, _, _| panic!("empty account must be refused before contacting provider"),
+            );
+            assert_eq!(code, ExitCode::from(3));
+        }
+    }
+
+    /// The CLI page-size knob accepts only the band the provider serves;
+    /// the default sits inside it, so an unqualified `pull letta` keeps
+    /// its existing behaviour. The parse runs on the worker stack the
+    /// product's own `main` grants itself ([`parse_cli_on_worker_stack`]):
+    /// clap's derive chain covers every subcommand in one debug frame, and
+    /// on a libtest thread's default stack that frame overflows — an
+    /// abort whose argv, parse and assertions are exactly these.
+    #[test]
+    fn api_pull_page_size_defaults_inside_the_accepted_band() {
+        let root = "/w964-synthetic-root";
+        let parse = |extra: &[&str]| {
+            let inbox = format!("{root}/inbox");
+            let stage = format!("{root}/stage");
+            let mut words: Vec<&str> = vec![
+                "chat-stasher",
+                "pull",
+                "letta",
+                "--account-id",
+                "synthetic-account",
+                "--inbox",
+                inbox.as_str(),
+                "--stage",
+                stage.as_str(),
+            ];
+            words.extend(extra.iter().copied());
+            match parse_cli_on_worker_stack(&words) {
+                Ok(cli) => match cli.command {
+                    Command::Pull(parsed) => Ok(parsed),
+                    _ => panic!("pull command required"),
+                },
+                Err(_) => Err(()),
+            }
+        };
+        assert_eq!(parse(&[]).unwrap().page_size, 100);
+        assert_eq!(parse(&["--page-size", "150"]).unwrap().page_size, 150);
+        assert_eq!(parse(&["--page-size", "200"]).unwrap().page_size, 200);
+        assert!(parse(&["--page-size", "99"]).is_err());
+        assert!(parse(&["--page-size", "201"]).is_err());
+    }
+}
+
+/// LETTA-P3: how the scheduled pass pulls the declared `[pull.letta]`
+/// producer before collect, and what an unread producer does to the pass's
+/// exit code. The producer step is exercised through the seam
+/// `run_once_pass_with` takes — the real binary-level behaviour (config
+/// declaration, ordering of effects, exit codes, run-state record) without a
+/// credential or any network; the wire behaviour of the pull itself (pacing,
+/// `Retry-After`, pending remainders) is proven by the `letta` module's
+/// mock-server tests.
+#[cfg(test)]
+mod run_once_letta_tests {
+    use super::*;
+    use chat_stasher::letta::Report;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Serialises these tests against one another: each redirects the
+    /// process environment into its own sandbox, and cargo runs tests in
+    /// parallel threads of one process. `Redirected::install` is the one
+    /// mutator of *these* variables — XDG_CONFIG_HOME, XDG_DATA_HOME,
+    /// XDG_STATE_HOME, XDG_CACHE_HOME, CHAT_STASHER_RUSTIC_CACHE_DIR,
+    /// CHAT_STASHER_REGISTRY and LETTA_API_KEY — and it restores them on
+    /// drop; it deliberately does not touch HOME or USERPROFILE (which
+    /// `home_redaction_covers_the_windows_home_spelling` mutates under its
+    /// own lock), so this lock protects exactly the variables above, and
+    /// the claim is scoped to them, not to the process environment as a
+    /// whole.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// One synthetic claude-code line with an RFC 3339 timestamp, the same
+    /// shape [run_once_activity_index_test] seals.
+    fn cc_line(ts: &str) -> String {
+        format!(
+            r#"{{"parentUuid":null,"isMeta":null,"sessionId":"s","type":"user","message":{{"role":"user","content":"hi"}},"uuid":"u1","timestamp":"{ts}","cwd":"/x","version":"1.0.31"}}"#
+        )
+    }
+
+    /// Write one sealed shard for `session` under `machine`, bucketed layout.
+    fn write_shard(stage: &Path, machine: &str, session: &str) {
+        let dir = stage
+            .join(store::SESSIONS_DIR)
+            .join(machine)
+            .join(session)
+            .join("000");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("000001.jsonl"),
+            cc_line("2025-01-15T12:34:56.789Z") + "\n",
+        )
+        .unwrap();
+    }
+
+    /// Points every ambient path the pass resolves — data, state, cache
+    /// roots, the harness registry, the rustic metadata cache — into the
+    /// sandbox, restoring what it replaced on drop.
+    struct Redirected {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        restored: bool,
+    }
+    impl Redirected {
+        fn install(
+            sandbox: &test_support::Sandbox,
+            registry: &Path,
+            letta_key: Option<&'static str>,
+        ) -> Self {
+            for dir in [
+                sandbox.config_home(),
+                sandbox.data_home(),
+                sandbox.state_home(),
+                sandbox.cache_home(),
+            ] {
+                fs::create_dir_all(&dir).unwrap();
+            }
+            let mut saved = Vec::new();
+            let mut set = |name: &'static str, value: Option<std::ffi::OsString>| {
+                saved.push((name, std::env::var_os(name)));
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            };
+            set(
+                "XDG_CONFIG_HOME",
+                Some(sandbox.config_home().into_os_string()),
+            );
+            set("XDG_DATA_HOME", Some(sandbox.data_home().into_os_string()));
+            set(
+                "XDG_STATE_HOME",
+                Some(sandbox.state_home().into_os_string()),
+            );
+            set(
+                "XDG_CACHE_HOME",
+                Some(sandbox.cache_home().into_os_string()),
+            );
+            set(
+                "CHAT_STASHER_RUSTIC_CACHE_DIR",
+                Some(sandbox.rustic_cache_dir().into_os_string()),
+            );
+            set(
+                "CHAT_STASHER_REGISTRY",
+                Some(registry.as_os_str().to_owned()),
+            );
+            set("LETTA_API_KEY", letta_key.map(std::ffi::OsString::from));
+            Redirected {
+                saved,
+                restored: false,
+            }
+        }
+    }
+    impl Drop for Redirected {
+        fn drop(&mut self) {
+            if !self.restored {
+                self.restore();
+            }
+        }
+    }
+    impl Redirected {
+        fn restore(&mut self) {
+            while let Some((name, value)) = self.saved.pop() {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            self.restored = true;
+        }
+    }
+
+    /// An empty-harness registry, so the collect step has nothing real to
+    /// read and the pass's own behaviour is the only thing under test.
+    fn empty_registry(sandbox: &test_support::Sandbox) -> PathBuf {
+        let registry = sandbox.root().join("registry.json");
+        fs::write(
+            &registry,
+            r#"{"schema_version":1,"generated":"W964 synthetic","harnesses":[]}"#,
+        )
+        .unwrap();
+        registry
+    }
+
+    /// A config declaring the Letta pull producer plus the shape a test
+    /// needs for a pass that actually pushes: `push_only_if_changed=false`
+    /// so a stage whose only content is the producer's shard still
+    /// publishes, and cache and repo under the sandbox.
+    fn declared_config(sandbox: &test_support::Sandbox, page_size: Option<u64>) -> Config {
+        Config {
+            push_only_if_changed: Some(false),
+            rustic_cache_dir: Some(sandbox.rustic_cache_dir().display().to_string()),
+            pull: Some(config::PullSectionConfig {
+                letta: Some(config::LettaPullConfig {
+                    account_id: Some("synthetic-account".to_string()),
+                    inbox: Some(sandbox.root().join("inbox").display().to_string()),
+                    state: Some(sandbox.root().join("letta-state").display().to_string()),
+                    api_key: None,
+                    pace_ms: None,
+                    budget_seconds: None,
+                    page_size,
+                }),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn one_pass(
+        sandbox: &test_support::Sandbox,
+        config: &Config,
+        hook: &dyn Fn(
+            &chat_stasher::letta::PassPull,
+            &[StoreConfig],
+            &str,
+            &Path,
+        ) -> anyhow::Result<Report>,
+    ) -> (ExitCode, chat_stasher::runstate::RunState) {
+        let stage = sandbox.root().join("stage");
+        run_once_pass_with(
+            config,
+            &stage,
+            Some("synthetic-machine".to_string()),
+            store::DEFAULT_SHARD_BUCKET_CAP,
+            None,
+            Some(sandbox.root().join("repo").display().to_string()),
+            Some(
+                sandbox
+                    .root()
+                    .join("keys")
+                    .join("masterkey.json")
+                    .display()
+                    .to_string(),
+            ),
+            None,
+            &[],
+            false,
+            false,
+            hook,
+        )
+    }
+
+    /// The declared producer is pulled before the collect step: what it
+    /// seals into the stage is counted by this pass's own stage audit and
+    /// archived by this pass's own push — one archive cycle, no second
+    /// command. The hook's shard is the only content, so `stage_shards == 1`
+    /// in the finished record is exactly the ordering witness: the audit that
+    /// counted it runs after collect, and could not have seen the shard if
+    /// the pull ran late.
+    #[test]
+    fn declared_producer_is_pulled_and_archived_within_the_same_pass() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sandbox = test_support::Sandbox::new();
+        let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
+        let session = "claude-code.synthetic-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+        let called = AtomicBool::new(false);
+        let stage = sandbox.root().join("stage");
+        let inbox = sandbox.root().join("inbox");
+        let hook = |pull: &chat_stasher::letta::PassPull,
+                    _pull_destinations: &[StoreConfig],
+                    machine: &str,
+                    hook_stage: &Path|
+         -> anyhow::Result<Report> {
+            assert_eq!(
+                machine, "synthetic-machine",
+                "the pull uses the pass's machine"
+            );
+            assert_eq!(hook_stage, stage, "the pull seals into the pass's stage");
+            assert_eq!(pull.account, "synthetic-account");
+            assert_eq!(pull.inbox, inbox);
+            assert_eq!(
+                pull.page_size, 150,
+                "a declared page size inside the band reaches the pull"
+            );
+            write_shard(hook_stage, machine, session);
+            called.store(true, Ordering::SeqCst);
+            Ok(Report::default())
+        };
+        let (code, state) = one_pass(&sandbox, &declared_config(&sandbox, Some(150)), &hook);
+        assert!(
+            called.load(Ordering::SeqCst),
+            "the declared producer must be pulled"
+        );
+        assert!(
+            code == ExitCode::SUCCESS,
+            "a fully-proven pull lets the pass complete: {code:?}"
+        );
+        assert_eq!(
+            state.stage_shards, 1,
+            "the pull's seal is audited by this pass"
+        );
+        assert_eq!(
+            state.shards_written, 0,
+            "collect itself sealed nothing here"
+        );
+        assert_eq!(state.outcome, chat_stasher::runstate::RunOutcome::Completed);
+        assert_eq!(state.failed_step, None);
+        assert!(state.snapshot_created);
+        // What the producer sealed really left this pass: the repository
+        // exists and holds the session the pull staged.
+        assert!(sandbox.root().join("repo").exists());
+        let sealed = stage
+            .join(store::SESSIONS_DIR)
+            .join("synthetic-machine")
+            .join(session);
+        assert!(
+            sealed.exists(),
+            "the sealed session directory must survive the pass"
+        );
+    }
+
+    /// The pull's archive proof checks the repository THIS pass pushes to —
+    /// the destination the pass's own overrides resolved — and not whatever
+    /// the config would default the standalone command to. Without that,
+    /// a pass named `--destination x` would prove its receipts against a
+    /// repository it never archived to, and its unproven-receipts branch
+    /// would freeze the producer against a repo it cannot read.
+    #[test]
+    fn the_pull_proof_uses_the_passs_own_resolved_destination() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sandbox = test_support::Sandbox::new();
+        let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
+        let repo = sandbox.root().join("repo");
+        let key_file = sandbox.root().join("keys").join("masterkey.json");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        let hook = move |_pull: &chat_stasher::letta::PassPull,
+                         pull_destinations: &[StoreConfig],
+                         _machine: &str,
+                         _stage: &Path|
+              -> anyhow::Result<Report> {
+            *recorder
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = pull_destinations.to_vec();
+            Ok(Report::default())
+        };
+        let stage = sandbox.root().join("stage");
+        run_once_pass_with(
+            &declared_config(&sandbox, None),
+            &stage,
+            Some("synthetic-machine".to_string()),
+            store::DEFAULT_SHARD_BUCKET_CAP,
+            None,
+            Some(repo.display().to_string()),
+            Some(key_file.display().to_string()),
+            None,
+            &[],
+            false,
+            false,
+            &hook,
+        );
+        let recorded = seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            recorded.len(),
+            1,
+            "the pass hands the pull one resolved destination, not the whole declared set"
+        );
+        assert_eq!(
+            recorded[0].key_file, key_file,
+            "the pull proof settles against the pass's own key file override"
+        );
+    }
+
+    /// A return-shape tour of the producer step: an unread remainder (an
+    /// incomplete report) and an outright refusal (an error) both keep the
+    /// pass's local archive work — the snapshot is still created, which the
+    /// record says — while failing the pass with exit 3, the "did not
+    /// finish reading" code, never a clean 0.
+    #[test]
+    fn unread_producer_keeps_the_local_push_but_fails_the_pass_with_exit_3() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for shape in 0..=1 {
+            let sandbox = test_support::Sandbox::new();
+            let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
+            let session = "claude-code.synthetic-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+            let hook = move |_pull: &chat_stasher::letta::PassPull,
+                             _pull_destinations: &[StoreConfig],
+                             machine: &str,
+                             hook_stage: &Path|
+                  -> anyhow::Result<Report> {
+                write_shard(hook_stage, machine, session);
+                match shape {
+                    0 => Ok(Report {
+                        incomplete: 1,
+                        ..Default::default()
+                    }),
+                    _ => anyhow::bail!("synthetic producer refusal"),
+                }
+            };
+            let (code, state) = one_pass(&sandbox, &declared_config(&sandbox, None), &hook);
+            assert_eq!(
+                code,
+                ExitCode::from(3),
+                "an unread producer keeps the pass at exit 3: {code:?}"
+            );
+            assert_eq!(
+                state.outcome,
+                chat_stasher::runstate::RunOutcome::Error,
+                "the pass is a failed pass, not a quiet one"
+            );
+            assert_eq!(state.failed_step.as_deref(), Some("pull-letta"));
+            assert!(
+                state.snapshot_created,
+                "the unchanged local duty still pushed a snapshot, and the record says so"
+            );
+            assert_eq!(state.stage_shards, 1);
+            assert!(sandbox.root().join("repo").exists());
+        }
+    }
+
+    /// Without a declaration the pass is exactly what it was: no producer
+    /// step, `letta_pull=0` in the phases record, the ordinary NOOP.
+    #[test]
+    fn undeclared_producer_leaves_the_pass_unchanged() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sandbox = test_support::Sandbox::new();
+        let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
+        let hook = |_pull: &chat_stasher::letta::PassPull,
+                    _pull_destinations: &[StoreConfig],
+                    _machine: &str,
+                    _stage: &Path|
+         -> anyhow::Result<Report> {
+            panic!("no declared producer means no producer step");
+        };
+        let config = Config {
+            push_only_if_changed: Some(false),
+            ..Default::default()
+        };
+        let (code, state) = one_pass(&sandbox, &config, &hook);
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(state.outcome, chat_stasher::runstate::RunOutcome::Noop);
+        assert_eq!(state.failed_step, None);
+        assert_eq!(state.phases.letta_pull_ms, 0);
+        assert!(!state.snapshot_created);
+    }
+
+    /// The multi-destination timer's recurring case: the producer's state
+    /// lock is already held by a sibling pass, so this pass deferred rather
+    /// than read the producer. The deferral is recorded as its own fact —
+    /// `pull_letta_deferred`, never `pull_letta_unread` or a `failed_step`
+    /// — the local cycle proceeds (stage audit counts what the winner
+    /// sealed, the push runs), and the pass exits clean: the winning pass
+    /// reports the producer's own result that hour, so this one never
+    /// claims an unread it did not see, and `status` renders the
+    /// hand-off's own sentence instead of the failure wording.
+    #[test]
+    fn deferred_producer_is_recorded_not_failed() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sandbox = test_support::Sandbox::new();
+        let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
+        let session = "claude-code.synthetic-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+        let hook = move |_pull: &chat_stasher::letta::PassPull,
+                         _pull_destinations: &[StoreConfig],
+                         machine: &str,
+                         hook_stage: &Path|
+              -> anyhow::Result<Report> {
+            // The winner's work is already in the shared stage: the
+            // deferring pass never touches the producer, but its local
+            // cycle still counts and pushes what the stage holds.
+            write_shard(hook_stage, machine, session);
+            Err(anyhow::Error::new(chat_stasher::letta::ProducerBusy))
+        };
+        let (code, state) = one_pass(&sandbox, &declared_config(&sandbox, None), &hook);
+        assert_eq!(
+            code,
+            ExitCode::SUCCESS,
+            "a deferred producer is a clean pass, not exit 3"
+        );
+        assert_eq!(
+            state.outcome,
+            chat_stasher::runstate::RunOutcome::Completed,
+            "the hand-off is kept out of the failure column by the local duty's own result"
+        );
+        assert!(!state.pull_letta_unread, "nothing was left unread");
+        assert!(
+            state.pull_letta_deferred,
+            "the deferral is the record's own fact"
+        );
+        assert_eq!(state.failed_step, None, "no local step failed");
+        assert!(
+            state.snapshot_created,
+            "the local duty still archived, and the record says so"
+        );
+        assert_eq!(
+            state.stage_shards, 1,
+            "the winner's stage content is counted"
+        );
+        assert!(sandbox.root().join("repo").exists());
+        // And the record renders as the hand-off's sentence, not the
+        // failure pair: the first line is the archive cycle's health, the
+        // producer's line names the deferral and no fix, and the pass's
+        // verdict never claims an unread producer.
+        let verdict = chat_stasher::runstate::summarize(
+            &chat_stasher::runstate::RunStateRead::Present(state.clone()),
+            state.finished_at_unix,
+            3600 * 2,
+        );
+        assert!(
+            verdict.healthy,
+            "a deferred producer keeps the verdict green: {verdict:?}"
+        );
+        let letta = verdict
+            .letta
+            .as_ref()
+            .expect("the deferral is rendered, never silent");
+        assert!(letta.sentence.contains("deferred"));
+        assert!(letta.fix.is_none(), "a hand-off needs no fix: {letta:?}");
+        assert!(
+            !letta.sentence.contains("did not finish reading"),
+            "the deferral is not worded as a read failure: {letta:?}"
+        );
+    }
+
+    /// A declaration that cannot run names its key, runs no pull, and still
+    /// holds the pass at exit 3 rather than ignoring the producer it cannot
+    /// honour — the opposite failure would be a declared producer that
+    /// silently never runs while the pass reports health.
+    #[test]
+    fn invalid_declaration_runs_no_pull_and_fails_the_pass_with_exit_3() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (account, page) in [
+            (Some("synthetic-account"), Some(500u64)),
+            (None, Some(100u64)),
+        ] {
+            let sandbox = test_support::Sandbox::new();
+            let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
+            let hook = |_pull: &chat_stasher::letta::PassPull,
+                        _pull_destinations: &[StoreConfig],
+                        _machine: &str,
+                        _stage: &Path|
+             -> anyhow::Result<Report> {
+                panic!("an invalid declaration must not reach a pull");
+            };
+            let mut config = declared_config(&sandbox, page);
+            config
+                .pull
+                .as_mut()
+                .unwrap()
+                .letta
+                .as_mut()
+                .unwrap()
+                .account_id = account.map(str::to_string);
+            let (code, state) = one_pass(&sandbox, &config, &hook);
+            assert_eq!(code, ExitCode::from(3));
+            assert_eq!(state.outcome, chat_stasher::runstate::RunOutcome::Error);
+            assert_eq!(state.failed_step.as_deref(), Some("pull-letta"));
+            assert!(!state.snapshot_created, "nothing was here to push");
+            assert_eq!(state.phases.letta_pull_ms, 0);
+            assert!(
+                !sandbox.root().join("letta-state").exists(),
+                "an invalid declaration must not have created producer state"
+            );
+        }
+    }
+
+    /// The production pull step really is the seam `run_once_pass` wires in.
+    /// With no credential in the environment it refuses before any network
+    /// attempt, which both proves the wiring and pins the refusal an
+    /// undeclared `LETTA_API_KEY` timer pass will see every hour.
+    #[test]
+    fn production_pull_step_refuses_without_a_credential() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sandbox = test_support::Sandbox::new();
+        let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
+        let (code, state) = one_pass(
+            &sandbox,
+            &declared_config(&sandbox, None),
+            &run_once_letta_pull,
+        );
+        assert_eq!(
+            code,
+            ExitCode::from(3),
+            "a declared producer with no credential is a pass that did not finish reading"
+        );
+        assert_eq!(state.failed_step.as_deref(), Some("pull-letta"));
+        assert!(
+            !sandbox.root().join("letta-state").exists(),
+            "no credential means no producer state was created"
+        );
+    }
+}
+
+// The two helpers below sit at the end of the file on purpose: nothing is
+// cited after this point (`docs-dev/citations.lock` anchors at most at line
+// 18310 of this file), so growing code here cannot drift a citation.
+
+/// Parse `argv` exactly as `main` does, on the same stack budget `main`
+/// already grants itself.
+///
+/// Why a thread at all: clap's derive walks every subcommand and argument in
+/// one builder frame, a debug build neither inlines nor reuses stack slots,
+/// and that chain measured ~944 KiB on arm64 debug in 2026-08-28 (see
+/// [`WORKER_STACK_BYTES`] above) and has grown with every subcommand since.
+/// `main` moved to a 16 MiB worker thread for exactly this reason. The bin's
+/// unit tests bypass `main`, and a libtest thread's default stack is small
+/// enough that CI run 38986096075 aborted inside
+/// `api_pull_boundary_tests` on both Ubuntu and Windows after four new
+/// subcommands (hide/unhide/purge/redact) pushed the chain past what the
+/// test thread could hold — while the same tests stayed green locally only
+/// because arm64 debug frames are smaller than x86-64 ones. What a test
+/// exercises is unchanged: the same argv goes through the same
+/// `Cli::try_parse_from`; only the stack under it matches what the product
+/// already promises itself. Panics from inside the parse re-panic on the
+/// test thread through `resume_unwind`, so failures keep their backtraces.
+#[cfg(test)]
+fn parse_cli_on_worker_stack(argv: &[&str]) -> Result<Cli, clap::Error> {
+    let owned: Vec<std::ffi::OsString> = argv
+        .iter()
+        .map(|arg| std::ffi::OsString::from(*arg))
+        .collect();
+    let handle = std::thread::Builder::new()
+        .stack_size(WORKER_STACK_BYTES)
+        .spawn(move || Cli::try_parse_from(owned))
+        .expect("spawn the worker-stack parse thread");
+    match handle.join() {
+        Ok(parsed) => parsed,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// [`clap::CommandFactory::command`] on the same budget: building the
+/// subcommand tree is the same one giant debug frame the parse helper above
+/// exists for, so tests that inspect the built command (its options, its
+/// help text) run that build on the worker stack too.
+#[cfg(test)]
+fn cli_command_on_worker_stack() -> clap::Command {
+    use clap::CommandFactory;
+    let handle = std::thread::Builder::new()
+        .stack_size(WORKER_STACK_BYTES)
+        .spawn(Cli::command)
+        .expect("spawn the worker-stack command-build thread");
+    match handle.join() {
+        Ok(command) => command,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// W1047f Medium 5: the entry-level unknown a source can hand `collect` — a
+/// source whose recognized-session count could not be taken at all
+/// (`record_count = None`, e.g. a CodeBuddy projects root that exists but
+/// cannot be listed) — is carried as prose and tallies in the printed report
+/// and in nothing else. The chain this pins end to end, from the decision
+/// functions' own inputs: `archive_gaps` keeps a `None` count out of the gap
+/// vector, the printed report narrates the unknown
+/// ([`collect_narrates_unknown`]), and the exit ladder answers 0 — the pass
+/// finished and no absence it carries proves an attempt failed. The
+/// integration half (a real unlistable CodeBuddy root producing exactly this
+/// report shape) lives beside the codebuddy scanner suite.
+#[cfg(test)]
+mod collect_exit_tests {
+    use super::*;
+
+    #[test]
+    fn an_entry_level_unknown_narrates_and_exits_zero() {
+        let report = chat_stasher::collect::CollectReport {
+            // The one field the scanner realistically fills for an
+            // unlistable root: the unreadable-entry tally; every read,
+            // gap and error field stays empty because nothing was
+            // recognized and nothing failed.
+            scanner_unreadable_entry_count: 1,
+            ..chat_stasher::collect::CollectReport::default()
+        };
+        assert!(
+            collect_narrates_unknown(&report),
+            "the printed report's scan-partial line carries the unknown"
+        );
+        assert!(report.archive_gaps.is_empty());
+        assert_eq!(
+            collect_exit_code(&report),
+            ExitCode::SUCCESS,
+            "no gap, no failure, no skip: the pass finished — the unknown rides the prose"
+        );
+    }
+
+    #[test]
+    fn the_exit_ladder_keeps_its_precedence_pinnable() {
+        // A recognized-but-unrecorded shortfall is 3; a session that was
+        // tried and failed outranks it as 1.
+        let partial = chat_stasher::collect::CollectReport {
+            archive_gaps: vec![chat_stasher::scanner::ArchiveGap {
+                harness_id: "codebuddy".to_string(),
+                display_name: "CodeBuddy".to_string(),
+                recognized_sessions: Some(2),
+                session_records: 1,
+            }],
+            ..chat_stasher::collect::CollectReport::default()
+        };
+        assert_eq!(collect_exit_code(&partial), ExitCode::from(3));
+        let failed = chat_stasher::collect::CollectReport {
+            errors: vec![chat_stasher::collect::CollectError {
+                session_prefix: "synthetic-prefix".to_string(),
+                source_path_sha256: "synthetic-digest".to_string(),
+            }],
+            ..partial.clone()
+        };
+        assert_eq!(
+            collect_exit_code(&failed),
+            ExitCode::FAILURE,
+            "a failed read outranks an archive gap"
+        );
+        // An entry-level unknown beside the gap changes neither arm's code.
+        let partial_with_unknown = chat_stasher::collect::CollectReport {
+            scanner_unreadable_entry_count: 1,
+            ..partial
+        };
+        assert_eq!(collect_exit_code(&partial_with_unknown), ExitCode::from(3));
+        assert!(collect_narrates_unknown(&partial_with_unknown));
     }
 }

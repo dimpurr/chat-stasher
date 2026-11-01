@@ -56,10 +56,34 @@ pub(crate) fn write_shard(
     bucket_cap: usize,
     source: ShardSource<'_>,
 ) -> anyhow::Result<ShardWrite> {
+    write_shard_in_dir(
+        &store::session_shard_dir(stage, machine, id),
+        bucket_cap,
+        source,
+        &[id],
+        stage,
+    )
+}
+
+/// [`write_shard`] installed into an already-resolved shard directory.
+///
+/// The dedup, bucket, sequence-counter and atomic-install mechanics are the
+/// same for every shard set; only the directory differs. That is what lets a
+/// machine log (ADR-053 D4) be sealed "with the existing shard writer" and not
+/// with a second implementation of it. `identity` and `guard_root` are the
+/// W306 fixture-write fail-safe's inputs: the identities a caller may write
+/// under, and the root the write lands in.
+pub(crate) fn write_shard_in_dir(
+    dir: &Path,
+    bucket_cap: usize,
+    source: ShardSource<'_>,
+    identity: &[&str],
+    guard_root: &Path,
+) -> anyhow::Result<ShardWrite> {
     let framed;
     let raw = match &source {
         ShardSource::Inbox(lines) => {
-            crate::test_identity_guard::refuse_fixture_write(&[id], stage)?;
+            crate::test_identity_guard::refuse_fixture_write(identity, guard_root)?;
             framed = lines
                 .iter()
                 .flat_map(|line| line.as_bytes().iter().copied().chain([b'\n']))
@@ -68,10 +92,9 @@ pub(crate) fn write_shard(
         }
         ShardSource::Store { raw, .. } | ShardSource::Active { raw, .. } => raw,
     };
-    let dir = store::session_shard_dir(stage, machine, id);
     // Active-file sealing historically creates the bucket only after dedup.
     if !matches!(source, ShardSource::Active { .. }) {
-        fs::create_dir_all(&dir)?;
+        fs::create_dir_all(dir)?;
     }
     // Restore reproduces the archive's physical shard set, including repeated
     // historical shards. A verified source delta may also repeat earlier bytes.
@@ -86,15 +109,15 @@ pub(crate) fn write_shard(
         }
     );
     if dedup {
-        if let Some(existing) = store::find_duplicate_shard(stage, machine, id, raw)? {
+        if let Some(existing) = store::find_duplicate_shard_in_dir(dir, raw)? {
             return Ok(ShardWrite::Existing(existing));
         }
     }
     if matches!(source, ShardSource::Inbox(_)) {
-        clean_stale_tmp(&dir)?;
+        clean_stale_tmp(dir)?;
     }
-    let seq = store::next_shard_seq(stage, machine, id)?;
-    let path = store::shard_path_with_cap(stage, machine, id, seq, bucket_cap);
+    let seq = store::next_shard_seq_in_dir(dir)?;
+    let path = store::shard_path_in_dir(dir, seq, bucket_cap);
     let parent = path.parent().expect("shard path has bucket parent");
     fs::create_dir_all(parent)?;
     if let ShardSource::Active { path: active, .. } = source {
@@ -103,6 +126,7 @@ pub(crate) fn write_shard(
         }
         fs::rename(active, &path)
             .with_context(|| format!("seal rename {} -> {}", active.display(), path.display()))?;
+        record_shard_fact(dir, seq, raw);
         return Ok(ShardWrite::Allocated(seq));
     }
     let inbox = matches!(source, ShardSource::Inbox(_));
@@ -159,7 +183,24 @@ pub(crate) fn write_shard(
     } else {
         renamed?;
     }
+    record_shard_fact(dir, seq, raw);
     Ok(ShardWrite::Allocated(seq))
+}
+
+/// Record the identity of the shard that just landed (SYNC-D): the digest the
+/// activity index compares between builds, written while the freshly sealed
+/// bytes are still in hand. Best-effort on purpose — the shard is already
+/// durable at this point, and a record that fails to land only costs the next
+/// index build a body re-read, so it must never fail the seal that produced
+/// a complete shard.
+fn record_shard_fact(dir: &Path, seq: u64, raw: &[u8]) {
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "A recording failure is deliberately reported nowhere: the best \
+                  effort is the whole contract, and the fallback (the next build \
+                  re-reads the body) is both correct and the historical behaviour."
+    )]
+    let _ = crate::shard_facts::record_in_dir(dir, &crate::shard_facts::fact_for(seq, raw));
 }
 
 /// Remove shard temp stubs left by an interrupted seal.

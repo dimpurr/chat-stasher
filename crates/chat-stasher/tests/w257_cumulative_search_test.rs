@@ -79,6 +79,11 @@ fn named(dir: &Path, name: &str) -> NamedStore {
     NamedStore {
         name: name.to_string(),
         cfg: store_config(dir, name),
+        // ADR-060: the proof consults the must-prove set; these tests
+        // exercise the archive mechanics, so their destinations enter as
+        // healthy the way a real classification after a successful push
+        // would have them.
+        health: chat_stasher::destdiag::DestinationHealth::Healthy,
     }
 }
 
@@ -243,7 +248,7 @@ fn fixture_with_a_damaged_newest_snapshot(damage: bool) -> Fixture {
     // The real thing: the destination proves it holds both bodies, so the stage
     // gives them up. This is what leaves the newest snapshot body-less.
     let dests = vec![named(dir.path(), "repo")];
-    let report = stagereclaim::reclaim_stage(&stage, &dests, true).unwrap();
+    let report = stagereclaim::reclaim_stage(&stage, &dests, true, None).unwrap();
     assert!(!report.blocked(), "reclaim was blocked: {report:?}");
     assert_eq!(
         report.reclaimed.len(),

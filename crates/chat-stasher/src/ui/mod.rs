@@ -282,6 +282,13 @@ impl UiSession {
 pub struct DestinationState {
     /// The name the user typed in `--destination`, never a repository path.
     pub label: String,
+    /// The behindness sentence a serving local mirror owes where reads
+    /// happen (ADR-062 D3: the ui shows "the local copy as of HH:MM",
+    /// 47 §5.5's own wording). `None` for
+    /// every destination with no mirror serving it — a page that named the
+    /// mirror a machine does not have would be noise, and one that named it
+    /// without the copy being behind would be noise twice.
+    pub mirror: Option<String>,
     pub snapshots_scanned: usize,
     pub snapshots_in_repo: usize,
     /// Sessions this destination held, before any filter and before the merge.
@@ -961,7 +968,13 @@ pub(super) fn param<'a>(params: &'a Query, key: &str) -> Option<&'a str> {
 /// and resolved by the *same* [`SelectorArgs::resolve`], so a query string can
 /// express exactly what a command line can and nothing more. A value that
 /// cannot be resolved is a usage error — reported as a 400, never as "0 rows",
-/// because a typo must not be dressed up as a measurement.
+/// because a typo must not be dressed up as a measurement. A `surface`
+/// parameter is held to the same standard as the command-line flag: it must
+/// be one the registry declares in its `dimensions.surfaces` union, so a
+/// link a user hand-edited into a typo comes back as a refused query rather
+/// than a dashboard that quietly matched nothing (DSK-5); the dashboard's own
+/// links only ever carry a value the launch flags or the URL already named,
+/// so nothing the page itself generates can fail this check.
 pub fn selector_from_query(params: &Query) -> Result<Resolved, UsageError> {
     let harness = param(params, "harness").map(|h| {
         h.split(',')
@@ -969,7 +982,7 @@ pub fn selector_from_query(params: &Query) -> Result<Resolved, UsageError> {
             .map(|p| p.to_string())
             .collect::<Vec<_>>()
     });
-    SelectorArgs {
+    let args = SelectorArgs {
         session: param(params, "session").map(str::to_string),
         machine: param(params, "machine").map(str::to_string),
         harness,
@@ -981,8 +994,8 @@ pub fn selector_from_query(params: &Query) -> Result<Resolved, UsageError> {
         surface: param(params, "surface")
             .or_else(|| param(params, "sub_surface"))
             .map(str::to_string),
-    }
-    .resolve()
+    };
+    crate::scanner::resolve_selector_flags(&args)
 }
 
 // ------------------------------------------------------------------- paging
@@ -2989,6 +3002,64 @@ mod tests {
         assert!(html.contains("last tick not recorded"), "{html}");
     }
 
+    /// W933 (EXTA-a3) · A quiet install whose own record says the backfill
+    /// switch was off went quiet by choice, not by fault, and the page says
+    /// so in words rather than in the raw `disabled` code. A record that
+    /// carries no reason gets none invented for it: unknown stays unknown.
+    #[test]
+    fn extensions_details_names_the_switched_off_backfill_and_invents_no_reason() {
+        let mut data = fixture::data();
+        data.local_machine_id = Some("Machine 1".to_string());
+        data.extension_installs = vec![
+            serde_json::json!({
+                "install_id": "synthetic-choice",
+                "machine": "Machine 1",
+                "browser": "Chrome",
+                "profile_label": "Personal",
+                "extension_version": "0.2.0",
+                "reported_at": "2026-09-20T12:00:00Z",
+                "stale": true,
+                "tick_ran": false,
+                "tick_reason": "disabled",
+                "tick_stopped": "disabled",
+                "tick_halted": null,
+                "platforms": []
+            }),
+            serde_json::json!({
+                "install_id": "synthetic-unexplained",
+                "machine": "Machine 1",
+                "browser": "Arc",
+                "profile_label": "Work",
+                "extension_version": "0.2.0",
+                "reported_at": "2026-09-20T12:00:00Z",
+                "stale": true,
+                "tick_ran": false,
+                "platforms": []
+            }),
+        ];
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        let item = |label: &str| {
+            html.split("<li>")
+                .find(|item| item.starts_with(&format!("<b>{label}</b>")))
+                .unwrap_or_else(|| panic!("{label} has no details line: {html}"))
+                .to_string()
+        };
+        // The choice is named in words; the raw code is not what the reader
+        // is left with.
+        let choice = item("Chrome · Personal");
+        assert!(
+            choice.contains("last tick did not run (backfill switch was off)"),
+            "{html}"
+        );
+        assert!(!choice.contains("did not run (disabled)"), "{html}");
+        // The reason-less record keeps its bare sentence — the switch
+        // explanation belongs to the record that carries it, not to every
+        // quiet install.
+        let unexplained = item("Arc · Work");
+        assert!(unexplained.contains("last tick did not run"), "{html}");
+        assert!(!unexplained.contains("backfill switch"), "{html}");
+    }
+
     #[test]
     fn extensions_view_links_only_a_verified_local_profile_to_open_action() {
         let mut data = fixture::data();
@@ -3020,6 +3091,132 @@ mod tests {
             .body
             .contains("An exact browser profile match is unavailable"));
         assert!(!response.body.contains("/open-extension?"));
+    }
+
+    /// Two installs of one browser that nobody has named are two rows a reader can
+    /// point at, not one row printed twice — and the handle that tells them apart
+    /// is the install's own id, because the page may not guess which browser
+    /// profile either record came from. An install the reader *has* named needs
+    /// nothing appended, and a record with no readable id says so instead of going
+    /// blank.
+    #[test]
+    fn unnamed_installs_of_one_browser_print_two_rows_the_reader_can_tell_apart() {
+        let mut data = fixture::data();
+        data.extension_installs = vec![
+            serde_json::json!({
+                "install_id": "aaaaaaaa-0000-4000-8000-000000000001",
+                "machine": "Machine 1",
+                "browser": "Chrome",
+                "profile_label": null,
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": true,
+                "platforms": []
+            }),
+            serde_json::json!({
+                "install_id": "bbbbbbbb-0000-4000-8000-000000000002",
+                "machine": "Machine 1",
+                "browser": "Chrome",
+                "profile_label": null,
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": []
+            }),
+            serde_json::json!({
+                "install_id": "cccccccc-0000-4000-8000-000000000003",
+                "machine": "Machine 1",
+                "browser": "Arc",
+                "profile_label": "Work",
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": []
+            }),
+            // A legacy record whose key could not be read: kept, not dropped, so
+            // the row has to say what it cannot distinguish itself with.
+            serde_json::json!({
+                "machine": "Machine 1",
+                "browser": "Firefox",
+                "profile_label": null,
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": []
+            }),
+            // The host accepts a blank label, and a blank is nobody's name: it
+            // reads as the absence of one, not as an empty label.
+            serde_json::json!({
+                "install_id": "dddddddd-0000-4000-8000-000000000004",
+                "machine": "Machine 1",
+                "browser": "Edge",
+                "profile_label": "",
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": []
+            }),
+        ];
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        assert!(
+            html.contains("<td>Chrome · Unnamed profile · <span class=mono>#aaaaaaaa</span></td>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<td>Chrome · Unnamed profile · <span class=mono>#bbbbbbbb</span></td>"),
+            "{html}"
+        );
+        // Neither row is the other's copy: the label a reader would read aloud is
+        // unique to the row, and it appears exactly once as a row label.
+        assert_eq!(
+            html.matches("<td>Chrome · Unnamed profile").count(),
+            2,
+            "{html}"
+        );
+        // A name the reader typed is already a distinguisher, so nothing is
+        // appended to it.
+        assert!(html.contains("<td>Arc · Work</td>"), "{html}");
+        // And the absence of an id is a sentence, not a blank.
+        assert!(
+            html.contains("<td>Firefox · Unnamed profile · install id not recorded</td>"),
+            "{html}"
+        );
+        assert!(
+            !html.contains("<td>Firefox · Unnamed profile · <span"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<td>Edge · Unnamed profile · <span class=mono>#dddddddd</span></td>"),
+            "{html}"
+        );
+    }
+
+    /// The order of two rows that differ only by the install id they print follows
+    /// that printed name, not the order the two records happened to be read off
+    /// disk — otherwise the same table swaps its rows between two renders.
+    #[test]
+    fn unnamed_rows_of_one_browser_order_by_the_install_id_they_print() {
+        let unnamed = |id: &str| {
+            serde_json::json!({
+                "install_id": id,
+                "machine": "Machine 1",
+                "browser": "Chrome",
+                "profile_label": null,
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": []
+            })
+        };
+        let mut data = fixture::data();
+        // Deliberately the wrong way round: the arrival order is the thing the
+        // sort must not depend on.
+        data.extension_installs = vec![
+            unnamed("bbbbbbbb-0000-4000-8000-000000000002"),
+            unnamed("aaaaaaaa-0000-4000-8000-000000000001"),
+        ];
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        let first = html
+            .find("<td>Chrome · Unnamed profile · <span class=mono>#aaaaaaaa")
+            .unwrap_or_else(|| panic!("{html}"));
+        let second = html
+            .find("<td>Chrome · Unnamed profile · <span class=mono>#bbbbbbbb")
+            .unwrap_or_else(|| panic!("{html}"));
+        assert!(first < second, "{html}");
     }
 
     #[test]
@@ -4241,7 +4438,10 @@ mod tests {
     }
 
     /// A filter that cannot be resolved is a usage error — a 400, never a list
-    /// of zero rows, which a reader would take for a measurement.
+    /// of zero rows, which a reader would take for a measurement. The surface
+    /// parameter answers to the same rule (DSK-5): a value the registry does
+    /// not declare can never match a session, so it is refused here exactly
+    /// like a date that is not a date.
     #[test]
     fn an_unresolvable_filter_is_a_usage_error_never_zero_rows() {
         let d = fixture::data();
@@ -4249,6 +4449,7 @@ mod tests {
             "day=yesterday",
             "day=2026-02-30",
             "since=2026-03-01&until=2026-01-01",
+            "surface=not-a-surface",
         ] {
             let r = req(&format!("/sessions?{bad}"), &d, &NoContent);
             assert_eq!(r.status, 400, "`{bad}` must be a usage error");
@@ -4258,6 +4459,11 @@ mod tests {
             );
         }
         assert_eq!(req("/sessions?day=2026-01-15", &d, &NoContent).status, 200);
+        assert_eq!(
+            req("/sessions?surface=cli", &d, &NoContent).status,
+            200,
+            "a surface the registry declares is a resolvable filter"
+        );
     }
 
     /// The query string accepts exactly the flags `search` accepts, and no more.
@@ -5345,6 +5551,188 @@ mod tests {
             ),
             "one destination still gets its ready-to-copy command: {html}"
         );
+    }
+
+    /// The behindness note a serving mirror owes where reads happen
+    /// (ADR-062 D3; 47 §5.5's "local copy as of HH:MM"): the sentence renders on
+    /// the pages a dashboard actually reads, names its destination when
+    /// several are merged, and renders **nothing** for a destination no
+    /// mirror serves — a note about a read policy the machine does not have
+    /// would be noise on every page, which is the same reason the CLI's
+    /// mirror line is absent for unconfigured machines.
+    #[test]
+    fn the_mirror_behindness_note_renders_where_reads_happen() {
+        let mut data = data_of(vec![fixture::hit_for("m-1", "deepseek.s1")]);
+        for target in ["/", "/sessions"] {
+            let body = req(target, &data, &NoContent).body;
+            assert!(
+                !body.contains("local copy"),
+                "no mirror serving, no note on {target}"
+            );
+        }
+        data.destinations[0].mirror = Some(
+            "local copy as of 02:07 UTC — the mirror serves what it holds; the remote answers \
+             what it lacks"
+                .to_string(),
+        );
+        for target in ["/", "/sessions"] {
+            let body = req(target, &data, &NoContent).body;
+            assert!(
+                body.contains("local copy as of 02:07 UTC"),
+                "the note travels to {target}"
+            );
+        }
+        // With several destinations each sentence belongs to its copy, so
+        // the reader never has to guess whose copy is how old. And
+        // dest-two's sentence travels from a real `mirror-progress.json`
+        // record through the same builder the ui production path uses
+        // (`behindness_sentence`), not as a hand-built stand-in — the
+        // first-fill loud branch is what ships to the page (rev2 ⑥:
+        // producing it began in `mirror_read`'s own tests).
+        let mut merged = UiData::from_reports(
+            &[
+                DestinationRead {
+                    label: "dest-one".into(),
+                    outcome: Ok(&fixture::report()),
+                },
+                DestinationRead {
+                    label: "dest-two".into(),
+                    outcome: Ok(&fixture::report()),
+                },
+            ],
+            Selector::default(),
+            NOW,
+        );
+        let progress_sb = tempfile::TempDir::new().unwrap();
+        let progress_home = progress_sb.path().join("state");
+        std::fs::create_dir_all(&progress_home).unwrap();
+        std::fs::write(
+            crate::mirror::mirror_progress_path(&progress_home),
+            serde_json::to_vec(&crate::mirror::MirrorProgress {
+                version: crate::mirror::MIRROR_PROGRESS_VERSION,
+                mirror_of: "dest-two".to_string(),
+                round_finished_at_unix: 4,
+                complete: false,
+                outcome: "stopped".to_string(),
+                outcome_note: None,
+                remote_total_bytes: 10_000,
+                mirror_bytes: 7_000,
+                remote_files: 90,
+                mirror_files: 63,
+                orphan_files: None,
+                orphan_bytes: None,
+                downloaded_bytes: None,
+                downloaded_files: None,
+                torn_files: 0,
+                torn_bytes: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        merged.destinations[1].mirror = Some(crate::mirror_read::behindness_sentence(
+            &progress_home,
+            "dest-two",
+        ));
+        let body = req("/sessions", &merged, &NoContent).body;
+        assert!(
+            // the apostrophe arrives escaped like every other interpolated
+            // character — the sentence is rendered as text, never markup
+            body.contains(
+                "<b>dest-two</b> — local copy&#39;s first sync is in progress: downloaded unknown \
+                 (the round that wrote the progress record did not measure the bytes on disk), \
+                 6.8 KiB of 9.8 KiB (70%) hash-verified — reads fall back to the remote for \
+                 what has not synced; this is not a failure"
+            ),
+            "the merged view names the copy each sentence is about: {body}"
+        );
+    }
+
+    /// The behindness sentence reaches the page as text, not markup: it
+    /// carries a configured destination name and LM-2's free-form
+    /// `outcome_note`, and every sibling helper escapes what it
+    /// interpolates — a `<` or an `&` inside either must render escaped,
+    /// which is the difference between a note and injected markup.
+    #[test]
+    fn the_mirror_note_escapes_its_sentence() {
+        let mut data = data_of(vec![fixture::hit_for("m-1", "deepseek.s1")]);
+        data.destinations[0].mirror =
+            Some("local copy unreadable — `<b>`root &amp; branch`</b>` did not load".into());
+        let body = req("/sessions", &data, &NoContent).body;
+        assert!(
+            body.contains(
+                "local copy unreadable — `&lt;b&gt;`root &amp;amp; branch`&lt;/b&gt;` did not load"
+            ),
+            "the single-destination sentence renders escaped: {body}"
+        );
+        assert!(
+            !body.contains("`<b>`"),
+            "raw markup from the sentence must not reach the page: {body}"
+        );
+        // Several destinations: the sentence behind the bold label escapes
+        // the same way (the label always was escaped).
+        let mut merged = UiData::from_reports(
+            &[
+                DestinationRead {
+                    label: "dest-one".into(),
+                    outcome: Ok(&fixture::report()),
+                },
+                DestinationRead {
+                    label: "dest-two".into(),
+                    outcome: Ok(&fixture::report()),
+                },
+            ],
+            Selector::default(),
+            NOW,
+        );
+        merged.destinations[1].mirror =
+            Some("local copy unreadable — `<i>`notes</i>` & `mirror_of = \"box\"`".into());
+        let body = req("/sessions", &merged, &NoContent).body;
+        assert!(
+            body.contains("`&lt;i&gt;`notes&lt;/i&gt;`"),
+            "the merged sentence renders escaped: {body}"
+        );
+        assert!(
+            body.contains("&amp; `mirror_of = &quot;box&quot;`"),
+            "the ampersand and quote escape too: {body}"
+        );
+    }
+
+    /// The note also rides on the payload pages (rev2 ⑦): `/session`,
+    /// `/content` and `/reader` are the routes whose bytes the copy actually
+    /// serves when a mirror is attached, so a reader who pages into one
+    /// conversation keeps seeing which copy answered and how old it is —
+    /// the note is the same sentence, not a second one, so it renders from
+    /// the same `UiData` the other pages already note from, and renders
+    /// nothing when no mirror serves the destination.
+    #[test]
+    fn the_mirror_note_renders_on_the_payload_pages() {
+        let mut data = data_of(vec![fixture::hit_for("m-1", "deepseek.s1")]);
+        for target in ["/session?i=0", "/content?i=0", "/reader?i=0"] {
+            let response = req(target, &data, &CountingContent::default());
+            assert_eq!(response.status, 200, "{target}");
+            assert!(
+                !response.body.contains("local copy"),
+                "no mirror serving, no note on the payload page {target}"
+            );
+        }
+        data.destinations[0].mirror = Some(
+            "local copy as of 02:07 UTC — the mirror serves what it holds; the remote answers \
+             what it lacks"
+                .to_string(),
+        );
+        for target in ["/session?i=0", "/content?i=0", "/reader?i=0"] {
+            let response = req(target, &data, &CountingContent::default());
+            assert_eq!(response.status, 200, "{target}");
+            assert!(
+                response.body.contains("local copy as of 02:07 UTC"),
+                "the note travels to {target}"
+            );
+            assert!(
+                response.body.contains("the remote answers what it lacks"),
+                "the whole sentence arrives, not a prefix: {}",
+                response.body
+            );
+        }
     }
 
     /// The zero-JS nav is links a browser can follow: each carries the query

@@ -54,6 +54,20 @@ fn cc_line_with_provenance(ts: &str, cwd: &str, organization: &str) -> String {
     )
 }
 
+/// One synthetic Cursor composer line from the global `cursorDiskKV` store,
+/// naming the workspace it ran in and the repository it was tracking.
+fn cursor_composer_line() -> String {
+    concat!(
+        r#"{"schema":"chat-stasher.sqlite.session.v1","table":"cursorDiskKV","session":{"key":"composerData:fixture-composer","value":{"#,
+        r#""composerId":"fixture-composer","createdAt":1753000000000,"status":"completed","#,
+        r#""workspaceIdentifier":{"id":"b9aaf50f1cc29397064ab565777ef13d","uri":{"#,
+        r#""$mid":1,"fsPath":"/w/one","external":"file:///w/one","path":"/w/one","scheme":"file"}},"#,
+        r#""trackedGitRepos":["/w/one/vendor"],"#,
+        r#""fullConversationHeadersOnly":[{"bubbleId":"b1","type":1}],"conversationMap":{"b1":{"text":"hi","type":1}}}}}"#,
+    )
+    .to_string()
+}
+
 /// Write one sealed shard for a session named `session` under `machine`.
 fn write_shard(stage: &Path, machine: &str, session: &str, lines: &[String]) {
     let dir = stage
@@ -467,6 +481,64 @@ fn activity_index_records_the_dimensions_an_opencode_export_states() {
     );
 }
 
+/// TICKET-4D-09 · the workspace folders Zed's `threads.folder_paths` column
+/// records for a thread reach the index: every folder as a `container`,
+/// the first as the session's `cwd`.
+///
+/// The shard line is the session envelope `read_zed_session` writes, with the
+/// column exported as the array of paths Zed stores (newline-separated,
+/// lexicographically sorted).
+#[test]
+fn activity_index_records_the_workspace_folders_zed_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "zed.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[concat!(
+            r#"{"schema":"chat-stasher.sqlite.session.v1","table":"threads","session":{"#,
+            r#""id":"synthetic-zed","summary":"synthetic-summary","#,
+            r#""updated_at":"2025-01-15T12:34:56.789Z","#,
+            r#""folder_paths":["/w/one","/w/two"]}}"#
+        )
+        .to_string()],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(&index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["/w/one", "/w/two"]),
+        "every workspace folder the thread belongs to is a container"
+    );
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/one"]),
+        "the first entry is the primary workspace root, the session's cwd"
+    );
+}
+
 /// An opencode row that recorded no project and no archive moment states those
 /// two dimensions not at all, and the written index must not state them
 /// either: the fields are absent from the line, never empty and never inferred.
@@ -518,6 +590,95 @@ fn activity_index_leaves_an_opencode_dimension_the_export_stated_nothing_about_a
     assert!(
         row["dimensions"].get("status").is_none(),
         "a null time_archived is an unobserved status, never an `active` one: {}",
+        row["dimensions"]
+    );
+}
+
+/// TICKET-4D-14 · a row that names a workspace beside its project states two
+/// container facts, and the written index keeps both: the workspace key is a
+/// second opaque identity the harness recorded, not a decoration on the
+/// project's, and a row that carries it alone still answers the container
+/// question.
+#[test]
+fn activity_index_keeps_the_workspace_beside_the_project_an_opencode_row_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "opencode.mbp-test.sess-1-opencode-4d";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[oc_envelope(
+            r#""id":"sess-1-opencode-4d","directory":"/w/one","project_id":"project-fixture","workspace_id":"ws-fixture""#,
+        )],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["project-fixture", "ws-fixture"]),
+        "the project and the workspace the row named are both kept, as a set: {}",
+        row["dimensions"]
+    );
+
+    // The same key without a project beside it is still a container answer.
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[oc_envelope(
+            r#""id":"sess-1-opencode-4d","workspace_id":"ws-fixture""#,
+        )],
+    );
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["ws-fixture"]),
+        "a workspace key the row stated with no project beside it is recorded \
+         on its own: {}",
+        row["dimensions"]
+    );
+    assert!(
+        row["dimensions"].get("cwd").is_none(),
+        "a row that stated no directory carries no cwd: {}",
         row["dimensions"]
     );
 }
@@ -1017,6 +1178,226 @@ fn activity_index_leaves_a_continue_workspace_the_session_named_nothing_about_ab
     assert!(
         row.get("dimensions").is_none(),
         "a session that named no workspace carries no dimensions object: {row}"
+    );
+}
+
+/// One synthetic Hermes Agent export envelope for a session whose own
+/// `sessions` row states whatever fields the caller spells in. The shape is the
+/// one `sqlite_probe.rs` seals: one line per session, the whole row beside its
+/// messages.
+fn hermes_envelope(session: &str) -> String {
+    format!(
+        r#"{{"schema":"chat-stasher.hermes-agent.session.v1","session":{{{session}}},"messages":[],"session_model_usage":[]}}"#
+    )
+}
+
+/// TICKET-4D-13 · the four facts a Hermes Agent session row states about itself
+/// reach the written index: the directory it ran in, the repository it belonged
+/// to, the gateway peer that owned it, and the archive flag it recorded.
+#[test]
+fn activity_index_records_the_dimensions_a_hermes_agent_row_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "hermes-agent.mbp-test.hermes-4d-1";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[hermes_envelope(
+            r#""id":"hermes-4d-1","cwd":"/w/one","git_repo_root":"https://github.com/org/repo-fixture","user_id":"peer-fixture","archived":1"#,
+        )],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/one"]),
+        "the directory the session ran in is recorded as a path"
+    );
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["https://github.com/org/repo-fixture"]),
+        "the repository root the harness recorded is recorded as a container"
+    );
+    assert_eq!(
+        row["dimensions"]["tenant"],
+        serde_json::json!(["peer-fixture"]),
+        "the gateway peer binding the row recorded is recorded as a tenancy"
+    );
+    assert_eq!(
+        row["dimensions"]["status"],
+        serde_json::json!(["archived"]),
+        "a flag the harness set is a recorded lifecycle state"
+    );
+}
+
+/// A local Hermes Agent row with every flag at its zero default and no peer,
+/// directory or repository states **no** dimension: the written line carries no
+/// dimension object at all, and never an `active` the harness did not record.
+#[test]
+fn activity_index_leaves_a_local_hermes_agent_row_stating_nothing_absent() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "hermes-agent.mbp-test.hermes-4d-2";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[hermes_envelope(
+            r#""id":"hermes-4d-2","source":"cli","cwd":null,"user_id":null,"git_repo_root":null,"archived":0,"pinned":0"#,
+        )],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert!(
+        row.get("dimensions").is_none(),
+        "the row recorded none of the four facts, so no dimension object is \
+         written — and a zero archive flag is never an `active` one: {}",
+        row
+    );
+}
+
+/// A Zed thread belonging to no folder records no folder: NULL stays
+/// unobserved in the index line, never an empty array or a placeholder.
+#[test]
+fn activity_index_leaves_a_zed_thread_without_folders_unobserved() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "zed.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[concat!(
+            r#"{"schema":"chat-stasher.sqlite.session.v1","table":"threads","session":{"#,
+            r#""id":"synthetic-zed","summary":"synthetic-summary","#,
+            r#""updated_at":"2025-01-15T12:34:56.789Z","folder_paths":null}}"#
+        )
+        .to_string()],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(&index).unwrap().trim()).unwrap();
+    assert!(
+        row["dimensions"].get("container").is_none() && row["dimensions"].get("cwd").is_none(),
+        "a NULL folder_paths records no folder: {}",
+        row["dimensions"]
+    );
+}
+
+/// TICKET-4D-05 · the boundaries a Cursor composer states about itself reach the
+/// written index: the workspace it names and the repository it was tracking.
+///
+/// The composer's own `status: "completed"` is in this fixture on purpose. It is
+/// the state of the *generation run* when the row was written, so the index must
+/// carry no lifecycle `status` for it — the difference between "this run
+/// finished" and "this conversation was archived" is the whole reason the two are
+/// not read from the same field.
+#[test]
+fn activity_index_records_the_workspace_and_repositories_a_composer_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "cursor.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09767";
+    write_shard(&stage, machine, session, &[cursor_composer_line()]);
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(&index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["/w/one/vendor", "file:///w/one"]),
+        "the workspace and the tracked repository are both boundaries, in one \
+         stable order: {}",
+        row["dimensions"]
+    );
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/one"]),
+        "a `file://` workspace names the directory the session ran in: {}",
+        row["dimensions"]
+    );
+    assert!(
+        row["dimensions"].get("status").is_none(),
+        "a generation run's outcome is not a lifecycle state, so none is \
+         recorded: {}",
+        row["dimensions"]
     );
 }
 

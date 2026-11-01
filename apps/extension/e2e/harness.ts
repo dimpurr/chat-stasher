@@ -360,6 +360,15 @@ export async function installFakePlatforms(
     //    pattern is narrow on purpose: everything else really is aborted and
     //    recorded, which is what makes `escaped` a measurement.
     if (url.startsWith(`${BRIDGE_ORIGIN}/`)) return route.fallback();
+    // 🔴 The extension reading its own packaged i18n catalog (`lib/i18n.ts`'s
+    //    locale floor; the same read the zh_CN override has always done). Chrome
+    //    serves it from the extension's own bundle already on this machine, so
+    //    it is neither traffic to a platform nor one that could leave the
+    //    machine — and aborting it would strip the floor's protection, leaving
+    //    the exact fresh-page blank strings the floor exists for. As narrow as
+    //    the bridge's: only this packaged file is let through; anything else
+    //    from the extension's origin stays abort-and-record.
+    if (/^chrome-extension:\/\/[^/]+\/_locales\/[^/]+\/messages\.json$/.test(url)) return route.fallback();
     log.escaped.push(url);
     return route.abort();
   });

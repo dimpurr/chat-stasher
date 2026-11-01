@@ -241,6 +241,23 @@ fn open(
 /// unreadable archives and incomplete reads must never produce `true`.
 pub trait ArchiveProof {
     fn holds(&self, machine: &str, outcome: &crate::inbox::SealOutcome) -> anyhow::Result<bool>;
+
+    /// Decide many receipts in one query: `outcomes[i]`'s answer is
+    /// `result[i]`. The default folds [`ArchiveProof::holds`], which is
+    /// correct and unbatched; an implementation that can ask a destination
+    /// about a whole batch with one open overrides this, which is how a
+    /// round's proof phase opens each destination once instead of once per
+    /// bundle.
+    fn holds_many(
+        &self,
+        machine: &str,
+        outcomes: &[crate::inbox::SealOutcome],
+    ) -> anyhow::Result<Vec<bool>> {
+        outcomes
+            .iter()
+            .map(|outcome| self.holds(machine, outcome))
+            .collect()
+    }
 }
 
 /// Listing failure is an error (unknown), never a successful zero-object pass.

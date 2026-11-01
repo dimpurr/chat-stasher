@@ -5,7 +5,7 @@
 //! and elides anything over the per-message budget with a measured byte count
 //! and a link to the raw shards.
 
-use super::html::{esc, fmt_bytes, fmt_unix, footer, head};
+use super::html::{esc, fmt_bytes, fmt_unix, footer, head, mirror_note};
 use super::{
     index_param, param, percent_encode, ContentSource, Query, Response, UiData, UiSession,
 };
@@ -95,6 +95,9 @@ fn page_reader(
         d = esc(&data.destination_label),
     ));
     out.push_str(&super::html::read_from_note(s, data));
+    // rev2 ⑦: the reader renders payload bytes, the copy's tier — the
+    // behindness note rides here like every other read surface.
+    out.push_str(&mirror_note(data));
     out.push_str(&reader_provenance(s, token, conversation));
     // A harness this build has no extractor for is served whole by the raw
     // route and interpreted here not at all. The page stops at the statement:

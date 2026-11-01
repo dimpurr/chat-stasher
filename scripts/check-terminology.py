@@ -22,9 +22,19 @@ semantic constraints this repo will not bend on (they are spec, not style):
   T4 · one-word-one-meaning-reap. "reap" is only permitted in ssh master connection
         reclaim context; all stage shard-body reclamation must say reclaim.
   T5 · no-cjk-characters.       Source code and tests under crates/ and under
-        apps/extension/ must not contain Chinese characters in comments or code
-        strings. The extension's Chinese lives in apps/extension/locales/zh_CN.yml
-        and nowhere else; T5_SCOPES below lists what is scanned and what is not.
+        apps/extension/ must not contain Chinese characters nor CJK/fullwidth
+        punctuation in comments or code strings. The extension's Chinese lives
+        in apps/extension/locales/zh_CN.yml and nowhere else; T5_SCOPES below
+        lists what is scanned and what is not. A line carrying the literal
+        marker "t5-allow:" is exempt — for test *data* that must quote CJK
+        punctuation to assert something about it, never for prose. One
+        production Chinese sentence is sanctioned by name: the upgrade-window
+        wording W1034 ships, defined as the single constant
+        `UPGRADE_WINDOW_MESSAGE` in crates/chat-stasher/src/destdiag.rs
+        (T5_PRODUCTION_ALLOWS below pins that one definition line and nothing
+        else; a re-typed copy of the sentence anywhere, including in
+        destdiag.rs, still violates T5). CLAUDE.md's Language section is the
+        statement this enforcement keeps.
   T6 · captured-by-this-browser-≠-saved. Decision D6 (36-EXTENSION-TOPOLOGY §5):
         the extension's surfaces may state what THIS install has confirmed only
         as "captured by this browser", the archive layer (CLI, dashboard) speaks
@@ -153,12 +163,22 @@ RULES = [
         "id": "T5",
         "name": "no-cjk-characters",
         "patterns": [
-            {"forbidden": r"[\u4e00-\u9fff]"},
+            # The ideograph block is the original rule; the two punctuation
+            # blocks were added because the language invariant (CLAUDE.md
+            # "Language") is about the *public surface being English*, and
+            # fullwidth `＋` / `（）` slipped through shipped comments while
+            # the gate stayed green (W1022 rev0 issue 7). U+3000-303F is CJK
+            # punctuation and spacing, U+FF00-FFEF is the fullwidth latin
+            # forms — together they close the loophole without scanning every
+            # non-ASCII glyph (em-dashes, «guillemets», emoji stay English
+            # enough that shipping one is a review judgement, not a rule).
+            {"forbidden": r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]"},
         ],
         "suggestion": (
-            "crates/ 与 apps/extension/ 下源码与测试中禁止出现中文字符（注释与代码均"
-            "包含）；请替换为地道、准确的英文。中文词条只允许出现在 "
-            "apps/extension/locales/zh_CN.yml 里。"
+            "crates/ 与 apps/extension/ 下源码与测试中禁止出现中文字符或全角标点"
+            "（注释与代码均包含）；请替换为地道、准确的英文和半角标点。中文及其"
+            "标点只允许出现在 apps/extension/locales/zh_CN.yml 里；测试数据必须"
+            "引用全角标点时，在该行加 t5-allow: 标记并写明原因。"
         ),
     },
     {
@@ -237,14 +257,65 @@ class FileLineHit:
     text: str
 
 
+# The literal marker that exempts ONE line from T5: for test *data* that must
+# carry CJK punctuation to assert something about it (splitting a registry
+# path on a full-width annotation, asserting the annotation did not leak into
+# a rendered root). Never for comments or prose; a marker is visible in
+# review and rechargeable in a way a silent exclusion is not.
+T5_LINE_ALLOW = "t5-allow:"
+
+# The sanctioned production exception: W1034's upgrade-window sentence, which
+# the task issuer mandated verbatim. It exists exactly once, as the definition
+# of `UPGRADE_WINDOW_MESSAGE` in destdiag.rs — the constant every wording site
+# references, so the sentence cannot be triplicated across files — and only
+# that one definition is exempt. The allowance is pinned to the definition's
+# file and line shape, not to the sentence's bytes: a re-typed copy of the
+# sentence anywhere, in destdiag.rs itself included, still fires T5. Because
+# `rustfmt` may wrap a grown value onto continuation lines of its own (so the
+# CJK no longer sits on the line that names the constant), the exemption
+# spans the definition *statement*: the matched line plus its continuations,
+# ending at the first line whose content terminates the statement (`;`). The
+# span cannot be widened by anything else — a copy, a drift or a stray
+# CJK line later in the file is scanned normally again from the terminator
+# on. This is the sanctioned exception CLAUDE.md's Language section names; a
+# new production CJK string needs a new entry here and a new line there, in
+# the same change, not a `t5-allow:` marker on prose.
+T5_PRODUCTION_ALLOWS = (
+    {
+        "file": os.path.join("crates", "chat-stasher", "src", "destdiag.rs"),
+        "line_prefix": "pub const UPGRADE_WINDOW_MESSAGE",
+    },
+)
+
+
 def check_cjk(root: str, rule: dict) -> list[tuple[FileLineHit, dict]]:
     """Scan the T5_SCOPES source trees for CJK characters, line by line.
 
     `.json` is included under crates/ because the harness registry there ships
-    with the binary and some of its fields reach users; it is as much part of the
-    public English surface as the source. The extension side adds `.ts`, `.tsx`
-    and `.html` for the same reason — those are the popup's markup and the code
-    that fills it.
+    with the binary and some of its fields reach users; it is as much part of
+    the public English surface as the source. The extension side adds `.ts`,
+    `.tsx` and `.html` for the same reason — those are the popup's markup and
+    the code that fills it.
+
+    A line carrying the `t5-allow:` marker is skipped: the marker exists for
+    test data that must *quote* CJK punctuation to assert something about it,
+    and it is deliberately loud, per-line and reviewable — an exemption hidden
+    in a config list rots, one visible in the data's own file gets re-read
+    every time the data does.
+
+    A line matching an entry of `T5_PRODUCTION_ALLOWS` is skipped: the
+    production surface carries one sanctioned Chinese sentence (W1034's
+    upgrade-window wording), defined once as a named constant the wording
+    sites reference, and the entry names that definition's file and line
+    shape. The match opens the definition's *statement*, and the exemption
+    then spans its continuation lines too, ending at the first line that
+    terminates the statement (`;`) — `rustfmt` may wrap a grown value so
+    the CJK lands on a continuation line, and the pinned definition must
+    not turn into a T5 hit on a file the contributor did not touch. The
+    span is never wider than the statement: the match is on the opening
+    line, never on the sentence, so the exemption cannot be extended by
+    copying the sentence anywhere else, in the same file included, and any
+    CJK after the terminator is scanned normally again.
 
     A file that cannot be read or decoded is reported, not skipped: a gate that
     treats "could not look" as "clean" is the exact failure this repository
@@ -266,10 +337,28 @@ def check_cjk(root: str, rule: dict) -> list[tuple[FileLineHit, dict]]:
                 rel_path = os.path.relpath(full_path, root)
                 if rel_path in scope["skip_files"]:
                     continue
+                # True while scanning the continuation lines of the sanctioned
+                # production constant's definition; reset by the statement's
+                # terminator so the very next line is checked again.
+                in_allow_definition = False
                 try:
                     with open(full_path, "r", encoding="utf-8") as fh:
                         for lineno, line in enumerate(fh, start=1):
                             line_content = line.rstrip("\r\n")
+                            if T5_LINE_ALLOW in line_content:
+                                continue
+                            if in_allow_definition:
+                                if line_content.rstrip().endswith(";"):
+                                    in_allow_definition = False
+                                continue
+                            if any(
+                                rel_path == allow["file"]
+                                and line_content.lstrip().startswith(allow["line_prefix"])
+                                for allow in T5_PRODUCTION_ALLOWS
+                            ):
+                                if not line_content.rstrip().endswith(";"):
+                                    in_allow_definition = True
+                                continue
                             if pat.search(line_content):
                                 out.append((FileLineHit(path=rel_path, line=lineno, text=line_content.strip()), rule))
                 except (OSError, UnicodeDecodeError) as exc:
@@ -433,6 +522,35 @@ FIXTURE_VIOLATING = {
     "t5_violation.json": (
         '{"display_name": "中文显示名"}\n'
     ),
+    # The production-exception half of T5 (W1034 rev3): the sanctioned
+    # sentence is exempt ONLY as its one constant definition in destdiag.rs.
+    # This file carries the definition WRAPPED the way rustfmt would grow a
+    # long value (W1034f2: the CJK lands on a continuation line — the
+    # definition's opening line and its continuations are silently skipped,
+    # the allowance at work) and a drifted re-typed copy on a later line —
+    # the copy must be reported, or the exemption is a blanket silent pass
+    # for the sentence's bytes rather than a pin on its one definition.
+    # Skipping the copy would also mean the span never closed at `;`.
+    "destdiag.rs": (
+        'pub const UPGRADE_WINDOW_MESSAGE: &str =\n'
+        '    "升级后还没有推送记录，下一次定时推送后恢复";\n'
+        'let drifted_copy = "升级后还没有推送记录，下一次定时推送后恢复";\n'
+    ),
+    # The same definition shape in a different file is NOT exempt: the
+    # allowance is pinned to destdiag.rs, so cloning the constant elsewhere
+    # (the duplication W1034 rev3 removed) fires rather than passing.
+    "t5_production_copy_violation.rs": (
+        'pub const UPGRADE_WINDOW_MESSAGE: &str = "升级后还没有推送记录，下一次定时推送后恢复";\n'
+    ),
+    # The punctuation half of T5 (W1022 rev0 issue 7): fullwidth plus and
+    # parentheses are barred from shipped prose the same as ideographs, so
+    # the class widened to U+3000-303F and U+FF00-FFEF must actually fire.
+    "t5_fullwidth_violation.rs": (
+        '// the budget is spent ＋ the round resumes\n'
+        'pub fn bad_fullwidth() {\n'
+        '    println!("not covered（check failed）");\n'
+        '}\n'
+    ),
 }
 
 # The extension half of T5. These live under apps/extension/, so they are written
@@ -547,6 +665,17 @@ FIXTURE_CLEAN = {
         '    retention: String,\n'
         '}\n'
     ),
+    # The t5-allow: marker (W1022 rev0 issue 7): one line of test *data*
+    # carrying CJK punctuation on purpose is exempt only when marked —
+    # only that line, so a marker that muted more than its own line makes
+    # the violating run under-report and fails this selftest.
+    "t5_allow_clean.rs": (
+        'pub fn split_annotation(t: &str) -> &str {\n'
+        "    t.split('（') // t5-allow: registry data quotes fullwidth punctuation on purpose\n"
+        '        .next()\n'
+        '        .unwrap_or("")\n'
+        '}\n'
+    ),
     "t5_clean.rs": (
         '// English comments only\n'
         'pub fn good_english() {\n'
@@ -606,9 +735,13 @@ def selftest() -> int:
             say(f"  {line}")
 
         expect(proc.returncode == 1, "violating tree exits 1")
-        # 14 from crates/ (the 13 plus T6's CLI fixture) + 3 from apps/extension/
-        # (T5) + 2 from the locale files (T6 extension half).
-        expect("FAILED:19" in report, "violating tree reports exactly 19 violations")
+        # 14 from crates/ (the 13 plus T6's CLI fixture) + 3 more from
+        # destdiag.rs (the drifted copy) and t5_production_copy_violation.rs
+        # (the wrong-file constant clone: 1 each) + 2 more from
+        # t5_fullwidth_violation.rs (the fullwidth comment line and the
+        # string line each report once) + 3 from apps/extension/ (T5) + 2
+        # from the locale files (T6 extension half).
+        expect("FAILED:23" in report, "violating tree reports exactly 23 violations")
         expect("t1_violation.rs" in report, "T1 fixture is named in the report")
         expect("t2_violation.rs" in report, "T2 fixture is named in the report")
         expect("t3_violation.rs" in report, "T3 fixture is named in the report")
@@ -616,6 +749,16 @@ def selftest() -> int:
         expect("t5_violation.rs" in report, "T5 fixture is named in the report")
         expect("t6_violation.rs" in report, "T6 CLI fixture is named in the report")
         expect("t5_violation.json" in report, "T5 also covers .json under crates/")
+        expect("destdiag.rs" in report,
+               "T5 still fires on a re-typed copy of the sanctioned sentence")
+        expect("drifted_copy" in report,
+               "the sanctioned constant's own file is not a blanket exemption")
+        expect("t5_production_copy_violation.rs" in report,
+               "T5 still fires on the sanctioned sentence cloned into another file")
+        expect("t5_fullwidth_violation.rs" in report,
+               "T5's widened class still fires on fullwidth punctuation")
+        expect("t5_allow_clean.rs" not in report,
+               "a t5-allow: marked data line is exempt from T5")
         expect("d6_bad" in report, "T6 catches the count claim in a locale value")
         expect(
             "a comment quoting old wording is not a value" not in report,
@@ -667,6 +810,20 @@ def selftest() -> int:
         src2 = os.path.join(tmp, "clean", "crates", "chat-stasher", "src")
         os.makedirs(src2)
         _write_fixtures(src2, FIXTURE_CLEAN)
+        # The production-exception clean probe: the sanctioned sentence's one
+        # definition, in its sanctioned file, in the WRAPPED shape a grown
+        # value takes under rustfmt (W1034f2) — both the naming line and its
+        # continuation are exempt, and nothing else in the file is. Written
+        # apart from FIXTURE_CLEAN because the name is pinned to destdiag.rs
+        # and the violating half planted a different destdiag.rs on purpose —
+        # the loop above asserts clean names against that violating run's
+        # report.
+        _write_fixtures(src2, {
+            "destdiag.rs": (
+                'pub const UPGRADE_WINDOW_MESSAGE: &str =\n'
+                '    "升级后还没有推送记录，下一次定时推送后恢复";\n'
+            ),
+        })
         # The extension half of the clean tree. It deliberately includes the
         # Chinese locale file and the Chinese inside node_modules/.output/.wxt:
         # if any of those exclusions were wrong, this half would not exit 0.
@@ -684,6 +841,8 @@ def selftest() -> int:
         say(f"clean tree -> exit {proc2.returncode} ({proc2.stdout.strip()})")
         expect(proc2.returncode == 0, "clean tree exits 0")
         expect("OK" in proc2.stdout, "clean tree reports OK")
+        expect("destdiag.rs" not in (proc2.stdout + proc2.stderr),
+               "the sanctioned production constant definition is exempt from T5")
 
     # -- the real repo: the lint must not be over-eager on today's source
     proc3 = subprocess.run([sys.executable, script, REPO], capture_output=True, text=True)

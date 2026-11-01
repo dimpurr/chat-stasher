@@ -277,6 +277,14 @@ pub struct RegistryHarness {
     pub product_group: Option<String>,
     #[serde(default)]
     pub paths: RegistryPaths,
+    /// Per-machine input logs this harness's own local app keeps (ADR-053 D1):
+    /// "what the user typed on this machine", which is a different product
+    /// kind from a session transcript. Declared on the same entry, so the
+    /// registry stays the single source of truth (ADR-048 D2) and there is no
+    /// new harness id and no second registry. Missing key deserializes to an
+    /// empty list: a harness that declares no machine log has none.
+    #[serde(default)]
+    pub machine_logs: Vec<RegistryMachineLog>,
     /// Additional compatibility roots scanned alongside the primary source.
     /// Hermes uses this for its pre-database session files.
     #[serde(default)]
@@ -290,6 +298,13 @@ pub struct RegistryHarness {
     /// root or measured from the source; this block is descriptive only.
     #[serde(default)]
     pub dimensions: RegistryDimensions,
+    /// Retention knobs of this harness's own settings store that a
+    /// doctor-class probe should read (ADR-059 draft, D5). Data first: the
+    /// item records where the key is read and how its values map to
+    /// retention, so the probe can never re-derive a location or guess a
+    /// default. Missing key deserializes to an empty list.
+    #[serde(default)]
+    pub retention_probes: Vec<RegistryRetentionProbe>,
     #[serde(default)]
     pub notes: Option<String>,
     /// Active-file sealing policy for this harness: `rename` / `no-rename` /
@@ -305,6 +320,141 @@ pub struct RegistryHarness {
     /// so an uncredited harness can never be rename-sealed.
     #[serde(default)]
     pub seal_source: String,
+}
+
+/// One declared machine log: an append-only per-machine file a harness's local
+/// app writes, with no native session id and no session id ever minted for it
+/// (ADR-053 D1). `role` is `machine-log` for every entry of the kind and exists
+/// so the vocabulary is declared in the data rather than implied by the key
+/// name; consumers split a harness entry into its session products (`paths`,
+/// `source_roots`) and its machine logs (`machine_logs`), and only sessions
+/// feed session machinery (ADR-053 D4/D7).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegistryMachineLog {
+    /// Stable log id, unique inside one harness entry — `history` for Claude
+    /// Code. It is a path component of the stage namespace
+    /// (`machine-logs/<machine>/<harness>/<log-id>/`), so it is validated
+    /// before use: an id with a separator or a `..` would place the write
+    /// outside the namespace.
+    pub id: String,
+    /// Product role. `machine-log` today; anything else is not a machine log
+    /// this build collects.
+    #[serde(default)]
+    pub role: String,
+    /// Per-platform cell of the log file itself. Unlike a session cell this
+    /// names one **file**, not a directory tree.
+    #[serde(default)]
+    pub paths: RegistryPaths,
+    /// Environment variable that relocates the harness's config base, and with
+    /// it this file (ADR-053 D7 / F14 / OQ3). For Claude Code's
+    /// `CLAUDE_CONFIG_DIR` the official directory page states that every
+    /// `~/.claude` path lives under the named directory instead; the log is
+    /// then `<value>/<file name of the platform template>`.
+    #[serde(default)]
+    pub env_override: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+/// One declared retention knob read from a harness's own settings store
+/// (ADR-059 draft, D5). The registry item is the *declaration* of the probe:
+/// which settings key, from which files, how each of the key's integer
+/// states maps to retention, and which other key can override it. The probe
+/// itself (doctor D1/D4 wiring) consumes this data later; the declaration
+/// exists so the read locations and semantics are recorded facts, never
+/// things the probe re-guesses.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegistryRetentionProbe {
+    /// Stable probe id, unique inside one harness entry
+    /// (`desktop-session-cleanup`).
+    pub id: String,
+    /// The settings key the probe reads, e.g.
+    /// `desktopSessionCleanupPeriodDays`.
+    pub key: String,
+    /// How the three integer states of this key map to retention. Each value
+    /// is the registry's recorded statement of one state's meaning; the
+    /// probe reports the state a machine is in, never a re-derived default.
+    pub states: RegistryRetentionStates,
+    /// Recorded interaction with other keys: a managed source that sets
+    /// `cleanupPeriodDays` makes this key ignored, and a report must say
+    /// which source governed the effective value (user or managed).
+    #[serde(default)]
+    pub managed_override: String,
+    /// Where the probe may look and where it must not. Free text on purpose:
+    /// it is the recorded finding (measured, with the date), not a rule the
+    /// code re-derives.
+    #[serde(default)]
+    pub notes: String,
+    /// Per-platform read locations for the key.
+    #[serde(default)]
+    pub platforms: RegistryRetentionPaths,
+}
+
+/// The three integer states of a [`RegistryRetentionProbe`] key, as the
+/// registry records them.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RegistryRetentionStates {
+    /// The key is absent: the harness's built-in default applies. For
+    /// `desktopSessionCleanupPeriodDays` that default is 0 = no ceiling — a
+    /// different answer from the missing state of `cleanupPeriodDays`
+    /// itself (which defaults to 30-day cleanup).
+    #[serde(default)]
+    pub missing: String,
+    /// Explicit 0. Allowed for keys that bound an exemption from deletion
+    /// but never disable writes; also unbounded retention.
+    #[serde(default)]
+    pub zero: String,
+    /// A positive value in days; the effective retention is the longer of
+    /// this ceiling and the effective `cleanupPeriodDays`.
+    #[serde(default)]
+    pub positive_int: String,
+}
+
+/// Per-platform cells of a [`RegistryRetentionProbe`]: which files hold the
+/// user-level and the policy-managed values of the key.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RegistryRetentionPaths {
+    #[serde(default)]
+    pub macos: Option<RegistryRetentionPlatform>,
+    #[serde(default)]
+    pub linux: Option<RegistryRetentionPlatform>,
+    #[serde(default)]
+    pub windows: Option<RegistryRetentionPlatform>,
+}
+
+impl RegistryRetentionPaths {
+    /// The read-location cell for `platform` ("macos"/"linux"/"windows"),
+    /// if the registry declares one — `None` is "no declared locations for
+    /// this platform", never "the key cannot exist here".
+    pub fn cell_for(&self, platform: &str) -> Option<&RegistryRetentionPlatform> {
+        match platform {
+            "macos" => self.macos.as_ref(),
+            "linux" => self.linux.as_ref(),
+            "windows" => self.windows.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+/// One platform's read locations for a retention key. A cell with
+/// `confidence: "measured-locally"` must declare what its measurement found
+/// (the parser enforces that measured user *and* managed source lists are
+/// non-empty); a cell whose managed sources were not measured declares an
+/// empty list and says so in `source`, because a guessed path is not a fact.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegistryRetentionPlatform {
+    /// Files the runtime's *user* settings layer can hold the key in.
+    #[serde(default)]
+    pub user_sources: Vec<String>,
+    /// Files the runtime's *managed* (policy) settings layer can hold the
+    /// key in. Empty means the platform's managed locations were not
+    /// measured — never "there are none".
+    #[serde(default)]
+    pub managed_sources: Vec<String>,
+    #[serde(default)]
+    pub confidence: String,
+    #[serde(default)]
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -323,8 +473,37 @@ pub struct RegistryDimensions {
 pub struct RegistrySourceRoot {
     pub id: String,
     pub paths: RegistryPaths,
+    /// Marked `"entry"` (the only value today) when this root's
+    /// [`RegistryCell::env_override`] replaces the harness's whole base
+    /// directory — channel suffix included — for every build of the harness,
+    /// not just this root's (ADR-054 D7). An entry-wide override that is set
+    /// collapses the entry to exactly this root plus its override path, and
+    /// the entry's `default_only` roots stay unsuppressed only when the user
+    /// stated them explicitly themselves.
+    #[serde(default)]
+    pub override_scope: Option<String>,
+    /// This root is active only while no entry-wide override is in force
+    /// (ADR-054 D7). One registry entry's channels share one layout, and a
+    /// base-replacing override (`FREEBUFF_CONFIG_DIR`) makes the channel
+    /// roots meaningless: scanning the defaults as well would read the same
+    /// directory twice under two root ids, or read locations the harness no
+    /// longer writes.
+    #[serde(default)]
+    pub default_only: bool,
     #[serde(default)]
     pub provenance: crate::provenance::SessionProvenance,
+    /// This root belongs to a store that MOVES its files between the roots
+    /// of one registry entry, keeping the file's own name as the session's
+    /// identity wherever it sits (W1007, ADR-059 draft D4): codex's
+    /// `archived_sessions/` to and from which the desktop's
+    /// `thread/archive` / `thread/unarchive` moves rollouts. The flag rides
+    /// every record discovered through this root as
+    /// [`crate::models::SessionRecord::movable_root`], where it lets the
+    /// collector treat a same-id discovery at a new path as the same file —
+    /// recovering its position from the stage by content instead of
+    /// re-sealing bytes the archive already holds.
+    #[serde(default)]
+    pub movable: bool,
 }
 
 /// The three platform cells. Missing keys deserialize to `None`.
@@ -433,9 +612,9 @@ pub struct RegistryCell {
 }
 
 /// A harness that gives every session its own directory, and writes the
-/// transcript at a fixed path inside it.
+/// transcript at a declared path inside it.
 ///
-/// Kimi Code is the case this exists for:
+/// Kimi Code is the case the literal `file` target exists for:
 /// `<sessions>/<workspaceId>/session_<uuid>/agents/main/wire.jsonl`. The
 /// file's own stem is the constant `wire`, so the walk in
 /// [`collect_records`] cannot identify a session from the discovered path
@@ -443,6 +622,22 @@ pub struct RegistryCell {
 /// id (`wire`), and two different conversations would collapse into one
 /// archive slot. A cell that declares this rule takes the id from the
 /// directory instead.
+///
+/// `file_glob` is the target for stores whose transcript *name* is the
+/// session id and whose path inside the session directory is not fixed:
+/// Claude Desktop's Cowork sandboxes keep the transcript at
+/// `​.claude/projects/<sanitized-cwd>/<sid>.jsonl`, so neither the literal
+/// shape nor the directory-name id can express it. A glob rule ids every
+/// record by the matched file's own stem (the `<sid>` filename), which is
+/// what the sandbox's adjacent metadata json points to with its
+/// `cliSessionId`; the sandbox directory's own name is not the identity
+/// (ADR-059 draft, D2/D3). Two files matching the glob are two sessions,
+/// not one — the id-collision concern that keeps the literal target
+/// literal is answered here by the id coming from each file's own name.
+///
+/// Exactly one of `file` / `file_glob` must be declared per rule; the
+/// registry parser enforces that at load time (see [`parse_registry`]) so
+/// a data defect is a load error, never a silent empty scan.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionDirRule {
     /// Root-relative directory glob for the session directory. Without a
@@ -457,8 +652,62 @@ pub struct SessionDirRule {
     /// on every platform (compared component by component, so a Windows
     /// backslash path matches too). Literal on purpose: a glob here could
     /// admit a second file per session and reintroduce the id collision this
-    /// rule exists to prevent.
-    pub file: String,
+    /// rule exists to prevent. Mutually exclusive with [`Self::file_glob`].
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Glob path (same component-wise syntax as [`Self::pattern`], no
+    /// leading `**`) from the session directory to the transcript file.
+    /// The matched file's own filename stem — after the declared format
+    /// suffix is stripped — becomes the record's native id. Mutually
+    /// exclusive with [`Self::file`].
+    #[serde(default)]
+    pub file_glob: Option<String>,
+    /// Indices (0-based, `/`-separated) into the components the pattern
+    /// matched, joined by `.` to compose the native id. The default —
+    /// omitted, or empty — is the last matched component, the pre-codebuff
+    /// behaviour of every existing rule. Codebuff declares `[1, 3]` for
+    /// `projects/*/chats/*`: the pair `<project-basename>.<chatId>` is the
+    /// chat's on-disk identity, and the chat directory name alone would
+    /// collapse two chats with the same millisecond id under different
+    /// projects into one archive slot (ADR-054 D3). Indices outside the
+    /// matched components fall back to the last component rather than
+    /// composing from a subset — a wrong selection is a registry bug, not a
+    /// licence to mint a narrower id. Applies to the literal `file` target
+    /// only: a `file_glob` record is id'd by the matched transcript's own
+    /// stem, which the pattern components never qualify.
+    #[serde(default)]
+    pub id_components: Vec<usize>,
+    /// Additional literal file names (never globs — see [`Self::file`])
+    /// sealed as raw bytes under the *same* session identity, when present
+    /// beside the transcript (ADR-054 D5/D9). Absent files are a normal
+    /// state, not an error: the sidecar rides along only when the harness
+    /// wrote it.
+    #[serde(default)]
+    pub extra_files: Vec<String>,
+}
+
+impl SessionDirRule {
+    /// The transcript target this rule matches files against: the literal
+    /// [`Self::file`] path or the [`Self::file_glob`] pattern. The parser
+    /// guarantees exactly one is declared, so the fallback is only a
+    /// never-matches guard against hand-built (test) rules.
+    fn transcript_target(&self) -> TranscriptTarget<'_> {
+        match (self.file.as_deref(), self.file_glob.as_deref()) {
+            (Some(_), Some(glob)) => TranscriptTarget::Glob(glob),
+            (Some(file), None) => TranscriptTarget::Literal(file),
+            (None, Some(glob)) => TranscriptTarget::Glob(glob),
+            (None, None) => TranscriptTarget::Glob(""),
+        }
+    }
+}
+
+/// Which transcript target a [`SessionDirRule`] matches against.
+#[derive(Debug, Clone, Copy)]
+enum TranscriptTarget<'a> {
+    /// The literal `/`-separated path from the session directory.
+    Literal(&'a str),
+    /// The `/`-separated component glob from the session directory.
+    Glob(&'a str),
 }
 
 /// Deserialize the registry from `path`. Returns a descriptive error on any
@@ -475,12 +724,103 @@ pub fn load_registry(path: &Path) -> io::Result<HarnessRegistry> {
 }
 
 fn parse_registry(raw: &str, source: &str) -> io::Result<HarnessRegistry> {
-    serde_json::from_str(raw).map_err(|e| {
+    let registry: HarnessRegistry = serde_json::from_str(raw).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("harness registry {source} is not valid JSON: {e}"),
         )
-    })
+    })?;
+    validate_registry(&registry, source)?;
+    Ok(registry)
+}
+
+/// Structural checks the shape alone cannot express (serde accepts both
+/// targets present, either absent, and a `**` component a `file_glob` is
+/// not defined to match). They run at load time so a registry data defect is
+/// a load error naming the harness and platform, never a silently empty
+/// scan or a glob that quietly behaves like `*`.
+fn validate_registry(registry: &HarnessRegistry, source: &str) -> io::Result<()> {
+    for harness in &registry.harnesses {
+        let mut cells: Vec<(String, &RegistryCell)> = Vec::new();
+        for platform in ["macos", "linux", "windows"] {
+            if let Some(cell) = harness.paths.cell_for(platform) {
+                cells.push((format!("{}/{platform}", harness.id), cell));
+            }
+            for root in &harness.source_roots {
+                if let Some(cell) = root.paths.cell_for(platform) {
+                    cells.push((format!("{}/:{}/{platform}", harness.id, root.id), cell));
+                }
+            }
+        }
+        for (where_, cell) in cells {
+            if let Some(rule) = cell.session_dir.as_ref() {
+                let declared = rule.file.is_some() as u8 + rule.file_glob.is_some() as u8;
+                if declared != 1 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "harness registry {source}: session_dir rule for {where_} must \
+                             declare exactly one transcript target: `file` (literal) or \
+                             `file_glob` (the matched stem ids the session)"
+                        ),
+                    ));
+                }
+                if let Some(glob) = rule.file_glob.as_deref() {
+                    if glob
+                        .split('/')
+                        .filter(|part| !part.is_empty())
+                        .any(|part| part == "**")
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "harness registry {source}: session_dir file_glob for {where_} \
+                                 matches one exact component depth; a `**` component is not \
+                                 defined here — write the measured layout out in components"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        for probe in &harness.retention_probes {
+            for (platform, cell) in [
+                ("macos", probe.platforms.macos.as_ref()),
+                ("linux", probe.platforms.linux.as_ref()),
+                ("windows", probe.platforms.windows.as_ref()),
+            ] {
+                let Some(cell) = cell else { continue };
+                if cell.confidence == "measured-locally"
+                    && (cell.user_sources.is_empty() || cell.managed_sources.is_empty())
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "harness registry {source}: retention probe `{}/{}` has a \
+                             measured-locally {platform} cell, but a measured cell declares \
+                             what it measured: both the user and the managed source lists \
+                             must be non-empty (an unmeasured managed list is declared \
+                             empty with an unascertained cell that says why)",
+                            harness.id, probe.id
+                        ),
+                    ));
+                }
+                if cell.confidence != "measured-locally" && !cell.managed_sources.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "harness registry {source}: retention probe `{}/{}` declares \
+                             managed sources on {platform} it does not claim to have \
+                             measured; measure them or move them behind a \
+                             measured-locally cell",
+                            harness.id, probe.id
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Locate the registry by walking **up from the cwd and the package manifest
@@ -538,6 +878,75 @@ pub enum ProbeState {
     SkipUnresolvable,
 }
 
+/// One declared source root of a family that this scan never verified — a
+/// root the probe refused to guess at (`unascertained`), never resolved a
+/// path for (`unresolvable`), or could not even establish the presence of
+/// (`indeterminate`) — while at least one sibling root of the same family
+/// **was** measured (ADR-059 draft D6, the qualified lower-bound rule the
+/// external review of the draft made mandatory, W1006d). The root is named by
+/// its registry root id (`claude-desktop-cowork`); the one shape where the
+/// unverified root is the entry's primary store names it by the canonical
+/// harness id, the key that store is configured under.
+#[derive(Debug, Clone)]
+pub struct UnverifiedRoot {
+    pub id: String,
+    /// Why the root stayed unverified, from the same closed vocabulary as
+    /// [`probe_state_word`] — never a path, never prose.
+    pub state: ProbeState,
+}
+
+/// One declared source root of a *primary-plus-roots* family, measured on its
+/// own beside the family aggregate (W1009, DSK-3: doctor D3 prints one row
+/// per source root; ADR-059 draft D5/D6). A row exists for every root the
+/// registry declares **for this platform** — the primary store first, then
+/// every additional `source_roots` entry in declaration order — so an
+/// unverified root keeps its own marked row instead of being folded into a
+/// number that reads as the family total. A root whose cell this platform does
+/// not declare never gets a probe (the scan loop skips it before probing, the
+/// same way a platform without a harness cell skips that harness:
+/// `SkipWrongPlatform`'s "nothing here to have missed"), so it gets no row
+/// either. All-roots families (codebuff's channels, antigravity's surfaces)
+/// keep their pre-DSK-1 aggregate semantics and carry no rows, per the same
+/// D6 scope the aggregate rules use.
+#[derive(Debug, Clone)]
+pub struct SourceRootProbe {
+    /// The registry root id this row stands for — the canonical harness id
+    /// for the primary store (the same id [`UnverifiedRoot`] names it by),
+    /// the root's own id for every additional source root.
+    pub id: String,
+    /// True when this row is the family's primary store (the harness's own
+    /// `paths` cells) rather than a declared `source_roots` entry.
+    pub primary: bool,
+    pub state: ProbeState,
+    /// The root path this row's own subprobe resolved, when it resolved one.
+    pub root: Option<PathBuf>,
+    /// Distinct session ids this root's own walk produced. `None` when this
+    /// root was not measured (the state says why). The row's scope is the
+    /// root only: one session id sitting in two roots of a movable store
+    /// (W1007's `thread/archive` copy) counts in each row it appears in,
+    /// while the family aggregate counts it once — that is the scope each
+    /// number claims, and neither is the other.
+    pub record_count: Option<u64>,
+    pub unreadable_count: Option<u64>,
+    pub unreadable_entry_count: Option<u64>,
+    /// Sum of this root's records' byte sizes. `Some(0)` for a scanned root
+    /// that holds nothing (a measured empty); `None` when no walk produced
+    /// records for this root.
+    pub total_bytes: Option<u64>,
+    /// W1049: this row's root belongs to a store that MOVES its files between
+    /// the roots of the same registry entry ([`RegistrySourceRoot::movable`];
+    /// W1007, ADR-059 draft D4). `true` on the movable root's own row and on
+    /// the primary's row of that family (the store's moves run in both
+    /// directions, so the movability is the pairing's fact, not one root's).
+    /// The collector reads this to decide which vanished sources may be
+    /// probed for a same-identity relocation: only a store that itself moves
+    /// files between already-collected roots licenses "same session id at a
+    /// new path is the same file", so every other family keeps today's
+    /// `source_not_collected` error unchanged.
+    pub movable: bool,
+    pub note: String,
+}
+
 /// One harness's fate on this machine, as decided by the registry.
 #[derive(Debug, Clone)]
 pub struct HarnessProbe {
@@ -548,9 +957,31 @@ pub struct HarnessProbe {
     pub root: Option<PathBuf>,
     pub confidence: Confidence,
     pub state: ProbeState,
-    /// Session records found at this harness's root. `None` when this harness
-    /// cannot be enumerated at all (missing, skipped, single-file store whose
-    /// schema we do not recognise) — never a fabricated zero.
+    /// Roots of this family that stayed **unverified** while a sibling root
+    /// was measured. Non-empty exactly when the counts below are a
+    /// *qualified lower bound* over the measured roots: `record_count` (and
+    /// every sibling count) is then the exact count of the measured roots
+    /// only, and must be rendered as `≥N` with these roots named beside it —
+    /// never as an unknown that erases the measured part (the D6 side
+    /// effect the ADR-059 draft review rejected) and never as a plain
+    /// number that silently claims the family total. The rule is scoped to
+    /// the primary-plus-additional-roots shape (the W1006c narrowing): a
+    /// family whose every root stayed unknown keeps the older aggregate
+    /// semantics and this field empty.
+    pub unverified_roots: Vec<UnverifiedRoot>,
+    /// One row per declared, platform-relevant source root of this family
+    /// (W1009/DSK-3): the same roots the aggregate merged, measured on
+    /// their own so `doctor` D3 can print one row per source root with
+    /// unverified roots explicitly marked rather than folded away. Empty
+    /// for every family outside the primary-plus-roots shape (see
+    /// [`SourceRootProbe`] for the scope rule).
+    pub source_roots: Vec<SourceRootProbe>,
+    /// Session records found at this harness's root, counted by **distinct
+    /// session id** — the quantity collect can address, and the quantity the
+    /// multi-source-root aggregation already counted (a file count cannot
+    /// stand in for it where several files share one stem). `None` when this
+    /// harness cannot be enumerated at all (missing, skipped, single-file
+    /// store whose schema we do not recognise) — never a fabricated zero.
     pub record_count: Option<u64>,
     /// Candidate rows before a store-specific qualification rule. For Cursor
     /// this is the raw `composerData:%` count shown beside `record_count`.
@@ -653,11 +1084,55 @@ pub struct ScanReport {
     pub indeterminate_roots: Vec<PathBuf>,
     /// Per-harness fate, in registry order.
     pub probes: Vec<HarnessProbe>,
+    /// Declared machine logs that exist on this machine (ADR-053 D1/D7), in
+    /// registry order. A **separate** vector from [`Self::records`] on purpose:
+    /// a machine log is not a session, so it never enters session lists,
+    /// session counts, coverage or `machine_recall` (D4/D6), and no session
+    /// walker can trip over it by construction. Discovery is home-keyed and
+    /// never matches a session path template.
+    pub machine_logs: Vec<MachineLogRecord>,
+    /// Machine logs the registry declares that this pass never looked at —
+    /// no cell for this platform, a cell whose confidence is `unascertained`,
+    /// or a template that does not resolve. B82's rule: a declared source that
+    /// was not looked at is an unknown, never an empty one.
+    pub machine_logs_unlooked: usize,
+    /// Machine logs that were looked at but whose shape could not be
+    /// established (permission/I/O error, or a directory where the registry
+    /// declares a file). Distinct from [`Self::machine_logs_unlooked`] for the
+    /// same reason `indeterminate_roots` is distinct from `missing_roots`.
+    pub machine_logs_indeterminate: usize,
+    /// Why each [`Self::machine_logs_unlooked`] log was not looked at, in the
+    /// scanner's own fixed vocabulary (never a path, never a hostname). The
+    /// reasons are a closed set of registry facts — an `unascertained` cell, no
+    /// cell for this platform, an unresolvable template — so a reader can tell
+    /// a policy decision from an oversight.
+    pub machine_logs_unlooked_reasons: Vec<&'static str>,
 }
 
-/// A harness probe recognised sessions, but the scanner produced fewer
-/// `SessionRecord`s for it. `collect` consumes only those records, so the
-/// difference is currently not archivable by this build.
+/// One declared machine log file that exists on this machine.
+///
+/// It carries no session id by construction: the canonical
+/// `<source>.<machine>.<native-id>` grammar stays reserved for sessions
+/// (ADR-002), so what identifies a machine log is the `(machine, harness,
+/// log_id)` triple — which is exactly the stage namespace it is sealed under
+/// (ADR-053 D4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineLogRecord {
+    /// Registry harness id that declares the log (`claude-code`).
+    pub harness: String,
+    /// The log's own declared id (`history`).
+    pub log_id: String,
+    /// Absolute path of the log file, as resolved on this machine.
+    pub absolute_path: PathBuf,
+    /// File size in bytes at scan time.
+    pub byte_size: u64,
+}
+
+/// A harness probe recognised more distinct sessions than the scanner
+/// produced distinct `SessionRecord` ids for. `collect` consumes only those
+/// records, so the difference is currently not archivable by this build.
+/// Both counts are of distinct ids — several source files aliasing onto one
+/// id is a slot merge the archive records elsewhere, not a gap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveGap {
     pub harness_id: String,
@@ -667,11 +1142,47 @@ pub struct ArchiveGap {
 }
 
 impl ScanReport {
+    /// The distinct session ids among the records each source emitted,
+    /// grouped in one pass over the report's records. `collect` stages one
+    /// dir per id, so both per-harness consumers of a report's records —
+    /// the staged-session count behind `found_staged`
+    /// ([`probe_found_staged`], used by [`scan_report_json`]) and
+    /// [`archive_gaps`]'s session-records side — answer from these sets;
+    /// grouping once per report keeps each consumer at one record
+    /// traversal instead of one per probe. A source with no records
+    /// simply has no entry: its id set is the measured empty.
+    fn staged_id_sets_per_source(
+        &self,
+    ) -> std::collections::HashMap<HarnessSource, std::collections::BTreeSet<&str>> {
+        let mut grouped: std::collections::HashMap<_, std::collections::BTreeSet<_>> =
+            std::collections::HashMap::new();
+        for record in &self.records {
+            grouped
+                .entry(record.source)
+                .or_default()
+                .insert(record.id.as_str());
+        }
+        grouped
+    }
+
     /// Return installed harnesses whose recognised session count is greater
-    /// than the number of records that `collect` can consume. The comparison
-    /// is deliberately made against the records actually produced by this
-    /// scan; no harness allowlist is involved.
+    /// than the number of records that `collect` can consume. Both sides
+    /// count **distinct session ids** — mirroring the multi-root aggregation
+    /// — so files that alias onto one id never fabricate a gap out of the
+    /// missing file-to-record difference; the comparison is deliberately
+    /// made against the records actually produced by this scan, and no
+    /// harness allowlist is involved.
     pub fn archive_gaps(&self) -> Vec<ArchiveGap> {
+        self.archive_gaps_with_id_sets(&self.staged_id_sets_per_source())
+    }
+
+    /// [`archive_gaps`] with the per-source id sets supplied, so a caller
+    /// that already grouped the report's records ([`scan_report_json`])
+    /// does not traverse them a second time.
+    fn archive_gaps_with_id_sets(
+        &self,
+        staged_id_sets: &std::collections::HashMap<HarnessSource, std::collections::BTreeSet<&str>>,
+    ) -> Vec<ArchiveGap> {
         self.probes
             .iter()
             .filter_map(|probe| {
@@ -681,12 +1192,8 @@ impl ScanReport {
                 let Some(source) = HarnessSource::from_id(&probe.id) else {
                     return None;
                 };
-                let session_records: std::collections::BTreeSet<_> = self
-                    .records
-                    .iter()
-                    .filter(|record| record.source == source)
-                    .map(|record| record.id.as_str())
-                    .collect();
+                let empty: std::collections::BTreeSet<&str> = Default::default();
+                let session_records = staged_id_sets.get(&source).unwrap_or(&empty);
                 match probe.record_count {
                     Some(0) => None,
                     Some(recognized_sessions)
@@ -723,9 +1230,20 @@ impl ScanReport {
 /// Render the same metadata-only warning for every CLI surface that reports
 /// scanner results. The counts come from the `ArchiveGap`, not from a harness
 /// name list.
+///
+/// Both counts name **distinct session ids** — the probe's recognized count
+/// and the record ids collect consumes — so a difference is a real shortfall
+/// of this build, never an artifact of aliased ids. The reason names what the
+/// two shapes of `recognized_sessions` actually mean instead of claiming a
+/// store-format refusal, which was untrue whenever the difference came from
+/// id aliasing (GB-2).
 pub fn format_archive_gap(gap: &ArchiveGap) -> String {
+    let reason = match gap.recognized_sessions {
+        Some(_) => "the scanner recognised more sessions than it produced SessionRecords for, so collect archives only the session_records side — an enumeration failure of this build, not a configuration problem and not a verdict on the harness's store format",
+        None => "an installed single-file store whose sessions this build could not enumerate, so collect produced no SessionRecords for it — not a configuration problem, and there is no switch to enable it",
+    };
     format!(
-        "  ! harness={} identified_sessions={} session_records={} source_not_collected=true — this build cannot archive this harness's store format (not a configuration problem, and there is no switch to enable it)",
+        "  ! harness={} identified_sessions={} session_records={} source_not_collected=true — {reason}",
         gap.harness_id,
         gap.recognized_sessions
             .map(|count| count.to_string())
@@ -777,9 +1295,10 @@ pub fn probe_session_count(p: &HarnessProbe) -> json_out::CountState {
         ProbeState::SkipUnascertained => {
             CountState::unknown("confidence unascertained; scanning a guessed path is forbidden")
         }
-        ProbeState::SkipUnresolvable => {
-            CountState::unknown("template cannot be reduced to a static root path")
-        }
+        ProbeState::SkipUnresolvable => CountState::unknown(
+            "no root to scan: template not statically resolvable, or registry id unknown \
+                 in this build",
+        ),
     }
 }
 
@@ -813,8 +1332,65 @@ pub fn probe_unreadable_entry_count(p: &HarnessProbe) -> json_out::CountState {
     }
 }
 
-/// One probe serialised for `status --json` / `doctor --json`. Every count is
-/// a tri-state; none can be `0`-or-null because a value was never looked at.
+/// One probe's metadata-only serialisation: the doctor's `probes` rows are
+/// exactly this, and the harness rows of a full scan report (`status
+/// --json`) are this plus the record-dependent staged-session count
+/// ([`probe_json_with_found_staged`]) — only a scan that still holds its
+/// records can answer that question, and the doctor's report keeps probes
+/// and drops records. Every count is a tri-state; none can be `0`-or-null
+/// because a value was never looked at.
+///
+/// `unverified_roots` (W1006d) is additive in the found_staged sense: it
+/// appears on every row, empty wherever a family was fully measured (or
+/// fully unknown — the state already says that). Where it is non-empty the
+/// sibling `session_count` is a *qualified lower bound* — the exact count
+/// of the measured roots only — and a consumer must not read it as the
+/// family total; the listed roots are the reason it cannot be one.
+/// One [`SourceRootProbe`] row as JSON (W1009/DSK-3). Shared by `probe_json`
+/// and doctor's footprint serialisation so the same row can never render two
+/// different answers in the two doctor tables. Counts are tri-states like
+/// every other count here: a root that was not measured is `unknown` (the row
+/// also names why through `state`), `not_applicable` when the platform has
+/// no such root.
+pub fn source_root_row_json(row: &SourceRootProbe) -> serde_json::Value {
+    use crate::json_out::CountState;
+    let session_count = match row.record_count {
+        Some(count) => CountState::known(count),
+        None => match row.state {
+            ProbeState::Missing => CountState::known(0),
+            ProbeState::SkipWrongPlatform => {
+                CountState::not_applicable("registry has no cell for this platform")
+            }
+            _ => CountState::unknown(format!(
+                "this root was not measured ({})",
+                probe_state_word(row.state)
+            )),
+        },
+    };
+    let total_bytes = match row.total_bytes {
+        Some(bytes) => CountState::known(bytes),
+        None => match row.state {
+            ProbeState::Missing => CountState::not_applicable("root not present"),
+            ProbeState::SkipWrongPlatform => {
+                CountState::not_applicable("registry has no cell for this platform")
+            }
+            _ => CountState::unknown(format!(
+                "this root's bytes were not measured ({})",
+                probe_state_word(row.state)
+            )),
+        },
+    };
+    serde_json::json!({
+        "id": row.id,
+        "primary": row.primary,
+        "state": probe_state_word(row.state),
+        "root": row.root.as_ref().map(|root| root.display().to_string()),
+        "session_count": session_count,
+        "total_bytes": total_bytes,
+        "note": row.note,
+    })
+}
+
 pub fn probe_json(p: &HarnessProbe) -> serde_json::Value {
     serde_json::json!({
         "harness": p.id,
@@ -822,10 +1398,112 @@ pub fn probe_json(p: &HarnessProbe) -> serde_json::Value {
         "state": probe_state_word(p.state),
         "installed": p.installed_p(),
         "root": p.root.as_ref().map(|root| root.display().to_string()),
+        "unverified_roots": p
+            .unverified_roots
+            .iter()
+            .map(|root| serde_json::json!({
+                "root": root.id,
+                "state": probe_state_word(root.state),
+            }))
+            .collect::<Vec<_>>(),
+        // W1009/DSK-3: additive in the same sense as `unverified_roots` —
+        // present on every row, empty wherever the family is not a
+        // primary-plus-roots shape. A consumer summing `source_roots`'
+        // counts where it is non-empty reads a *lower bound*, and must
+        // consult `unverified_roots` before reading the aggregate above as
+        // a total.
+        "source_roots": p
+            .source_roots
+            .iter()
+            .map(source_root_row_json)
+            .collect::<Vec<_>>(),
         "session_count": probe_session_count(p),
         "unreadable_count": probe_unreadable_count(p),
         "unreadable_entry_count": probe_unreadable_entry_count(p),
     })
+}
+
+/// The staged-session answer for one probe (GC-3), for a scan that still
+/// holds its records: how many DISTINCT session ids those records carry for
+/// this harness — the unit `collect` stages, one session dir per id.
+///
+/// Neither existing count states that unit. `session_count` is the declared
+/// store's own row count (a store session must stay a store session), and
+/// `total_sessions` counts `SessionRecord`s — and since W982 a harness can
+/// legitimately emit several records under one id (a grok `session_docs`
+/// row and its native `chat_history.jsonl` share their id deliberately, so
+/// one conversation stays one conversation), so records are not the staged
+/// unit either. The verify scripts needed that third number and had to
+/// parse collect's human stdout for it; this is where the product states
+/// it instead.
+///
+/// The tri-state reasons mirror [`probe_session_count`] where the shapes
+/// coincide, with one deliberate difference: a positive count here is
+/// `known` whatever the probe's state, because the question is not "what
+/// does the source hold" but "what will collect archive from this scan" —
+/// and the emitted records are the complete answer to that. Only the zero
+/// cases keep the honest `unknown`: a store the scan handed no records for,
+/// and a harness that was never looked at, must not read as a measured
+/// empty.
+pub fn probe_found_staged(p: &HarnessProbe, staged_ids: u64) -> json_out::CountState {
+    use crate::json_out::CountState;
+    if staged_ids > 0 {
+        return CountState::known(staged_ids);
+    }
+    match p.state {
+        ProbeState::Scanned | ProbeState::FileTarget => match p.record_count {
+            Some(0) => CountState::known(0),
+            // The store enumerates sessions but the scan produced no
+            // records for them, so what collect will be handed — and stage —
+            // is unproven, never a zero.
+            Some(_) => CountState::unknown(
+                "the store enumerates sessions but the scan produced no session \
+                 records, so what collect will stage is unproven",
+            ),
+            None => {
+                CountState::unknown("session count could not be enumerated (store not enumerable)")
+            }
+        },
+        // A root that measured absent hands collect nothing, exactly as in
+        // `probe_session_count`: the one case where 0 is earned.
+        ProbeState::Missing => CountState::known(0),
+        ProbeState::SkipWrongPlatform => {
+            CountState::not_applicable("registry has no cell for this platform")
+        }
+        ProbeState::Indeterminate => {
+            CountState::unknown("cannot even confirm whether the source exists")
+        }
+        ProbeState::SkipUnascertained => {
+            CountState::unknown("confidence unascertained; scanning a guessed path is forbidden")
+        }
+        ProbeState::SkipUnresolvable => {
+            // Two ways reach this state — an unresolvable template, and a
+            // registry id this build does not know (`probe_harness_single`
+            // skips both before any root resolves) — the why names both.
+            CountState::unknown(
+                "no root to scan: template not statically resolvable, or registry id unknown \
+                 in this build",
+            )
+        }
+    }
+}
+
+/// [`probe_json`] plus the `found_staged` tri-state — the per-harness count
+/// of distinct staged session ids ([`probe_found_staged`]). Only a scan that
+/// still holds its records can answer it, which is why the plain
+/// [`probe_json`] (the doctor's metadata-only shape) does not carry the key:
+/// a `doctor --json` probe row has no records to count, and writing
+/// `unknown` there would state an answer its contract never asks for.
+pub fn probe_json_with_found_staged(
+    p: &HarnessProbe,
+    found_staged: &json_out::CountState,
+) -> serde_json::Value {
+    let mut value = probe_json(p);
+    // Every existing field stays byte-identical; the staged-session count is
+    // purely additive, so consumers that read the old keys see no change.
+    value["found_staged"] = serde_json::to_value(found_staged)
+        .expect("CountState is a plain tagged enum and always serializes");
+    value
 }
 
 /// The `scanner` object of `status --json`, for a scan that succeeded. Every
@@ -852,17 +1530,47 @@ pub fn scan_report_json(report: &ScanReport) -> serde_json::Value {
         .iter()
         .filter(|p| p.record_count.is_some() && p.unreadable_count.is_none())
         .count() as u64;
+    // The distinct-id sets per source, grouped once, feed both per-harness
+    // consumers below: each probe's `found_staged` and the
+    // `archive_gap_harnesses` count. Without the shared grouping each
+    // consumer would rebuild one id set per probe — a full traversal of
+    // the report's records per probe.
+    let staged_id_sets = report.staged_id_sets_per_source();
+    let harnesses: Vec<_> = report
+        .probes
+        .iter()
+        .map(|p| {
+            // Distinct session ids among the records this harness emitted:
+            // collect stages one dir per id, so this is the staged-session
+            // count.
+            let staged_ids = match HarnessSource::from_id(&p.id) {
+                Some(source) => staged_id_sets
+                    .get(&source)
+                    .map_or(0, |ids| ids.len() as u64),
+                // reason: a harness id the scan dispatch cannot map to a
+                // source is never scanned, so it cannot have emitted
+                // records — a measured empty, and the probe's own state
+                // still decides the tri-state below.
+                None => 0,
+            };
+            probe_json_with_found_staged(p, &probe_found_staged(p, staged_ids))
+        })
+        .collect();
     serde_json::json!({
         "kind": "ok",
         "total_sessions": CountState::known(report.records.len() as u64),
         "compressed_sessions": CountState::known(compressed),
         "missing_roots": CountState::known(report.missing_roots.len() as u64),
         "indeterminate_roots": CountState::known(report.indeterminate_roots.len() as u64),
-        "archive_gap_harnesses": CountState::known(report.archive_gaps().len() as u64),
+        "archive_gap_harnesses": CountState::known(
+            report
+                .archive_gaps_with_id_sets(&staged_id_sets)
+                .len() as u64,
+        ),
         "unreadable_sessions": CountState::known(unreadable_sessions),
         "unreadable_entries": CountState::known(unreadable_entries),
         "unreadable_uncounted_harnesses": CountState::known(unreadable_uncounted),
-        "harnesses": report.probes.iter().map(probe_json).collect::<Vec<_>>(),
+        "harnesses": harnesses,
     })
 }
 
@@ -900,6 +1608,81 @@ pub fn load_registry_from_repo() -> io::Result<HarnessRegistry> {
     load_registry(&path)
 }
 
+impl HarnessRegistry {
+    /// The surface dimension's declared value vocabulary: the union of every
+    /// harness's `dimensions.surfaces` (ADR-059 D1, DSK-5).
+    ///
+    /// This is what a user's `--surface` value is checked against, and it is
+    /// read from the same registry the capture side records provenance from,
+    /// so the word a query may ask for cannot drift from the word a source
+    /// root may record. A value a harness's own capture does not re-record
+    /// per session (claude-code's primary CLI library records no surface at
+    /// all) is still a legal **value**: the vocabulary declares what the
+    /// dimension can mean, not what every session carries — a session with no
+    /// observation answers "unevaluated" under the filter, never "no" (see
+    /// `crate::selector`).
+    pub fn surface_vocabulary(&self) -> BTreeSet<String> {
+        self.harnesses
+            .iter()
+            .flat_map(|harness| harness.dimensions.surfaces.iter().cloned())
+            .collect()
+    }
+}
+
+/// The current registry's surface vocabulary, memoised for this process
+/// (DSK-5).
+///
+/// `search`, `export` and the dashboard all validate a requested surface
+/// against the same declared set; the dashboard re-resolves the selector for
+/// **every request**, so the registry is read once per process rather than
+/// once per page. The registry is read through the same precedence
+/// [`load_registry_from_repo`] documents — explicit override, repository
+/// file, embedded copy — and a failed read stays a failed read on every
+/// later call: memoising an error would be a way to report a broken
+/// override only once and guess afterwards.
+pub fn surface_vocabulary() -> io::Result<&'static BTreeSet<String>> {
+    static VOCABULARY: std::sync::OnceLock<io::Result<BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    let loaded = VOCABULARY
+        .get_or_init(|| load_registry_from_repo().map(|registry| registry.surface_vocabulary()));
+    loaded.as_ref().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("the harness registry's surface vocabulary could not be read: {error}"),
+        )
+    })
+}
+
+/// Resolve `search`'s shared filter flags, validating a requested surface
+/// value against the registry's declared surface vocabulary (DSK-5).
+///
+/// The registry is consulted **only when a surface was actually requested**:
+/// a query that names no surface must behave exactly as before — all
+/// surfaces are in scope by default — and must not fail because a registry
+/// copy could not be read. With a surface named, an unreadable registry is
+/// still a usage error rather than a search that quietly skipped the check:
+/// the query asks about a dimension nobody could verify, and guessing there
+/// is the "unknown recorded as empty" failure this repo forbids.
+///
+/// Callers print the message and exit `2`, the same way they treat
+/// [`crate::selector::UsageError`] from the plain resolve — the arguments
+/// cannot be turned into a verifiable filter at all.
+pub fn resolve_selector_flags(
+    filters: &crate::selector::SelectorArgs,
+) -> Result<crate::selector::Resolved, crate::selector::UsageError> {
+    let Some(surface) = filters.surface.as_deref() else {
+        // No surface named: nothing to validate, the registry is not read.
+        return filters.resolve();
+    };
+    let vocabulary = surface_vocabulary().map_err(|error| {
+        crate::selector::UsageError(format!(
+            "the requested `--surface {surface}` could not be checked against the harness \
+             registry, so the query is refused rather than answered unverified: {error}"
+        ))
+    })?;
+    filters.resolve_validated(vocabulary)
+}
+
 /// Registry-driven scan against an already-loaded [`HarnessRegistry`];
 /// separate entry so tests can feed it a scratch registry without touching
 /// the user's HOME or the repo's `data/` file.
@@ -913,10 +1696,30 @@ pub fn scan_with_registry(config: &Config, registry: &HarnessRegistry) -> io::Re
     scan_with_registry_and_machine(config, registry, &machine)
 }
 
+/// How many times [`scan_with_machine`] has run in this process. Test-only:
+/// the collect-once-reuse path asserts a quiet run-once pass performs exactly
+/// one registry scan, and this is the counter that proves it.
+#[doc(hidden)]
+pub static SCAN_WITH_MACHINE_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Read [`SCAN_WITH_MACHINE_CALLS`]. Test-only.
+#[doc(hidden)]
+pub fn scan_with_machine_calls() -> usize {
+    SCAN_WITH_MACHINE_CALLS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Reset [`SCAN_WITH_MACHINE_CALLS`]. Test-only.
+#[doc(hidden)]
+pub fn reset_scan_with_machine_calls() {
+    SCAN_WITH_MACHINE_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Registry-driven scan with a caller-selected machine partition. Archive
 /// commands use this after resolving their explicit `--machine` or the local
 /// hostname, so a missing local hostname cannot block the explicit route.
 pub fn scan_with_machine(config: &Config, machine: &str) -> io::Result<ScanReport> {
+    SCAN_WITH_MACHINE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let registry = load_registry_from_repo()?;
     scan_with_registry_and_machine(config, &registry, machine)
 }
@@ -978,7 +1781,166 @@ pub fn scan_with_registry_and_machine(
         }
         report.probes.push(probe);
     }
+
+    // Machine logs are discovered last and kept out of `records` entirely
+    // (ADR-053 D4): what is scanned here is the harness's per-machine input
+    // log, a different product kind from a session transcript. The session
+    // loop above never sees it, so no session count, coverage number or
+    // `machine_recall` bucket can move because a machine log exists.
+    let (machine_logs, unlooked, indeterminate) = scan_machine_logs(registry, platform);
+    report.machine_logs_unlooked = unlooked.len();
+    report.machine_logs_unlooked_reasons = unlooked;
+    report.machine_logs = machine_logs;
+    report.machine_logs_indeterminate = indeterminate;
     Ok(report)
+}
+
+/// The persistence root the grok-bot probe would read, resolved exactly the
+/// way the scan pass resolves it — the same precedence `probe_harness`
+/// applies (the registry's env override first, then the config's
+/// `[harness_roots]` root, then the registry template), through the same
+/// helpers, so a caller needing that read outside a full scan (the
+/// backfill pass's preflight) could not drift from the scan's own path.
+///
+/// `None` = this build would not scan grok-bot here (no registry cell for
+/// this platform, or a template this build refuses to guess-scan).
+pub fn grok_bot_persistence_root(config: &Config) -> Option<PathBuf> {
+    let registry = load_registry_from_repo().ok()?;
+    let harness = registry.harnesses.iter().find(|h| h.id == "grok-bot")?;
+    let cell = harness.paths.cell_for(current_platform())?;
+    if let Some((root, _)) = root_from_env_override(cell) {
+        return Some(root);
+    }
+    if let Some(explicit_root) = config.explicit_harness_root("grok-bot").map(expand_tilde) {
+        return Some(explicit_root);
+    }
+    if !Confidence::classify(&cell.confidence).scan_allowed() {
+        // A guessed path the registry itself refuses to guess: honor the
+        // same gate the scan pass honors.
+        return None;
+    }
+    static_prefix_root(&cell.template).map(|(root, _)| root)
+}
+
+/// Where a declared machine log resolves to, or why it was not looked at.
+enum MachineLogResolution {
+    /// The declared file path on this platform.
+    Path(PathBuf),
+    /// Not looked at, with the fixed metadata reason (never a path).
+    Unlooked(&'static str),
+}
+
+/// Resolve one declared machine log for `platform`.
+///
+/// The three reasons a declared log is *not* looked at are the scanner's
+/// existing rules applied to a file source: no cell for this platform, a cell
+/// whose confidence is `unascertained` (the registry's own "nobody has
+/// measured this" marker), and a template that does not resolve to a concrete
+/// file. A machine log is one file, so a template that carries a placeholder
+/// (`<…>`) or names a directory is not a machine log and is not guessed at.
+fn resolve_machine_log(entry: &RegistryMachineLog, platform: &str) -> MachineLogResolution {
+    if entry.role != "machine-log" {
+        return MachineLogResolution::Unlooked("role is not machine-log");
+    }
+    if !safe_log_component(&entry.id) {
+        return MachineLogResolution::Unlooked("log id is not a usable path component");
+    }
+    let Some(cell) = entry.paths.cell_for(platform) else {
+        return MachineLogResolution::Unlooked("no registry cell for this platform");
+    };
+    if cell.confidence == "unascertained" {
+        return MachineLogResolution::Unlooked("registry cell confidence is unascertained");
+    }
+    // The env override names the harness's config base, which the platform
+    // template's own leading directory stands for (`~/.claude`). The file name
+    // is what the template contributes inside it.
+    let override_variable = cell
+        .env_override
+        .as_deref()
+        .or(entry.env_override.as_deref());
+    if let Some(variable) = override_variable {
+        if let Some(value) = env::var_os(variable).filter(|value| !value.is_empty()) {
+            let Some(name) = template_file_name(&cell.template) else {
+                return MachineLogResolution::Unlooked(
+                    "template does not name a file to place under the override",
+                );
+            };
+            return MachineLogResolution::Path(PathBuf::from(value).join(name));
+        }
+    }
+    match static_prefix_root(&cell.template) {
+        Some((path, true)) => MachineLogResolution::Path(path),
+        Some((_, false)) => {
+            MachineLogResolution::Unlooked("template names a directory, not a file")
+        }
+        None => MachineLogResolution::Unlooked("template is not resolvable on this platform"),
+    }
+}
+
+/// Last component of a platform template, i.e. the file's own name. `None`
+/// for a template that ends in a separator or carries a placeholder.
+fn template_file_name(template: &str) -> Option<String> {
+    if template.contains('<') {
+        return None;
+    }
+    let name = template
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()?;
+    if name.is_empty() || name.starts_with('.') {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// A log id is used as one path component of the stage namespace, so anything
+/// that could address a different component (a separator, `..`, an empty
+/// name) is refused rather than sanitized — a sanitized id would silently
+/// seal a different log's content into a directory that already means
+/// something else.
+fn safe_log_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// Walk every declared machine log and hand back the ones that exist, plus the
+/// two "not read" tallies. Nothing here reads a byte of any file.
+fn scan_machine_logs(
+    registry: &HarnessRegistry,
+    platform: &str,
+) -> (Vec<MachineLogRecord>, Vec<&'static str>, usize) {
+    let mut records = Vec::new();
+    let mut unlooked: Vec<&'static str> = Vec::new();
+    let mut indeterminate = 0usize;
+    for harness in &registry.harnesses {
+        for entry in &harness.machine_logs {
+            let path = match resolve_machine_log(entry, platform) {
+                MachineLogResolution::Path(path) => path,
+                MachineLogResolution::Unlooked(reason) => {
+                    unlooked.push(reason);
+                    continue;
+                }
+            };
+            match fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() => records.push(MachineLogRecord {
+                    harness: harness.id.clone(),
+                    log_id: entry.id.clone(),
+                    absolute_path: path,
+                    byte_size: metadata.len(),
+                }),
+                // Measured absence: the declared file is genuinely not here.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                // A directory where a file is declared, or a stat we could not
+                // take: the log may hold anything, so this is not "absent".
+                Ok(_) | Err(_) => indeterminate += 1,
+            }
+        }
+    }
+    (records, unlooked, indeterminate)
 }
 
 fn scan_hermes_legacy(
@@ -1048,6 +2010,8 @@ fn scan_hermes_legacy(
                 compressed: false,
                 sqlite_layout: None,
                 provenance: Default::default(),
+                session_dir: None,
+                movable_root: false,
             });
         }
     }
@@ -1066,7 +2030,51 @@ fn probe_harness(
     }
 
     let mut subprobes = Vec::new();
+    // The registry root id each subprobe stands for, parallel to
+    // `subprobes`: the canonical harness id for the primary store, the
+    // root's own id for every additional source root. The unverified
+    // marking below names roots by these ids — a path can carry a
+    // username, an id is ours to name.
+    let mut subprobe_root_ids = Vec::new();
+    // W1009/DSK-3: one `SourceRootProbe` row per subprobe. Filled only in
+    // the primary-plus-roots shape (the D6 scope the aggregate rules use);
+    // an all-roots family keeps its aggregate-only surface.
+    let mut source_rows: Vec<SourceRootProbe> = Vec::new();
     let mut total = ScanReport::default();
+    // DSK-1 (plan C, ADR-059 draft): an entry may declare BOTH its primary
+    // store (the `paths` cells) and additional `source_roots` — the desktop
+    // Cowork root beside the claude-code CLI store, the archived-rollouts
+    // root beside codex's active ones. The primary store stays an implicit
+    // root of the same entry, first in the aggregate, so its records, its
+    // canonical `harness_roots` override and its display root keep the
+    // meaning they had before any root was declared. An entry with no
+    // platform cell for its primary store (antigravity, codebuff) keeps the
+    // all-roots shape it has always had — nothing below changes for it.
+    let primary_probeable = h.paths.cell_for(platform).is_some();
+    // W1049: the family's movability for every row of this entry. A store
+    // that moves files between the roots of one registry entry moves them
+    // both ways — codex's `thread/archive` into `codex-archived` and its
+    // `thread/unarchive` back — so the primary row carries the same fact
+    // any declared movable root does.
+    let family_movable = h.source_roots.iter().any(|root| root.movable);
+    if primary_probeable {
+        let mut one = h.clone();
+        one.source_roots.clear();
+        let mut local = ScanReport::default();
+        let probe = probe_harness_single(config, &one, platform, machine, &mut local);
+        source_rows.push(source_root_row(
+            h.id.clone(),
+            true,
+            family_movable,
+            &probe,
+            &local,
+        ));
+        total.records.extend(local.records);
+        total.missing_roots.extend(local.missing_roots);
+        total.indeterminate_roots.extend(local.indeterminate_roots);
+        subprobes.push(probe);
+        subprobe_root_ids.push(h.id.clone());
+    }
     let canonical_override = config.explicit_harness_root(&h.id).is_some();
     let root_keys: Vec<_> = h
         .source_roots
@@ -1076,13 +2084,20 @@ fn probe_harness(
     let has_all_root_overrides = root_keys
         .iter()
         .all(|key| config.explicit_harness_root(key).is_some());
-    if canonical_override && !has_all_root_overrides {
+    // The canonical override is ambiguous only when it cannot mean one root:
+    // a harness whose primary `paths` cell it names is not ambiguous (it is
+    // the primary's override, probed above); a harness whose cells are all
+    // source_roots has no primary for it to name, so the historical refusal
+    // stands there.
+    if canonical_override && !has_all_root_overrides && !primary_probeable {
         return HarnessProbe {
             id: h.id.clone(),
             display_name: h.display_name.clone(),
             root: None,
             confidence: Confidence::Unascertained,
             state: ProbeState::Indeterminate,
+            unverified_roots: Vec::new(),
+            source_roots: Vec::new(),
             record_count: None,
             candidate_count: None,
             unreadable_count: None,
@@ -1094,14 +2109,55 @@ fn probe_harness(
             note: "a canonical harness_roots override is ambiguous across multiple source roots; declare every root with a quoted harness_roots key `<harness>:<source-root>`".to_string(),
         };
     }
+    // An entry-wide env override (ADR-054 D7): a root marked
+    // `override_scope: "entry"` declares a variable whose value replaces the
+    // harness's whole base directory — channel suffix included — for every
+    // build of the harness. While that variable is set, the entry is exactly
+    // one root: the override root, reading the override value. The entry's
+    // `default_only` roots are suppressed here in that state (scanning the
+    // defaults as well would read the same directory twice under two root
+    // ids, or read locations the harness no longer writes), with one
+    // exception: a root the user stated explicitly themselves, the same
+    // user-stated-path rule that outranks templates and confidence gates
+    // below — the variable has nothing to say about a path the user wrote
+    // down. With no such override in force the entry behaves as before:
+    // every declared root scans.
+    let entry_override_in_force = h.source_roots.iter().any(|root| {
+        root.override_scope.as_deref() == Some("entry")
+            && root
+                .paths
+                .cell_for(platform)
+                .and_then(|cell| cell.env_override.as_deref())
+                .is_some_and(|variable| {
+                    env::var_os(variable).is_some_and(|value| !value.is_empty())
+                })
+    });
     for root in &h.source_roots {
         let Some(cell) = root.paths.cell_for(platform) else {
             continue;
         };
+        if entry_override_in_force
+            && root.default_only
+            && config
+                .explicit_harness_root(&format!("{}:{}", h.id, root.id))
+                .is_none()
+        {
+            continue;
+        }
         let mut one = h.clone();
         one.paths = root.paths.clone();
         one.source_roots.clear();
         let mut root_config = config.clone();
+        // The canonical `<harness>` harness_roots key names the entry's
+        // primary store, which was probed above — a source root never
+        // inherits it, or every additional root would re-walk the primary's
+        // override instead of its own declared template. For an all-roots
+        // entry (antigravity, codebuff) this is the same removal the
+        // `has_all_root_overrides` case always did, and any other canonical
+        // override was refused by the guard above, so nothing changes for
+        // those entries; a per-root override is re-inserted below by its
+        // own key.
+        root_config.harness_roots.remove(&h.id);
         if has_all_root_overrides {
             root_config.harness_roots.remove(&h.id);
         }
@@ -1116,6 +2172,15 @@ fn probe_harness(
         }
         let mut local = ScanReport::default();
         let probe = probe_harness_single(&root_config, &one, platform, machine, &mut local);
+        if primary_probeable {
+            source_rows.push(source_root_row(
+                root.id.clone(),
+                false,
+                root.movable,
+                &probe,
+                &local,
+            ));
+        }
         for record in &mut local.records {
             // The cell's declared observation joins whatever the record's own
             // discovery already observed — a Kimi Code session's workspace
@@ -1123,6 +2188,19 @@ fn probe_harness(
             // it: every dimension here is a distinct observation of one
             // session, not a single authoritative answer.
             crate::provenance::merge(&mut record.provenance, &root.provenance);
+            // A movable root's records carry the movability fact the
+            // collector needs to treat a same-id discovery at a new path
+            // as the same file rather than a fresh source (W1007).
+            record.movable_root = root.movable;
+            // The registry root that produced this record, for control
+            // records that must name a root instead of a path (ADR-054 D6:
+            // a path can carry a username; the root id is ours to name).
+            // A record without session-dir facts is not a codebuff record
+            // and has no root-bearing control stream to feed, so the stamp
+            // only exists where the facts do.
+            if let Some(facts) = record.session_dir.as_mut() {
+                facts.root_id = Some(root.id.clone());
+            }
         }
         total.records.extend(local.records);
         total.missing_roots.extend(local.missing_roots);
@@ -1131,6 +2209,7 @@ fn probe_harness(
         // any other declared root, including their honest unknown state.
         let _ = cell;
         subprobes.push(probe);
+        subprobe_root_ids.push(root.id.clone());
     }
     let any_unknown = subprobes.iter().any(HarnessProbe::not_probed_p)
         || subprobes
@@ -1145,19 +2224,91 @@ fn probe_harness(
         .map(|record| record.id.as_str())
         .collect();
     let known_count = unique_records.len() as u64;
-    // Missing cells stay unknown through aggregation; they are never filled
-    // with a semantic zero.
-    let unreadable = subprobes
-        .iter()
-        .try_fold(0u64, |sum, probe| sum.checked_add(probe.unreadable_count?));
+    // A root that was looked for and found ABSENT answers a known zero for
+    // the aggregate once another root of the same family was actually
+    // seen — but only in the primary-plus-roots shape DSK-1 introduced
+    // (ADR-059 draft D6, scoped in the W1006c review): the family is
+    // anchored by a PRIMARY store the entry itself declares, so the absent
+    // sibling's contribution is a measured nothing, and a machine without
+    // Claude Desktop must not have its known claude-code CLI count dimmed
+    // to an unknown. An all-roots family (codebuff's channels, antigravity's
+    // surfaces) declares no primary store, so nothing anchors it and the
+    // pre-DSK-1 rule stands there: a missing sibling keeps that family's
+    // combined total unknown, exactly as before this batch. The doctor's
+    // footprint/probe consistency contract forced the distinction for the
+    // primary shape, because the record-derived footprint could count what
+    // the aggregate refused to claim. One limit guards against a semantic
+    // zero: a family whose roots were ALL absent still reports unknown
+    // (an absent harness is not an empty one).
+    //
+    // W1006d — the same review's D6 correction, one step further: a root
+    // that was never LOOKED at (unascertained, unresolvable,
+    // indeterminate) must not erase a measured total either. That was the
+    // D6 side effect the draft shipped with — on Windows the desktop
+    // Cowork cell is `unascertained`, so an installed CLI's measured count
+    // turned into a blanket unknown — and the rule the W1006c paragraph
+    // above still kept ("a subprobe that never looked keeps the whole
+    // total unknown") is exactly what the review rejected. In the anchored
+    // (primary-plus-roots) shape the measured roots' count is instead
+    // reported as a QUALIFIED LOWER BOUND: the exact count of what the
+    // scan measured, its unverified siblings named beside it. Never an
+    // unknown — that erases a measurement already taken; never a plain
+    // number — that silently claims the family total. The lower bound is
+    // marked, in `unverified_roots`, everywhere the aggregate is shown.
+    // When NO root of the family was measured, nothing anchors a lower
+    // bound and the total stays unknown, exactly as before.
+    let absent_sibling_is_zero = primary_probeable;
+    let family_measured = subprobes.iter().any(HarnessProbe::probed_p);
+    let qualified_lower_bound = primary_probeable && any_unknown && family_measured;
+    let unverified_roots: Vec<UnverifiedRoot> = if qualified_lower_bound {
+        subprobes
+            .iter()
+            .zip(&subprobe_root_ids)
+            .filter(|(probe, _)| probe.not_probed_p())
+            .map(|(probe, id)| UnverifiedRoot {
+                id: id.clone(),
+                state: probe.state,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let unreadable = subprobes.iter().try_fold(0u64, |sum, probe| {
+        if absent_sibling_is_zero && probe.state == ProbeState::Missing {
+            return Some(sum);
+        }
+        // An unverified root contributes nothing to a lower bound for the
+        // same reason an absent one contributes a zero: it never looked,
+        // so it holds no unreadable tally to add — the marking, not the
+        // fold, is where its existence is stated. Outside the lower-bound
+        // shape the fold still refuses, keeping the whole total unknown.
+        if qualified_lower_bound && probe.not_probed_p() {
+            return Some(sum);
+        }
+        sum.checked_add(probe.unreadable_count?)
+    });
     let unreadable_entries = subprobes.iter().try_fold(0u64, |sum, probe| {
+        if absent_sibling_is_zero && probe.state == ProbeState::Missing {
+            return Some(sum);
+        }
+        if qualified_lower_bound && probe.not_probed_p() {
+            return Some(sum);
+        }
         sum.checked_add(probe.unreadable_entry_count?)
     });
     let counts_complete = !subprobes.is_empty()
-        && subprobes.iter().all(|p| p.record_count.is_some())
+        && (any_scanned || qualified_lower_bound)
+        && subprobes.iter().all(|p| {
+            p.record_count.is_some()
+                || (absent_sibling_is_zero && p.state == ProbeState::Missing)
+                || (qualified_lower_bound && p.not_probed_p())
+        })
         && unreadable.is_some()
         && unreadable_entries.is_some();
-    let bytes_complete = !subprobes.is_empty() && subprobes.iter().all(|p| p.bytes.is_some());
+    let bytes_complete = !subprobes.is_empty()
+        && subprobes
+            .iter()
+            .all(|p| p.bytes.is_some() || (qualified_lower_bound && p.not_probed_p()));
     let confidence = subprobes
         .iter()
         .map(|p| p.confidence)
@@ -1179,55 +2330,116 @@ fn probe_harness(
         // Every root was skipped by policy before any filesystem probe. Keep
         // that precise reason; mixed measured/unknown roots remain indeterminate.
         ProbeState::SkipUnascertained
-    } else if any_unknown {
+    } else if any_unknown && !qualified_lower_bound {
         ProbeState::Indeterminate
-    } else if all_missing {
+    } else if all_missing || (qualified_lower_bound && !any_scanned) {
+        // The W1006d lower-bound shape with no scanned root: every MEASURED
+        // root of the family is absent (that is what `probed_p` can mean
+        // here once the unverified roots are subtracted), so the state that
+        // tells the truth about presence is still `Missing` — while
+        // `unverified_roots` and the note carry the "≥" qualification.
         ProbeState::Missing
     } else if any_scanned {
         ProbeState::Scanned
     } else {
         ProbeState::SkipWrongPlatform
     };
+    // Whether the aggregate may claim a count at all: fully measured, or the
+    // qualified-lower-bound shape where the claim is the measured roots'
+    // count carrying its own qualification.
+    let counts_claimable = counts_complete && (!any_unknown || qualified_lower_bound);
     let roots: Vec<_> = subprobes.iter().filter_map(|p| p.root.clone()).collect();
     report.records.extend(total.records);
     report.missing_roots.extend(total.missing_roots);
     report.indeterminate_roots.extend(total.indeterminate_roots);
+    let note = if qualified_lower_bound {
+        format!(
+            "{} declared source roots checked; total is a lower bound — {} unverified \
+             source root(s): {}",
+            subprobes.len(),
+            unverified_roots.len(),
+            unverified_roots
+                .iter()
+                .map(|root| format!("{} ({})", root.id, probe_state_word(root.state)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else if any_unknown {
+        "one or more declared source roots could not be fully checked; total is unknown".to_string()
+    } else if all_missing {
+        "all declared source roots are absent".to_string()
+    } else {
+        format!("{} declared source roots checked", roots.len())
+    };
     HarnessProbe {
         id: h.id.clone(),
         display_name: h.display_name.clone(),
         root: roots.first().cloned(),
         confidence,
         state,
-        record_count: (!any_unknown && counts_complete).then_some(known_count),
+        unverified_roots,
+        source_roots: source_rows,
+        record_count: counts_claimable.then_some(known_count),
         // An unreadable source root has no native id to deduplicate against
         // the other roots, so candidate totals remain unknown in that case.
-        candidate_count: (!any_unknown
-            && counts_complete
+        candidate_count: (counts_claimable
             && unreadable == Some(0)
             && unreadable_entries == Some(0))
         .then_some(known_count),
-        unreadable_count: (!any_unknown && counts_complete)
-            .then_some(unreadable)
-            .flatten(),
-        unreadable_entry_count: (!any_unknown && counts_complete)
-            .then_some(unreadable_entries)
-            .flatten(),
+        unreadable_count: counts_claimable.then_some(unreadable).flatten(),
+        unreadable_entry_count: counts_claimable.then_some(unreadable_entries).flatten(),
         earliest: subprobes.iter().filter_map(|p| p.earliest).min(),
         latest: subprobes.iter().filter_map(|p| p.latest).max(),
-        bytes: (!any_unknown && bytes_complete)
+        bytes: (bytes_complete && (!any_unknown || qualified_lower_bound))
             .then(|| subprobes.iter().filter_map(|p| p.bytes).sum()),
         recognized_files: subprobes
             .into_iter()
             .flat_map(|p| p.recognized_files)
             .collect(),
-        note: if any_unknown {
-            "one or more declared source roots could not be fully checked; total is unknown"
-                .to_string()
-        } else if all_missing {
-            "all declared source roots are absent".to_string()
-        } else {
-            format!("{} declared source roots checked", roots.len())
-        },
+        note,
+    }
+}
+
+/// Build one [`SourceRootProbe`] row from a root's own subprobe and the same
+/// scan-local record set the aggregate folded away (W1009/DSK-3).
+///
+/// Only the subprobe state decides which tallies may be claimed: a `Scanned`
+/// root earned its byte census from the very records the walk handed out —
+/// the same standard the family footprint's byte total uses in doctor's
+/// `coverage_from_records`, with `Some(0)` as that standard's measured empty
+/// for a scanned root that holds nothing — and any other state has no byte
+/// measurement at all (`None`, never a guessed zero). Count, unreadable and
+/// entry tallies, note and root path all come from the subprobe verbatim, so
+/// a root's own row and the family aggregate can never disagree about what
+/// that root's walk saw.
+fn source_root_row(
+    id: String,
+    primary: bool,
+    movable: bool,
+    probe: &HarnessProbe,
+    local: &ScanReport,
+) -> SourceRootProbe {
+    let total_bytes = match probe.state {
+        ProbeState::Scanned => Some(local.records.iter().map(|record| record.byte_size).sum()),
+        // A single-file root carries no per-record bytes in its subprobe's
+        // local report; the store-level figure the probe measured stands in.
+        // No primary-plus-roots family has a file-target root today; this
+        // arm exists so a future one cannot silently read as `None`-bytes
+        // for a store the probe did measure.
+        ProbeState::FileTarget => probe.bytes,
+        _ => None,
+    };
+    SourceRootProbe {
+        id,
+        primary,
+        movable,
+        state: probe.state,
+        root: probe.root.clone(),
+        record_count: probe.record_count,
+        unreadable_count: probe.unreadable_count,
+        unreadable_entry_count: probe.unreadable_entry_count,
+        total_bytes,
+        note: probe.note.clone(),
     }
 }
 
@@ -1244,6 +2456,8 @@ fn probe_harness_single(
         root: None,
         confidence: Confidence::Unascertained,
         state: ProbeState::SkipUnresolvable,
+        unverified_roots: Vec::new(),
+        source_roots: Vec::new(),
         record_count: None,
         candidate_count: None,
         unreadable_count: None,
@@ -1459,6 +2673,8 @@ fn probe_harness_single(
                                                         SqliteSessionLayout::OpenCode,
                                                     ),
                                                     provenance: Default::default(),
+                                                    session_dir: None,
+                                                    movable_root: false,
                                                 })
                                             })
                                             .collect();
@@ -1503,19 +2719,28 @@ fn probe_harness_single(
                                                 )
                                             };
                                             let record_count = records.len();
-                                            let usage =
-                                                grok_usage_records(&root, &records, machine);
+                                            let (session_dirs, walk_unreadable) =
+                                                grok_session_dirs(&root);
+                                            let usage = grok_usage_records(
+                                                &session_dirs,
+                                                &records,
+                                                machine,
+                                            );
+                                            let history =
+                                                grok_history_records(&session_dirs, machine);
                                             report.records.extend(records);
                                             let usage_count = usage.records.len();
                                             report.records.extend(usage.records);
+                                            let history_count = history.records.len();
+                                            report.records.extend(history.records);
                                             probe.unreadable_count = enumeration_gap(
                                                 count,
                                                 record_count,
                                                 info.unreadable_count,
                                             );
-                                            if usage.unreadable_entries > 0 {
+                                            if walk_unreadable > 0 {
                                                 probe.unreadable_entry_count =
-                                                    Some(usage.unreadable_entries);
+                                                    Some(walk_unreadable);
                                             }
                                             if usage.unreadable_files > 0 {
                                                 probe.note.push_str(&format!(
@@ -1523,8 +2748,14 @@ fn probe_harness_single(
                                                     usage.unreadable_files
                                                 ));
                                             }
+                                            if history.unreadable_files > 0 {
+                                                probe.note.push_str(&format!(
+                                                    "; chat_history.jsonl unreadable={}",
+                                                    history.unreadable_files
+                                                ));
+                                            }
                                             probe.note.push_str(&format!(
-                                                "; SessionRecord={record_count}; usage files={usage_count}"
+                                                "; SessionRecord={record_count}; usage files={usage_count}; history files={history_count}"
                                             ));
                                         }
                                         Err(error) => {
@@ -1680,6 +2911,21 @@ fn probe_harness_single(
                 base, confidence, root, env_note, source, machine, report,
             );
         }
+        if h.id == "workbuddy" {
+            return probe_workbuddy_harness(
+                base, confidence, root, env_note, source, machine, report,
+            );
+        }
+        if h.id == "codebuddy" {
+            return probe_codebuddy_harness(
+                base, confidence, root, env_note, source, machine, report,
+            );
+        }
+        if h.id == "github-copilot-cli" {
+            return probe_github_copilot_cli_harness(
+                base, confidence, root, env_note, source, machine, report,
+            );
+        }
         let recs = collect_records(
             &root,
             source,
@@ -1688,7 +2934,23 @@ fn probe_harness_single(
             cell.session_pattern.as_deref(),
             cell.session_dir.as_ref(),
         );
-        let count = recs.records.len() as u64;
+        // One archive slot addresses one session id, so the recognized count
+        // is the **distinct** ids this scan produced — the same quantity the
+        // multi-source-root aggregation counts as `known_count` and the
+        // quantity `archive_gaps` compares it against. Until some harness
+        // wrote the same filename stem in several directories, the raw file
+        // count and the distinct-id count were equal; comparing raw files
+        // here against collect's distinct record ids would turn pure id
+        // aliasing into an "identified but unarchivable" gap (GB-2: 2848
+        // files over 2840 ids read as 8 sessions this build could not
+        // archive). Candidate files keep the file census either way.
+        let count = recs
+            .records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len() as u64;
+        let file_count = recs.records.len() as u64;
         let recognized_files = recs
             .records
             .iter()
@@ -1715,7 +2977,7 @@ fn probe_harness_single(
             confidence,
             state: ProbeState::Scanned,
             record_count: Some(count),
-            candidate_count: Some(count + recs.unreadable_count),
+            candidate_count: Some(file_count + recs.unreadable_count),
             // Counted entry by entry by the directory walk: a real number.
             unreadable_count: Some(recs.unreadable_count),
             unreadable_entry_count: Some(recs.unreadable_entry_count),
@@ -1775,6 +3037,8 @@ fn probe_grok_bot_harness(
                     compressed: false,
                     sqlite_layout: Some(crate::models::SqliteSessionLayout::GrokBot),
                     provenance: Default::default(),
+                    session_dir: None,
+                    movable_root: false,
                 });
             }
             base.root = Some(root);
@@ -1800,6 +3064,984 @@ fn probe_grok_bot_harness(
             base
         }
     }
+}
+
+/// One `*.jsonl` transcript file below a cbc-family `projects/` root: the
+/// session id — the file name's stem, measured equal to the store key on
+/// every installation this family was measured from — together with the
+/// file's own metadata. Never its bytes; a scan reads names, sizes and
+/// times only.
+struct CbcTranscript {
+    path: PathBuf,
+    mtime: SystemTime,
+    byte_size: u64,
+}
+
+/// Which layouts one cbc-family `projects/` root walks (W1047): both
+/// products in the family are builds of the same `cbc` CLI core, and the
+/// layout is the one fact their transcript roots do not share.
+enum CbcRootLayout {
+    /// WorkBuddy desktop app (W1046, measured): transcripts live only at
+    /// `projects/<project-slug>/<session-id>.jsonl`. A flat
+    /// `projects/<id>.jsonl` file is measured and skipped, and a matched
+    /// name whose metadata could not be read stays an unreadable directory
+    /// entry — the sqlite store beside the root remains the source of
+    /// recognized truth, so a session is joined through its store row and
+    /// an unreadable file never invents one.
+    SlugOnly,
+    /// CodeBuddy CLI (W1047, measured): the flat `projects/<session-id>.jsonl`
+    /// layout and the `projects/<project-slug>/<session-id>.jsonl` layout
+    /// both exist on one installation. The CLI keeps no sqlite session
+    /// store, so a matched file name is the only record that a session
+    /// exists at all — a name the layout accepts whose metadata could not
+    /// be read is therefore a recognized session this build cannot hand
+    /// out, kept in [`CbcTranscriptWalk::recognized_unrecorded`] so the
+    /// recognized-vs-archived difference becomes an archive gap and collect
+    /// reports PARTIAL exit 3, never 0 — the same rule the desktop probe
+    /// gets from its store rows. The `history` stem is the per-machine
+    /// input log the CLI writes beside `projects/` (declared as a machine
+    /// log on the registry entry), never a session.
+    FlatAndSlug,
+}
+
+/// What one cbc-family transcript walk observed, all metadata only.
+struct CbcTranscriptWalk {
+    /// The readable transcripts, keyed by session id (the file name's
+    /// stem), the newest copy per id.
+    transcripts: BTreeMap<String, CbcTranscript>,
+    /// Transcripts seen directly under the root — the flat CLI layout.
+    /// Always 0 for [`CbcRootLayout::SlugOnly`], which skips those files.
+    flat_files: u64,
+    /// Transcripts seen under a `<project-slug>/` directory.
+    slug_files: u64,
+    /// Copies of an id already kept at a newer (mtime, path).
+    stale_duplicates: u64,
+    /// Directory entries whose type, listing or metadata could not be
+    /// inspected: each is an untaken tally entry, never a zero.
+    unreadable_entries: u64,
+    /// Matched names whose metadata could not be read — recognized
+    /// sessions with no record, the exit-3 arm of the CLI layout. Always 0
+    /// for [`CbcRootLayout::SlugOnly`].
+    recognized_unrecorded: u64,
+}
+
+/// Walk a cbc-family transcript root, `~/<product>/projects/`. Only
+/// `*.jsonl` files the layout accepts are transcripts; the neighbours the
+/// core writes beside them are excluded by name wherever they appear —
+/// `*.file-rollback.ndjson` (a rollback journal) and any subdirectory
+/// inside a project slug (the `tool-results/` derivative cache the
+/// renderer reads) are never sessions, never archived, and never counted as
+/// candidates. Every other subdirectory or non-jsonl file is measured and
+/// skipped, the same three-state rule every scanner walk keeps.
+///
+/// The same session id can appear under more than one project slug — the
+/// app moves projects and community tooling reports the stale copy that
+/// stays behind — and one archive session answers for one id, so the walk
+/// keeps one copy per id, the newest by (mtime, path), and returns how many
+/// stale duplicates it skipped. Keeping one copy is a scan-side decision
+/// only: the bytes of every observed copy stay on disk untouched, and
+/// appends a skipped copy would later gain are picked up the day its mtime
+/// makes it the newest.
+fn cbc_transcript_walk(root: &Path, layout: CbcRootLayout) -> CbcTranscriptWalk {
+    let accept_flat = matches!(layout, CbcRootLayout::FlatAndSlug);
+    // On the CLI layout the accepted name itself is the record that a
+    // session exists, so an unreadable one is a recognized session without
+    // a record; on the desktop layout the store stays the source of
+    // recognized truth, so it is a plain unreadable entry. The same flag is
+    // also where the CLI layout's `history` machine-log exclusion applies
+    // (`cbc_accept_file`), so it is named for the layout it carries.
+    let cli_layout = accept_flat;
+    let mut walk = CbcTranscriptWalk {
+        transcripts: BTreeMap::new(),
+        flat_files: 0,
+        slug_files: 0,
+        stale_duplicates: 0,
+        unreadable_entries: 0,
+        recognized_unrecorded: 0,
+    };
+    let root_entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        // The root exists (the caller checked) but cannot be listed: every
+        // candidate below it is one untaken tally entry, not zero.
+        Err(_) => {
+            walk.unreadable_entries += 1;
+            return walk;
+        }
+    };
+    for entry in root_entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                walk.unreadable_entries += 1;
+                continue;
+            }
+        };
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => {}
+            // A flat file is a transcript only on the CLI layout; the
+            // desktop app writes its `*.jsonl` sessions one level deeper,
+            // so on the slug-only walk a root-level file — whatever its
+            // name — is measured and skipped.
+            Ok(_) => {
+                if accept_flat {
+                    cbc_accept_file(&entry, &mut walk, true, cli_layout);
+                }
+                continue;
+            }
+            Err(_) => {
+                walk.unreadable_entries += 1;
+                continue;
+            }
+        }
+        // A directory is a project slug: its own entries are the slug
+        // layout's transcripts, and anything deeper is unmeasured.
+        let files = match fs::read_dir(entry.path()) {
+            Ok(entries) => entries,
+            Err(_) => {
+                walk.unreadable_entries += 1;
+                continue;
+            }
+        };
+        for file in files {
+            let file = match file {
+                Ok(entry) => entry,
+                Err(_) => {
+                    walk.unreadable_entries += 1;
+                    continue;
+                }
+            };
+            match file.file_type() {
+                // `tool-results/` and any other subdirectory never hold
+                // transcripts: the glob is `*.jsonl` files only.
+                Ok(kind) if kind.is_dir() => continue,
+                Ok(_) => {}
+                Err(_) => {
+                    walk.unreadable_entries += 1;
+                    continue;
+                }
+            }
+            cbc_accept_file(&file, &mut walk, false, cli_layout);
+        }
+    }
+    walk
+}
+
+/// Classify one `*.jsonl`-named file the walk accepted by type and record
+/// it — a readable one under its stem, an unreadable one as the layout's
+/// unknown arm. Only cbc-family exclusion rules apply: the rollback
+/// journal suffix, and on the CLI layout the `history` input-log stem.
+fn cbc_accept_file(
+    file: &fs::DirEntry,
+    walk: &mut CbcTranscriptWalk,
+    flat: bool,
+    cli_layout: bool,
+) {
+    let name = file.file_name().to_string_lossy().into_owned();
+    // A rollback journal beside the transcripts: excluded by name.
+    if name.ends_with(".file-rollback.ndjson") {
+        return;
+    }
+    if !name.ends_with(".jsonl") {
+        return;
+    }
+    let stem = match Path::new(&name).file_stem().and_then(|stem| stem.to_str()) {
+        Some(stem) => stem.to_string(),
+        None => return,
+    };
+    // The CLI's per-typed-line input log, which the registry entry
+    // declares as a machine log: its lines are prompts the person typed on
+    // this machine, not a conversation this walk can ever archive, and its
+    // stem is never a session id — at either level the CLI layout accepts
+    // files, flat and under a project slug, because both are inside
+    // `projects/` and the registry note says exactly that. The desktop
+    // entry measured no file of this name, so the slug-only walk keeps
+    // accepting it (nothing there writes one into `projects/`).
+    if cli_layout && stem == "history" {
+        return;
+    }
+    let (byte_size, mtime) = match file.metadata() {
+        Ok(metadata) => match (metadata.len(), metadata.modified()) {
+            (byte_size, Ok(mtime)) => (byte_size, mtime),
+            _ => return cbc_unreadable_name(walk, cli_layout),
+        },
+        Err(_) => return cbc_unreadable_name(walk, cli_layout),
+    };
+    let keep_newest = match walk.transcripts.get(&stem) {
+        Some(existing) => (existing.mtime, &existing.path) < (mtime, &file.path()),
+        None => true,
+    };
+    if walk.transcripts.contains_key(&stem) {
+        walk.stale_duplicates += 1;
+    }
+    if keep_newest {
+        walk.transcripts.insert(
+            stem,
+            CbcTranscript {
+                path: file.path(),
+                mtime,
+                byte_size,
+            },
+        );
+    }
+    if flat {
+        walk.flat_files += 1;
+    } else {
+        walk.slug_files += 1;
+    }
+}
+
+/// A file the layout accepted by name whose metadata could not be taken.
+/// One counted observation either way, never a zero: on the CLI layout the
+/// name itself is the session's record, so the count joins the recognized
+/// set and the recognized-vs-archived difference becomes collect's
+/// PARTIAL exit-3 gap; on the desktop layout an unreadable entry stays an
+/// entry, because the store beside the root — not the file name — carries
+/// the recognized truth there.
+fn cbc_unreadable_name(walk: &mut CbcTranscriptWalk, cli_layout: bool) {
+    if cli_layout {
+        walk.recognized_unrecorded += 1;
+    } else {
+        walk.unreadable_entries += 1;
+    }
+}
+
+/// The WorkBuddy desktop app's transcript walk (W1046), the slug-only
+/// layout: `~/.workbuddy/projects/<project-slug>/<session-id>.jsonl`.
+fn workbuddy_transcripts(root: &Path) -> CbcTranscriptWalk {
+    cbc_transcript_walk(root, CbcRootLayout::SlugOnly)
+}
+
+/// The CodeBuddy CLI's transcript walk (W1047), the both-layouts walk:
+/// flat `~/.codebuddy/projects/<session-id>.jsonl` and
+/// `~/.codebuddy/projects/<project-slug>/<session-id>.jsonl` — measured
+/// to coexist on one installation.
+fn codebuddy_transcripts(root: &Path) -> CbcTranscriptWalk {
+    cbc_transcript_walk(root, CbcRootLayout::FlatAndSlug)
+}
+
+/// The canonical cbc-family session id for one native id (the store row's
+/// `id`, or the transcript file name's stem when no store says anything
+/// about it).
+fn cbc_session_id(source: HarnessSource, machine: &str, native_id: &str) -> String {
+    crate::id::SessionIdentity {
+        source_short: source.short(),
+        machine: machine.to_string(),
+        native_id: native_id.to_string(),
+    }
+    .id()
+}
+
+/// Push one transcript file record — a plain append-only jsonl session whose
+/// bytes the ordinary file reader collects under the shared id.
+fn push_cbc_transcript_record(
+    records: &mut Vec<SessionRecord>,
+    source: HarnessSource,
+    machine: &str,
+    native_id: &str,
+    transcript: &CbcTranscript,
+) {
+    records.push(SessionRecord {
+        id: cbc_session_id(source, machine, native_id),
+        absolute_path: transcript.path.clone(),
+        byte_size: transcript.byte_size,
+        mtime: transcript.mtime,
+        source,
+        compressed: false,
+        sqlite_layout: None,
+        provenance: Default::default(),
+        session_dir: None,
+        movable_root: false,
+    });
+}
+
+/// Widen an (earliest, latest) span with one more observed time.
+fn widen_time_span(
+    earliest: &mut Option<SystemTime>,
+    latest: &mut Option<SystemTime>,
+    time: SystemTime,
+) {
+    *earliest = Some(match *earliest {
+        Some(earliest) => earliest.min(time),
+        None => time,
+    });
+    *latest = Some(match *latest {
+        Some(latest) => latest.max(time),
+        None => time,
+    });
+}
+
+/// The counters one `fold_workbuddy_store_rows` pass produced. Every field
+/// is a counted recognition or a counted miss, never an inferred one.
+struct WorkBuddyRowFold {
+    /// Rows that exported a tombstone record.
+    tombstoned: u64,
+    /// Live rows this machine holds no transcript bytes for.
+    without_transcript: u64,
+    /// Rows the store cannot name; recognized, never guessed an id.
+    unnamed_rows: u64,
+    /// Rows whose time could not be taken at all — the row's own columns
+    /// unreadable as a time and the store file's own mtime absent — whether
+    /// live with a transcript or already deleted: recognized, never archived,
+    /// never stamped with a fake epoch, and never silently filed under the
+    /// live-rows-without-a-transcript count (W1047f L3).
+    untimeable_rows: u64,
+    /// The recognized set: distinct row ids plus transcript ids plus unnamed
+    /// rows, exactly what `record_count` earns as a measurement.
+    known_sessions: u64,
+    /// Transcripts whose id no store row carries; archived as orphans.
+    orphan_transcripts: u64,
+}
+
+/// The probe-note segment that names untimed rows. Kept beside the fold so
+/// the honest line is pinned with the bucket it reports (W1047f L3): a row
+/// dropped for lack of a readable time is its own named count, never a
+/// `without_transcript` mislabel — a deleted row with its transcript still on
+/// disk is not a live row without a local transcript, and the printed note
+/// must not say it is.
+fn workbuddy_untimed_rows_note(untimed: u64) -> String {
+    if untimed == 0 {
+        String::new()
+    } else {
+        format!(
+            "; {untimed} store row(s) without a readable time — recognized, not archived, not 0"
+        )
+    }
+}
+
+/// Fold the store's enumerated `sessions` rows against the transcript walk
+/// (W1046): push the row/tombstone and transcript records, count the orphans,
+/// and hand back the probe's tallies. Split from `probe_workbuddy_harness`
+/// (W1047f L3) for the same reason the codebuddy accounting is split from its
+/// probe: the arm a filesystem cannot be made to produce on POSIX — a row
+/// with neither a readable row time nor a readable store-file time, because a
+/// unix stat of a live sqlite file always supplies a modified time — is worth
+/// pinning directly against the fold's own accounting.
+#[allow(clippy::too_many_arguments)]
+fn fold_workbuddy_store_rows(
+    rows: Vec<crate::sqlite_probe::WorkBuddySessionRow>,
+    transcripts: &BTreeMap<String, CbcTranscript>,
+    db: &std::path::Path,
+    db_modified: Option<SystemTime>,
+    source: HarnessSource,
+    machine: &str,
+    records: &mut Vec<SessionRecord>,
+    earliest: &mut Option<SystemTime>,
+    latest: &mut Option<SystemTime>,
+) -> WorkBuddyRowFold {
+    let mut tombstoned = 0u64;
+    let mut without_transcript = 0u64;
+    let mut unnamed_rows = 0u64;
+    let mut untimeable_rows = 0u64;
+    let mut known_ids: BTreeSet<String> = BTreeSet::new();
+    for row in rows {
+        if row.id.is_empty() {
+            // A row the store cannot name is still a recognized
+            // session; it is never guessed an id from neighbours.
+            unnamed_rows += 1;
+            continue;
+        }
+        known_ids.insert(row.id.clone());
+        let transcript = transcripts.get(&row.id);
+        if !row.deleted && transcript.is_none() {
+            // The unknown arm: a live store row this machine
+            // holds no transcript bytes for. No record is
+            // emitted; the recognized-vs-archived difference is
+            // what `collect` turns into PARTIAL exit 3, never 0.
+            without_transcript += 1;
+            continue;
+        }
+        // An unrepresentable row time falls back to the store
+        // file's own mtime, the hermes precedent; a row with
+        // neither is not archived — a named gap, never a fake
+        // epoch, and never counted as a live row without a
+        // transcript (W1047f L3): it is the row's time that is
+        // missing, live or deleted, transcript or none.
+        let mtime = match row
+            .time_ms
+            .and_then(sqlite_millis_to_system_time)
+            .or(db_modified)
+        {
+            Some(mtime) => mtime,
+            None => {
+                untimeable_rows += 1;
+                continue;
+            }
+        };
+        records.push(SessionRecord {
+            id: cbc_session_id(source, machine, &row.id),
+            absolute_path: db.to_path_buf(),
+            byte_size: 0,
+            mtime,
+            source,
+            compressed: false,
+            sqlite_layout: Some(SqliteSessionLayout::WorkBuddy),
+            provenance: Default::default(),
+            session_dir: None,
+            movable_root: false,
+        });
+        if row.deleted {
+            tombstoned += 1;
+        }
+        if let Some(transcript) = transcript {
+            push_cbc_transcript_record(records, source, machine, &row.id, transcript);
+        }
+        widen_time_span(earliest, latest, mtime);
+    }
+    let mut orphan_transcripts = 0u64;
+    for (stem, transcript) in transcripts {
+        if !known_ids.contains(stem) {
+            known_ids.insert(stem.clone());
+            orphan_transcripts += 1;
+            push_cbc_transcript_record(records, source, machine, stem, transcript);
+        }
+    }
+    let known_sessions = (known_ids.len() as u64).saturating_add(unnamed_rows);
+    WorkBuddyRowFold {
+        tombstoned,
+        without_transcript,
+        unnamed_rows,
+        untimeable_rows,
+        known_sessions,
+        orphan_transcripts,
+    }
+}
+
+/// Probe the WorkBuddy dual store (W1046): sessions enumerate from the
+/// `sessions` table of the `workbuddy.db` that sits beside the registry
+/// root, and each row joins to its `*.jsonl` transcript below the root. One
+/// session id is carried by up to two `SessionRecord`s, exactly the grok
+/// row/history shape: a virtual sqlite record whose `absolute_path` is the
+/// db (its cursor is keyed `path\0id`, so it never collides with the
+/// transcript file's own byte-offset cursor), plus the transcript file
+/// record that the ordinary append-only jsonl reader collects.
+///
+/// * a row with `deleted_at IS NOT NULL` is a tombstone: the virtual record
+///   exports a bare tombstone line, and a still-present transcript keeps
+///   being archived beside it — both facts stay, neither invented, neither
+///   dropped;
+/// * a live row without a matching transcript jsonl (a transport this
+///   machine holds no local transcript for, or the rows whose jsonl a
+///   project move left behind) is a recognized session with no archivable
+///   bytes: no record is emitted for it, the recognized-vs-archived
+///   difference the report computes becomes an archive gap, and `collect`
+///   reports PARTIAL exit 3 — never 0;
+/// * a transcript whose id has no store row archives under its own id: the
+///   union of store rows and transcript ids is the recognized set, so such
+///   an orphan is recognized *and* archived, never a gap and never hidden
+///   behind the rows that are.
+fn probe_workbuddy_harness(
+    mut base: HarnessProbe,
+    confidence: Confidence,
+    root: PathBuf,
+    env_note: String,
+    source: HarnessSource,
+    machine: &str,
+    report: &mut ScanReport,
+) -> HarnessProbe {
+    base.root = Some(root.clone());
+    base.confidence = confidence;
+    // The slug-only walk never recognizes a name it could not read (the
+    // store carries the recognized truth), so this probe's
+    // recognized-vs-archived arithmetic runs on the store rows below.
+    let walk = workbuddy_transcripts(&root);
+    let transcripts = walk.transcripts;
+    let walk_unreadable = walk.unreadable_entries;
+    let stale_duplicates = walk.stale_duplicates;
+    let transcript_count = transcripts.len() as u64;
+    let recognized_files = transcripts
+        .values()
+        .map(|transcript| transcript.path.clone())
+        .collect::<Vec<_>>();
+    let transcript_bytes = transcripts
+        .values()
+        .map(|transcript| transcript.byte_size)
+        .sum::<u64>();
+    let mut earliest = None;
+    let mut latest = None;
+    for transcript in transcripts.values() {
+        widen_time_span(&mut earliest, &mut latest, transcript.mtime);
+    }
+    let db = match root.parent().map(|parent| parent.join("workbuddy.db")) {
+        Some(db) => db,
+        None => {
+            base.state = ProbeState::Indeterminate;
+            base.note = format!(
+                "{env_note}the registry root has no parent directory, so the sibling store is unresolvable — session count unknown, not 0"
+            );
+            return base;
+        }
+    };
+    match fs::metadata(&db) {
+        // Measured absence of the sqlite half: the transcripts below the
+        // root still archive, each under its own file-name id.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            // A walk that listed nothing and could not read an entry proves
+            // no clean zero: without the store, the transcripts are the
+            // only recognized set, and an untakeable tally stays unknown.
+            let walk_clean = !(transcripts.is_empty() && walk_unreadable > 0);
+            for (stem, transcript) in &transcripts {
+                push_cbc_transcript_record(&mut report.records, source, machine, stem, transcript);
+            }
+            let walk_note = if walk_unreadable > 0 {
+                format!(
+                    "; transcript walk incomplete: {walk_unreadable} unreadable directory entries"
+                )
+            } else {
+                String::new()
+            };
+            base.state = ProbeState::Scanned;
+            base.record_count = walk_clean.then_some(transcript_count);
+            base.candidate_count = walk_clean.then_some(transcript_count);
+            base.unreadable_count = walk_clean.then_some(0);
+            base.unreadable_entry_count = Some(walk_unreadable);
+            base.bytes = Some(transcript_bytes);
+            base.earliest = earliest;
+            base.latest = latest;
+            base.recognized_files = recognized_files;
+            base.note = format!(
+                "{env_note}workbuddy.db is not present beside the projects root; {transcript_count} transcript file(s) archived from files only — the store's session count is unknown, not 0{walk_note}"
+            );
+            base
+        }
+        Err(e) => {
+            report.indeterminate_roots.push(db.clone());
+            base.state = ProbeState::Indeterminate;
+            base.note = format!(
+                "{env_note}workbuddy.db unreadable, existence unknown ({e}) — not 'absent'"
+            );
+            base
+        }
+        Ok(md) if !md.is_file() => {
+            report.indeterminate_roots.push(db.clone());
+            base.state = ProbeState::Indeterminate;
+            base.note = format!(
+                "{env_note}workbuddy.db exists but is not a file ({}) — session count unknown, not 0",
+                path_kind(&md)
+            );
+            base
+        }
+        Ok(_) => match crate::sqlite_probe::enumerate_workbuddy_sessions(&db) {
+            Err(error) => {
+                // The transcripts still archive; whether the store holds
+                // sessions beyond them is exactly what this error leaves
+                // unread, so the session count is unknown and stays so.
+                for (stem, transcript) in &transcripts {
+                    push_cbc_transcript_record(
+                        &mut report.records,
+                        source,
+                        machine,
+                        stem,
+                        transcript,
+                    );
+                }
+                base.state = ProbeState::Scanned;
+                base.unreadable_entry_count = Some(walk_unreadable);
+                base.bytes = Some(transcript_bytes);
+                base.earliest = earliest;
+                base.latest = latest;
+                base.recognized_files = recognized_files;
+                base.note = format!(
+                    "{env_note}WorkBuddy store enumeration failed: {error}; session count unknown, not 0; {transcript_count} transcript file(s) archived from files only"
+                );
+                base
+            }
+            Ok(rows) => {
+                let row_count = rows.len() as u64;
+                let db_modified = fs::metadata(&db)
+                    .and_then(|metadata| metadata.modified())
+                    .ok();
+                let db_bytes = crate::sqlite_probe::sqlite_store_bytes(&db).ok();
+                let fold = fold_workbuddy_store_rows(
+                    rows,
+                    &transcripts,
+                    &db,
+                    db_modified,
+                    source,
+                    machine,
+                    &mut report.records,
+                    &mut earliest,
+                    &mut latest,
+                );
+                let walk_note = if walk_unreadable > 0 {
+                    format!(
+                        "; transcript walk incomplete: {walk_unreadable} unreadable directory entries"
+                    )
+                } else {
+                    String::new()
+                };
+                base.state = ProbeState::Scanned;
+                base.record_count = Some(fold.known_sessions);
+                base.candidate_count = Some(fold.known_sessions);
+                base.unreadable_count =
+                    Some(fold.without_transcript + fold.unnamed_rows + fold.untimeable_rows);
+                base.unreadable_entry_count = Some(walk_unreadable);
+                // reason: the sqlite byte tally already failed open once
+                // here; the transcripts' bytes are measured, the store's are
+                // a live-only reading and zero is not an honest fallback
+                // for it — the probe either counted all three files or
+                // reports the transcripts' half alone.
+                base.bytes = db_bytes.map_or(Some(transcript_bytes), |db_bytes| {
+                    Some(db_bytes + transcript_bytes)
+                });
+                base.earliest = earliest;
+                base.latest = latest;
+                base.recognized_files = recognized_files;
+                base.note = format!(
+                    "{env_note}WorkBuddy dual store: {row_count} session row(s) in the sqlite store (tombstoned={tombstoned}); {transcript_count} transcript file(s) (stale duplicates skipped={stale_duplicates}, without a store row={orphan_transcripts}); live rows without a local transcript jsonl={without_transcript} — recognized, not archived, not 0{untimed_note}{walk_note}",
+                    tombstoned = fold.tombstoned,
+                    orphan_transcripts = fold.orphan_transcripts,
+                    without_transcript = fold.without_transcript,
+                    untimed_note = workbuddy_untimed_rows_note(fold.untimeable_rows),
+                );
+                base
+            }
+        },
+    }
+}
+
+/// Probe the CodeBuddy CLI transcript root (W1047): the CLI is the other
+/// build of the same `cbc` core the WorkBuddy desktop app wraps (the
+/// ruling CS-WB-2 records the same event schema on both, with the CLI the
+/// one that adds `summary` and `turn-metrics` lines the W1046 reader
+/// already handles), and its sessions live one whole per
+/// `*.jsonl` transcript below the registry root — the flat
+/// `projects/<session-id>.jsonl` layout and the
+/// `projects/<slug>/<session-id>.jsonl` layout both measured on this
+/// machine. There is no sqlite sessions store to read, so there is no
+/// tombstone arm (the CLI keeps no deletion marker this build can observe)
+/// and no row-join: each transcript archives on its own file-name stem
+/// through the ordinary append-only jsonl reader.
+///
+/// The unknown arm is the walk itself, with the file name standing in for
+/// the role the store row plays on the desktop side. A `*.jsonl` name the
+/// layout accepted whose metadata could not be read is a session this
+/// source recognizes and this build cannot hand out: the walk counts it,
+/// no record is emitted for it, and the recognized-vs-archived difference
+/// the report computes becomes an archive gap, so `collect` reports
+/// PARTIAL exit 3 — never 0. Directory entries that could not be typed or
+/// listed stay the same unreadable-entry tallies every scanner walk keeps,
+/// and the `history` input log (a machine log this registry entry declares)
+/// is excluded by name at either level this layout accepts files, flat and
+/// under a project slug, never a session.
+fn probe_codebuddy_harness(
+    mut base: HarnessProbe,
+    confidence: Confidence,
+    root: PathBuf,
+    env_note: String,
+    source: HarnessSource,
+    machine: &str,
+    report: &mut ScanReport,
+) -> HarnessProbe {
+    base.root = Some(root.clone());
+    base.confidence = confidence;
+    let walk = codebuddy_transcripts(&root);
+    let transcripts = &walk.transcripts;
+    for (stem, transcript) in transcripts {
+        push_cbc_transcript_record(&mut report.records, source, machine, stem, transcript);
+    }
+    codebuddy_probe_accounting(base, walk, env_note)
+}
+
+/// Assemble the CodeBuddy probe's counts and note from one walk. Split from
+/// the probe because the walk's arms are worth pinning beyond what a
+/// filesystem can be made to produce: on POSIX the stat of a file inside a
+/// readable directory succeeds whatever the file's own mode bits say, so
+/// the state the real walker hands back when an accepted name gives no
+/// metadata is produced directly by the internal test instead.
+fn codebuddy_probe_accounting(
+    mut base: HarnessProbe,
+    walk: CbcTranscriptWalk,
+    env_note: String,
+) -> HarnessProbe {
+    let transcripts = walk.transcripts;
+    let transcript_count = transcripts.len() as u64;
+    let recognized_files = transcripts
+        .values()
+        .map(|transcript| transcript.path.clone())
+        .collect::<Vec<_>>();
+    let transcript_bytes = transcripts
+        .values()
+        .map(|transcript| transcript.byte_size)
+        .sum::<u64>();
+    let mut earliest = None;
+    let mut latest = None;
+    for transcript in transcripts.values() {
+        widen_time_span(&mut earliest, &mut latest, transcript.mtime);
+    }
+    // The recognized set: every stem the walk accepted, readable or not.
+    let known_sessions = transcript_count + walk.recognized_unrecorded;
+    // A walk that listed nothing and could not read an entry — with no
+    // recognized names at all — proves no clean zero: the session count
+    // stays unknown rather than the measured emptiness a readable walk
+    // earns.
+    let walk_clean =
+        !(transcripts.is_empty() && walk.recognized_unrecorded == 0 && walk.unreadable_entries > 0);
+    let mut note = format!(
+        "{env_note}CodeBuddy transcript store: {known_sessions} session file(s) in the flat and project-directory layouts (flat={}, under a project directory={}), no sqlite session store beside them; stale duplicates skipped={}",
+        walk.flat_files, walk.slug_files, walk.stale_duplicates
+    );
+    if !walk_clean {
+        note = format!(
+            "{env_note}CodeBuddy transcript store: the walk could not read every entry below the projects root, so the session count is unknown, not 0 — nothing was recognized as a session and nothing is claimed as archivable"
+        );
+    } else if walk.recognized_unrecorded > 0 {
+        note.push_str(&format!(
+            "; {unrecorded} transcript file(s) present but unreadable — recognized, not archived, not 0",
+            unrecorded = walk.recognized_unrecorded
+        ));
+    }
+    if walk.unreadable_entries > 0 {
+        note.push_str(&format!(
+            "; transcript walk incomplete: {walk_unreadable} unreadable directory entries",
+            walk_unreadable = walk.unreadable_entries
+        ));
+    }
+    base.state = ProbeState::Scanned;
+    base.record_count = walk_clean.then_some(known_sessions);
+    base.candidate_count = walk_clean.then_some(known_sessions);
+    base.unreadable_count = walk_clean.then_some(walk.recognized_unrecorded);
+    base.unreadable_entry_count = Some(walk.unreadable_entries);
+    base.bytes = Some(transcript_bytes);
+    base.earliest = earliest;
+    base.latest = latest;
+    base.recognized_files = recognized_files;
+    base.note = note;
+    base
+}
+
+/// GitHub Copilot CLI keeps its persisted sessions in one SQLite store,
+/// `session-store.db` directly under its home, and writes a per-session
+/// `events.jsonl` beside them. This reader is built on the store (the upstream's
+/// own documentation of `sessions`/`turns` is the schema
+/// [`crate::sqlite_probe::github_copilot_cli_schema`] encodes); the per-session
+/// events files are *not* enumerated, because the layout below
+/// `session-state/` has never been measured and a basename-only walk would give
+/// every session the same `events` stem. Session records therefore come from
+/// the store's `sessions` table, one per row.
+///
+/// When the store is absent, the count is not silently zero: the events files
+/// the CLI also writes are looked for by their exact, writer-confirmed name,
+/// and finding any means sessions exist that this build cannot enumerate — an
+/// unknown, carried in the note. Absent store and absent events together are a
+/// measured "nothing to read".
+fn probe_github_copilot_cli_harness(
+    base: HarnessProbe,
+    confidence: Confidence,
+    root: PathBuf,
+    env_note: String,
+    source: HarnessSource,
+    machine: &str,
+    report: &mut ScanReport,
+) -> HarnessProbe {
+    let db = root.join("session-store.db");
+    let metadata = match fs::metadata(&db) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let (events, unreadable_entries) = count_events_jsonl_files(&root);
+            if events > 0 || unreadable_entries > 0 {
+                let note = format!(
+                    "{env_note}session-store.db not present, but {events} events.jsonl file(s) were seen under the root (with {unreadable_entries} unreadable entries); the per-session events layout is unmeasured, so the session count from them is unknown"
+                );
+                return HarnessProbe {
+                    root: Some(root),
+                    confidence,
+                    state: ProbeState::Indeterminate,
+                    record_count: None,
+                    candidate_count: None,
+                    unreadable_count: None,
+                    // The events walk ran, so its tally is a counted number —
+                    // `Some(0)` says "looked and none unreadable", not "unknown".
+                    unreadable_entry_count: Some(unreadable_entries),
+                    recognized_files: Vec::new(),
+                    note,
+                    ..base
+                };
+            }
+            return HarnessProbe {
+                root: Some(root),
+                confidence,
+                state: ProbeState::Scanned,
+                record_count: Some(0),
+                candidate_count: Some(0),
+                unreadable_count: Some(0),
+                unreadable_entry_count: Some(unreadable_entries),
+                recognized_files: Vec::new(),
+                note: format!(
+                    "{env_note}no session-store.db and no events.jsonl under the Copilot home — no persisted sessions to read"
+                ),
+                ..base
+            };
+        }
+        Err(e) => {
+            report.indeterminate_roots.push(db);
+            return HarnessProbe {
+                root: Some(root),
+                confidence,
+                state: ProbeState::Indeterminate,
+                record_count: None,
+                candidate_count: None,
+                unreadable_count: None,
+                note: format!(
+                    "{env_note}session-store.db unreadable, existence unknown ({e}) — not 'absent'"
+                ),
+                ..base
+            };
+        }
+    };
+    if !metadata.is_file() {
+        report.indeterminate_roots.push(db);
+        return HarnessProbe {
+            root: Some(root),
+            confidence,
+            state: ProbeState::Indeterminate,
+            record_count: None,
+            candidate_count: None,
+            unreadable_count: None,
+            note: format!(
+                "{env_note}session-store.db exists but is not a file ({}) — session count unknown, not 0",
+                path_kind(&metadata)
+            ),
+            ..base
+        };
+    }
+    let Ok(store_modified) = metadata.modified() else {
+        report.indeterminate_roots.push(db);
+        return HarnessProbe {
+            root: Some(root),
+            confidence,
+            state: ProbeState::Indeterminate,
+            record_count: None,
+            candidate_count: None,
+            unreadable_count: None,
+            note: format!(
+                "{env_note}session-store.db mtime unreadable — session records cannot be dated for staging"
+            ),
+            ..base
+        };
+    };
+    let spec = crate::sqlite_probe::github_copilot_cli_schema();
+    let info = crate::sqlite_probe::probe_sqlite_store_with(&db, &spec);
+    let expected = "sessions table(id, cwd, repository)".to_string();
+    let mut probe = HarnessProbe {
+        root: Some(root),
+        confidence,
+        state: ProbeState::Scanned,
+        recognized_files: vec![db.clone()],
+        ..base
+    };
+    probe.bytes = info.total_bytes;
+    match info.sessions {
+        SqliteSessionProbe::Known {
+            count,
+            candidate_count,
+            ..
+        } => {
+            let rows = match enumerate_sqlite_sessions(&db, &spec) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    probe.unreadable_count = enumeration_gap(count, 0, info.unreadable_count);
+                    probe.note = format!(
+                        "{env_note}SQLite read-only enumeration of {expected} (bytes include .db+-wal+-shm) failed: {error}"
+                    );
+                    return probe;
+                }
+            };
+            let records = copilot_records_from_rows(rows, &db, store_modified, source, machine);
+            let emitted = records.len();
+            let record_count = records.len() as u64;
+            report.records.extend(records);
+            probe.record_count = Some(count);
+            probe.candidate_count = Some(candidate_count);
+            probe.unreadable_count = enumeration_gap(count, emitted, info.unreadable_count);
+            probe.note = format!(
+                "{env_note}SQLite read-only enumeration of {expected} (bytes include .db+-wal+-shm); before filter {candidate_count} / after {count} sessions; SessionRecord={record_count}"
+            );
+        }
+        SqliteSessionProbe::SchemaMismatch { actual } => {
+            probe.note = format!(
+                "{env_note}detected SQLite but schema not recognized (expected {expected}, got {actual}) — not 0, it is un-enumerable"
+            );
+        }
+        SqliteSessionProbe::ReadFailed { error } => {
+            probe.note =
+                format!("{env_note}detected SQLite but read-only enumeration failed ({error})");
+        }
+    }
+    probe
+}
+
+/// Copilot session records from enumerated `sessions` rows. The spec declares
+/// no timestamp column (none was measured on a real store), so every record
+/// carries the store file's own mtime — the same fallback the Hermes reader
+/// uses — and the collect-side cursor is a content hash, never a time.
+fn copilot_records_from_rows(
+    rows: Vec<SqliteSessionRow>,
+    db: &Path,
+    store_modified: SystemTime,
+    source: HarnessSource,
+    machine: &str,
+) -> Vec<SessionRecord> {
+    rows.into_iter()
+        .map(|row| SessionRecord {
+            id: crate::id::SessionIdentity {
+                source_short: source.short(),
+                machine: machine.to_string(),
+                native_id: row.id,
+            }
+            .id(),
+            absolute_path: db.to_path_buf(),
+            byte_size: 0,
+            mtime: row.mtime.unwrap_or(store_modified),
+            source,
+            compressed: false,
+            sqlite_layout: Some(SqliteSessionLayout::GitHubCopilotCli),
+            provenance: Default::default(),
+            session_dir: None,
+            movable_root: false,
+        })
+        .collect()
+}
+
+/// Count the `events.jsonl` files a Copilot home holds, by the exact name the
+/// shipped CLI's own event writer uses (`<sessionStatePath>/events.jsonl`).
+/// Counting by name claims nothing about which session a file belongs to: the
+/// per-session layout is unmeasured, so the count is only ever reported as
+/// "sessions exist that this build cannot enumerate", never as a session count.
+fn count_events_jsonl_files(root: &Path) -> (u64, u64) {
+    let mut events = 0u64;
+    let mut unreadable_entries = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => {
+                unreadable_entries += 1;
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            };
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() && entry.file_name() == "events.jsonl" {
+                events += 1;
+            }
+        }
+    }
+    (events, unreadable_entries)
 }
 
 /// Name the kind of thing a path turned out to be, for the one message that
@@ -1849,12 +4091,27 @@ fn root_from_env_override(cell: &RegistryCell) -> Option<(PathBuf, bool)> {
         ".kimi-code/"
     } else if template.contains(".dsh/") {
         // `DSH_HOME` is DeepSeek Harness's home directory, i.e. the `.dsh`
-        // layer itself; `sessions/` hangs below it. A cell that declares an
-        // env override this table does not know would resolve to the template
+        // layer itself; `sessions/` hangs below it. A cell that declares
+        // an env override this table does not know would resolve to the template
         // instead, silently reading the default location while the registry
         // claims the override works — which is what happened here until the
         // real binary was run against a moved home.
         ".dsh/"
+    } else if template.contains(".config/manicode/") {
+        // `FREEBUFF_CONFIG_DIR` is Codebuff/Freebuff's config base, i.e. the
+        // `.config/manicode` layer itself; nothing hangs below it in the
+        // template (ADR-054 F3/F7: the value replaces the whole base,
+        // channel suffix included, for every build of the harness). The
+        // marker must not swallow the `-dev`/`-staging` siblings: only this
+        // exact spelling matches, so a dev-channel template can never
+        // resolve through another channel's override.
+        ".config/manicode/"
+    } else if template.contains(".copilot/") {
+        // `COPILOT_HOME` replaces the whole `.copilot` layer: the CLI resolves
+        // its home from that variable before joining anything below it (the
+        // registry's v1.0.80 source note — "COPILOT_HOME/configDir can
+        // override" — declares exactly this).
+        ".copilot/"
     } else {
         return None;
     };
@@ -1893,9 +4150,88 @@ fn sqlite_records_from_rows(
                 compressed: false,
                 sqlite_layout: Some(layout),
                 provenance: Default::default(),
+                session_dir: None,
+                movable_root: false,
             })
         })
         .collect()
+}
+
+/// One Grok session directory: `sessions/<working-directory>/<session-id>/`.
+struct GrokSessionDir {
+    path: std::path::PathBuf,
+    session_id: String,
+}
+
+/// Walk the session directories that sit beside the search DB:
+/// `~/.grok/sessions/<sanitized-cwd>/<session-uuid>/`. Both sidecar
+/// collectors — the `usage.json` manifest and the native
+/// `chat_history.jsonl` transcript — must see the very same set of session
+/// directories, so the walk is shared rather than repeated: a collector that
+/// walked on its own could drift from its sibling and, one day, associate a
+/// sidecar with the wrong session population.
+///
+/// Returns the directories plus the count of directory entries the walk could
+/// not read. A non-directory entry is not an unreadable one — it is measured
+/// and skipped, the same three-state rule every scanner walk keeps.
+fn grok_session_dirs(db: &Path) -> (Vec<GrokSessionDir>, u64) {
+    let Some(root) = db.parent() else {
+        return (Vec::new(), 0);
+    };
+    let mut dirs = Vec::new();
+    let mut unreadable_entries = 0;
+    let cwd_dirs = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => {
+            return (Vec::new(), 1);
+        }
+    };
+    for cwd_entry in cwd_dirs {
+        let cwd_entry = match cwd_entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                unreadable_entries += 1;
+                continue;
+            }
+        };
+        match cwd_entry.file_type() {
+            Ok(kind) if kind.is_dir() => {}
+            Ok(_) => continue,
+            Err(_) => {
+                unreadable_entries += 1;
+                continue;
+            }
+        }
+        let session_dirs = match fs::read_dir(cwd_entry.path()) {
+            Ok(entries) => entries,
+            Err(_) => {
+                unreadable_entries += 1;
+                continue;
+            }
+        };
+        for session_entry in session_dirs {
+            let session_entry = match session_entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            };
+            match session_entry.file_type() {
+                Ok(kind) if kind.is_dir() => {}
+                Ok(_) => continue,
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            }
+            dirs.push(GrokSessionDir {
+                path: session_entry.path(),
+                session_id: session_entry.file_name().to_string_lossy().into_owned(),
+            });
+        }
+    }
+    (dirs, unreadable_entries)
 }
 
 /// Additional raw usage files stored under
@@ -1906,105 +4242,122 @@ fn sqlite_records_from_rows(
 struct GrokUsageScan {
     records: Vec<SessionRecord>,
     unreadable_files: u64,
-    unreadable_entries: u64,
 }
 
-fn grok_usage_records(db: &Path, sessions: &[SessionRecord], machine: &str) -> GrokUsageScan {
-    let Some(root) = db.parent() else {
-        return GrokUsageScan::default();
-    };
+fn grok_usage_records(
+    dirs: &[GrokSessionDir],
+    sessions: &[SessionRecord],
+    machine: &str,
+) -> GrokUsageScan {
     let known: BTreeSet<String> = sessions
         .iter()
         .filter_map(|record| record.id.splitn(3, '.').nth(2).map(str::to_owned))
         .collect();
     let mut scan = GrokUsageScan::default();
-    let cwd_dirs = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => {
-            scan.unreadable_entries = 1;
-            return scan;
+    for dir in dirs {
+        if !known.contains(&dir.session_id) {
+            continue;
         }
-    };
-
-    for cwd_entry in cwd_dirs {
-        let cwd_entry = match cwd_entry {
-            Ok(entry) => entry,
-            Err(_) => {
-                scan.unreadable_entries += 1;
-                continue;
-            }
-        };
-        match cwd_entry.file_type() {
-            Ok(kind) if kind.is_dir() => {}
+        let path = dir.path.join("usage.json");
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => metadata,
             Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(_) => {
-                scan.unreadable_entries += 1;
-                continue;
-            }
-        }
-        let session_dirs = match fs::read_dir(cwd_entry.path()) {
-            Ok(entries) => entries,
-            Err(_) => {
-                scan.unreadable_entries += 1;
+                scan.unreadable_files += 1;
                 continue;
             }
         };
-        for session_entry in session_dirs {
-            let session_entry = match session_entry {
-                Ok(entry) => entry,
-                Err(_) => {
-                    scan.unreadable_entries += 1;
-                    continue;
-                }
-            };
-            let session_id = session_entry.file_name().to_string_lossy().into_owned();
-            if !known.contains(&session_id) {
+        let mtime = match metadata.modified() {
+            Ok(mtime) => mtime,
+            Err(_) => {
+                scan.unreadable_files += 1;
                 continue;
             }
-            match session_entry.file_type() {
-                Ok(kind) if kind.is_dir() => {}
-                Ok(_) => continue,
-                Err(_) => {
-                    scan.unreadable_entries += 1;
-                    continue;
-                }
-            }
-            let path = session_entry.path().join("usage.json");
-            let metadata = match fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.is_file() => metadata,
-                Ok(_) => continue,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(_) => {
-                    scan.unreadable_files += 1;
-                    continue;
-                }
-            };
-            let mtime = match metadata.modified() {
-                Ok(mtime) => mtime,
-                Err(_) => {
-                    scan.unreadable_files += 1;
-                    continue;
-                }
-            };
-            let usage_id = crate::id::SessionIdentity {
-                source_short: "grok",
-                machine: machine.to_string(),
-                native_id: format!("{session_id}.usage"),
-            }
-            .id();
-            // The native suffix associates usage with its source session; the
-            // composed ID may be bounded when that suffix exceeds NAME_MAX.
-            scan.records.push(SessionRecord {
-                id: usage_id,
-                absolute_path: absolutize(&path),
-                byte_size: metadata.len(),
-                mtime,
-                source: HarnessSource::Grok,
-                compressed: false,
-                sqlite_layout: None,
-                provenance: Default::default(),
-            });
+        };
+        let usage_id = crate::id::SessionIdentity {
+            source_short: "grok",
+            machine: machine.to_string(),
+            native_id: format!("{}.usage", dir.session_id),
         }
+        .id();
+        // The native suffix associates usage with its source session; the
+        // composed ID may be bounded when that suffix exceeds NAME_MAX.
+        scan.records.push(SessionRecord {
+            id: usage_id,
+            absolute_path: absolutize(&path),
+            byte_size: metadata.len(),
+            mtime,
+            source: HarnessSource::Grok,
+            compressed: false,
+            sqlite_layout: None,
+            provenance: Default::default(),
+            session_dir: None,
+            movable_root: false,
+        });
+    }
+    scan
+}
+
+/// The native Grok CLI transcripts — `chat_history.jsonl`, one directory per
+/// session under the same sessions root the usage sidecars live in.
+///
+/// Every session that holds the file produces a record, including sessions
+/// the `session_docs` store has no row for: a session with no row was
+/// previously invisible to the archive entirely, and the native transcript is
+/// then the session's only observation. The record's id is the session's own
+/// identity — the same id a `session_docs` row record gets — so a session
+/// with both producers seals both observations into ONE body, which is the
+/// shape the reader expects (a body that renders a native turn must not
+/// append the legacy plain-text summary again, while the raw body keeps
+/// both). The record is an ordinary JSONL file record (no SQLite layout), so
+/// the collector gives it the same append-only, byte-accurate cursor every
+/// other file source gets: the first pass archives the file whole, and a pass
+/// after the CLI appended to it archives only the new bytes.
+#[derive(Debug, Default)]
+struct GrokHistoryScan {
+    records: Vec<SessionRecord>,
+    unreadable_files: u64,
+}
+
+fn grok_history_records(dirs: &[GrokSessionDir], machine: &str) -> GrokHistoryScan {
+    let mut scan = GrokHistoryScan::default();
+    for dir in dirs {
+        let path = dir.path.join("chat_history.jsonl");
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                scan.unreadable_files += 1;
+                continue;
+            }
+        };
+        let mtime = match metadata.modified() {
+            Ok(mtime) => mtime,
+            Err(_) => {
+                scan.unreadable_files += 1;
+                continue;
+            }
+        };
+        let id = crate::id::SessionIdentity {
+            source_short: "grok",
+            machine: machine.to_string(),
+            native_id: dir.session_id.clone(),
+        }
+        .id();
+        scan.records.push(SessionRecord {
+            id,
+            absolute_path: absolutize(&path),
+            byte_size: metadata.len(),
+            mtime,
+            source: HarnessSource::Grok,
+            compressed: false,
+            sqlite_layout: None,
+            provenance: Default::default(),
+            session_dir: None,
+            movable_root: false,
+        });
     }
     scan
 }
@@ -2033,6 +4386,8 @@ fn hermes_records_from_rows(
             compressed: false,
             sqlite_layout: Some(SqliteSessionLayout::HermesAgent),
             provenance: Default::default(),
+            session_dir: None,
+            movable_root: false,
         })
         .collect()
 }
@@ -2156,6 +4511,8 @@ fn cursor_legacy_records_from_rows(
                 compressed: false,
                 sqlite_layout: Some(SqliteSessionLayout::CursorLegacy),
                 provenance: Default::default(),
+                session_dir: None,
+                movable_root: false,
             })
         })
         .collect()
@@ -2266,6 +4623,8 @@ fn probe_openclaw_agents(
                                 compressed: false,
                                 sqlite_layout: Some(SqliteSessionLayout::OpenClaw),
                                 provenance: Default::default(),
+                                session_dir: None,
+                                movable_root: false,
                             });
                         }
                         known += row_count;
@@ -2382,6 +4741,8 @@ fn scan_openclaw_cold_files(
                         compressed: true,
                         sqlite_layout: None,
                         provenance: Default::default(),
+                        session_dir: None,
+                        movable_root: false,
                     });
                 }
                 Err(_) => *unreadable += 1,
@@ -2671,7 +5032,12 @@ fn explicit_root_is_file(root: &Path) -> bool {
 /// points at a single file (an extension-bearing basename, e.g. `opencode.db`).
 /// Returns `None` for templates that cannot be anchored at all
 /// (e.g. `$CWD/...`).
-fn static_prefix_root(template: &str) -> Option<(PathBuf, bool)> {
+///
+/// `pub(crate)` since W1009 (DSK-3): doctor's Desktop retention probe
+/// expands the registry's declared settings-file templates through the same
+/// expander every session root uses, so a template can never resolve two
+/// different ways in one binary.
+pub(crate) fn static_prefix_root(template: &str) -> Option<(PathBuf, bool)> {
     let mut out = String::with_capacity(template.len() + 64);
     let mut rest = template;
     let mut seen_placeholder = false;
@@ -2831,8 +5197,11 @@ enum SessionScope {
     /// No ancestor directory matched the rule's `pattern`.
     Outside,
     /// The current matching session-directory ancestor: its path and
-    /// name — the native id. Ordinary rules keep the first scope;
-    /// recursive rules replace it when a nested directory matches.
+    /// (usually) name — the native id. A rule that declares
+    /// `id_components` composes the id from selected matched components
+    /// instead (ADR-054 D3: codebuff's `<basename>.<chatId>`). Ordinary
+    /// rules keep the first scope; recursive rules replace it when a
+    /// nested directory matches.
     ///
     /// `container` is the segment immediately above the session
     /// directory when that segment is a workspace identity: Kimi
@@ -2845,11 +5214,61 @@ enum SessionScope {
     /// that segment a workspace meaning. Unrecognized hierarchies
     /// leave it `None`, and a `None` container is *not observed*,
     /// never "no workspace".
+    ///
+    /// `chat_dir_name` and `dir_mtime` ride the scope only for the
+    /// harness whose facts are captured from the session directory
+    /// itself (codebuff, ADR-054 D4): the chat directory's own name
+    /// for the start-time record, and the directory's own mtime for
+    /// the cross-check. They stay `None` for every other harness, and
+    /// no later stage may re-derive either from the archive id.
     In {
         dir: PathBuf,
         id: String,
         container: Option<String>,
+        chat_dir_name: Option<String>,
+        dir_mtime: Option<std::time::SystemTime>,
     },
+}
+
+/// Stat a matched codebuff chat directory for its capture-time facts
+/// (ADR-054 D4): the directory's own name — which is the session start time
+/// in the harness's encoding — and its own mtime (plus ctime under Unix,
+/// whichever is earlier) for the cross-check that a recorded start time is not
+/// preceded by the directory. `None` when the metadata cannot be read: an
+/// unstattable directory observes nothing, and the facts stay unknown rather
+/// than being fabricated from elsewhere.
+fn codebuff_chat_dir_facts(dir: &Path) -> Option<(String, std::time::SystemTime)> {
+    let name = dir.file_name()?.to_string_lossy().into_owned();
+    let metadata = fs::metadata(dir).ok()?;
+    let mtime = metadata.modified().ok();
+    // std exposes no ctime on Windows; there the mtime alone guards the
+    // cross-check. On Unix both are read and the earlier one compared, so an
+    // either-way-precedence is caught on the platforms that can see it.
+    let ctime = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // reason: a ctime the platform reports before the epoch (an
+            // exotically back-dated inode) cannot live in the u64 seconds
+            // this stat feeds; the epoch itself stands in, which still
+            // precedes every chat directory name the D4 pattern accepts.
+            let secs = u64::try_from(metadata.ctime()).unwrap_or(0);
+            // reason: ctime_nsec is unsigned already; the try_from exists
+            // only for type juggling, and a nanos field that overflows u32
+            // (never seen on any supported filesystem) clamps to zero
+            // seconds-of-nanos, a sub-millisecond error in a cross-check
+            // that compares whole seconds.
+            let nanos = u32::try_from(metadata.ctime_nsec()).unwrap_or(0);
+            std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(secs, nanos))
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    };
+    let earlier = mtime.zip(ctime).map(|(mtime, ctime)| mtime.min(ctime));
+    let dir_mtime = earlier.or(mtime)?;
+    Some((name, dir_mtime))
 }
 
 /// The scope a child directory inherits: unchanged, or replaced when the
@@ -2909,6 +5328,37 @@ fn descend_scope(
     let Some(name) = components.last().cloned() else {
         return parent.clone();
     };
+    // The matched window: for the non-recursive rules every existing
+    // `session_dir` harness uses, the pattern covers exactly these
+    // components root-relative; for a recursive rule the `**` prefix matched
+    // the components above them.
+    let matched = &components[start..];
+    // The native id defaults to the session directory's own name — the
+    // pre-codebuff behaviour every existing rule relies on. `id_components`
+    // composes it from selected matched components instead, joined by `.`:
+    // codebuff's chats key themselves by the *pair* `<project-basename>.<chatId>`
+    // (projects/<basename>/chats/<chatId>, indices [1, 3]), and the name
+    // alone is unique only within one project basename — taking the last
+    // component would hand two chats under different basenames with the same
+    // timestamp id the same archive slot, the exact collapse this rule
+    // exists to prevent (ADR-054 D3). An out-of-range index set falls back
+    // to the last component: a wrong selection is a registry bug to be
+    // caught in review and tests, not a licence to compose from a subset
+    // and mint a narrower id.
+    let id = if !rule.id_components.is_empty()
+        && rule
+            .id_components
+            .iter()
+            .all(|index| *index < matched.len())
+    {
+        rule.id_components
+            .iter()
+            .map(|index| matched[*index].clone())
+            .collect::<Vec<String>>()
+            .join(".")
+    } else {
+        name.clone()
+    };
     // Kimi Code's measured layout is `<root>/<workspaceId>/<sessionId>`:
     // the segment immediately above the session directory is a workspace
     // identity, and only at that exact depth. One level (a session directly
@@ -2926,10 +5376,25 @@ fn descend_scope(
     // reads.
     let container =
         (source == HarnessSource::KimiCode && components.len() == 2).then(|| components[0].clone());
+    // Codebuff's chat directory name *is* the session start time (ADR-054
+    // F5), and its directory mtime crosses checks the time (D4): both are
+    // recorded at capture, from the scan that just matched the directory —
+    // later stages must never parse either out of the archive id, which can
+    // be bounded and lose the tail entirely. No other session-dir harness
+    // carries these facts, so the walk stats nothing for them.
+    let codebuff_facts = (source == HarnessSource::Codebuff)
+        .then(|| codebuff_chat_dir_facts(dir))
+        .flatten();
+    let (chat_dir_name, dir_mtime) = match codebuff_facts {
+        Some((dir_name, dir_mtime)) => (Some(dir_name), Some(dir_mtime)),
+        None => (None, None),
+    };
     SessionScope::In {
         dir: dir.to_path_buf(),
-        id: name,
+        id,
         container,
+        chat_dir_name,
+        dir_mtime,
     }
 }
 
@@ -2945,6 +5410,28 @@ fn relpath_matches(dir: &Path, file: &Path, expected: &str) -> bool {
         .map(|c| c.as_os_str().to_string_lossy().to_string())
         .collect();
     got.len() == want.len() && got.iter().zip(&want).all(|(got, want)| got == want)
+}
+
+/// True when `file`'s path below `dir` matches the `/`-separated component
+/// glob `glob`: same depth, each component matched with the same `*` syntax
+/// [`matches_session_pattern`] applies (so a Windows backslash relpath
+/// compares equal too). The depth is exact on purpose — a `session_dir`
+/// rule with a `file_glob` declares a measured layout, and anything at a
+/// different depth is noise the rule must reject, not a session.
+fn relpath_glob_matches(dir: &Path, file: &Path, glob: &str) -> bool {
+    let Ok(rel) = file.strip_prefix(dir) else {
+        return false;
+    };
+    let want: Vec<&str> = glob.split('/').filter(|s| !s.is_empty()).collect();
+    let got: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    got.len() == want.len()
+        && got
+            .iter()
+            .zip(&want)
+            .all(|(got, want)| matches_session_pattern(got, Some(want)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3025,6 +5512,36 @@ fn collect_records(
                 RecordBuild::Record(record) => records.push(record),
                 RecordBuild::Unreadable => unreadable_count += 1,
                 RecordBuild::NotSession => {}
+            }
+        }
+    }
+    // Whitelist sidecars (ADR-054 D5/D9): a session-directory rule that
+    // declares `extra_files` seals those literal names beside the
+    // transcript under the *same* session identity whenever they exist.
+    // They attach here, after the walk, because the transcript file and
+    // its sidecars are visited in directory order and the record is the one
+    // thing tying them together. Absent files observe nothing — a session
+    // without its sidecars is still archived — and an unreadable sidecar is
+    // skipped the same way (its bytes are optional derived data, and a
+    // missing observation never blocks the transcript).
+    if let Some(rule) = session_dir.filter(|rule| !rule.extra_files.is_empty()) {
+        for record in &mut records {
+            let Some(chat_dir) = record.absolute_path.parent() else {
+                continue;
+            };
+            let facts = record.session_dir.get_or_insert_with(Default::default);
+            for name in &rule.extra_files {
+                let sidecar = chat_dir.join(name);
+                match fs::metadata(&sidecar) {
+                    Ok(md) if md.is_file() => {
+                        facts.extra_files.push(crate::models::ExtraFileSource {
+                            name: name.clone(),
+                            byte_size: md.len(),
+                            path: absolutize(&sidecar),
+                        })
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -3146,6 +5663,40 @@ fn detect_source(path: &Path) -> Option<HarnessSource> {
     None
 }
 
+/// Claude Code's Workflows runs write one journal per run at
+/// `…/<parent-session>/subagents/workflows/wf_<run-uuid>/journal.jsonl`. The
+/// filename stem is the harness constant `journal` — identical for every run
+/// — so a stem id collapses every workflow run on the machine into one
+/// archive slot, and the raw file count standing against collect's distinct
+/// record ids made that aliasing masquerade as an unarchivable gap (GB-2).
+/// The workflow-run directory names the run structurally — `wf_` and the
+/// trailing run id are harness-generated constants, like the `subagents` and
+/// `workflows` segments above it — so for exactly this layout the directory
+/// name is the native id. Nothing else re-ids: ordinary `<uuid>.jsonl`
+/// session files, `agent-<hex>.jsonl` transcripts at any depth, and any
+/// `journal.jsonl` not directly inside a `wf_<…>` directory under
+/// `subagents/workflows` keep the filename-stem id.
+fn claude_code_workflow_journal_native_id(path: &Path, stem: &str) -> Option<String> {
+    if stem != "journal" {
+        return None;
+    }
+    let run_dir = path.parent()?;
+    let wf = run_dir.file_name()?.to_string_lossy().into_owned();
+    let run = wf.strip_prefix("wf_")?;
+    if run.is_empty() {
+        return None;
+    }
+    let workflows = run_dir.parent()?;
+    if workflows.file_name()?.to_string_lossy() != "workflows" {
+        return None;
+    }
+    let subagents = workflows.parent()?;
+    if subagents.file_name()?.to_string_lossy() != "subagents" {
+        return None;
+    }
+    Some(wf)
+}
+
 /// Turn one discovered path into a `SessionRecord`, or `None` if the file's
 /// name is not a session file at all.
 ///
@@ -3198,19 +5749,65 @@ fn build_record(
     // segment above the session directory (its container, when the layout
     // gives that segment a workspace meaning) and, for a harness that keeps
     // a per-session index, the working directory the index recorded.
+    //
+    // The record's own source detection runs before the id is chosen, so the
+    // claude-code structural rule below sees the same source the record will
+    // be labelled with — a harness_roots override relocates a tree without
+    // losing the rule, and a file detected as another harness never gains it.
+    let source = detect_source(path).unwrap_or(expected);
+    // The codebuff facts ride the scope; every other harness leaves them
+    // unset, and a record outside any session directory has none to take.
+    let codebuff_scope = match scope {
+        SessionScope::In {
+            chat_dir_name,
+            dir_mtime,
+            ..
+        } if source == HarnessSource::Codebuff => Some((chat_dir_name, dir_mtime)),
+        _ => None,
+    };
     let (native_id, container, indexed_cwd) = match (session_dir, scope) {
-        (Some(rule), SessionScope::In { dir, id, container }) => {
-            if !relpath_matches(dir, path, &rule.file) {
-                return RecordBuild::NotSession;
+        (
+            Some(rule),
+            SessionScope::In {
+                dir, id, container, ..
+            },
+        ) => {
+            match rule.transcript_target() {
+                TranscriptTarget::Literal(file) => {
+                    if !relpath_matches(dir, path, file) {
+                        return RecordBuild::NotSession;
+                    }
+                    let cwd = session_index.get(id.as_str()).cloned();
+                    (id.clone(), container.clone(), cwd)
+                }
+                TranscriptTarget::Glob(glob) => {
+                    // The glob is the file-name-ids-the-session shape
+                    // (ADR-059 draft D2/D3): the matched transcript's own
+                    // stem — with the declared format suffix stripped by
+                    // the caller above — is the native id, so a sandbox
+                    // directory named `local_<uuid>` never becomes the
+                    // identity and two transcripts in one sandbox are two
+                    // sessions, never one.
+                    if !relpath_glob_matches(dir, path, glob) {
+                        return RecordBuild::NotSession;
+                    }
+                    let cwd = session_index.get(stem.as_str()).cloned();
+                    (stem.clone(), container.clone(), cwd)
+                }
             }
-            let cwd = session_index.get(id.as_str()).cloned();
-            (id.clone(), container.clone(), cwd)
         }
         (Some(_), SessionScope::Outside) => return RecordBuild::NotSession,
+        // Claude Code's workflow journals sit at a fixed path whose stem is
+        // a constant, so exactly that layout ids by its workflow-run
+        // directory; every claude-code file outside it keeps the stem id.
+        (None, _) if source == HarnessSource::ClaudeCode => (
+            claude_code_workflow_journal_native_id(path, &stem).unwrap_or_else(|| stem.clone()),
+            None,
+            None,
+        ),
         (None, _) => (stem, None, None),
     };
 
-    let source = detect_source(path).unwrap_or(expected);
     let source_short = source.short();
 
     let meta = match fs::metadata(path) {
@@ -3243,6 +5840,28 @@ fn build_record(
         provenance.insert_cwd(work_dir);
     }
 
+    // The session-directory facts codebuff captures at discovery (ADR-054
+    // D4/D9): the chat directory name's own instant, parsed here while the
+    // actual name is still in hand — a name that does not match the accepted
+    // shape records no start time rather than approximating one, and no
+    // later stage re-reads the time out of the archive id, whose bounding
+    // can drop the timestamp entirely — and the directory mtime for the
+    // cross-check. `extra_files` are attached to the record after the walk
+    // by [`collect_records`], which sees the sidecars beside the transcript
+    // it already found.
+    let session_dir_facts = codebuff_scope.map(|(chat_dir_name, dir_mtime)| {
+        crate::models::SessionDirFacts {
+            // The multi-root probe stamps the registry root id after this
+            // scan; a record that skips it carries no root to name.
+            root_id: None,
+            captured_start: chat_dir_name
+                .as_deref()
+                .and_then(crate::codebuff::captured_start_from_chat_dir_name),
+            dir_mtime: *dir_mtime,
+            extra_files: Vec::new(),
+        }
+    });
+
     RecordBuild::Record(SessionRecord {
         id: ident.id(),
         absolute_path: absolutize(path),
@@ -3252,6 +5871,8 @@ fn build_record(
         compressed,
         sqlite_layout: None,
         provenance,
+        session_dir: session_dir_facts,
+        movable_root: false,
     })
 }
 
@@ -3277,6 +5898,254 @@ mod tests {
     /// Serialises tests that mutate process env vars — cargo runs tests in
     /// parallel threads and `set_var` is process-global.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// A one-harness claude-code cell whose declared root is the sandbox
+    /// home's `~/.claude/projects`, so the GB-2 tests can plant harness-shaped
+    /// trees and walk them through the same registry path production uses.
+    fn claude_code_directory_registry() -> HarnessRegistry {
+        let cell = serde_json::json!({
+            "template": "~/.claude/projects",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        });
+        let paths = match current_platform() {
+            "macos" => serde_json::json!({"macos": cell}),
+            "linux" => serde_json::json!({"linux": cell}),
+            "windows" => serde_json::json!({"windows": cell}),
+            platform => panic!("unexpected platform: {platform}"),
+        };
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{"id": "claude-code", "display_name": "synthetic", "paths": paths}]
+        }))
+        .unwrap()
+    }
+
+    /// A claude-code-shaped registry with the DSK-1 (plan C) shape: the CLI
+    /// store stays the entry's primary `paths`, and the desktop Cowork store
+    /// is a `claude-desktop-cowork` source root beside it — the same harness
+    /// id, a different surface, expressed per-root.
+    fn claude_code_cli_plus_desktop_registry() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let paths = serde_json::json!({ platform_key: {
+            "template": "~/.claude/projects",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        }});
+        let desktop = serde_json::json!({
+            "template": "~/Library/Application Support/Claude/local-agent-mode-sessions/",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture",
+            "session_dir": {
+                "pattern": "*/*/local_*",
+                "file_glob": ".claude/projects/*/*.jsonl"
+            }
+        });
+        let desktop_paths = serde_json::json!({ platform_key: desktop });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": paths,
+                "source_roots": [{
+                    "id": "claude-desktop-cowork",
+                    "paths": desktop_paths,
+                    "provenance": { "surface": ["desktop-cowork"] }
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// The DSK-1 claude-code shape with the desktop Cowork root UNVERIFIED
+    /// on this platform: the registry declares the root's cell but refuses
+    /// to vouch for its path (`unascertained`), so the probe skips it by
+    /// policy — the exact cell the shipped registry carries for Windows,
+    /// replayable on every platform for the aggregation rules the external
+    /// review of ADR-059 draft D6 made mandatory (W1006d).
+    fn claude_code_cli_plus_unverified_desktop_registry() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let paths = serde_json::json!({ platform_key: {
+            "template": "~/.claude/projects",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        }});
+        let desktop = serde_json::json!({
+            "template": "~/Library/Application Support/Claude/local-agent-mode-sessions/",
+            "format": "jsonl",
+            "confidence": "unascertained",
+            "source": "synthetic fixture"
+        });
+        let desktop_paths = serde_json::json!({ platform_key: desktop });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": paths,
+                "source_roots": [{
+                    "id": "claude-desktop-cowork",
+                    "paths": desktop_paths,
+                    "provenance": { "surface": ["desktop-cowork"] }
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// A claude-code-shaped registry whose WHOLE family stays unverified on
+    /// this platform: the primary cell is measurable but its template is
+    /// not statically resolvable, and the desktop root's cell is
+    /// `unascertained` — one root never resolved a path, one the scan
+    /// refuses to guess at, and nothing in the family was ever measured.
+    fn claude_code_all_unverified_registry() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let paths = serde_json::json!({ platform_key: {
+            "template": "$CWD/sessions",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        }});
+        let desktop = serde_json::json!({
+            "template": "~/Library/Application Support/Claude/local-agent-mode-sessions/",
+            "format": "jsonl",
+            "confidence": "unascertained",
+            "source": "synthetic fixture"
+        });
+        let desktop_paths = serde_json::json!({ platform_key: desktop });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": paths,
+                "source_roots": [{
+                    "id": "claude-desktop-cowork",
+                    "paths": desktop_paths,
+                    "provenance": { "surface": ["desktop-cowork"] }
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// The all-unverified family with BOTH cells skipped by the same
+    /// policy reason (`unascertained`), for the `skip unascertained`
+    /// aggregate word — the confidence gate runs before any path is
+    /// resolved, so a vouched-for template under an unvouched confidence
+    /// is still a refusal to scan, not a path choice.
+    fn claude_code_all_unverified_registry_with_unascertained_primary() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let paths = serde_json::json!({ platform_key: {
+            "template": "~/.claude/projects",
+            "format": "jsonl",
+            "confidence": "unascertained",
+            "source": "synthetic fixture"
+        }});
+        let desktop = serde_json::json!({
+            "template": "~/Library/Application Support/Claude/local-agent-mode-sessions/",
+            "format": "jsonl",
+            "confidence": "unascertained",
+            "source": "synthetic fixture"
+        });
+        let desktop_paths = serde_json::json!({ platform_key: desktop });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": paths,
+                "source_roots": [{
+                    "id": "claude-desktop-cowork",
+                    "paths": desktop_paths,
+                    "provenance": { "surface": ["desktop-cowork"] }
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// A codex-shaped registry with the DSK-1 movable-root shape: the active
+    /// rollouts root stays the entry's primary `paths`, and the archive the
+    /// desktop's `thread/archive` moves rollouts into is a `codex-archived`
+    /// source root beside it — the same store, the same ids.
+    fn codex_plus_archived_registry() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let sessions = serde_json::json!({
+            "template": "~/.codex/sessions/",
+            "format": "jsonl / jsonl.zst",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        });
+        let archived = serde_json::json!({
+            "template": "~/.codex/archived_sessions/",
+            "format": "jsonl / jsonl.zst",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        });
+        let paths = serde_json::json!({ platform_key: sessions });
+        let archived_paths = serde_json::json!({ platform_key: archived });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "codex",
+                "display_name": "synthetic",
+                "paths": paths,
+                "source_roots": [{
+                    "id": "codex-archived",
+                    "paths": archived_paths
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// A roots-only family shaped like the codebuff channels: every declared
+    /// root is a sibling beside the others and the entry names no primary
+    /// `paths` store at all — the all-roots shape antigravity and codebuff
+    /// have always had. DSK-1's measured-zero sibling rule is scoped away
+    /// from this shape, so its aggregation must not change semantics here.
+    fn all_roots_channel_registry() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let stable = serde_json::json!({
+            "template": "~/.synthetic-manicode/stable/",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        });
+        let dev = serde_json::json!({
+            "template": "~/.synthetic-manicode/dev/",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        });
+        let stable_paths = serde_json::json!({ platform_key: stable });
+        let dev_paths = serde_json::json!({ platform_key: dev });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "codebuff",
+                "display_name": "synthetic",
+                "source_roots": [
+                    { "id": "codebuff", "paths": stable_paths },
+                    { "id": "codebuff-dev", "paths": dev_paths }
+                ]
+            }]
+        }))
+        .unwrap()
+    }
 
     fn synthetic_grok_registry() -> HarnessRegistry {
         let cell = serde_json::json!({
@@ -3414,6 +6283,400 @@ mod tests {
         assert_eq!(surfaces, ["cli", "cli", "ide"]);
     }
 
+    /// GB-2. Claude Code's Workflows feature writes one journal per workflow
+    /// run at
+    /// `~/.claude/projects/<project>/<parent-session>/subagents/workflows/wf_<run-uuid>/journal.jsonl`.
+    /// The filename stem is the harness constant `journal`, identical for
+    /// every run, so a stem id collapses every workflow run into a single
+    /// archive slot and — worse — the raw file count standing against
+    /// collect's distinct record ids read the shortfall as an unarchivable
+    /// gap, blocking every run-once snapshot on the affected machine. The
+    /// workflow-run directory is the structural identity of a run, so this
+    /// regression says one journal per run under two different parents
+    /// yields two records, two distinct ids, and no gap.
+    #[test]
+    fn claude_code_workflow_journals_get_one_session_id_per_workflow_run() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let projects = sandbox.home().join(".claude").join("projects");
+        let run_a = "wf_019d7a00-0000-7000-8000-00000000000a";
+        let run_b = "wf_019d7b00-0000-7000-8000-00000000000b";
+        for (project, parent, run) in [
+            (
+                "-fixture-proj-a",
+                "019d7a01-0000-7000-8000-000000000001",
+                run_a,
+            ),
+            (
+                "-fixture-proj-b",
+                "019d7b02-0000-7000-8000-000000000002",
+                run_b,
+            ),
+        ] {
+            let journal = projects
+                .join(project)
+                .join(parent)
+                .join("subagents")
+                .join("workflows")
+                .join(run)
+                .join("journal.jsonl");
+            fs::create_dir_all(journal.parent().unwrap()).unwrap();
+            fs::write(&journal, b"{\"synthetic\":\"workflow-journal\"}\n").unwrap();
+        }
+        let registry = claude_code_directory_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let ids: std::collections::BTreeSet<String> = report
+            .records
+            .iter()
+            .map(|record| record.id.as_str().to_string())
+            .collect();
+        let expected: std::collections::BTreeSet<String> = [
+            format!("claude-code.synthetic-machine.{run_a}"),
+            format!("claude-code.synthetic-machine.{run_b}"),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            report.records.len(),
+            2,
+            "one journal file per workflow run, each its own record; records={:?}",
+            report
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            ids, expected,
+            "the wf_<run-uuid> directory is the native id of a workflow journal"
+        );
+        assert_eq!(
+            report.probes[0].record_count,
+            Some(2),
+            "the probe counts the sessions collect can address"
+        );
+        assert!(
+            report.archive_gaps().is_empty(),
+            "two journals with distinct ids are not an archive gap; gaps={:?}",
+            report.archive_gaps()
+        );
+    }
+
+    /// GB-2. The ordinary claude-code tree keeps its ids: session transcripts
+    /// named `<uuid>.jsonl` and subagent transcripts named `agent-<hex>.jsonl`
+    /// (at either depth — directly under `subagents/` or inside a workflow
+    /// run's directory) still id by their own filename stem, on the m1max-style
+    /// tree that has no workflow journals at all.
+    #[test]
+    fn claude_code_ordinary_tree_keeps_filename_stem_ids() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let projects = sandbox.home().join(".claude").join("projects");
+        let files = [
+            "-fixture-proj-a/019d7c01-0000-7000-8000-000000000001.jsonl",
+            "-fixture-proj-a/019d7c02-0000-7000-8000-000000000002/subagents/agent-0f1e2d3c4b5a6978.jsonl",
+            "-fixture-proj-a/019d7c02-0000-7000-8000-000000000002/subagents/workflows/wf_019d7c03-0000-7000-8000-000000000003/agent-1122334455667788.jsonl",
+            "-fixture-proj-b/019d7c04-0000-7000-8000-000000000004/subagents/agent-99aabbccddeeff00.jsonl",
+        ];
+        let expected: std::collections::BTreeSet<String> = files
+            .iter()
+            .map(|rel| {
+                let stem = rel
+                    .rsplit('/')
+                    .next()
+                    .expect("fixture path names a file")
+                    .trim_end_matches(".jsonl");
+                format!("claude-code.synthetic-machine.{stem}")
+            })
+            .collect();
+        for rel in files {
+            let path = projects.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"{\"synthetic\":\"ordinary\"}\n").unwrap();
+        }
+        let registry = claude_code_directory_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let ids: std::collections::BTreeSet<_> = report
+            .records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect();
+        assert_eq!(report.records.len(), expected.len());
+        assert_eq!(
+            ids.len(),
+            report.records.len(),
+            "no two stems alias on an ordinary tree"
+        );
+        assert_eq!(
+            ids.iter()
+                .map(|id| id.to_string())
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected,
+            "ordinary sessions and agent transcripts id by filename stem"
+        );
+        assert_eq!(
+            report.probes[0].record_count,
+            Some(4),
+            "the recognized count still covers every record"
+        );
+        assert!(
+            report.archive_gaps().is_empty(),
+            "an ordinary tree is gap-free; gaps={:?}",
+            report.archive_gaps()
+        );
+    }
+
+    /// GB-2 counting. Two files with the same filename stem in different
+    /// directories alias to one session id. That is a real loss of
+    /// distinctness the archive should honestly show as one session — but it
+    /// is *not* an "identified but unarchivable" gap: collect consumes every
+    /// record, just under one slot. The recognized count must therefore be
+    /// the distinct ids on both sides of the comparison, exactly as the
+    /// multi-source-root aggregation counts them.
+    #[test]
+    fn aliased_filename_stems_warp_the_count_but_report_no_archive_gap() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let projects = sandbox.home().join(".claude").join("projects");
+        for project in ["-fixture-proj-a", "-fixture-proj-b"] {
+            let path = projects.join(project).join("dup-stem.jsonl");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"{\"synthetic\":\"aliased\"}\n").unwrap();
+        }
+        let registry = claude_code_directory_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        assert_eq!(report.records.len(), 2);
+        let distinct: std::collections::BTreeSet<_> = report
+            .records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect();
+        assert_eq!(
+            distinct.len(),
+            1,
+            "the fixture really does alias: one stem shared by two files"
+        );
+        assert_eq!(
+            report.probes[0].record_count,
+            Some(1),
+            "the recognized count is the distinct session ids collect can address"
+        );
+        assert!(
+            report.archive_gaps().is_empty(),
+            "pure id aliasing is not an archive gap: collect consumed both records; gaps={:?}",
+            report.archive_gaps()
+        );
+    }
+
+    /// GB-2 message. A gap with a concrete recognized count must name the
+    /// actual shortfall cause — sessions the scanner could not turn into
+    /// SessionRecords — and must never claim the build cannot archive the
+    /// harness's store format, which was untrue whenever the difference was
+    /// an artifact of aliased ids.
+    #[test]
+    fn archive_gap_message_names_the_shortfall_not_a_store_format_refusal() {
+        let counted = ArchiveGap {
+            harness_id: "claude-code".to_string(),
+            display_name: "Claude Code".to_string(),
+            recognized_sessions: Some(9),
+            session_records: 8,
+        };
+        let text = format_archive_gap(&counted);
+        assert!(
+            text.contains("harness=claude-code")
+                && text.contains("identified_sessions=9")
+                && text.contains("session_records=8")
+                && text.contains("source_not_collected=true"),
+            "the machine-readable fields stay: {text}"
+        );
+        assert!(
+            !text.contains("this build cannot archive this harness's store format"),
+            "the message must not claim a store-format refusal: {text}"
+        );
+        assert!(
+            text.contains("recognised more sessions than it produced SessionRecords for"),
+            "the counted shape says what the shortfall is: {text}"
+        );
+
+        let unread = ArchiveGap {
+            recognized_sessions: None,
+            harness_id: "opencode".to_string(),
+            display_name: "OpenCode".to_string(),
+            session_records: 0,
+        };
+        let text = format_archive_gap(&unread);
+        assert!(
+            text.contains("identified_sessions=unknown")
+                && text.contains("source_not_collected=true")
+                && text.contains("no switch to enable it"),
+            "the existing single-file-store shape keeps its own honest wording: {text}"
+        );
+    }
+
+    /// The workflow-journal id rule is structural, so its edges are decided by
+    /// the layout alone: the one matching shape is a `journal.jsonl` directly
+    /// inside a `wf_<run>` directory that sits inside `subagents/workflows`.
+    #[test]
+    fn claude_code_journal_rule_matches_only_the_workflows_layout() {
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            // The measured layout: one run of Claude Code's Workflows.
+            (
+                "projects/proj/parent/subagents/workflows/wf_019d7d00-0000-7000-8000-00000000000d/journal.jsonl",
+                "journal",
+                Some("wf_019d7d00-0000-7000-8000-00000000000d"),
+            ),
+            // A subagent transcript inside the same run keeps the stem id.
+            (
+                "projects/proj/parent/subagents/workflows/wf_019d7d00-0000-7000-8000-00000000000d/agent-0f1e2d3c4b5a6978.jsonl",
+                "agent-0f1e2d3c4b5a6978",
+                None,
+            ),
+            // A journal nested one level deeper than the run directory.
+            (
+                "projects/proj/parent/subagents/workflows/wf_019d7d00-0000-7000-8000-00000000000d/deeper/journal.jsonl",
+                "journal",
+                None,
+            ),
+            // The workflow directory without its wf_ marker.
+            (
+                "projects/proj/parent/subagents/workflows/run-no-prefix/journal.jsonl",
+                "journal",
+                None,
+            ),
+            // The wf_ marker with nothing after it.
+            (
+                "projects/proj/parent/subagents/workflows/wf_/journal.jsonl",
+                "journal",
+                None,
+            ),
+            // Missing the workflows segment between parent and run.
+            (
+                "projects/proj/parent/subagents/wf_019d7d00-0000-7000-8000-00000000000d/journal.jsonl",
+                "journal",
+                None,
+            ),
+            // Missing the subagents segment above the run.
+            (
+                "projects/proj/parent/workflows/wf_019d7d00-0000-7000-8000-00000000000d/journal.jsonl",
+                "journal",
+                None,
+            ),
+            // The harness-generated segment names are lowercase on every
+            // measured platform; a recased tree is not the measured layout
+            // and its journal falls back to the stem id.
+            (
+                "projects/proj/parent/Subagents/workflows/wf_019d7d00-0000-7000-8000-00000000000d/journal.jsonl",
+                "journal",
+                None,
+            ),
+            (
+                "projects/proj/parent/subagents/Workflows/wf_019d7d00-0000-7000-8000-00000000000d/journal.jsonl",
+                "journal",
+                None,
+            ),
+        ];
+        for (path, stem, expected) in cases {
+            assert_eq!(
+                claude_code_workflow_journal_native_id(Path::new(path), stem).as_deref(),
+                *expected,
+                "layout `{path}` id must be {expected:?}"
+            );
+        }
+    }
+
+    /// GB-2 (W980 Low). The workflow-journal rule's layout match is
+    /// exact-case: the segment names `subagents` and `workflows` are
+    /// harness-generated constants, lowercase on every measured platform,
+    /// and a recased tree (`Subagents`, `Workflows`) is not the measured
+    /// layout. Its journal must fall back to the filename-stem id — the
+    /// honest pre-W978 behavior — rather than guessing at a renamed
+    /// segment, while the lowercase runs in the same tree keep their
+    /// workflow-run ids, which is what makes this scan contrast the two
+    /// spellings end to end.
+    #[test]
+    fn recased_workflow_segments_fall_back_to_the_stem_id() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let projects = sandbox.home().join(".claude").join("projects");
+        let run_a = "wf_019d7e00-0000-7000-8000-00000000000a";
+        let run_b = "wf_019d7e00-0000-7000-8000-00000000000b";
+        let run_c = "wf_019d7e00-0000-7000-8000-00000000000c";
+        for (project, parent, segments, run) in [
+            (
+                "-fixture-proj-a",
+                "019d7e01-0000-7000-8000-000000000001",
+                "subagents/workflows",
+                run_a,
+            ),
+            (
+                "-fixture-proj-b",
+                "019d7e02-0000-7000-8000-000000000002",
+                "subagents/workflows",
+                run_b,
+            ),
+            (
+                "-fixture-proj-c",
+                "019d7e03-0000-7000-8000-000000000003",
+                "Subagents/Workflows",
+                run_c,
+            ),
+        ] {
+            let journal = projects
+                .join(project)
+                .join(parent)
+                .join(segments)
+                .join(run)
+                .join("journal.jsonl");
+            fs::create_dir_all(journal.parent().unwrap()).unwrap();
+            fs::write(&journal, b"{\"synthetic\":\"workflow-journal\"}\n").unwrap();
+        }
+        let registry = claude_code_directory_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let ids: std::collections::BTreeSet<String> = report
+            .records
+            .iter()
+            .map(|record| record.id.as_str().to_string())
+            .collect();
+        let expected: std::collections::BTreeSet<String> = [
+            format!("claude-code.synthetic-machine.{run_a}"),
+            format!("claude-code.synthetic-machine.{run_b}"),
+            "claude-code.synthetic-machine.journal".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            report.records.len(),
+            3,
+            "the recased tree is still scanned; every journal is a record"
+        );
+        assert_eq!(
+            ids, expected,
+            "the lowercase measured layout ids by its run directories; the recased tree falls back to the stem"
+        );
+        assert_eq!(
+            report.probes[0].record_count,
+            Some(3),
+            "the fallback stem is a distinct id, so the probe still counts every session"
+        );
+        assert!(
+            report.archive_gaps().is_empty(),
+            "the fallback stem is honest, not an archive gap; gaps={:?}",
+            report.archive_gaps()
+        );
+    }
+
     #[test]
     fn session_dir_supports_root_relative_multilevel_patterns() {
         let sandbox = Sandbox::new();
@@ -3429,7 +6692,10 @@ mod tests {
             None,
             Some(&SessionDirRule {
                 pattern: "*/*".to_string(),
-                file: "transcript.jsonl".to_string(),
+                file: Some("transcript.jsonl".to_string()),
+                file_glob: None,
+                id_components: Vec::new(),
+                extra_files: Vec::new(),
             }),
         );
         assert_eq!(scan.records.len(), 1);
@@ -3585,6 +6851,1005 @@ mod tests {
             .any(|row| row.absolute_path == default_app));
     }
 
+    /// A claude-code-shaped sandbox home for the DSK-1 fixtures: the real
+    /// Cowork layout, nested three levels under the given desktop root,
+    /// with the sandbox's own noise (audit log, uploads, config-clone
+    /// history) planted beside the one true transcript. Returns the
+    /// transcript path and the sid it is named by. The root is a parameter
+    /// so the registry tests can spell the real app-support path and the
+    /// unit test can root the same tree anywhere.
+    fn plant_cowork_session(store_root: &Path) -> (PathBuf, &'static str) {
+        let sid = "019d5c02-0000-7000-8000-0000000000d2";
+        let account = store_root.join("space-fixture").join("account-fixture");
+        fs::create_dir_all(&account).unwrap();
+        let home_dir_name = "local_019d5c00-0000-7000-8000-0000000000b3";
+        let session_home = account.join(home_dir_name);
+        // The metadata json the app keeps beside the sandbox: fields the
+        // reader may use for title/time only, never identity.
+        fs::write(
+            account.join(format!("{home_dir_name}.json")),
+            format!(r#"{{"cliSessionId":"{sid}","title":"synthetic fixture title"}}"#).as_bytes(),
+        )
+        .unwrap();
+        let transcript = session_home
+            .join(".claude")
+            .join("projects")
+            .join("-Users-fixture-desktop")
+            .join(format!("{sid}.jsonl"));
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&transcript, b"{\"synthetic\":\"cowork-transcript\"}\n").unwrap();
+        for rel in [
+            "audit.jsonl",
+            "uploads/upload.jsonl",
+            ".claude/history.jsonl",
+            // A jsonl directly under projects/ (no sanitized-cwd layer) is
+            // not the measured session shape, and must not count as one.
+            ".claude/projects/loose-notes.jsonl",
+        ] {
+            let noise = session_home.join(rel);
+            fs::create_dir_all(noise.parent().unwrap()).unwrap();
+            fs::write(&noise, b"{\"synthetic\":\"noise\"}\n").unwrap();
+        }
+        (transcript, sid)
+    }
+
+    /// DSK-1 (ADR-059 draft D1/D2/D3). The desktop Cowork store is a second
+    /// source root of the claude-code harness, declared beside the entry's
+    /// primary `paths`. The scan must keep both stores: the primary CLI root
+    /// keeps producing its records exactly as before — a harness that
+    /// declares source_roots must not lose the store its `paths` names — and
+    /// the desktop root contributes its sandbox transcripts, each id'd by
+    /// its own jsonl filename and carrying the `desktop-cowork` surface
+    /// observation, with the sandbox's noise and the metadata json counted
+    /// as nothing.
+    #[test]
+    fn desktop_cowork_root_scans_sandbox_transcripts_beside_the_cli_store() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let cli_sid = "019d5c01-0000-7000-8000-0000000000c1";
+        let cli_file = sandbox
+            .home()
+            .join(".claude/projects/-fixture-proj")
+            .join(format!("{cli_sid}.jsonl"));
+        fs::create_dir_all(cli_file.parent().unwrap()).unwrap();
+        fs::write(&cli_file, b"{\"synthetic\":\"cli-session\"}\n").unwrap();
+
+        let desktop_store = sandbox
+            .home()
+            .join("Library/Application Support/Claude/local-agent-mode-sessions");
+        let (transcript, cowork_sid) = plant_cowork_session(&desktop_store);
+
+        let registry = claude_code_cli_plus_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let ids: std::collections::BTreeSet<String> = report
+            .records
+            .iter()
+            .map(|record| record.id.as_str().to_string())
+            .collect();
+        let expected: std::collections::BTreeSet<String> = [
+            format!("claude-code.synthetic-machine.{cli_sid}"),
+            format!("claude-code.synthetic-machine.{cowork_sid}"),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            ids, expected,
+            "the primary CLI root and the desktop root each contribute their sessions; records={:?}",
+            report
+                .records
+                .iter()
+                .map(|record| (record.id.as_str(), record.absolute_path.clone()))
+                .collect::<Vec<_>>()
+        );
+        let desktop = report
+            .records
+            .iter()
+            .find(|record| record.id.ends_with(cowork_sid))
+            .expect("the cowork record exists");
+        assert_eq!(
+            desktop.provenance.surface,
+            ["desktop-cowork"],
+            "the desktop root's declared observation rides the record"
+        );
+        assert_eq!(
+            desktop.absolute_path, transcript,
+            "the record is the sandbox transcript, not the metadata json"
+        );
+        assert!(
+            report.records.iter().all(|record| record
+                .absolute_path
+                .file_name()
+                .map(|name| name != "audit.jsonl")
+                .unwrap_or(true)),
+            "the sandbox's audit log is not a session; noise must not count"
+        );
+        let probe = &report.probes[0];
+        assert_eq!(probe.state, ProbeState::Scanned);
+        assert_eq!(
+            probe.record_count,
+            Some(2),
+            "the aggregate count spans the primary and the desktop root"
+        );
+    }
+
+    /// DSK-1 (ADR-059 draft D4). Codex `thread/archive` moves a rollout from
+    /// `sessions/` to `archived_sessions/` and `thread/unarchive` moves it
+    /// back; the archived directory is therefore a *movable* source root of
+    /// the same harness. The rollout's id comes from its filename, so the
+    /// move must not fork the archive-holding identity: the id set before,
+    /// between and after the archive round-trip is the same one session.
+    #[test]
+    fn codex_archive_move_and_unarchive_keep_one_session_id() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let sid = "rollout-2026-09-01T10-00-00-019bf00d-0000-7000-8000-00000000000a";
+        let active = sandbox
+            .home()
+            .join(".codex/sessions/2026/09/01")
+            .join(format!("{sid}.jsonl"));
+        let archived = sandbox
+            .home()
+            .join(".codex/archived_sessions/2026/09/01")
+            .join(format!("{sid}.jsonl"));
+        fs::create_dir_all(active.parent().unwrap()).unwrap();
+        fs::write(&active, b"{\"synthetic\":\"rollout\"}\n").unwrap();
+        // Both roots are planted, though the aggregate rules below would
+        // tolerate the archived one being absent (a scanned primary keeps
+        // the family's total known): this test is about the id stability
+        // of the archive move, not the family's aggregate counting rules.
+        fs::create_dir_all(archived.parent().unwrap()).unwrap();
+
+        let registry = codex_plus_archived_registry();
+        let scan_ids = |report: &ScanReport| -> Vec<String> {
+            let mut ids: Vec<String> = report
+                .records
+                .iter()
+                .map(|record| record.id.as_str().to_string())
+                .collect();
+            ids.sort();
+            ids
+        };
+        let expected_id = format!("codex.synthetic-machine.{sid}");
+
+        let before =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        assert_eq!(
+            scan_ids(&before),
+            std::slice::from_ref(&expected_id),
+            "the active rollout is scanned before the archive move"
+        );
+        assert_eq!(before.probes[0].record_count, Some(1));
+
+        // thread/archive: the rollout moves into the archived directory.
+        fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        fs::rename(&active, &archived).unwrap();
+        let archived_report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        assert_eq!(
+            scan_ids(&archived_report),
+            std::slice::from_ref(&expected_id),
+            "the archived root re-scans the same session: the move must not fork the id"
+        );
+        assert_eq!(
+            archived_report.records[0].absolute_path, archived,
+            "the record follows the file to its new root"
+        );
+
+        // thread/unarchive: the rollout moves back; a rescan of the same
+        // tree is also idempotent — scanning twice changes nothing.
+        fs::rename(&archived, &active).unwrap();
+        let back =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        assert_eq!(
+            scan_ids(&back),
+            [expected_id],
+            "the id survives the round trip"
+        );
+        let rescan =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        assert_eq!(
+            scan_ids(&rescan),
+            scan_ids(&back),
+            "a repeated scan is idempotent"
+        );
+    }
+
+    /// DSK-1. Overriding the canonical `harness_roots["claude-code"]` key
+    /// keeps its historical meaning once source_roots exist: it names the
+    /// entry's primary store, and does not become an ambiguous
+    /// every-root-override the way it would for a harness whose registry
+    /// cells are all source_roots.
+    #[test]
+    fn canonical_override_keeps_naming_the_primary_store_when_source_roots_exist() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let desktop_store = sandbox
+            .home()
+            .join("Library/Application Support/Claude/local-agent-mode-sessions");
+        let (_, cowork_sid) = plant_cowork_session(&desktop_store);
+        let moved_projects = sandbox.home().join("moved-projects");
+        let cli_sid = "019d5c03-0000-7000-8000-0000000000c3";
+        let moved_cli = moved_projects
+            .join("-fixture-proj")
+            .join(format!("{cli_sid}.jsonl"));
+        fs::create_dir_all(moved_cli.parent().unwrap()).unwrap();
+        fs::write(&moved_cli, b"{\"synthetic\":\"moved-cli-session\"}\n").unwrap();
+
+        let config = Config {
+            harness_roots: [(
+                "claude-code".to_string(),
+                moved_projects.to_string_lossy().into_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Config::default()
+        };
+        let registry = claude_code_cli_plus_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&config, &registry, "synthetic-machine").unwrap();
+        let probe = &report.probes[0];
+        assert_ne!(
+            probe.state,
+            ProbeState::Indeterminate,
+            "the canonical override is not ambiguous once it names the primary store; note={}",
+            probe.note
+        );
+        let ids: std::collections::BTreeSet<String> = report
+            .records
+            .iter()
+            .map(|record| record.id.as_str().to_string())
+            .collect();
+        assert!(
+            ids.contains(&format!("claude-code.synthetic-machine.{cli_sid}")),
+            "the primary root follows the canonical override; ids={ids:?}"
+        );
+        assert!(
+            ids.contains(&format!("claude-code.synthetic-machine.{cowork_sid}")),
+            "the desktop root still scans at its declared default; ids={ids:?}"
+        );
+    }
+
+    /// DSK-1. A declared desktop root that is simply NOT THERE on this
+    /// machine (no Claude Desktop app installed) must not dim the harness's
+    /// known CLI count to an unknown: the root was looked for and found
+    /// absent, which is a measured zero contribution once the primary root
+    /// anchored the family by being scanned. The doctor's footprint row
+    /// counts records directly, so an aggregate that refused to claim what
+    /// the records already count is the exact two-table contradiction
+    /// `doctor_consistency_test` exists to catch.
+    #[test]
+    fn an_absent_declared_root_keeps_the_scanned_primary_count_known() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let cli_sid = "019d5c04-0000-7000-8000-0000000000c4";
+        let cli_file = sandbox
+            .home()
+            .join(".claude/projects/-fixture-proj")
+            .join(format!("{cli_sid}.jsonl"));
+        fs::create_dir_all(cli_file.parent().unwrap()).unwrap();
+        fs::write(&cli_file, b"{\"synthetic\":\"cli-session\"}\n").unwrap();
+        // The desktop root is deliberately NOT planted: the machine has no
+        // Claude Desktop install, which is the ordinary case.
+
+        let registry = claude_code_cli_plus_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            report.records.len(),
+            1,
+            "the CLI record is collected either way; records={:?}",
+            report
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            probe.record_count,
+            Some(1),
+            "a scanned primary plus an absent sibling root is a known total, not an unknown; note={}",
+            probe.note
+        );
+        assert_eq!(probe.state, ProbeState::Scanned);
+
+        // And the symmetric shape — only the desktop store, no CLI store —
+        // keeps the desktop session countable the same way.
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let desktop_store = sandbox
+            .home()
+            .join("Library/Application Support/Claude/local-agent-mode-sessions");
+        let (transcript, desktop_sid) = plant_cowork_session(&desktop_store);
+        let _ = transcript;
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            probe.record_count,
+            Some(1),
+            "the absent CLI root contributes a known zero to the desktop count; note={}",
+            probe.note
+        );
+        assert!(
+            report
+                .records
+                .iter()
+                .any(|record| record.id.ends_with(desktop_sid)),
+            "the desktop session itself was collected"
+        );
+
+        // But a family whose roots were ALL absent stays unknown — an
+        // absent store is not an empty one.
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.state, ProbeState::Missing);
+        assert_eq!(
+            probe.record_count, None,
+            "an all-missing family is unknown, never a semantic zero"
+        );
+    }
+
+    /// W1006d — ADR-059 draft D6, the one required change of the external
+    /// review: an *unverified* additional root (one the scan never looked
+    /// at — a cell the registry will not vouch for) must not make an
+    /// already-measured CLI total disappear. The Windows shape of the
+    /// shipped registry is exactly this family: CLI store scanned, desktop
+    /// Cowork root `unascertained`. The aggregate must report the measured
+    /// roots' count as a QUALIFIED LOWER BOUND — `record_count` set to what
+    /// the scan measured, the unverified sibling named in
+    /// `unverified_roots`, `status`/`doctor` rendering it `≥N` — never the
+    /// blanket unknown the pre-W1006d rule produced (the rejected D6 side
+    /// effect), never a bare number that silently claims the family total.
+    #[test]
+    fn an_unverified_sibling_qualifies_the_measured_total_as_a_lower_bound() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let cli_sid = "019d5c05-0000-7000-8000-0000000000c5";
+        let cli_file = sandbox
+            .home()
+            .join(".claude/projects/-fixture-proj")
+            .join(format!("{cli_sid}.jsonl"));
+        fs::create_dir_all(cli_file.parent().unwrap()).unwrap();
+        fs::write(&cli_file, b"{\"synthetic\":\"cli-session\"}\n").unwrap();
+        // The desktop root's cell is `unascertained`, so the machine's real
+        // desktop directory — planted or not — is never looked at; plant
+        // nothing, which is the ordinary machine that has the CLI only.
+
+        let registry = claude_code_cli_plus_unverified_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            report.records.len(),
+            1,
+            "the CLI record is collected either way; records={:?}",
+            report
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            probe.state,
+            ProbeState::Scanned,
+            "the measured primary keeps the family available; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe.record_count,
+            Some(1),
+            "the measured CLI count is reported, not erased by the unverified sibling; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe
+                .unverified_roots
+                .iter()
+                .map(|root| (root.id.as_str(), root.state))
+                .collect::<Vec<_>>(),
+            vec![("claude-desktop-cowork", ProbeState::SkipUnascertained)],
+            "the unverified root is named so the count reads as a lower bound"
+        );
+        assert!(
+            probe.note.contains("lower bound") && probe.note.contains("claude-desktop-cowork"),
+            "the note qualifies the total and names the root; note={}",
+            probe.note
+        );
+
+        // The same family with the CLI store absent as well: the primary
+        // root was still MEASURED (found absent), so the rule that only an
+        // all-unknown family stays unknown does not bite — the total is the
+        // measured zero, still qualified by the unverified sibling
+        // (`≥0`), never an unqualified 0.
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            probe.state,
+            ProbeState::Missing,
+            "the measured primary was found absent; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe.record_count,
+            Some(0),
+            "the measured absence is kept as the lower bound's floor, but the mark must \
+             keep it from reading as an exact total; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe.unverified_roots.len(),
+            1,
+            "the unverified sibling still qualifies the missing family's total; note={}",
+            probe.note
+        );
+    }
+
+    /// W1009/DSK-3: doctor D3 prints one row per source root, so the probe
+    /// carries one [`SourceRootProbe`] per declared, platform-relevant root
+    /// beside the aggregate — the primary first (named by the canonical
+    /// harness id, marked `primary`), then every additional root by its own
+    /// registry id, each with its own walk's count and bytes. The rows are
+    /// the roots' own scopes: a root's count is exact, and the aggregate is
+    /// where the D6 lower-bound marking stays.
+    #[test]
+    fn a_primary_plus_roots_family_carries_one_row_per_source_root() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let cli_file = sandbox
+            .home()
+            .join(".claude/projects/-fixture-proj")
+            .join("019d5c07-0000-7000-8000-0000000000c7.jsonl");
+        fs::create_dir_all(cli_file.parent().unwrap()).unwrap();
+        fs::write(&cli_file, b"{\"synthetic\":\"cli-session\"}\n").unwrap();
+        let desktop_store = sandbox
+            .home()
+            .join("Library/Application Support/Claude/local-agent-mode-sessions");
+        plant_cowork_session(&desktop_store);
+
+        let registry = claude_code_cli_plus_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.source_roots.len(), 2, "one row per declared root");
+        let (primary, cowork) = (&probe.source_roots[0], &probe.source_roots[1]);
+        assert!(
+            primary.primary,
+            "the first row is the family's primary store"
+        );
+        assert_eq!(primary.id, "claude-code");
+        assert_eq!(primary.state, ProbeState::Scanned);
+        assert_eq!(primary.record_count, Some(1));
+        assert_eq!(
+            primary.total_bytes,
+            Some(cli_file.metadata().unwrap().len()),
+            "a scanned root's byte census is the sum of its records' sizes"
+        );
+        assert!(
+            !cowork.primary,
+            "the desktop root is an additional source root, not the primary"
+        );
+        assert_eq!(cowork.id, "claude-desktop-cowork");
+        assert_eq!(cowork.state, ProbeState::Scanned);
+        assert_eq!(cowork.record_count, Some(1));
+        assert!(
+            cowork.total_bytes.is_some_and(|bytes| bytes > 0),
+            "the desktop root's own walk measured its own bytes"
+        );
+    }
+
+    /// W1009/DSK-3: an unverified root keeps a row of its own — the whole
+    /// point of the per-root breakdown is that a root the scan never looked
+    /// at cannot be folded into a number that reads as the family total.
+    /// The row carries the skip state and no fabricated count or bytes,
+    /// while the aggregate keeps the W1006d qualified lower bound.
+    #[test]
+    fn an_unverified_source_root_keeps_its_own_marked_row() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let cli_file = sandbox
+            .home()
+            .join(".claude/projects/-fixture-proj")
+            .join("019d5c08-0000-7000-8000-0000000000c8.jsonl");
+        fs::create_dir_all(cli_file.parent().unwrap()).unwrap();
+        fs::write(&cli_file, b"{\"synthetic\":\"cli-session\"}\n").unwrap();
+
+        let registry = claude_code_cli_plus_unverified_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.source_roots.len(), 2);
+        let (primary, cowork) = (&probe.source_roots[0], &probe.source_roots[1]);
+        assert_eq!(primary.state, ProbeState::Scanned);
+        assert_eq!(primary.record_count, Some(1));
+        assert_eq!(
+            (cowork.id.as_str(), cowork.state),
+            ("claude-desktop-cowork", ProbeState::SkipUnascertained),
+            "the unverified root's row says why it never measured"
+        );
+        assert_eq!(
+            cowork.record_count, None,
+            "a root nobody looked at carries no count, not a zero"
+        );
+        assert_eq!(
+            cowork.total_bytes, None,
+            "a root nobody looked at carries no byte census either"
+        );
+    }
+
+    /// W1009/DSK-3: a family whose every root was looked for and found
+    /// absent still carries its rows — each a measured absence (`0`, the
+    /// state saying it) — while the aggregate keeps the W1006c "all absent
+    /// is unknown, not empty" rule.
+    #[test]
+    fn an_all_absent_family_carries_measured_absent_rows() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let registry = claude_code_cli_plus_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.record_count, None, "all absent stays unknown");
+        assert_eq!(probe.source_roots.len(), 2);
+        for row in &probe.source_roots {
+            assert_eq!(
+                (row.state, row.record_count, row.total_bytes),
+                (ProbeState::Missing, None, None),
+                "each missing root's row is the measured absence itself; id={}",
+                row.id
+            );
+        }
+    }
+
+    /// W1009/DSK-3: the rows are scoped to the D6 primary-plus-roots shape.
+    /// An all-roots family (codebuff's channels, antigravity's surfaces)
+    /// keeps the aggregate surface it has always had — no rows — so this
+    /// change widens no family's output it was not scoped for.
+    #[test]
+    fn an_all_roots_family_carries_no_source_root_rows() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let registry = all_roots_channel_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert!(
+            probe.source_roots.is_empty(),
+            "all-roots families keep the aggregate-only surface"
+        );
+    }
+
+    /// W1006d — the other half of the rule: only when ALL roots of the
+    /// family stayed unverified does the combined total stay unknown. No
+    /// root was measured, so nothing anchors a lower bound and the
+    /// aggregate keeps the pre-DSK-1 unknown — with no unverified-roots
+    /// marking, because there is no measured count for it to qualify.
+    #[test]
+    fn a_family_whose_roots_all_stayed_unknown_keeps_the_total_unknown() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let registry = claude_code_all_unverified_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.state, ProbeState::Indeterminate);
+        assert_eq!(
+            probe.record_count, None,
+            "no root of the family was measured, so the total is unknown — a lower bound \
+             needs a measured floor; note={}",
+            probe.note
+        );
+        assert!(
+            probe.unverified_roots.is_empty(),
+            "an unknown total carries no lower-bound marking; there is no measured count \
+             for it to qualify; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe.note,
+            "one or more declared source roots could not be fully checked; total is unknown"
+        );
+
+        // And the sub-case where every root was skipped by the SAME policy
+        // reason: the aggregate keeps the precise `skip unascertained`
+        // word rather than collapsing it into indeterminate.
+        let both_unascertained = claude_code_all_unverified_registry_with_unascertained_primary();
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &both_unascertained,
+            "synthetic-machine",
+        )
+        .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            probe.state,
+            ProbeState::SkipUnascertained,
+            "an all-unascertained family keeps the precise skip word"
+        );
+        assert_eq!(
+            probe.record_count, None,
+            "the family total stays unknown when every root stayed unknown"
+        );
+        assert!(probe.unverified_roots.is_empty());
+    }
+
+    /// W1006c (review of DSK-1): the measured-zero sibling rule is scoped to
+    /// the primary-plus-additional-roots shape ADR-059 draft D6 introduced,
+    /// and does not leak into the all-roots families that predate it. A
+    /// channel family (codebuff stable/dev/staging, antigravity's surfaces)
+    /// has no primary store that anchors it, so a scanned channel plus a
+    /// looked-for-but-absent sibling keeps the family's *combined* total
+    /// unknown — exactly the pre-DSK-1 rule, restored for these entries so
+    /// their aggregate semantics do not change under an unrelated harness's
+    /// desktop-store work.
+    #[test]
+    fn an_absent_sibling_in_an_all_roots_family_keeps_the_total_unknown() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let stable = sandbox
+            .home()
+            .join(".synthetic-manicode/stable")
+            .join("probe-stable-01.jsonl");
+        fs::create_dir_all(stable.parent().unwrap()).unwrap();
+        fs::write(&stable, b"{\"synthetic\":\"channel-session\"}\n").unwrap();
+        // The dev-channel root is deliberately NOT planted: looked for and
+        // absent, the ordinary machine that never ran a dev build.
+
+        let registry = all_roots_channel_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        assert_eq!(
+            report.records.len(),
+            1,
+            "the scanned channel's record is collected either way"
+        );
+        let probe = &report.probes[0];
+        assert_eq!(
+            probe.state,
+            ProbeState::Scanned,
+            "the family is available through its scanned channel"
+        );
+        assert_eq!(
+            probe.record_count, None,
+            "an all-roots family keeps the pre-DSK-1 rule: an absent sibling root leaves the combined total unknown — no primary store anchors this family, so the measured-zero rule does not apply; note={}",
+            probe.note
+        );
+    }
+
+    /// A `file_glob` session-directory rule selects only the transcripts the
+    /// declared glob names and takes each record's native id from the matched
+    /// file's own stem — the metadata json beside the sandbox, the audit log,
+    /// the uploads and the config-clone files are not sessions, and a
+    /// mismatched depth is not either.
+    #[test]
+    fn session_dir_file_glob_takes_the_id_from_the_transcript_filename() {
+        let sandbox = Sandbox::new();
+        let root = sandbox.root().join("lam");
+        let (transcript, sid) = plant_cowork_session(&root);
+        let scan = collect_records(
+            &root,
+            HarnessSource::ClaudeCode,
+            "synthetic-machine",
+            "jsonl",
+            None,
+            Some(&SessionDirRule {
+                pattern: "*/*/local_*".to_string(),
+                file: None,
+                file_glob: Some(".claude/projects/*/*.jsonl".to_string()),
+                id_components: Vec::new(),
+                extra_files: Vec::new(),
+            }),
+        );
+        assert_eq!(
+            scan.records.len(),
+            1,
+            "only the sandbox transcript counts; records={:?}",
+            scan.records
+                .iter()
+                .map(|record| record.absolute_path.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(scan.records[0].id.ends_with(sid));
+        assert_eq!(scan.records[0].absolute_path, transcript);
+        assert_eq!(
+            scan.records[0].byte_size,
+            transcript.metadata().unwrap().len()
+        );
+    }
+
+    /// A session-directory rule must declare exactly one transcript target:
+    /// the literal `file` or the `file_glob`. Both at once is ambiguous data,
+    /// neither is a rule that can never match, and neither may reach the
+    /// walk (a registry is data anyone can edit; it is validated at load so
+    /// the defect is a load error, not an empty scan).
+    #[test]
+    fn session_dir_rules_declare_exactly_one_transcript_target() {
+        let cell = |session_dir: &str| {
+            let platform = current_platform();
+            format!(
+                r#"{{ "schema_version": 1, "generated": "synthetic fixture",
+                      "harnesses": [
+                        {{ "id": "claude-code", "display_name": "fixture",
+                           "paths": {{ "{platform}": {{
+                             "template": "/fixture", "format": "jsonl",
+                             "confidence": "measured-locally",
+                             "source": "synthetic fixture",
+                             "session_dir": {session_dir} }}}}
+                        }} ]}}"#
+            )
+        };
+        let neither = cell(r#"{ "pattern": "*" }"#);
+        let err = parse_registry(neither.as_str(), "neither fixture")
+            .expect_err("a rule with no transcript target must not load");
+        assert!(
+            err.to_string().contains("exactly one"),
+            "the load error must say what to fix: {err}"
+        );
+
+        let both = cell(
+            r#"{ "pattern": "*", "file": "transcript.jsonl",
+                 "file_glob": "*/*.jsonl" }"#,
+        );
+        let err = parse_registry(both.as_str(), "both fixture")
+            .expect_err("a rule with two transcript targets must not load");
+        assert!(
+            err.to_string().contains("exactly one"),
+            "the load error must say what to fix: {err}"
+        );
+
+        let glob_only = cell(r#"{ "pattern": "*", "file_glob": "*/*.jsonl" }"#);
+        parse_registry(glob_only.as_str(), "glob fixture")
+            .expect("a file_glob rule without a literal file loads");
+
+        let literal_only = cell(r#"{ "pattern": "*", "file": "transcript.jsonl" }"#);
+        parse_registry(literal_only.as_str(), "literal fixture")
+            .expect("a literal-file rule without a glob loads");
+    }
+
+    /// DSK-1 (ADR-059 draft D5). The shipped registry declares the desktop
+    /// transcript retention probe, in the shape the later doctor wiring will
+    /// read: the settings key, its three integer states, the longer-of-two
+    /// interaction, the managed-override reporting duty, and — only where
+    /// the read locations were measured — the user and managed files to
+    /// read. An unmeasured platform declares no managed files and says why,
+    /// because an empty measurement is a fact and a guessed path is not.
+    #[test]
+    fn registry_declares_the_desktop_session_cleanup_retention_probe() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let previous = env::var_os(REGISTRY_ENV);
+        env::remove_var(REGISTRY_ENV);
+
+        let registry = load_registry_from_repo().expect("the shipped registry must load");
+        let claude = registry
+            .harnesses
+            .iter()
+            .find(|h| h.id == "claude-code")
+            .expect("the shipped registry must carry claude-code");
+        let probe = claude
+            .retention_probes
+            .iter()
+            .find(|probe| probe.key == "desktopSessionCleanupPeriodDays")
+            .expect("claude-code must declare the desktop transcript retention probe");
+        assert_eq!(probe.id, "desktop-session-cleanup");
+        for state in [
+            &probe.states.missing,
+            &probe.states.zero,
+            &probe.states.positive_int,
+        ] {
+            assert!(
+                !state.is_empty(),
+                "every integer state is recorded: {probe:?}"
+            );
+        }
+        assert!(
+            probe.states.missing.contains("0"),
+            "a missing key defaults to 0 (unbounded), which is NOT the cleanupPeriodDays default of 30 days"
+        );
+        assert!(
+            probe
+                .managed_override
+                .to_ascii_lowercase()
+                .contains("cleanupperioddays"),
+            "the managed override is reported against cleanupPeriodDays: {}",
+            probe.managed_override
+        );
+        let macos = probe
+            .platforms
+            .macos
+            .as_ref()
+            .expect("the measured platform cell exists");
+        assert!(
+            macos
+                .user_sources
+                .iter()
+                .any(|path| path.ends_with(".claude/settings.json")),
+            "the user settings file is where the User scope is read: {:?}",
+            macos.user_sources
+        );
+        assert!(
+            !macos.managed_sources.is_empty(),
+            "a measured cell never claims 'no managed files': the managed source list is a fact"
+        );
+        assert!(
+            macos
+                .source
+                .to_ascii_lowercase()
+                .contains("application support"),
+            "the measured cell states the desktop app-support tree is a disproved source: {}",
+            macos.source
+        );
+        for (platform, cell, reason) in [
+            (
+                "linux",
+                probe.platforms.linux.as_ref(),
+                "the linux cell declares the user file and no measured managed list",
+            ),
+            (
+                "windows",
+                probe.platforms.windows.as_ref(),
+                "the windows cell declares the user file and no measured managed list",
+            ),
+        ] {
+            let Some(cell) = cell else {
+                panic!("the {platform} cell exists with its {} state", reason)
+            };
+            assert!(
+                cell.user_sources
+                    .iter()
+                    .any(|path| path.contains("settings.json")),
+                "{platform}: the user settings file is declared: {:?}",
+                cell.user_sources
+            );
+            assert!(
+                cell.managed_sources.is_empty(),
+                "{platform}: managed locations were not measured, so none are guessed"
+            );
+        }
+
+        match previous {
+            Some(value) => env::set_var(REGISTRY_ENV, value),
+            None => env::remove_var(REGISTRY_ENV),
+        }
+    }
+
+    /// DSK-5 (ADR-059): the shipped registry declares the surface dimension's
+    /// value vocabulary, and the two values the ADR landed for claude-code
+    /// — `cli` and `desktop-cowork` — are in the union a `--surface` value
+    /// is validated against. The union is the whole registry's, not one
+    /// harness's: `ide`/`app` (antigravity) and `web` (deepseek-harness)
+    /// are declared by their own entries, and `resolve`'s refusal lists
+    /// exactly this set.
+    #[test]
+    fn the_shipped_registry_declares_the_surface_vocabulary() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let previous = env::var_os(REGISTRY_ENV);
+        env::remove_var(REGISTRY_ENV);
+
+        let registry = load_registry_from_repo().expect("the shipped registry must load");
+        let vocabulary = registry.surface_vocabulary();
+        for value in ["cli", "desktop-cowork", "ide", "app", "web"] {
+            assert!(
+                vocabulary.contains(value),
+                "the shipped registry must declare `{value}` as a surface value: {vocabulary:?}"
+            );
+        }
+
+        match previous {
+            Some(value) => env::set_var(REGISTRY_ENV, value),
+            None => env::remove_var(REGISTRY_ENV),
+        }
+    }
+
+    /// The vocabulary is a **union** with duplicates removed, taken from every
+    /// harness's `dimensions.surfaces` alike: claude-code declares
+    /// `desktop-cowork` where another harness declares the same `cli`, and
+    /// neither harness's list shadows the other's. A scratch registry proves
+    /// the fold without depending on the shipped data's exact contents.
+    #[test]
+    fn the_surface_vocabulary_is_the_sorted_deduplicated_union() {
+        // The DSK-1 scratch registry declares no dimensions, so its union is
+        // empty — this is also the proof that a harness entry without a
+        // `dimensions` block contributes nothing, rather than an error.
+        assert!(claude_code_cli_plus_desktop_registry()
+            .surface_vocabulary()
+            .is_empty());
+
+        let registry: HarnessRegistry = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [
+                {
+                    "id": "claude-code",
+                    "display_name": "synthetic",
+                    "dimensions": {
+                        "supported": ["surface"],
+                        "surfaces": ["desktop-cowork", "cli"]
+                    },
+                    "paths": {}
+                },
+                {
+                    "id": "google-antigravity",
+                    "display_name": "synthetic",
+                    "dimensions": {
+                        "supported": ["surface"],
+                        "surfaces": ["cli", "ide", "app"]
+                    },
+                    "paths": {}
+                },
+                {
+                    "id": "codex",
+                    "display_name": "synthetic",
+                    "paths": {}
+                }
+            ]
+        }))
+        .unwrap();
+        let expected: BTreeSet<String> = ["app", "cli", "desktop-cowork", "ide"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(registry.surface_vocabulary(), expected);
+    }
+
+    /// [`resolve_selector_flags`] reads the registry only when a surface was
+    /// asked for (DSK-5: the no-flag run must behave exactly as before), so
+    /// a flag-absent resolve cannot fail because of the registry at all.
+    #[test]
+    fn flags_without_a_surface_resolve_without_touching_the_registry() {
+        let args = crate::selector::SelectorArgs {
+            machine: Some("m".to_string()),
+            ..Default::default()
+        };
+        let resolved = resolve_selector_flags(&args)
+            .expect("a flag-absent resolve must not depend on the registry at all");
+        assert_eq!(resolved.selector.machine.as_deref(), Some("m"));
+    }
+
     #[test]
     fn grok_usage_json_is_scanned_and_linked_to_its_sqlite_session() {
         let sandbox = Sandbox::new();
@@ -3646,6 +7911,101 @@ mod tests {
             );
         assert_eq!(usage_record.id, format!("{sqlite_id}.usage"));
         assert_eq!(usage_record.sqlite_layout, None);
+    }
+
+    #[test]
+    fn grok_chat_history_files_are_scanned_including_sessions_without_a_row() {
+        let sandbox = Sandbox::new();
+        let sessions = sandbox.home().join(".grok/sessions");
+        let db = sessions.join("session_search.sqlite");
+        fs::create_dir_all(&sessions).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_docs (session_id TEXT PRIMARY KEY, cwd TEXT NOT NULL, updated_at INTEGER NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, content_hash TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_docs VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "synthetic-session-005",
+                "/synthetic/work",
+                1_780_000_000_i64,
+                "synthetic title",
+                "synthetic body",
+                "synthetic hash"
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let history_with_row = sessions
+            .join("synthetic-cwd")
+            .join("synthetic-session-005")
+            .join("chat_history.jsonl");
+        fs::create_dir_all(history_with_row.parent().unwrap()).unwrap();
+        fs::write(
+            &history_with_row,
+            br#"{"type":"user","content":[{"type":"text","text":"synthetic user turn"}]}"#,
+        )
+        .unwrap();
+        let history_native_only = sessions
+            .join("synthetic-cwd")
+            .join("synthetic-session-006")
+            .join("chat_history.jsonl");
+        fs::create_dir_all(history_native_only.parent().unwrap()).unwrap();
+        fs::write(
+            &history_native_only,
+            br#"{"type":"assistant","content":"synthetic answer"}"#,
+        )
+        .unwrap();
+
+        let config = Config {
+            harness_roots: [("grok".to_string(), db.to_string_lossy().into())]
+                .into_iter()
+                .collect(),
+            ..Config::default()
+        };
+        let report = scan_with_registry_and_machine(
+            &config,
+            &synthetic_grok_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+
+        // One record for a session whose row exists: the shared id means the
+        // transcript seals into the session's own body.
+        let with_row_id = "grok.synthetic-machine.synthetic-session-005";
+        assert_eq!(
+            report
+                .records
+                .iter()
+                .filter(|record| record.id == with_row_id && record.sqlite_layout.is_none())
+                .count(),
+            1
+        );
+        let history_record = report
+            .records
+            .iter()
+            .find(|record| record.id == with_row_id && record.sqlite_layout.is_none())
+            .expect("the chat_history.jsonl record shares the row session id");
+        assert_eq!(history_record.absolute_path, history_with_row);
+
+        // A session the store has no row for still yields its record: the
+        // native transcript is then the session's only observation.
+        assert_eq!(
+            report
+                .records
+                .iter()
+                .filter(|record| record.id == "grok.synthetic-machine.synthetic-session-006")
+                .count(),
+            1
+        );
+
+        // The probe note reports every population collect will archive.
+        let probe = &report.probes[0];
+        assert!(probe
+            .note
+            .contains("SessionRecord=1; usage files=0; history files=2"));
     }
 
     #[test]
@@ -4176,7 +8536,10 @@ mod tests {
             .map(|id| RegistrySourceRoot {
                 id: id.to_string(),
                 paths: harness.paths.clone(),
+                override_scope: None,
+                default_only: false,
                 provenance: Default::default(),
+                movable: false,
             })
             .collect();
         let report = scan_with_registry(&Config::default(), &registry).unwrap();
@@ -4319,7 +8682,10 @@ mod tests {
         let root = Path::new("/fixture/sessions");
         let rule = SessionDirRule {
             pattern: "**/session_*".to_string(),
-            file: "agents/main/wire.jsonl".to_string(),
+            file: Some("agents/main/wire.jsonl".to_string()),
+            file_glob: None,
+            id_components: Vec::new(),
+            extra_files: Vec::new(),
         };
         for path in [
             root.join("session_zero-prefix"),
@@ -4351,7 +8717,10 @@ mod tests {
         let root = Path::new("/fixture/sessions");
         let rule = SessionDirRule {
             pattern: "**/session_*".to_string(),
-            file: "agents/main/wire.jsonl".to_string(),
+            file: Some("agents/main/wire.jsonl".to_string()),
+            file_glob: None,
+            id_components: Vec::new(),
+            extra_files: Vec::new(),
         };
         let outer_path = root.join("workspace").join("session_outer");
         let outer = descend_scope(
@@ -4396,7 +8765,10 @@ mod tests {
         let root = Path::new("/fixture/sessions");
         let rule = SessionDirRule {
             pattern: "*/*".to_string(),
-            file: "transcript.jsonl".to_string(),
+            file: Some("transcript.jsonl".to_string()),
+            file_glob: None,
+            id_components: Vec::new(),
+            extra_files: Vec::new(),
         };
         let root_session = root.join("workspace").join("session_one");
         let scope = descend_scope(
@@ -4453,7 +8825,10 @@ mod tests {
         ] {
             let rule = SessionDirRule {
                 pattern: pattern.to_string(),
-                file: "agents/main/wire.jsonl".to_string(),
+                file: Some("agents/main/wire.jsonl".to_string()),
+                file_glob: None,
+                id_components: Vec::new(),
+                extra_files: Vec::new(),
             };
             let matched = descend_scope(
                 &SessionScope::Outside,
@@ -4492,7 +8867,10 @@ mod tests {
         let root = Path::new("/fixture/sessions");
         let rule = SessionDirRule {
             pattern: "**/session_*".to_string(),
-            file: "agents/main/wire.jsonl".to_string(),
+            file: Some("agents/main/wire.jsonl".to_string()),
+            file_glob: None,
+            id_components: Vec::new(),
+            extra_files: Vec::new(),
         };
 
         // The measured layout: <root>/<workspaceId>/<sessionId>.
@@ -4606,6 +8984,8 @@ mod tests {
             root: None,
             confidence: Confidence::Unascertained,
             state,
+            unverified_roots: Vec::new(),
+            source_roots: Vec::new(),
             record_count: None,
             candidate_count: None,
             unreadable_count: None,
@@ -4650,5 +9030,598 @@ mod tests {
                 "{state:?} must not count as probed"
             );
         }
+    }
+
+    /// GC-3 / W993 — `found_staged`, the per-harness staged-session tri-state.
+    ///
+    /// The positive branch is `known` whatever the probe state, because the
+    /// count is measured from the records the scan actually emitted and
+    /// `collect` stages exactly those; every zero is only `known` when the
+    /// absence itself was measured, and stays `unknown` / `not_applicable`
+    /// otherwise — an unlooked or un-enumerable harness must never read as
+    /// a staged zero. Every case below is one state or one shape, so the
+    /// partition is asserted, not assumed.
+    #[test]
+    fn found_staged_states_the_measured_unit_and_keeps_unproven_zeros_honest() {
+        fn probe_with(state: ProbeState, record_count: Option<u64>) -> HarnessProbe {
+            HarnessProbe {
+                id: "synthetic".to_string(),
+                display_name: "synthetic".to_string(),
+                root: None,
+                confidence: Confidence::Measured,
+                state,
+                unverified_roots: Vec::new(),
+                source_roots: Vec::new(),
+                record_count,
+                candidate_count: None,
+                unreadable_count: None,
+                unreadable_entry_count: None,
+                earliest: None,
+                latest: None,
+                bytes: None,
+                recognized_files: Vec::new(),
+                note: String::new(),
+            }
+        }
+
+        use crate::json_out::CountState;
+
+        // Measured from emitted records: known even where session_count
+        // would be unknown (record_count None), because this question —
+        // what collect will be handed — the scan's own emission answers.
+        // The count stands for a two-records-one-id population collapsing
+        // to one staged session, the W982 grok shape the key exists for.
+        // Only the record-producing states are asserted here: emitting a
+        // record requires a resolved, readable root, so no scan path pairs
+        // `Indeterminate` or a skip state with a positive staged count, and
+        // pinning such an impossible shape would state it as if it could
+        // occur.
+        for state in [ProbeState::Scanned, ProbeState::FileTarget] {
+            assert_eq!(
+                probe_found_staged(&probe_with(state, None), 1),
+                CountState::known(1),
+                "{state:?}: emitted records are the complete answer to what collect stages"
+            );
+        }
+
+        // A scanned store that measured empty: the earned zero.
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::Scanned, Some(0)), 0),
+            CountState::known(0)
+        );
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::FileTarget, Some(0)), 0),
+            CountState::known(0)
+        );
+        // Missing root: same earned zero as `probe_session_count`.
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::Missing, None), 0),
+            CountState::known(0)
+        );
+
+        // Unproven zeros: a store that enumerates sessions but handed the
+        // scan no records (the enumeration-failure shape), and a store the
+        // scan could not enumerate at all — neither may claim a staged 0.
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::FileTarget, Some(9)), 0),
+            CountState::unknown(
+                "the store enumerates sessions but the scan produced no session \
+                 records, so what collect will stage is unproven"
+            )
+        );
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::FileTarget, None), 0),
+            CountState::unknown("session count could not be enumerated (store not enumerable)")
+        );
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::Indeterminate, None), 0),
+            CountState::unknown("cannot even confirm whether the source exists")
+        );
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::SkipUnascertained, None), 0),
+            CountState::unknown("confidence unascertained; scanning a guessed path is forbidden")
+        );
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::SkipUnresolvable, None), 0),
+            CountState::unknown(
+                "no root to scan: template not statically resolvable, or registry id unknown \
+                 in this build"
+            )
+        );
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::SkipWrongPlatform, None), 0),
+            CountState::not_applicable("registry has no cell for this platform")
+        );
+
+        // The JSON shape: additive key on the scan-report side, absent on
+        // the doctor's metadata-only side, and every existing field
+        // byte-identical on both.
+        let probe = probe_with(ProbeState::FileTarget, Some(4));
+        let plain = probe_json(&probe);
+        let staged = probe_json_with_found_staged(&probe, &probe_found_staged(&probe, 6));
+        assert!(
+            plain.get("found_staged").is_none(),
+            "the metadata-only shape does not carry the key"
+        );
+        for (key, value) in plain.as_object().unwrap().iter() {
+            assert_eq!(
+                staged.get(key).unwrap(),
+                value,
+                "found_staged must be additive: {key} changed"
+            );
+        }
+        assert_eq!(
+            staged["found_staged"],
+            serde_json::json!({"kind": "known", "count": 6})
+        );
+    }
+
+    /// The per-harness grouping behind `found_staged`: distinct ids among
+    /// THIS harness's records only — two records sharing one id (the grok
+    /// row and its native transcript) stage one session, another harness's
+    /// records never leak into the count, and `total_sessions` keeps
+    /// counting records (GC-3's three counts deliberately disagree).
+    #[test]
+    fn scan_report_json_counts_staged_ids_per_harness_not_records() {
+        fn record(source: HarnessSource, native_id: &str) -> SessionRecord {
+            SessionRecord {
+                id: crate::id::SessionIdentity {
+                    source_short: source.short(),
+                    machine: "synthetic-machine".to_string(),
+                    native_id: native_id.to_string(),
+                }
+                .id(),
+                absolute_path: PathBuf::from("/synthetic"),
+                byte_size: 0,
+                mtime: SystemTime::UNIX_EPOCH,
+                source,
+                compressed: false,
+                sqlite_layout: None,
+                provenance: Default::default(),
+                session_dir: None,
+                movable_root: false,
+            }
+        }
+        let mut report = ScanReport::default();
+        // Grok: one session observed twice (row + native transcript), plus
+        // its usage sidecar under its own id — 3 records, 2 staged ids.
+        report
+            .records
+            .push(record(HarnessSource::Grok, "synthetic-a"));
+        report
+            .records
+            .push(record(HarnessSource::Grok, "synthetic-a"));
+        report
+            .records
+            .push(record(HarnessSource::Grok, "synthetic-a.usage"));
+        // Codex: a foreign harness whose records must not leak.
+        report
+            .records
+            .push(record(HarnessSource::Codex, "synthetic-b"));
+        for (id, display, state, count) in [
+            ("grok", "Grok CLI", ProbeState::FileTarget, 9u64),
+            ("codex", "Codex", ProbeState::Scanned, 1),
+        ] {
+            report.probes.push(HarnessProbe {
+                id: id.to_string(),
+                display_name: display.to_string(),
+                root: None,
+                confidence: Confidence::Measured,
+                state,
+                unverified_roots: Vec::new(),
+                source_roots: Vec::new(),
+                record_count: Some(count),
+                candidate_count: Some(count),
+                unreadable_count: Some(0),
+                unreadable_entry_count: Some(0),
+                earliest: None,
+                latest: None,
+                bytes: Some(0),
+                recognized_files: Vec::new(),
+                note: String::new(),
+            });
+        }
+
+        let value = scan_report_json(&report);
+        assert_eq!(
+            value["total_sessions"],
+            serde_json::json!({"kind": "known", "count": 4}),
+            "total_sessions keeps counting SessionRecords"
+        );
+        let harnesses = value["harnesses"].as_array().unwrap();
+        assert_eq!(
+            harnesses[0]["found_staged"],
+            serde_json::json!({"kind": "known", "count": 2}),
+            "grok stages two ids: the row-shared session id and the usage id"
+        );
+        assert_eq!(
+            harnesses[1]["found_staged"],
+            serde_json::json!({"kind": "known", "count": 1}),
+            "codex keeps records == staged ids"
+        );
+    }
+
+    fn synthetic_copilot_registry() -> HarnessRegistry {
+        let cell = serde_json::json!({
+            "template": "~/.copilot/",
+            "format": "sqlite + jsonl",
+            "confidence": "source-confirmed",
+            "source": "synthetic fixture",
+            "env_override": "COPILOT_HOME"
+        });
+        let paths = match current_platform() {
+            "macos" => serde_json::json!({"macos": cell}),
+            "linux" => serde_json::json!({"linux": cell}),
+            "windows" => serde_json::json!({"windows": cell}),
+            platform => panic!("unexpected platform: {platform}"),
+        };
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{"id": "github-copilot-cli", "display_name": "GitHub Copilot CLI fixture", "paths": paths}]
+        }))
+        .unwrap()
+    }
+
+    /// Write a synthetic Copilot store. `home` is the Copilot home itself
+    /// (`~/.copilot` under the template, `$COPILOT_HOME` under the override),
+    /// so both resolutions can share one fixture.
+    fn write_copilot_store(home: &Path, drained: bool) {
+        fs::create_dir_all(home).unwrap();
+        let db = home.join("session-store.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let sessions = if drained {
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT)"
+        } else {
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                cwd TEXT,
+                repository TEXT,
+                branch TEXT,
+                summary TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )"
+        };
+        conn.execute_batch(&format!(
+            "{sessions}; CREATE TABLE turns (session_id TEXT, turn_index INTEGER, user_message TEXT, assistant_response TEXT);"
+        ))
+        .unwrap();
+        if !drained {
+            conn.execute(
+                "INSERT INTO sessions (id, cwd, repository, branch, summary, created_at, updated_at)
+                 VALUES ('synthetic-copilot-x', '/synthetic/cwd', 'dimpurr/synthetic-repo', 'main', 'synthetic summary', '2026-10-08T10:00:00Z', '2026-10-08T11:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, cwd, repository, branch, summary, created_at, updated_at)
+                 VALUES ('synthetic-copilot-y', NULL, NULL, NULL, NULL, NULL, NULL)",
+                [],
+            )
+            .unwrap();
+        }
+        drop(conn);
+    }
+
+    #[test]
+    fn copilot_probe_enumerates_sessions_from_the_store() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        env::remove_var("COPILOT_HOME");
+        write_copilot_store(&sandbox.home().join(".copilot"), false);
+
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &synthetic_copilot_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.id, "github-copilot-cli");
+        assert_eq!(probe.record_count, Some(2));
+        assert!(probe.note.contains("sessions table(id, cwd, repository)"));
+        let copilot_records: Vec<&SessionRecord> = report
+            .records
+            .iter()
+            .filter(|record| record.id.starts_with("github-copilot-cli."))
+            .collect();
+        assert_eq!(copilot_records.len(), 2);
+        assert!(copilot_records.iter().all(|record| record
+            .sqlite_layout
+            .is_some_and(|layout| layout == SqliteSessionLayout::GitHubCopilotCli)));
+        assert!(copilot_records
+            .iter()
+            .any(|record| record.id.ends_with("synthetic-copilot-x")));
+    }
+
+    #[test]
+    fn copilot_probe_home_env_override_wins_over_the_template() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox_home = tempfile::TempDir::new().unwrap();
+        let sandbox_override = tempfile::TempDir::new().unwrap();
+        env::set_var("HOME", sandbox_home.path());
+        env::set_var("COPILOT_HOME", sandbox_override.path());
+
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &synthetic_copilot_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+        let probe = &report.probes[0];
+        // The override is empty so far: no store, no events — but the probe
+        // must have resolved the override, not the still-empty template home.
+        assert!(probe.note.contains("env_override=$COPILOT_HOME"));
+        assert_eq!(
+            probe.root,
+            Some(sandbox_override.path().to_path_buf()),
+            "COPILOT_HOME must win over the registry template"
+        );
+
+        write_copilot_store(sandbox_override.path(), false);
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &synthetic_copilot_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+        assert_eq!(report.probes[0].record_count, Some(2));
+        assert_eq!(report.records.len(), 2);
+
+        env::remove_var("COPILOT_HOME");
+        env::set_var("HOME", tempfile::TempDir::new().unwrap().path());
+    }
+
+    #[test]
+    fn copilot_probe_without_store_and_without_events_is_measured_zero() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        env::remove_var("COPILOT_HOME");
+        fs::create_dir_all(sandbox.home().join(".copilot/ide")).unwrap();
+        fs::write(sandbox.home().join(".copilot/ide/synthetic.lock"), b"lock").unwrap();
+
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &synthetic_copilot_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.record_count, Some(0));
+        assert!(probe.note.contains("no persisted sessions to read"));
+        assert!(report.records.is_empty());
+    }
+
+    #[test]
+    fn copilot_events_without_a_store_keep_the_session_count_unknown() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        env::remove_var("COPILOT_HOME");
+        let session_state = sandbox.home().join(".copilot/session-state");
+        fs::create_dir_all(&session_state).unwrap();
+        fs::write(
+            session_state.join("events.jsonl"),
+            b"{\"event\":\"session.start\"}\n",
+        )
+        .unwrap();
+
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &synthetic_copilot_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            probe.record_count, None,
+            "events the reader cannot map to a session must not be counted as 0"
+        );
+        assert!(probe.note.contains("events.jsonl"));
+        assert!(probe.note.contains("unknown"));
+        assert!(report.records.is_empty());
+    }
+
+    #[test]
+    fn copilot_drifted_store_is_un_enumerable_not_empty() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        env::remove_var("COPILOT_HOME");
+        write_copilot_store(&sandbox.home().join(".copilot"), true);
+
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &synthetic_copilot_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.record_count, None);
+        assert!(probe.note.contains("un-enumerable"));
+        assert!(report.records.is_empty());
+    }
+
+    /// The W1047 recognized-by-name arm: a `*.jsonl` file the CodeBuddy CLI
+    /// walk accepted by name whose metadata could not be taken is a
+    /// recognized session without a record — collect's PARTIAL exit-3 gap,
+    /// never an unreadable entry and never zero. POSIX cannot be made to
+    /// fail that stat portably (a readable parent directory makes stat
+    /// succeed whatever the file's own mode bits say), so this pins the
+    /// walk's accounting directly: the walk built below is exactly the
+    /// state the real walker hands back for one accepted name that gave no
+    /// metadata, and the report arithmetic reads the probe that accounting
+    /// assembles.
+    #[test]
+    fn a_codebuddy_name_without_metadata_is_a_recognized_gap_never_an_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let walk = CbcTranscriptWalk {
+            transcripts: [(
+                "synthetic-session-701".to_string(),
+                CbcTranscript {
+                    path: dir.path().join("synthetic-session-701.jsonl"),
+                    mtime: SystemTime::UNIX_EPOCH,
+                    byte_size: 84,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            flat_files: 2,
+            slug_files: 0,
+            stale_duplicates: 0,
+            unreadable_entries: 0,
+            recognized_unrecorded: 1,
+        };
+        let base = HarnessProbe {
+            id: "codebuddy".to_string(),
+            display_name: "CodeBuddy".to_string(),
+            root: None,
+            confidence: Confidence::Unascertained,
+            state: ProbeState::Scanned,
+            unverified_roots: Vec::new(),
+            source_roots: Vec::new(),
+            record_count: None,
+            candidate_count: None,
+            unreadable_count: None,
+            unreadable_entry_count: None,
+            earliest: None,
+            latest: None,
+            bytes: None,
+            recognized_files: Vec::new(),
+            note: String::new(),
+        };
+        let probe = codebuddy_probe_accounting(base, walk, String::new());
+        assert_eq!(probe.record_count, Some(2), "readable and name-only alike");
+        assert_eq!(
+            probe.unreadable_count,
+            Some(1),
+            "a recognized session without a record"
+        );
+        assert_eq!(
+            probe.unreadable_entry_count,
+            Some(0),
+            "a matched name is never reported as a directory entry"
+        );
+        assert!(probe.note.contains(
+            "1 transcript file(s) present but unreadable — recognized, not archived, not 0"
+        ));
+
+        // The report arithmetic collect reads: recognized two, one record —
+        // the named gap that turns the run partial, exit 3 never 0.
+        let mut report = ScanReport::default();
+        report.records.push(SessionRecord {
+            id: cbc_session_id(
+                HarnessSource::CodeBuddy,
+                "synthetic-machine",
+                "synthetic-session-701",
+            ),
+            absolute_path: dir.path().join("synthetic-session-701.jsonl"),
+            byte_size: 84,
+            mtime: SystemTime::UNIX_EPOCH,
+            source: HarnessSource::CodeBuddy,
+            compressed: false,
+            sqlite_layout: None,
+            provenance: Default::default(),
+            session_dir: None,
+            movable_root: false,
+        });
+        report.probes.push(probe);
+        let gaps = report.archive_gaps();
+        assert_eq!(gaps.len(), 1, "collect reports PARTIAL: exit 3, never 0");
+        assert_eq!(gaps[0].harness_id, "codebuddy");
+        assert_eq!(gaps[0].recognized_sessions, Some(2));
+        assert_eq!(gaps[0].session_records, 1);
+    }
+
+    /// The W1047f L3 arm: a store row whose time cannot be taken at all —
+    /// the row's own columns do not read as a time, and the store file's own
+    /// mtime is absent too — is dropped without a fake epoch, and until this
+    /// fix it was dropped *into the `without_transcript` bucket*, which
+    /// printed it as a live row without a local transcript. A deleted row
+    /// whose transcript is still on disk, and a live row whose transcript is
+    /// still on disk, are never that, and the note must not say they are.
+    /// POSIX cannot stage this state through the filesystem (a stat of a
+    /// live sqlite file always supplies a modified time), so the fold is
+    /// pinned directly against fabricated rows — the same precedent as the
+    /// codebuddy accounting test above.
+    #[test]
+    fn a_row_without_any_readable_time_is_named_not_mislabeled() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("workbuddy.db");
+        let mut transcripts = std::collections::BTreeMap::new();
+        transcripts.insert(
+            "synthetic-session-801".to_string(),
+            CbcTranscript {
+                path: dir.path().join("synthetic-session-801.jsonl"),
+                mtime: SystemTime::UNIX_EPOCH,
+                byte_size: 64,
+            },
+        );
+        transcripts.insert(
+            "synthetic-session-802".to_string(),
+            CbcTranscript {
+                path: dir.path().join("synthetic-session-802.jsonl"),
+                mtime: SystemTime::UNIX_EPOCH,
+                byte_size: 64,
+            },
+        );
+        let rows = vec![
+            // The review's exact case: a tombstoned row whose transcript is
+            // still present, with no time any column can name.
+            crate::sqlite_probe::WorkBuddySessionRow {
+                id: "synthetic-session-801".to_string(),
+                deleted: true,
+                transport: None,
+                time_ms: None,
+            },
+            // The live twin of the same failure: transcript present, no
+            // readable time — no more a "live row without a transcript".
+            crate::sqlite_probe::WorkBuddySessionRow {
+                id: "synthetic-session-802".to_string(),
+                deleted: false,
+                transport: Some("local".to_string()),
+                time_ms: None,
+            },
+        ];
+        let mut records = Vec::new();
+        let mut earliest = None;
+        let mut latest = None;
+        let fold = fold_workbuddy_store_rows(
+            rows,
+            &transcripts,
+            &db,
+            // The store-file fallback is absent: the one input POSIX cannot
+            // take away from a real run, so the only honest states left to
+            // the fold are the row's own columns — both unreadable here.
+            None,
+            HarnessSource::WorkBuddy,
+            "synthetic-machine",
+            &mut records,
+            &mut earliest,
+            &mut latest,
+        );
+        assert_eq!(fold.untimeable_rows, 2, "both rows are the untimed arm");
+        assert_eq!(
+            fold.without_transcript, 0,
+            "neither row is a live row without a local transcript"
+        );
+        assert_eq!(fold.tombstoned, 0, "neither row reached the tombstone arm");
+        assert_eq!(fold.orphan_transcripts, 0);
+        assert_eq!(fold.known_sessions, 2, "both rows stay recognized");
+        assert!(
+            records.is_empty(),
+            "no record was emitted: never a fake epoch, neither the rows' \
+             virtual records nor their transcripts'"
+        );
+        // The named gap: the probe's note segment is the honest line, and it
+        // is neither the without-transcript count nor silence.
+        let note = workbuddy_untimed_rows_note(fold.untimeable_rows);
+        assert!(note
+            .contains("2 store row(s) without a readable time — recognized, not archived, not 0"));
+        assert!(!note.contains("without a local transcript"));
+        assert_eq!(workbuddy_untimed_rows_note(0), String::new());
     }
 }

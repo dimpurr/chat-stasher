@@ -1,6 +1,6 @@
 # Command reference
 
-<!-- RELEASE GATE: written against main. Merged after 0.5.0-rc.2: `index`, `search --text` / `--scan`, `ui --destination a,b|all`, `ui --view extensions`, `overview --json --summary`, the `local` section of `status --json`, `prune-orphans`, and the setup wizard's destination and scheduler steps. -->
+<!-- RELEASE GATE: written against main. Merged after 0.5.0-rc.2: `index`, `search --text` / `--scan`, `ui --destination a,b|all`, `ui --view extensions`, `overview --json --summary`, the `local` section of `status --json`, `prune-orphans`, the setup wizard's destination and scheduler steps, and `hide` / `unhide` / `purge` (dry-run preview) / `redact` (refused surface). -->
 
 Every `chat-stasher` command, its purpose, its main flags and its exit codes. This page is a map. The authority for your installed version is always:
 
@@ -16,7 +16,7 @@ chat-stasher <command> --help
 | [`init`](#init) | Writes a commented config file, if none exists | Config (new file only) |
 | [`setup`](#setup) | First-run wizard: first archive, key, destination, timer | Yes |
 | [`doctor`](#doctor) | Is anything on this machine deleting its history? | No |
-| [`run-once`](#run-once) | One archive pass: collect, then push if changed | Stage, archive |
+| [`run-once`](#run-once) | One archive pass: pull any declared producer, collect, then push if changed | Stage, archive |
 | [`schedule`](#schedule) | Renders, installs or removes the hourly timer | Timer files (with `install` / `uninstall`) |
 | [`status`](#status) | Is the timer working? What does the scanner find? | No |
 | [`dest-init`](#dest-init) | Seeds a new destination with this machine's history | Stage, destination |
@@ -26,14 +26,20 @@ chat-stasher <command> --help
 | [`search`](#search) | Finds sessions by machine, tool, date or text | No |
 | [`export`](#export) | Writes selected sessions out as files | Files in `--out` |
 | [`read`](#read) | Prints one session | No |
+| [`hide`](#hide--unhide) | Hides one archived session from readers, reversibly | Stage control record |
+| [`unhide`](#hide--unhide) | Restores a hidden session | Stage control record |
+| [`purge`](#purge) | Previews deleting one named session from selected destinations; the deletion itself is not implemented | No |
+| [`redact`](#redact) | Not implemented; refused with the phase boundary | No |
 | [`overview`](#overview) | Machine × tool activity matrix, in the terminal or as JSON | No |
 | [`index`](#index) | Builds, checks or deletes the local full-text index | Local index |
 | [`cache`](#cache) | Shows or clears the local body cache | Local cache (`clear`) |
 | [`reclaim-stage`](#reclaim-stage) | Removes staged copies every destination proves it holds | Stage (with `--apply`) |
 | [`prune-orphans`](#prune-orphans) | Reports the archive packs no index file names | No |
+| [`mirror`](#mirror) | Keeps a byte-exact local copy of one declared destination's repository | Mirror copy under the data directory (see [config.md](config.md#mirror)) |
 | [`install-native-host`](#install-native-host) | Registers the browser host | Browser manifests, config |
 | [`ingest`](#ingest) | Archives an extension export file | Stage |
-| [`import`](#import) | Turns an official export (a takeout) into inbox bundles and a byte-exact raw archive object | An existing `--stage` and a named `--inbox` |
+| [`import`](#import) | Turns an official export (a takeout) into inbox bundles, or feeds a copied Grok Bot cache backup in as an archive pass | Takeout mode: an existing `--stage` and a named `--inbox`. Backup mode: `--stage` and one or more `--from` directories, read-only |
+| [`backfill`](#backfill) | Recovers a Grok Bot conversation's pre-window history by letting its own app load it (opt-in, macOS only) | App: quits and relaunches Grok Bot; Stage, archive (only with `--i-accept-the-risk`) |
 
 Lower-level commands, used by the ones above or for repair, are listed under [Plumbing](#plumbing).
 
@@ -68,7 +74,7 @@ Exceptions are listed per command. `ui` never exits `1`.
 
 ### JSON output
 
-`doctor`, `status`, `setup`, `overview`, `search` and `prune-orphans` accept `--json`. A value that could not be measured is written as `{"kind":"unknown","why":"…"}`, never as `0`, `null` or a missing field. Known values are `{"kind":"known",…}`, and values that do not apply are `{"kind":"not_applicable",…}`.
+`doctor`, `status`, `setup`, `overview`, `search`, `prune-orphans` and `purge` accept `--json`. A value that could not be measured is written as `{"kind":"unknown","why":"…"}`, never as `0`, `null` or a missing field. Known values are `{"kind":"known",…}`, and values that do not apply are `{"kind":"not_applicable",…}`.
 
 ### Where output goes
 
@@ -105,17 +111,23 @@ Exit codes: `0` done · `1` a step did not finish · `2` missing parameter or ma
 
 ### `doctor`
 
-Read-only. Reports each AI tool on this machine, whether its settings delete old sessions, each declared destination (reached or not, with the reason), identical duplicate shards in the configured local stage, the browser host registration, local cache sizes, and the key files this machine holds — one per archive copy, with whether each is present here and whether you have declared a copy of it. Prints paths, counts, sizes and dates, never conversation text. To inspect archived destinations for duplicates, run [`repair-duplicates`](#repair-duplicates).
+Read-only. Reports each AI tool on this machine, whether its settings delete old sessions, each declared destination (reached or not, with the reason), identical duplicate shards in the configured local stage, the browser host registration, local cache sizes, and the key files this machine holds — one per archive copy, with whether each is present here and whether you have declared a copy of it — and how the declared set agrees with what the timers and the weekly stage clean-up actually do: push coverage, credentials a timer can resolve, the last recorded push per destination, and the latest recorded reclaim. Prints paths, counts, sizes and dates, never conversation text. To inspect archived destinations for duplicates, run [`repair-duplicates`](#repair-duplicates).
+
+Every check runs behind its own deadline, and each prints a `doctor: checking …` line before it starts, so a wedged step names itself instead of holding the whole report hostage: a check that does not answer within its budget is abandoned, its section is worded as unknown (never zero, never absent), the sections that did answer still print, and the run ends with exit `3` — the same "could not look" code an unreadable config gets, never a clean-looking `0` for a machine only half of which was inspected. A destination that accepts the connection and then says nothing is the case this exists for: its line reads `NO ANSWER WITHIN <N>s`, which is unknown, not a refusal. A timed-out section keeps its own heading and one `UNKNOWN` line naming the check and the budget, so a hole in the report is a named hole, not a missing section. The config is read once, behind the same deadline, and every later step that needs it reuses that one read — a config file that never answers gets one bounded attempt, not a second unbounded one. On a slow link, budgets are what a healthy probe fits in with room to spare — a check that needs longer than its budget on a healthy machine is a bug in the check, not a budget to raise; say so in an issue.
+
+The run is bounded because every check is: the worst case is the sum of the per-check budgets — roughly 34 minutes with two destinations declared (240s each for the scan and the reclaim plan, 90s each for the nine walks — the metadata cache, the body cache, the full-text indexes, the stage duplicates, the native host, the machine-log rows, the destination reconciliation, the mirror and the keys — 45s to connect to a destination and, once connected, 120s for each of the two reads it gets, the activity index and the debris, and 30s each for the six short reads — the Claude Code settings, the Gemini settings, the Desktop/Cowork retention settings, the out-of-scope harness listing, the config file and the remote inbox status), not an open-ended wait. A healthy machine finishes in seconds; the sum is what a wedged-everything run is capped at.
+
+`CHAT_STASHER_DOCTOR_CHECK_BUDGET_SECS=<seconds>` replaces **every** check's budget with one number (values below 1 are ignored, and an unset or unparsable value keeps the per-check defaults). It is the product override for the two cases the default budgets do not fit: a healthy-but-slow machine whose probe legitimately needs longer than its budget, and an operator who wants a faster or stricter bound. Changing it changes what a timeout means — a probe cut off at 1s says far less than one cut off at 45s — so prefer the per-check defaults when reporting an issue.
 
 | Flag | Meaning |
 |---|---|
-| `--json` | One JSON object. |
+| `--json` | One JSON object. Under `--json`, a non-empty `timed_out` array lists the checks that outlived their budget (`check`, `budget_secs`), and every part of the report it names must be read as "did not look", exactly as under a non-null `config_error`. The section-shaped parts say so with their own fields: `{"checked": false}` and, when a deadline note names them, also `timed_out_after_secs` — that is the answer `claude`, `gemini`, `desktop_retention`, `machine_logs`, `reclaim`, `cache`, `body_cache`, `fts_indexes`, `stage_duplicate_shards`, `destination_reconciliation`, `native_host`, `keys` and `mirror` give. The array-shaped parts keep their array shape instead: each `destinations` entry carries its own `probe_timed_out` or `not_checked` kind with the reason; `other_present`, `probes` and `archive_gaps` are the ones a deadline empties, and their empty arrays read as "did not look" through the `timed_out` note (and `scan_failed: true`), never as "none found"; and `footprints` is emptied by no deadline: a scan that timed out still fills it, one row per harness with every count in each row an explicit `unknown` rather than a zero, and the array is `[]` only in the config-unreadable report — an empty `footprints` must still never be read as a machine with no harnesses. |
 
 ## Archiving
 
 ### `run-once`
 
-One pass: collect new session data into the stage, then push to the archive if anything changed.
+One pass: collect new session data into the stage, then push to the archive if anything changed. A declared `[pull.letta]` producer (see [pull.md](pull.md)) is pulled before the collect step, so the pass archives it too; a producer that cannot finish reading keeps the pass at exit 3 while the local cycle still runs.
 
 | Flag | Meaning |
 |---|---|
@@ -124,7 +136,7 @@ One pass: collect new session data into the stage, then push to the archive if a
 | `--verify` | Run the cheap structure check (`verify --level l1`) afterwards. |
 | `--shard-bucket-cap <n>` | Sealed shards per bucket. Default 20. |
 
-Ends with `result: COMPLETED` (a snapshot was created) or `result: NOOP` (nothing changed). Both exit `0`. Non-zero is a real error. Safe to run again at any time.
+Ends with `result: COMPLETED` (a snapshot was created) or `result: NOOP` (nothing changed). Both exit `0`. Non-zero is a real error; `3` includes the case where a declared pull producer did not finish reading. Safe to run again at any time.
 
 ### `schedule`
 
@@ -166,8 +178,12 @@ A `[keys]` line is added for each **destination** whose key needs attention: one
 | Flag | Meaning |
 |---|---|
 | `--sessions` | Add one line per session found (tool, size, date, short id). Can be hundreds of lines. |
-| `--json` | One JSON object, including a `local` section: whether the timer is installed (`installed` needs the units present *and*, on Linux, systemd confirming each timer active — otherwise `unconfirmed`), the next run and why, and the sessions still staged and waiting to upload. The last pass is its own field, `run_state`. A `keys` section carries the full inventory — the local key and every destination's, with each file's path, whether it is on this machine, and whether you have declared a copy. |
+| `--json` | One JSON object, including a `local` section: whether the timer is installed (`installed` needs the units present *and*, on Linux, systemd confirming each timer active — otherwise `unconfirmed`), the next run and why, and the sessions still staged and waiting to upload. The last pass is its own field, `run_state`. A `keys` section carries the full inventory — the local key and every destination's, with each file's path, whether it is on this machine, and whether you have declared a copy. The same section also carries `destinations` (the four facts per destination: installed-timer push coverage, credentials a timer can resolve, the last recorded successful push, and its share of the latest recorded reclaim; plus an `upgrade_window` flag, true when the repository provably holds snapshots while no push is on record — the window between the upgrade and the first recorded push, readable as a field instead of by matching the alert sentence), `dest_alerts` (the same findings as the `[dest]`/`[reclaim]` lines, each with `severity` and fix), `reclaim` (the weekly clean-up's durable record: state, consecutive blocked runs, what is held back and which destination the record names per block, with the block's kind — a `not-mirrored` block names the mirroring destination the copy lags behind, and the mirrored, proven destination is never the one its bytes are worded "held back for" on any surface), and `mirror` (the local copy's field family when `[mirror]` is configured: size, last sync, snapshots behind and orphans, each measured / unknown / not applicable, plus the already-worded `rows` the menu bar app displays). |
 | `--destination <name>` | Also list the chat-stasher version each machine last archived with, and flag machines behind the newest. |
+
+`[dest]` and `[reclaim]` lines are added when a declared destination disagrees with what the machine's timers and the weekly stage clean-up actually do: a destination no installed timer pushes, one whose `env:` credentials a timer cannot resolve, one a timer covers but no push has been recorded against, one whose `push-state` record exists but cannot be read, or a reclaim blocked for several weeks running. Each line is the same sentence `doctor` reports and the menu bar app shows, with the fix command beneath it. A machine whose destinations are all covered, timer-resolvable, record-successful and currently reclaiming prints no such line — and the lines do not change the exit code, which stays the timer verdict documented above.
+
+A `[mirror]` line is added when the machine's local mirror has something to say: a first fill in progress (phrased as progress — the bytes of the listing that are downloaded onto the disk, `downloaded X of Y (Z%)`, with the hash-verified bytes beside them as `of which V (W%) hash-verified`, so the tool's number and the directory's own size say the same thing; never as a red), a round that failed, a record that cannot be read, or the steady row once the copy is complete — its size on disk, the last sync's time and age, how many snapshots the closure record does not cover, and how many orphan files the copy carries. Those four are the mirror's settled field family: the same wording shows in this line, in `doctor`'s `D13` section and in the menu bar app, which decodes the rows from `--json` rather than rewording them. No `[mirror]` section configured prints no line at all — while a section with the switch off still prints the one line it owes when a leftover copy is on disk (the copy's measured size and file count; it keeps every byte until you delete it — see [config.md](config.md#mirror)), so turning the mirror off is silence only when no bytes are left behind. A mirror line never moves the exit code either.
 
 ### `dest-init`
 
@@ -210,6 +226,19 @@ leaves, whether that body took one shard or several — or a block that recurs
 without beginning the sequence, which is the weakest of the three and the one
 least distinguishable from content that genuinely repeats.
 
+`--offline` certifies the **local mirror copy** instead of the destination: the
+destination is never contacted, the copy answers every read, and the verdict is
+worded as certifying the copy — never the destination's repository — with the
+report's `served from mirror` lines stating the source. L1 and L2 grade the
+copy's own integrity: packs the copy holds that its index does not name, or
+index-named packs the copy lacks, are the copy's own findings, exit `1`. L3
+reconciles the stage against what the copy holds, and a session the stage
+expects that the copy never synced is an unknown about the archive — one
+`NOT IN THE LOCAL COPY` row, `L3 verdict: INCOMPLETE`, and the run's
+`RESULT: INCOMPLETE` (exit `3`) — never `MISSING IN ARCHIVE`, which a
+destination nobody contacted cannot prove. Online `verify` — without the
+switch — never consults the copy.
+
 ### `repair-duplicates`
 
 Read-only dry-run inventory of identical shard content in the newest archived
@@ -250,7 +279,7 @@ keeps the original data in place.
 
 ### `reclaim-stage`
 
-Removes staged copies, but only for sessions that **every** declared destination proves it holds, byte for byte. An unreachable destination blocks it.
+Removes staged copies, but only for sessions that **every** declared destination proves it holds, byte for byte. An unreachable destination blocks it. On a machine whose `[mirror]` is enabled it is also hold-back gated by the copy: a session is refused — `not-mirrored` — until the mirror's completed-round record holds the proof's snapshot closure-complete, so a completed `mirror sync` round is what frees it (the mirror rows name the count it holds back).
 
 | Flag | Meaning |
 |---|---|
@@ -275,10 +304,16 @@ retry is allowed to reuse one and write a snapshot that depends on it while it
 stays unindexed on disk, so a pack can be the only copy of archived content.
 [docs-dev/orphan-packs.md](../docs-dev/orphan-packs.md) has the full argument.
 
-Every pack it reports is verified the way the adopting open verifies one before
-reusing it: the header must decrypt, every blob it declares must decrypt and hash
-to the id the header gives, and the pack's bytes must hash to the id it is stored
-under.
+Every pack it reports is classified the way the shared interrupted-push
+classification does: a pack whose bytes verify complete is **stranded** — a
+later open adopts it, and the report says so; a pack that cannot be read as a
+pack at all (its length field declares a header the file cannot hold, or the
+header will not decrypt) is **torn debris** from an interrupted push — it
+belongs to no backup and can be ignored, and it makes the survey neither
+incomplete nor a failure; anything else is `unknown` with the verifier's own
+reason. `verify`, `doctor`, and `mirror sync` use the same classification and
+the same sentence for torn debris — see
+[use-cases/interrupted-push.md](use-cases/interrupted-push.md).
 
 | Flag | Meaning |
 |---|---|
@@ -290,22 +325,98 @@ under.
 The report carries the repository's **own id** from its config — the same on every
 machine that reads it — and never the path, host or account it was reached at. Along
 with it: the backend family, pack and byte totals, the unindexed packs by id prefix
-and size, how many of those verified, how many are unknown with the verifier's own
-reason, and any pack an index names that the backend no longer lists. No
-conversation text appears in it.
+and size, how many of those are torn and stranded (each with their own count and
+byte total), how many are unknown with the verifier's own reason, and any pack an
+index names that the backend no longer lists. The earliest-seen time of a torn or
+stranded pack is reported as unknown — the backend interface carries no
+modification time, and no field invents a clock. No conversation text appears in
+it.
 
-Exit codes: `0` the survey read every pack · `1` it read everything and found an
+Exit codes: `0` the survey read every pack (torn debris included — it is a known
+state, not an unfinished read) · `1` it read everything and found an
 index naming a pack the backend does not list · `3` it did not finish reading — a
 pack or an index file could not be read, the backend was unreachable, or `--apply`
 was asked for — so no absence in the output proves anything · `2` usage error.
 
-An empty answer and an unknown one never look alike: a pack that could not be read
-is reported `unknown` with its size and the verifier's reason, never as nothing
-there, and it makes the whole survey incomplete. A clean report of zero candidates
+An empty answer and an unknown one never look alike: a pack whose header reads
+but whose bytes do not verify is reported `unknown` with its size and the
+verifier's reason, never as nothing there, and it makes the whole survey
+incomplete. Torn debris is not that case: it is established, classified, and
+reported as its own count. A clean report of zero candidates
 is produced only after a complete survey.
 
 Nothing calls this command for you: no schedule, no `push`, no `run-once`, no
 browser host.
+
+### `mirror`
+
+`mirror sync` runs one copy round: list the declared destination's whole
+repository, download the files the local mirror lacks, and hash every file
+against its own name (`config`, the one non-addressed file, is compared and
+copied byte for byte). The result lives under
+`~/.local/share/chat-stasher/mirror/<name>/` — the *storage*, the `keys/`
+directory, `index/`, `snapshots/` and `data/`, everything except `locks/`,
+which this build never holds. Nothing is decrypted to copy it; with
+`[mirror]` enabled, the scheduled pass runs the same round after its own
+push, inside the pass's leftover budget. Declare one in
+[config.md](config.md#mirror).
+
+And the copy is not just for keeping: with the switch on, the mirror also
+**serves** that destination's reads — `read`, `search`, `export`, `index
+build` and the `ui` dashboard answer bytes from the local copy first and
+fall back to the remote per file it lacks, so a fully mirrored machine
+reads offline, and each command's report shows which side served what.
+What the reads are worth is dated — "the local copy as of HH:MM" — and
+`verify` never consults the copy. The read rules (offline, dated answers,
+what stays the remote's) are stated in [config.md](config.md#mirror).
+
+`--offline` (on `read`, `export` and `verify`) takes the fallback away: the
+destination's backend is never even constructed — no connection is opened
+at all — and every byte answers from the mirror copy, the body cache or
+rustic's local metadata cache. The output says `served from mirror` on
+every such run, and a file the copy does not hold is the end of that read,
+reported in the "did not finish" family (exit `3`) and never as an empty
+result or a claim the archive lacks it. `verify --offline` certifies the
+copy, never the destination's repository, and says so; an online `verify`
+still never consults the copy. A machine whose mirror cannot serve an
+offline run (no `[mirror]` section, the switch off, no filled copy) has
+the switch refuse before anything is read, exit `3`.
+
+One run is one bounded round: a large first fill spans several rounds, each
+resuming where the previous stopped, and `status` reports the progress as
+progress — a round that stops early is not a failure. Before a first fill
+starts, the command estimates whether the remaining download plus the
+free-disk floor fits the free space, and refuses with both numbers when it
+does not. A mirror file that is present but unreadable is never quietly
+re-fetched mid-read: a command reading over it stops with the file's name
+and points back at `mirror sync`, whose next round re-downloads a file
+that no longer hashes to its name.
+
+What the copy keeps is on every surface: `status` prints one `[mirror]`
+line, `doctor` shows a `D13` section, and the menu bar app decodes the
+same rows from `status --json` without rewording them — the size on disk,
+the last completed sync with its age, how many snapshots the closure
+record does not cover, and the orphan files a remote cleanup left behind.
+Orphans are never removed automatically: `doctor` reports their
+reclaimable bytes, and the manual act is to delete the files by hand or
+remove the whole mirror directory and re-run `mirror sync`, which rebuilds
+a copy without them.
+
+| Flag | Meaning |
+|---|---|
+| `--budget-secs <n>` | The round's budget. Default 600. A stop here is a pause; the next round resumes. |
+| `--keep-ssh-masters` | Leave SSH connection masters open after this run (they are shut down by default on every exit path). |
+
+Exit codes, the same vocabulary `verify` and `read` use — and the one place
+a "checked and failed" answer exists for the *remote*:
+`0` the mirror holds everything the remote listed, verified — torn debris from an interrupted push excepted: a half-written pack no index file names is classified, skipped, and counted (`[mirror] torn : …` with the standard sentence), never downloaded, never a failure —
+`3` the round did not finish — the budget ran out, the free-disk floor tripped, the space pre-estimate refused to start, or the remote could not be read mid-round — progress is recorded and the next round resumes ·
+`1` a finished read that failed: the source proved corrupt (a file hashed against its own name twice and failed both times — a pack an index file names, or one that is neither torn debris nor complete; not a transfer a later round can heal), a local write failed, or the listing named a file over the whole-file bound ·
+`2` usage error — no `[mirror]` section, the switch is off, `mirror_of` names no declared destination, the destination has never been initialised (run a push first), or the destination's masterkey file is missing on this machine or unusable. Nothing was read or written.
+
+The round's own records (`mirror-state.json`, written only by a completed
+round, and `mirror-progress.json`, written every round) carry ids, counts
+and destination names — no repository paths, and no raw error chains.
 
 ## Getting your conversations back
 
@@ -371,7 +482,9 @@ Writes exactly the sessions `search` selects for the same flags, as `<out>/<mach
 | `--turns all\|user` | `user` keeps only the person's own messages for Claude Code. Other tools' formats do not prove which lines are the person's, so every line is written and the manifest records `turns_filter: "not-supported"`. |
 | `--trim-to-window` | With a date filter, also drop lines timestamped outside it. |
 | `--no-collapse` | Write every stored shard. By default a run that byte-for-byte replays the session's complete preceding shard sequence is collapsed to its first copy, because that is what a re-seal leaves. |
+| `--include-deleted` | For snapshot-source sessions (opencode), also write the records the source deleted, at their original positions, each carrying `"deleted": true`. The default view stays the source's final state; deleted history is never erased from the archive. Other harnesses ignore the switch. |
 | `--dry-run` | Print the plan and its cost. Writes nothing. |
+| `--offline` | Serve the export from the local [mirror](#mirror) copy only (W1053): the destination is never contacted, and the report says `served from mirror`. A selected session whose bytes the copy does not hold is listed in the manifest's failed sessions worded as an unknown (the destination was not contacted, so nothing here proves the archive lacks it) and makes the run exit `3` — never read as "the archive does not have it". |
 
 Exit codes: `0` wrote sessions and answered for everything · `1` selected nothing · `3` incomplete: what was written is real, and the manifest lists what is missing · `2` usage error. `--dry-run` reports the same exit code the real run would, so it is worth running first.
 
@@ -398,11 +511,56 @@ Prints one session (`--session <id>`) and its SHA-256, without content: the shar
 
 `--no-collapse` reads every stored shard. Default reads collapse legacy whole-content replays, while retaining shards covered by verified sequence-bound capture observations, even when their bytes repeat. A fresh source root's matching prefix alone cannot establish that its records are a replay; provenance-bearing sources are captured conservatively under the same session identity. Nothing is deleted by either policy. Missing provenance retains legacy behavior; malformed provenance makes metadata-dependent default reads fail rather than silently discard a captured repeat. `--no-collapse` remains available for raw body reads and also applies to `--all-machines`.
 
+For snapshot-source sessions (opencode) the reported body is the **assembled** view, not the raw shard concatenation: every whole-file observation and every increment record the archive holds folds by last-version-per-record, deletions the source performed (revert, compaction) leave the view the same way they left the source's own database, and the reported digest is of that view. At quiescence it equals a fresh export of the source's final state; the older multi-copy era reported the concatenation of every copy, which equaled no single version of anything. The raw shard identities printed beside it remain what `verify` L3 proves. A body that cannot be assembled is an exit `3` read failure — never a short or empty session. `--include-deleted` asks for the other view: deleted records are included at their original positions, each marked `"deleted": true`, so the history the source threw away stays reachable (`read` then reports that view's digest; `export --include-deleted` writes the marked lines).
+
 `--all-machines` reports each session's id, shard count, length and digest across **every snapshot of every machine** cumulatively. The machine row identifies its newest snapshot; session bodies also include older retained sequences. This downloads and hashes payloads. For an enumeration without payload downloads, use `search` without `--text`; its snapshot labels identify where the session was most recently observed.
 
-Exit codes: `0` read · `1` completed and the result failed · `3` did not finish reading (no key, repository unreadable, session not in any snapshot it could read) · `2` usage error.
+Every step prints what it is doing before it runs — the configuration, the machine identity, the body-cache and mirror tiers, the master key file, the archive read, the ssh-master teardown — and every step that can block on something this machine does not control runs behind its own deadline, so a read that cannot finish is a named step on screen and an exit code, never a silent hang (the backend calls the archive walk makes open connections with no timeout of their own, and the observed incident was exactly one such read: a 1373-byte session that sat 120 s with five printed lines and no verdict, then finished, unannounced, 17.6 minutes in — a silent read is a hang wearing a different clock). A destination that accepts the connection and then says nothing is the case this exists for: the step is abandoned at its budget, the verdict says `did not answer within <N>s` and the run exits `3` — the step is **unknown**, never worded as unreachable (a measured refusal the destination made), never as a session that is absent, and no report line prints for a body that was not read. The steps that did answer keep their lines, exactly as a healthy run prints them. `CHAT_STASHER_READ_STEP_BUDGET_SECS=<seconds>` replaces **every** read-step budget for one run — the defaults are 30 s for a local file (configuration, identity, master key), 90 s for the body-cache and mirror directory walk, 30 s for the ssh-master teardown, 1800 s for one session's archive read (an old session is found by streaming every tree of every snapshot the reclaim design may have pushed it into, which is not a small operation even for a small session), and a deliberately generous hour for `--all-machines`, which exists to read everything. A read that needs longer than its budget on a healthy machine is a bug to file against the budget, not a number to guess past: say so in an issue.
+
+`--offline` serves the read from the local [mirror](#mirror) copy only (W1053): the destination's backend is never constructed, so no connection is opened at all, and the report says `served from mirror` on both its state line and its served line. The steps stay traced and bounded exactly as above — a wedged local disk still deserves a named exit — but the ssh-master teardown line reads `N/A (--offline…)` because the run opened none, and the archive trace names the mirror as its source. A file the copy does not hold ends the read in the "did not finish" family: exit `3`, the refusal names the copy's shortfall and the repair (`mirror sync`), and a session whose snapshots the copy never synced is worded as unknown — never "holds no shards in any of the snapshots" as a proof of absence, because the destination was not asked. A machine whose mirror cannot serve an offline run (no `[mirror]` section, the switch off, no filled copy) refuses before anything is read, exit `3`.
+
+Exit codes: `0` read · `1` completed and the result failed · `3` did not finish reading (no key, repository unreadable, session not in any snapshot it could read, a step that outlived its deadline — named, and unknown rather than absent — or, offline, anything the copy lacked) · `2` usage error.
 
 `--session` here is the **whole** stored id, `<tool>.<machine>.<native id>`, and unlike `search --session` it accepts no prefix: anything shorter exits `3` with "holds no shards in any of the snapshots of machine …", which means it could not be resolved rather than that it is absent. The full ids are in an `export`'s `manifest.json`, and `read --all-machines --full-ids` prints them all at the cost of reading and hashing every shard. [Recover a lost machine's conversations](use-cases/lost-machine.md#5-read-one-back) is the worked version.
+
+### `hide` / `unhide`
+
+Hide is presentation state, not deletion: the session's archived bytes are untouched, and every ordinary reader omits the identity while it is in force — `read --all-machines`, `search`, `export`, the UI, `index build` and `read --session` (which refuses with exit `1`, a finished read that the policy refuses, not a `3` that would blame the archive). `unhide` appends a later record and restores visibility. The state is durable control data, not a local preference: it is appended to `meta/<machine>/deletion-control-v1.jsonl` — this machine's own metadata partition (ADR-017), one JSONL record per command — and the next ordinary `push` archives it with the stage, so every machine honors it from the destination it reads.
+
+| Flag | Meaning |
+|---|---|
+| `--stage <dir>` | The stage whose meta tree receives the record. Required; never created. |
+| `--machine <id>` | The recording machine partition, as everywhere; also the target's partition unless `--target-machine` is given. |
+| `--target-machine <id>` | The partition the target identity lives under, when it is not the recording machine's own. |
+| `--reason <label>` | Optional, at most 80 bytes, one line. Metadata the user chose to keep — never conversation text. |
+
+The identity is exact: the session id as named, in one machine partition. A session with the same id under another partition is a different identity and is never affected, and no id is prefix-matched. Hiding twice appends nothing (the state is already in force); un-hiding a visible session appends nothing. A destination whose control stream is unreadable or cannot be established fails the reads above closed (exit `3`) — an unknown control state is never treated as "nothing recorded".
+
+Exit codes: `0` the state is recorded or already in force · `1` the record could not be appended durably · `2` usage (missing `--stage`, invalid identity, over-long reason) · `3` this machine's identity could not be resolved, or the existing control stream is unreadable — nothing is written over an unknown state.
+
+Run `index build` after the next push so the full-text index reflects the state; the index is built from the same policy every reader applies, but it does not rebuild itself.
+
+### `purge`
+
+Read-only dry-run preview of deleting one named session from explicit destinations ([the design](../docs-dev/named-session-purge.md)). **The default is the dry run, and in this build there is no other mode**: the destructive purge — the exclusive maintenance gate, the tombstone publication barrier, snapshot rewrite, forget and prune — is not implemented. The preview reads every selected destination and reports, per destination, whether the exact named identity is **found** (with shard-file and byte counts across **every** snapshot that holds it, cumulatively — a session stays readable through older snapshots), **absent** (proved by a complete read of every snapshot), or **unknown** (the destination could not be read to completion — never spelled "absent"). Nothing is deleted: no archive, stage, destination or index is changed, and the preview never decrypts a session, only lists metadata.
+
+| Flag | Meaning |
+|---|---|
+| `--destination <name>` | One destination to inspect, repeatable. |
+| `--all-destinations` | Inspect every declared destination. Explicit: with neither this nor `--destination` the run is a usage error — there is no implicit destination set. |
+| `--machine <id>` | The machine partition of the target identity. Default: this machine's partition. |
+| `--confirm SESSION` | Refused (exit `3`): the destructive transaction does not exist in this build, so nothing was read or changed. A value that does not name the exact session is a usage error (exit `2`) either way. |
+| `--dry-run` | Accepted and implied. Scripts can say what they expect. |
+| `--json` | One object: per-destination status, occurrence and byte counts (unknowns as `{"kind":"unknown"}`, never `0`), snapshot ids. |
+| `--repo`, `--key-file`, `--connections`, `--option` | Single-repository mode, as everywhere. |
+
+The identity is exact: the session id as named, in one machine partition. The purge does not touch the source conversation, the staged copy, or any other machine's data — so a later `push` can archive the session again; "purged" would describe the selected destinations at the moment of the result, which is one of the reasons the destructive design requires a tombstone before any rewrite.
+
+Exit codes: `0` every selected destination was read to completion (each `found` — a would-purge inventory — or `absent`) · `3` a destination could not be read to completion, so the target's status there is unknown and an absence proves nothing · `2` usage.
+
+### `redact`
+
+Refused (exit `2`), and nothing is read or changed: redaction — cut one session at a described boundary, physically remove the old occurrences, seal a user-edited replacement — is the destructive transaction of a later phase ([design](../docs-dev/redaction-and-recollection.md)). The command exists so asking for it gets the phase boundary rather than an unknown-flag error. Until then, `purge SESSION` previews a whole-session version and `hide` is the reversible one.
 
 ### `overview`
 
@@ -493,22 +651,53 @@ Archives extension export files, the ones the popup saves when you export undeli
 | `--inbox <dir>` | The folder holding the export files. Processed files move to `<inbox>/consumed/`. |
 | `--stage <dir>` | The stage. |
 
-## Importing an official export
+## Importing an official export or a local-cache backup
 
 ### `import`
 
-Turns an official export — a takeout **you** requested from the platform — into ordinary inbox bundles, so a conversation the browser extension never captured can still be archived. The export file is read whole and stored byte-exact under `<stage>/import-raw/<platform>/<sha256>` — a sibling of `sessions/`, so it enters no session count — and every conversation the platform's parser reads becomes one `chat-stasher/inbox@3` `web-capture` bundle in `--inbox`. A later `ingest --inbox` is what seals those bundles: `import` never seals, never pushes, never reads the config, a destination or a machine identity, and never modifies or moves the export file.
+Two modes share this command.
 
-Only Claude's `conversations.json` has a parser in this build; naming any other platform is a named refusal, not a guess. The archive comparison that would suppress a body already archived sits behind a probe this build ships unwired, so every conversation currently gets a body.
+With a `<platform>` and an `<export>` file, `import` turns an official export — a takeout **you** requested from the platform — into ordinary inbox bundles, so a conversation the browser extension never captured can still be archived. The export file is read whole and stored byte-exact under `<stage>/import-raw/<platform>/<sha256>` — a sibling of `sessions/`, so it enters no session count — and every conversation the platform's parser reads becomes one `chat-stasher/inbox@3` `web-capture` bundle in `--inbox`. A later `ingest --inbox` is what seals those bundles: this mode never seals, never pushes, never reads the config, a destination or a machine identity, and never modifies or moves the export file.
+
+Claude's `conversations.json` and Grok's `prod-grok-backend.json` have parsers in this build; naming any other platform is a named refusal, not a guess. The archive comparison that would suppress a body already archived sits behind a probe this build ships unwired, so every conversation currently gets a body.
 
 | Flag | Meaning |
 |---|---|
 | `--inbox <dir>` | Required. The local inbox folder the bundles are written into, for a later `ingest --inbox`. |
-| `--stage <dir>` | Required. An existing stage directory that receives the byte-exact export under `import-raw/`. Never created. |
+| `--stage <dir>` | Required in both modes. An existing stage directory that receives the byte-exact export under `import-raw/`, or the sealed shards of a backup import. Never created. |
 
 The export file is only ever read: it is not moved, renamed or deleted, so importing from it again is safe.
 
-Exit codes: `0` the export was read whole and everything importable in it was written · `1` it was read, and a conversation or a write failed · `2` it was read and is not something this build imports · `3` the export was never read to the end, so nothing is claimed about which conversations it holds.
+The other mode, `--harness grok-bot --from <dir>`, imports one folder at a time out of local caches you copied aside — backups that may overlap the live cache, each other, and be shaped either as the persistence directory itself or as a whole app-support tree above it. For each session found it delivers only rows that session has never archived (the identity is machine + agent uuid, never a file path), so overlaps deliver exactly their new rows once and re-running the same import delivers 0 rows. The backups are only ever read and the live cache is never touched; an ordinary `collect` after an import still delivers only what is genuinely new, because the delivered state the two share is kept per destination — name the same `--destination` your collector uses. Each sealed shard's measurement line records that it came from a backup import, the backup directory's name and the import time; no absolute path enters the archive.
+
+| Flag | Meaning |
+|---|---|
+| `--harness grok-bot` | Selects backup-restore mode. Only Grok Bot has a backup importer in this build; any other harness is a named refusal. |
+| `--from <dir>` | Required in this mode, repeatable. The backup directory to read, read-only. |
+| `--dry-run` | Report the per-session counts (rows new, rows already delivered) and write nothing — not even a state directory. |
+| `--machine <id>` | The machine partition, as for `collect`. Default: config `machine`, else this machine's identity. |
+| `--destination <name>` / `--repo` / `--key-file` | As for `collect` — the destination whose delivered state the import extends. |
+| `--shard-bucket-cap <n>` | Maximum sealed shards per bucket (default: 20). |
+
+Exit codes, both modes: `0` everything was read to the end and imported · `1` it was read, and a conversation, session or write failed — what was written is real but the run is incomplete · `2` usage (including a `--stage` that is not a directory) · `3` an input was never read to the end, so nothing about what it holds is proven and (for a backup import) nothing was imported.
+
+## Recovering older history
+
+### `backfill`
+
+The Grok Bot local cache is a bounded window, and every position that fell out of it is gone from disk for good — but the server still holds the conversation, and whenever the app opens one, the app itself fetches the conversation's whole user-visible span into view. `backfill grok-bot` is the opt-in route through that fact: it quits and relaunches Grok Bot with a debugging connection that listens only on this machine, waits for the relaunched app to present its conversation list before reading it (a freshly relaunched app draws that list a while after it starts, and an empty list during boot is never taken as "no conversations"), opens one conversation at a time exactly as a person clicking the sidebar would, waits while the app loads it, and delivers the rows the archive does not already hold — through the same session identity a collect uses, so nothing is added twice and an ordinary collect afterwards stays incremental. Each delivered shard's measurement line records that it came from a backfill, with the run id and the app version it drove. The withheld interior rows the service never sends the app stay missing and the session's gap record and `partial` fidelity stand. macOS only; the tool never calls the vendor's service itself and never touches a credential. The app is restored to a normal launch at the end of every run, interrupted runs included: what has been delivered stays delivered, the debugging relaunch it quit is waited out — every recorded process fully exited and its debugging port released — before the plain relaunch starts, so the relaunch cannot lose to the dying instance's one-instance lock, and the report states the restore's own verification facts.
+
+**The default is a dry run**: with no extra flags the same read-only traversal runs — it too relaunches and drives the app — and it only reports, per conversation: how many rows the archive would gain, the loaded span versus the locally held span, and the positions that will stay missing. Delivery needs the explicit acknowledgement flag, whose name is what the [source page](sources/grok-bot.md) documents.
+
+| Flag | Meaning |
+|---|---|
+| `<harness>` | The harness whose app-driven backfill this runs. Only `grok-bot` exists today. |
+| `--stage <dir>` | Required. An existing stage directory; never created. |
+| `--i-accept-the-risk` | Deliver the rows found (a real run). Without it the run is a dry run: identical traversal, reports only. |
+| `--conversation <prefix>` | Restrict the run to the conversations these id prefixes name, repeatable — the prefixes the dry run prints. Default: every conversation the app's sidebar lists. |
+| `--machine <id>` / `--destination <name>` / `--repo` / `--key-file` / `--shard-bucket-cap <n>` | As for `collect` — the destination whose delivered state the run extends. |
+
+Exit codes: `0` every selected conversation loaded and was reported (or delivered) · `1` the traversal finished with findings — a conversation that never finished loading within its wait and was skipped whole, a `--conversation` prefix that matched nothing, an app that could not be restored to a normal launch or a close-out that could not be verified (a relaunched app that did not stay running included) · `2` usage (including a `--stage` that is not a directory) · `3` the run refused before touching anything (macOS only, app not installed, a signed-in app unconfirmable, an unreachable or non-loopback debug endpoint), or stopped before finishing — a user interrupt, a relaunched app whose sidebar never listed a conversation within its readiness wait, or an app-layout change; partial work is kept and reported, and a close-out that failed on top of it says so in the same stop text rather than replacing it.
 
 ## Plumbing
 

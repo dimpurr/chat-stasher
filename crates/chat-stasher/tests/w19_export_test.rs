@@ -280,6 +280,7 @@ fn export_opts(out: &Path, turns: Turns, trim: bool) -> ExportOptions {
         out: out.to_path_buf(),
         turns,
         trim_to_window: trim,
+        include_deleted: false,
         force: false,
         dry_run: false,
     }
@@ -534,6 +535,7 @@ fn export_writes_exactly_what_search_selects() {
             out: dry.clone(),
             turns: Turns::All,
             trim_to_window: false,
+            include_deleted: false,
             force: false,
             dry_run: true,
         },

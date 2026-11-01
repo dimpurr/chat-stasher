@@ -28,6 +28,238 @@ use crate::config::Config;
 use crate::json_out::{CountState, TimeState};
 use crate::scanner;
 use crate::sqlite_probe;
+
+// ---------------------------------------------------------------------------
+// The per-check deadline (W1043) — every check is traced before it runs and
+// bounded while it runs, so a wedged step can never freeze the whole report
+// ---------------------------------------------------------------------------
+
+/// Check labels, shared by the trace a check prints before running, the
+/// `timed_out` notes a run records, and the sections of the report — so the
+/// line a hang leaves behind names the same check the report's section does.
+/// `D7 destination probe (<name>) …` labels are composed at runtime instead.
+pub const D1_CHECK: &str = "D1 Claude Code rotation settings";
+pub const D2_CHECK: &str = "D2 Gemini CLI retention policy";
+pub const CONFIG_CHECK: &str = "configuration file";
+pub const D3_SCAN_CHECK: &str = "D3 harness registry and scan";
+pub const DESKTOP_RETENTION_CHECK: &str = "D1\u{00bd} Desktop/Cowork retention settings";
+pub const OTHER_HARNESS_CHECK: &str = "detected out-of-scope harness directories";
+pub const RECLAIM_CHECK: &str = "D5 repository reclaim";
+pub const CACHE_CHECK: &str = "D6 local metadata cache";
+pub const BODY_CACHE_CHECK: &str = "D9 body cache";
+pub const FTS_CHECK: &str = "D10 full-text indexes";
+pub const STAGE_DUP_CHECK: &str = "D11 stage duplicate scan";
+pub const NATIVE_HOST_CHECK: &str = "D8 native host stage";
+pub const MACHINE_LOGS_CHECK: &str = "machine log rows";
+pub const KEYS_CHECK: &str = "key inventory";
+pub const DEST_RECONCILE_CHECK: &str = "D12 destination reconciliation";
+pub const MIRROR_CHECK: &str = "D13 local mirror";
+pub const INBOX_STATUS_CHECK: &str = "remote inbox status";
+
+/// Per-check budgets, in seconds. A budget is a *diagnosis* bound, not an
+/// archive bound: every check above is a read of a few files, a bounded walk
+/// or one connection probe, and the value is only a floor against a hang
+/// (`reader_guard` documents why the bulk commands are deliberately not
+/// bounded instead). A check that needs more time than this on a healthy
+/// machine is a bug in the check, not a budget to raise.
+pub const SETTINGS_BUDGET_SECS: u64 = 30;
+pub const CONFIG_BUDGET_SECS: u64 = 30;
+pub const SCAN_BUDGET_SECS: u64 = 240;
+pub const BACKED_WALK_BUDGET_SECS: u64 = 90;
+pub const RECLAIM_BUDGET_SECS: u64 = 240;
+pub const INBOX_BUDGET_SECS: u64 = 30;
+pub const DESTINATION_CONNECT_BUDGET_SECS: u64 = 45;
+pub const DESTINATION_READ_BUDGET_SECS: u64 = 120;
+
+/// One check's budget after the test override. The default is the check's
+/// own; `CHAT_STASHER_DOCTOR_CHECK_BUDGET_SECS` replaces **every** check's
+/// budget with one number (floored at 1), so a fixture can turn a hang into
+/// a short wait without owning a second copy of the table. Anything below 1
+/// would stop being a bound at all.
+///
+/// W1043f: the override is a product lever, not a test secret — it is the
+/// one knob a user with a healthy-but-slow remote has, and `docs/cli.md`'s
+/// `doctor` section documents it (including how it is applied). The
+/// override also cannot disable the bound: an unset variable, an
+/// unparsable value or a zero all fall back to the check's own budget.
+pub fn check_budget_secs(default_secs: u64) -> u64 {
+    std::env::var("CHAT_STASHER_DOCTOR_CHECK_BUDGET_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|secs| *secs >= 1)
+        // reason: an unset variable, an unparsable value or a zero all fall
+        // back to the check's own budget — an override nobody can read must
+        // not disable the bound, and must not change it silently either.
+        .unwrap_or(default_secs)
+}
+
+/// What one check that outlived its budget owes every reader: the same
+/// label the `doctor: checking …` trace printed before it ran, and the
+/// budget it exceeded.
+///
+/// Deliberately not a "failed" verdict: a timeout is an **unknown**, exactly
+/// like `config_error` — the check did not answer, it did not find nothing —
+/// and the surrounding machinery keeps the two from being worded as each
+/// other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckTimedOut {
+    /// The check's label — the words the trace printed, the words the
+    /// INCOMPLETE line and the report section use.
+    pub check: String,
+    /// The per-check budget that expired, in seconds.
+    pub budget_secs: u64,
+}
+
+impl CheckTimedOut {
+    /// The JSON shape of one note, under the report's `timed_out` array.
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({"check": self.check, "budget_secs": self.budget_secs})
+    }
+}
+
+/// Runs doctor's checks one at a time, each behind its own deadline (W1043).
+///
+/// Two properties, both owed to a doctor user whose machine is half-broken —
+/// the one user this command is *for*:
+///
+/// 1. **A trace before every check.** `doctor: checking <label>` goes to
+///    stderr before the check starts, so a wedged run always has its culprit
+///    named on a line that was already flushed. Before this harness, the
+///    whole report printed at the end, so a hang produced zero output and no
+///    clue (the incident this module half was written for: a run with a
+///    wedged destination probe waited 90 s on an idle machine and said
+///    nothing).
+/// 2. **A deadline per check.** A check that outlives its budget is
+///    abandoned — the worker thread is left blocked where it is and the run
+///    continues — and the note that it timed out rides in the report
+///    ([`DoctorReport::timed_out`]), where `doctor` words the section as
+///    unknown, exits 3 and prints the checks that *did* answer. Skipping
+///    with a timeout note is the only honest answer a hang permits.
+///
+/// A panic inside the check propagates unchanged (`resume_unwind` of the
+/// payload the worker's join hands back): a panicking check is a bug to
+/// fix, not an unknown to word around, and intercepting it here would
+/// silently change a crash into a partial report.
+///
+/// The abandoned thread cannot be joined on the timeout path — joining is
+/// the hang again — so it is detached and keeps whatever it was blocked on
+/// until the process exits; the check is read-only, so the only thing it
+/// leaks is the wait it was already stuck in. `std::thread::scope` is not an
+/// option here for exactly that reason: a scope joins on exit, so a stuck
+/// worker would convert the budget right back into a hang.
+#[derive(Debug, Default)]
+pub struct CheckRunner {
+    notes: Vec<CheckTimedOut>,
+}
+
+impl CheckRunner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The checks that outlived their budget, in the order they ran.
+    pub fn notes(&self) -> &[CheckTimedOut] {
+        &self.notes
+    }
+
+    /// Whether `check` timed out, and with which budget — the one place the
+    /// report, the printer and the exit code agree on when they ask.
+    pub fn timed_out_after(&self, check: &str) -> Option<u64> {
+        self.notes
+            .iter()
+            .find(|note| note.check == check)
+            .map(|note| note.budget_secs)
+    }
+
+    /// Run one check behind its deadline: print its trace, let it answer
+    /// within the budget, or record the note and return `None`.
+    ///
+    /// `None` is exclusively the timeout: a finished check always returns
+    /// `Some`, whatever it measured, and a panicking one never returns.
+    pub fn run<T, F>(&mut self, check: &str, default_budget_secs: u64, f: F) -> Option<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        let budget = std::time::Duration::from_secs(check_budget_secs(default_budget_secs));
+        eprintln!("doctor: checking {check}");
+        // The closure travels in a carrier so the spawn-failure path below
+        // can still run the check itself: `Builder::spawn` consumes its
+        // argument, and a worker that was never created is the one failure
+        // that must not lose the question it was handed.
+        let carrier = std::sync::Arc::new(std::sync::Mutex::new(Some(f)));
+        let (answer, answers) = std::sync::mpsc::channel();
+        let carried = std::sync::Arc::clone(&carrier);
+        let worker = std::thread::Builder::new()
+            .name("doctor-check".to_string())
+            .spawn(move || {
+                // Take the closure out under the lock, release the guard, and
+                // only then run it: the sender drops when this scope ends
+                // whether the check answered or panicked, which is all the
+                // caller needs — an answer, or a disconnect meaning "ended
+                // without one".
+                let taken = match carried.lock() {
+                    Ok(mut slot) => slot.take(),
+                    Err(poisoned) => poisoned.into_inner().take(),
+                };
+                if let Some(f) = taken {
+                    #[allow(
+                        clippy::let_underscore_must_use,
+                        reason = "a send that fails means the caller's budget already expired \
+                                  and the receiver is gone — the answer is rightfully discarded, \
+                                  and the error says nothing either side should act on"
+                    )]
+                    let _ = answer.send(f());
+                }
+            });
+        let handle = match worker {
+            Ok(handle) => handle,
+            Err(_) => {
+                // reason: a spawn failure is a machine out of threads, and
+                // the bound itself is dead without one — running the check
+                // keeps the answer honest at the cost of a deadline nothing
+                // could have enforced anyway. The carrier still holds the
+                // closure because a thread that was never created is the one
+                // branch that never took it.
+                let recovered = match carrier.lock() {
+                    Ok(mut slot) => slot.take(),
+                    Err(poisoned) => poisoned.into_inner().take(),
+                };
+                match recovered {
+                    Some(f) => return Some(f()),
+                    None => {
+                        std::unreachable!(
+                            "the doctor-check carrier was stripped by a worker that was never \
+                             created"
+                        );
+                    }
+                }
+            }
+        };
+        match answers.recv_timeout(budget) {
+            Ok(value) => Some(value),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.notes.push(CheckTimedOut {
+                    check: check.to_string(),
+                    budget_secs: budget.as_secs(),
+                });
+                None
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // The worker ended without answering: a panic. Hand its
+                // payload back to this thread and let it unwind exactly as
+                // it would have without the harness.
+                match handle.join() {
+                    Ok(()) => std::unreachable!(
+                        "a doctor-check worker only ends without answering by panicking, and the \
+                         carrier is only stripped by a thread that never existed"
+                    ),
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
+            }
+        }
+    }
+}
 use crate::store::{self, StoreConfig};
 use std::collections::BTreeMap;
 use std::fs;
@@ -73,6 +305,16 @@ pub enum ClaudeRetention {
     /// error it silently reverts to the 30-day default and starts cleaning,
     /// no matter what was configured.
     ParseFailed { path: PathBuf, error: String },
+    /// The settings read did not answer within its deadline (W1043): no
+    /// layer on this machine was read. An unknown, kept apart from
+    /// [`Self::UnsetDefault`] (a measured "no file says anything") and from
+    /// [`Self::ParseFailed`] (a measured broken file) because the wording
+    /// those two carry — the default-30 risk, the fail-destructive alarm —
+    /// would be a claim about files nobody read. [`Self::is_dangerous`]
+    /// answers `false` for the same reason it does for [`Self::Safe`]: the
+    /// flag is a finding's verdict, and a timeout is not a finding; D4 words
+    /// the unknown itself.
+    TimedOut,
 }
 
 impl ClaudeRetention {
@@ -83,17 +325,25 @@ impl ClaudeRetention {
             ClaudeRetention::Safe { days, .. } => format!("large ({days}d)"),
             ClaudeRetention::SmallValue { days, .. } => format!("small ({days}d)"),
             ClaudeRetention::ParseFailed { .. } => "PARSE FAILED".to_string(),
+            ClaudeRetention::TimedOut => "TIMED OUT".to_string(),
         }
     }
 
     /// True when this state hands Claude Code a live deletion window.
     pub fn is_dangerous(&self) -> bool {
-        matches!(
-            self,
+        match self {
             ClaudeRetention::UnsetDefault
-                | ClaudeRetention::SmallValue { .. }
-                | ClaudeRetention::ParseFailed { .. }
-        )
+            | ClaudeRetention::SmallValue { .. }
+            // A parse failure reverts the runtime to its 30-day default, so
+            // the window is live whatever the file intended — the flag IS a
+            // finding here.
+            | ClaudeRetention::ParseFailed { .. } => true,
+            // A timeout is not a finding: answering `true` here would word a
+            // non-answer as the measured 30-day window, which is exactly the
+            // collapse `ParseFailed` and `UnsetDefault` exist to stay apart.
+            // D4 words the unknown itself.
+            ClaudeRetention::Safe { .. } | ClaudeRetention::TimedOut => false,
+        }
     }
 }
 
@@ -357,6 +607,554 @@ impl GeminiRetention {
 }
 
 // ---------------------------------------------------------------------------
+// D1½ — Claude Code `desktopSessionCleanupPeriodDays` (Desktop/Cowork
+// transcripts), the registry-declared retention probe (ADR-059 draft D5,
+// DSK-0a / W1009 DSK-3).
+// ---------------------------------------------------------------------------
+
+/// Which settings layer one probed file belongs to. The registry declares
+/// both lists per platform; the probe must report which one governed the
+/// effective value, or "managed overridden" reads as "the user set X"
+/// (DSK-0a, the retention-probe semantics section, item 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopSourceKind {
+    User,
+    Managed,
+}
+
+impl DesktopSourceKind {
+    fn word(self) -> &'static str {
+        match self {
+            DesktopSourceKind::User => "user",
+            DesktopSourceKind::Managed => "managed",
+        }
+    }
+}
+
+/// What one settings file said (or why it could not say anything). The three
+/// broken states are kept apart for the same reason every other tri-state in
+/// this file is: an absent file is a measured absence, an unreadable or
+/// unparseable one is an unknown, and a value this probe cannot interpret is
+/// its own finding — never a silent default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesktopSourceOutcome {
+    /// The declared file is not on this machine. For managed locations this
+    /// is the ordinary case (measured locally on two machines: every
+    /// declared managed location was absent on both).
+    Absent,
+    /// The file is there but its bytes could not be read (permissions, I/O).
+    Unreadable(String),
+    /// The file read but is not parseable JSON. The runtime's fail-destructive
+    /// fallback applies to its own load — the desktop key's fallback is the
+    /// built-in default, which for *this* key is 0 = no ceiling (the
+    /// opposite direction of `cleanupPeriodDays`' 30-day fallback) — so this
+    /// is reported loudly, never assumed.
+    ParseFailed(String),
+    /// The file holds the key but the value is not a plain nonnegative
+    /// integer (the runtime's schema is `int().nonnegative().optional()`; an
+    /// invalid value is never applied — but which value it *would* apply is
+    /// exactly what no probe may guess).
+    InvalidValue(String),
+    /// Parsed cleanly. Each key is `None` when the file simply does not set
+    /// it — an absent key is a fact about the file, not about retention.
+    Read {
+        desktop_days: Option<u64>,
+        cleanup_days: Option<u64>,
+    },
+}
+
+/// One settings source the probe consulted, in declared order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopRetentionSource {
+    pub path: PathBuf,
+    /// The declared list the registry put this file in. Reported so the
+    /// effective value can never be attributed to the wrong layer.
+    pub kind: DesktopSourceKind,
+    pub outcome: DesktopSourceOutcome,
+}
+
+impl DesktopRetentionSource {
+    /// One `D1`-table-style line for this source.
+    fn line(&self) -> String {
+        let said = match &self.outcome {
+            DesktopSourceOutcome::Absent => "absent".to_string(),
+            DesktopSourceOutcome::Unreadable(e) => format!("unreadable: {e}"),
+            DesktopSourceOutcome::ParseFailed(e) => format!("parse failed: {e}"),
+            DesktopSourceOutcome::InvalidValue(w) => format!("invalid value: {w}"),
+            DesktopSourceOutcome::Read {
+                desktop_days,
+                cleanup_days,
+            } => {
+                let mut parts = Vec::new();
+                parts.push(match desktop_days {
+                    Some(days) => format!("{days}"),
+                    None => "not set".to_string(),
+                });
+                if let Some(days) = cleanup_days {
+                    parts.push(format!("cleanupPeriodDays={days}"));
+                }
+                parts.join(", ")
+            }
+        };
+        format!(
+            "    {:<52} [{:<7}] {}",
+            self.path.display(),
+            self.kind.word(),
+            said
+        )
+    }
+}
+
+/// The three readable states of `desktopSessionCleanupPeriodDays`, plus the
+/// managed-override shape that short-circuits all three, plus unknown. The
+/// semantics are the registry's recorded ones (`retention_probes` of
+/// `claude-code`, written in ADR-059 draft D5 from DSK-0a's measurement):
+///
+/// * **missing** — the built-in default 0 applies: no ceiling. This is NOT
+///   the `cleanupPeriodDays` missing-state default of 30; Desktop/Cowork
+///   transcripts are *exempt* from that sweep by default. Never worded as
+///   30 here.
+/// * **explicit 0** — also no ceiling (0 is allowed because this key bounds
+///   an exemption from deletion; it never disables writes).
+/// * **positive** — a hard ceiling in days; the effective retention is the
+///   *longer* of this ceiling and the effective `cleanupPeriodDays`.
+/// * **managed override** — a managed source that sets `cleanupPeriodDays`
+///   makes this key ignored entirely, so the report must name the managed
+///   source that governed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DesktopRetention {
+    /// The key is not set in any readable source → default 0 = no ceiling.
+    DefaultZero,
+    /// The key is explicitly 0 in `source` → no ceiling, by choice.
+    ExplicitZero { source: PathBuf },
+    /// A positive ceiling in `source`. `cleanup_days` is the effective
+    /// `cleanupPeriodDays` D1 measured (None when D1 could not classify,
+    /// e.g. a parse failure); `effective_days` is the longer of the two
+    /// periods where both are known.
+    Ceiling {
+        days: u64,
+        source: PathBuf,
+        cleanup_days: Option<u64>,
+        effective_days: Option<u64>,
+    },
+    /// A managed source sets `cleanupPeriodDays` → the desktop key is
+    /// ignored entirely; `days` is the policy value in `source`.
+    ManagedOverride { days: u64, source: PathBuf },
+    /// A source that could have spoken could not be read, did not parse,
+    /// or held a value this probe cannot interpret. Never fallen back to
+    /// the default — the runtime's own parse-failure fallback for a
+    /// *deletion-optional* key would be "no ceiling", but reporting that
+    /// as the user's configuration is exactly the "parsed failure read as
+    /// unset" lie D1 exists to prevent.
+    Unknown { why: String },
+}
+
+impl DesktopRetention {
+    /// The effective retention in days for Desktop/Cowork transcripts, when
+    /// known: unbounded shapes are `None` (no ceiling — kept until deleted
+    /// another way), a ceiling/override carries its effective number.
+    fn effective_days(&self) -> Option<u64> {
+        match self {
+            DesktopRetention::DefaultZero | DesktopRetention::ExplicitZero { .. } => None,
+            DesktopRetention::Ceiling { effective_days, .. } => *effective_days,
+            DesktopRetention::ManagedOverride { days, .. } => Some(*days),
+            DesktopRetention::Unknown { .. } => None,
+        }
+    }
+
+    /// True when this state hands Claude Code a live deletion window for
+    /// desktop-hosted transcripts — the same threshold D1 applies to
+    /// `cleanupPeriodDays` (never a separate standard the two knobs drift
+    /// into): a bounded retention under half a year is "still rotating".
+    fn is_dangerous(&self) -> bool {
+        matches!(self, DesktopRetention::Unknown { .. })
+            || self
+                .effective_days()
+                .is_some_and(|days| days < CLEANUP_SAFE_DAYS)
+    }
+
+    /// Short label for the D1 block's headline.
+    pub fn label(&self) -> String {
+        match self {
+            DesktopRetention::DefaultZero => {
+                "not set → default 0 = no ceiling (≠ the 30-day cleanupPeriodDays default)"
+                    .to_string()
+            }
+            DesktopRetention::ExplicitZero { source } => {
+                format!("explicit 0 = no ceiling ({})", source.display())
+            }
+            DesktopRetention::Ceiling {
+                days,
+                source,
+                effective_days: _,
+                cleanup_days: _,
+            } => format!(
+                "{days} days ({}); effective retention is the longer of this and cleanupPeriodDays",
+                source.display()
+            ),
+            DesktopRetention::ManagedOverride { days, source } => format!(
+                "ignored — cleanupPeriodDays is managed ({days} days, {})",
+                source.display()
+            ),
+            DesktopRetention::Unknown { why } => format!("unknown ({why})"),
+        }
+    }
+}
+
+/// The full result of the Desktop retention probe.
+#[derive(Debug, Clone)]
+pub struct DesktopRetentionCheck {
+    /// Registry probe id (`desktop-session-cleanup`) and the settings key.
+    pub probe_id: String,
+    pub key: String,
+    /// Every source the probe consulted, in the registry's declared order —
+    /// user sources first, then managed — with what each said. Presence + a
+    /// kind word per row; never file contents.
+    pub sources: Vec<DesktopRetentionSource>,
+    /// The merged verdict, per [`DesktopRetention`].
+    pub state: DesktopRetention,
+}
+
+/// The effective `cleanupPeriodDays` as D1 measured it, for the
+/// longer-of-two comparison. Unset → the runtime's documented 30-day default
+/// (the same number D1's own label prints); a parse failure → `None`, which
+/// the ceiling state carries so the comparison never fabricates a floor.
+fn d1_effective_cleanup_days(verdict: &ClaudeRetention) -> Option<u64> {
+    match verdict {
+        // reason: Claude Code's documented built-in default when the key is
+        // unset is 30 days (D1 prints the same number); this is the runtime's
+        // documented default, not an unknown collapsed into a concrete value.
+        ClaudeRetention::UnsetDefault => Some(30),
+        ClaudeRetention::Safe { days, .. } | ClaudeRetention::SmallValue { days, .. } => {
+            Some(*days)
+        }
+        // `TimedOut` sits beside `ParseFailed` on purpose: the CLI side of the
+        // longer-of-two comparison is unknown, so the longer of the two is
+        // unknown — `DesktopRetention::Ceiling`'s `effective_days` must stay
+        // `None` rather than borrow a default from a file nobody read.
+        ClaudeRetention::ParseFailed { .. } | ClaudeRetention::TimedOut => None,
+    }
+}
+
+/// Read one integer settings key out of a parsed settings file. `Ok(None)`
+/// = the file does not set it; `Err(_) ` = the key is present but this
+/// probe cannot interpret it (never silently dropped: the caller reports it).
+fn settings_int(value: &serde_json::Value, key: &str) -> Result<Option<u64>, String> {
+    match value.get(key) {
+        None => Ok(None),
+        Some(v) => match v.as_u64() {
+            Some(days) => Ok(Some(days)),
+            None => Err(format!(
+                "{key} is present but not a nonnegative integer (found {})",
+                kind_word(v)
+            )),
+        },
+    }
+}
+
+/// The JSON kind word for a value this probe cannot read as a day count —
+/// so an `InvalidValue` row says what was actually there, without printing a
+/// value that may carry anything else.
+fn kind_word(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(n) if n.is_f64() => "a non-integer number",
+        serde_json::Value::Number(_) => "a negative number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// Read one declared settings source and classify what it said.
+fn inspect_desktop_source(
+    template: &str,
+    kind: DesktopSourceKind,
+    key: &str,
+) -> DesktopRetentionSource {
+    // The registry's template is a settings **file**: expand it through the
+    // same expander every session root uses, refuse (as one refused probe
+    // row, not a crash) if it cannot be anchored, and treat an unanchorable
+    // template as an unreadable source — this build cannot read a value from
+    // a path it cannot name.
+    let path = match scanner::static_prefix_root(template) {
+        // reason: an unanchorable template (a variable this build does not
+        // resolve) still *names a file that may exist*; reporting the source
+        // as unreadable keeps the three states — absent / broken / read —
+        // intact instead of dropping the source and reading its absence as
+        // "the key is not set".
+        Some((path, _)) => path,
+        None => {
+            return DesktopRetentionSource {
+                path: PathBuf::from(template),
+                kind,
+                outcome: DesktopSourceOutcome::Unreadable(format!(
+                    "template cannot be resolved to a path this build knows"
+                )),
+            };
+        }
+    };
+    let outcome = match fs::read_to_string(&path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => DesktopSourceOutcome::Absent,
+        Err(e) => DesktopSourceOutcome::Unreadable(format!("{e}")),
+        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Err(e) => DesktopSourceOutcome::ParseFailed(format!("{e}")),
+            Ok(v) => match (settings_int(&v, key), settings_int(&v, "cleanupPeriodDays")) {
+                (Err(desktop), _) => DesktopSourceOutcome::InvalidValue(desktop),
+                (_, Err(cleanup)) => DesktopSourceOutcome::InvalidValue(cleanup),
+                (Ok(desktop_days), Ok(cleanup_days)) => DesktopSourceOutcome::Read {
+                    desktop_days,
+                    cleanup_days,
+                },
+            },
+        },
+    };
+    DesktopRetentionSource {
+        path,
+        kind,
+        outcome,
+    }
+}
+
+/// D1½ — read the registry-declared `desktopSessionCleanupPeriodDays` probe
+/// (claude-code's `retention_probes`, ADR-059 draft D5) and classify the
+/// machine's state, so D4 can state the Desktop/Cowork retention risk
+/// without re-deriving a location or a default.
+///
+/// Reads exactly the sources the registry declares for this platform — the
+/// User settings file plus managed policy files — and never looks under the
+/// desktop app's Application Support tree (measured there and disproved as a
+/// source, DSK-0a). `None` when this registry declares no such probe (a
+/// scratch registry, an older registry) — the check is then *not performed*
+/// rather than performed against guessed paths.
+pub fn inspect_desktop_retention(
+    registry: &scanner::HarnessRegistry,
+    claude: &ClaudeCheck,
+) -> Option<DesktopRetentionCheck> {
+    let harness = registry.harnesses.iter().find(|h| h.id == "claude-code")?;
+    let probe = harness
+        .retention_probes
+        .iter()
+        .find(|probe| probe.key == "desktopSessionCleanupPeriodDays")?;
+    let platform = scanner::current_platform();
+    let cell = probe.platforms.cell_for(platform)?;
+    let mut sources = Vec::new();
+    for template in &cell.user_sources {
+        sources.push(inspect_desktop_source(
+            template,
+            DesktopSourceKind::User,
+            &probe.key,
+        ));
+    }
+    for template in &cell.managed_sources {
+        sources.push(inspect_desktop_source(
+            template,
+            DesktopSourceKind::Managed,
+            &probe.key,
+        ));
+    }
+
+    // Managed override first (DSK-0a item 3): a managed source that sets
+    // `cleanupPeriodDays` makes the desktop key ignored entirely, whatever
+    // any user file says — so this must be decided before the key's own
+    // value, or "overridden by org policy" reads as "the user set X".
+    let managed_override = sources.iter().find_map(|source| match source {
+        DesktopRetentionSource {
+            kind: DesktopSourceKind::Managed,
+            outcome:
+                DesktopSourceOutcome::Read {
+                    cleanup_days: Some(days),
+                    ..
+                },
+            path,
+            ..
+        } => Some((*days, path.clone())),
+        _ => None,
+    });
+    let state = if let Some((days, source)) = managed_override {
+        DesktopRetention::ManagedOverride { days, source }
+    } else {
+        // The key's own value, in the runtime's precedence order: managed
+        // (policySettings) before user — the scope's own "User or managed"
+        // recorded in the registry, and the same order the runtime's settings
+        // merge consults (DSK-0a §3: policySettings first).
+        let desktop_value = sources
+            .iter()
+            .filter(|source| source.kind == DesktopSourceKind::Managed)
+            .chain(
+                sources
+                    .iter()
+                    .filter(|source| source.kind == DesktopSourceKind::User),
+            )
+            .find_map(|source| match source {
+                DesktopRetentionSource {
+                    outcome:
+                        DesktopSourceOutcome::Read {
+                            desktop_days: Some(days),
+                            ..
+                        },
+                    path,
+                    ..
+                } => Some((*days, path.clone())),
+                _ => None,
+            });
+        // Anything that could have spoken but could not be read keeps the
+        // state unknown — the same rule D1 applies to an unparsed layer,
+        // and the opposite direction of this key's fail-open runtime
+        // fallback, which is exactly why it must be said rather than lived.
+        let broken = sources.iter().find_map(|source| match &source.outcome {
+            DesktopSourceOutcome::Unreadable(e)
+            | DesktopSourceOutcome::ParseFailed(e)
+            | DesktopSourceOutcome::InvalidValue(e) => {
+                Some(format!("{}: {e}", source.path.display()))
+            }
+            _ => None,
+        });
+        match desktop_value {
+            Some((days, source)) => {
+                // 0 is allowed and means no ceiling (the key bounds an
+                // exemption from deletion; it never disables writes).
+                if days == 0 {
+                    DesktopRetention::ExplicitZero { source }
+                } else {
+                    let cleanup_days = d1_effective_cleanup_days(&claude.verdict);
+                    // The ceiling is a hard cap; the effective retention is
+                    // the *longer* of the two periods — never max-of-knowns
+                    // with a fabricated floor when the CLI side is unknown.
+                    let effective_days = cleanup_days.map(|cleanup| days.max(cleanup));
+                    DesktopRetention::Ceiling {
+                        days,
+                        source,
+                        cleanup_days,
+                        effective_days,
+                    }
+                }
+            }
+            None => match broken {
+                Some(why) => DesktopRetention::Unknown { why },
+                None => DesktopRetention::DefaultZero,
+            },
+        }
+    };
+    Some(DesktopRetentionCheck {
+        probe_id: probe.id.clone(),
+        key: probe.key.clone(),
+        sources,
+        state,
+    })
+}
+
+impl DesktopRetentionCheck {
+    /// The `--settings` invisibility note, printed with the state: a value
+    /// handed to a single run through the CLI's `--settings` flag is real to
+    /// that run and invisible to a disk probe — its absence here is expected,
+    /// not a gap (DSK-0a item 4).
+    fn invisibility_note() -> &'static str {
+        "probe reads the registry-declared user and managed settings files only; a \
+         one-run --settings value is invisible on disk and its absence is expected"
+    }
+
+    /// The D4 "so what" line for this state.
+    fn risk_line(&self) -> String {
+        let today = format_date(SystemTime::now());
+        match &self.state {
+            DesktopRetention::DefaultZero => format!(
+                "🟢 Claude Desktop/Cowork transcripts: {} is not set → default 0 = no \
+                 ceiling. Desktop/Cowork transcripts are exempt from the cleanupPeriodDays \
+                 sweep by default and are kept until deleted some other way — this is NOT \
+                 the 30-day default that governs CLI transcripts (today {today}). \
+                 — {}",
+                self.key,
+                Self::invisibility_note()
+            ),
+            DesktopRetention::ExplicitZero { source } => format!(
+                "🟢 Claude Desktop/Cowork transcripts: {} = 0 (explicitly set by {}) → \
+                 no ceiling; kept until deleted some other way (today {today}). \
+                 — 0 is allowed here because the key bounds an exemption from deletion; \
+                 it never disables writes. {}",
+                self.key,
+                source.display(),
+                Self::invisibility_note()
+            ),
+            DesktopRetention::Ceiling {
+                days,
+                source,
+                cleanup_days,
+                effective_days,
+            } => {
+                let head = if self.state.is_dangerous() {
+                    format!(
+                        "🔴 Claude Desktop/Cowork transcripts: {} = {days} days",
+                        self.key
+                    )
+                } else {
+                    format!(
+                        "🟡 Claude Desktop/Cowork transcripts: {} = {days} days",
+                        self.key
+                    )
+                };
+                let effective = match (cleanup_days, effective_days) {
+                    (Some(cleanup), Some(effective)) => format!(
+                        "the effective retention is the longer of the two periods = \
+                         {effective} days (cleanupPeriodDays = {cleanup})"
+                    ),
+                    // D1's parse failure: the ceiling is a fact; the floor
+                    // under it is not, and saying `days` is the effective
+                    // retention would fabricate the smaller number.
+                    _ => "the effective retention cannot be computed: the \
+                          cleanupPeriodDays state is unknown (settings parse failed)"
+                        .to_string(),
+                };
+                format!(
+                    "{head} (source {}) → the desktop-kept transcripts now carry a \
+                     hard age cap where they were exempt before. {effective}. \
+                     — {}",
+                    source.display(),
+                    Self::invisibility_note()
+                )
+            }
+            DesktopRetention::ManagedOverride { days, source } => {
+                let emoji = if self.state.is_dangerous() {
+                    "🔴"
+                } else {
+                    "🟡"
+                };
+                format!(
+                    "{emoji} Claude Desktop/Cowork transcripts: {} is ignored — a managed \
+                     source ({}) sets cleanupPeriodDays = {days} days, so org policy \
+                     governs rotation and the desktop exemption is out of the user's \
+                     hands. — the report names the managing source so this never \
+                     reads as \"the user set X\"; {}",
+                    self.key,
+                    source.display(),
+                    Self::invisibility_note()
+                )
+            }
+            DesktopRetention::Unknown { why } => format!(
+                "🟡 Claude Desktop/Cowork transcripts: {} state unknown ({why}) — not \
+                 guessing the retention risk from a default. — {}",
+                self.key,
+                Self::invisibility_note()
+            ),
+        }
+    }
+
+    /// The D1-block lines: the state headline, then one row per source read.
+    fn print(&self) {
+        eprintln!(
+            "  {} (Desktop/Cowork transcripts): {}",
+            self.key,
+            self.state.label()
+        );
+        for source in &self.sources {
+            eprintln!("{}", source.line());
+        }
+        eprintln!("    ({})", Self::invisibility_note());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // D3 — coverage: which harnesses exist, and all of them accounted for?
 // ---------------------------------------------------------------------------
 
@@ -439,6 +1237,23 @@ pub struct HarnessFootprint {
     pub unreadable_entry_count: Option<u64>,
     /// `None` means the footprint was not measured; it is not an empty store.
     pub total_bytes: Option<u64>,
+    /// Registry ids of the harness family's roots that stayed unverified
+    /// while a sibling root was measured (ADR-059 draft D6, W1006d).
+    /// Non-empty exactly when `session_count` is a *qualified lower
+    /// bound* — the exact count of the measured roots only — and the
+    /// label prints it as `≥N` beside the note that names why. Empty for
+    /// a fully measured row and for a fully unknown one (the state says
+    /// that already, and there is no measured count to qualify).
+    pub unverified_roots: Vec<String>,
+    /// One row per declared source root of this family (W1009/DSK-3):
+    /// the probe's own per-root rows, carried through so the footprint
+    /// table can print one row per source root beside the aggregate —
+    /// with unverified roots explicitly marked instead of folded into a
+    /// number that reads as the family total. Copied from the probe
+    /// (`footprint_from_dir_probe`) like `unverified_roots` is, so the
+    /// two doctor tables can never disagree about a root either. Empty
+    /// for families outside the primary-plus-roots shape.
+    pub source_roots: Vec<scanner::SourceRootProbe>,
     /// The clock `earliest` / `latest` were read from. Printed with them, so a
     /// row can never be read as the other clock — see [`TimeBasis`].
     pub time_basis: TimeBasis,
@@ -470,13 +1285,31 @@ pub fn coverage_from_records<'a>(
     let earliest = recs.iter().map(|r| r.mtime).min();
     let latest = recs.iter().map(|r| r.mtime).max();
     let compressed_count = recs.iter().filter(|r| r.compressed).count() as u64;
+    // Sessions counted by identity, records kept by observation. The two are
+    // the same number for every ordinary store — one transcript file per
+    // session — and come apart exactly once: the same session id discovered
+    // through more than one declared source root of the same harness family
+    // (W1007's codex uuid sitting in both `sessions/` and the
+    // `archived_sessions/` the store moves it through; a copy left behind is
+    // the same thread, not a second one). The registry probe table's
+    // aggregate counts unique ids for the same reason, and doctor's two
+    // tables must agree, so the count here is the distinct-id count too.
+    // Everything below keeps a per-record view on purpose: the byte total,
+    // the mtimes and the recognised-file set describe the files that are
+    // physically there, and a copy is one more file on disk even when it is
+    // not one more conversation.
+    let distinct_sessions = recs
+        .iter()
+        .map(|r| r.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     HarnessFootprint {
         name: name.to_string(),
         root: Some(root),
         installed,
         presence_unknown: false,
         session_count: if installed {
-            Some(recs.len() as u64)
+            Some(distinct_sessions as u64)
         } else {
             None
         },
@@ -484,6 +1317,8 @@ pub fn coverage_from_records<'a>(
         unreadable_count: None,
         unreadable_entry_count: None,
         total_bytes,
+        unverified_roots: Vec::new(),
+        source_roots: Vec::new(),
         time_basis,
         earliest,
         latest,
@@ -681,6 +1516,18 @@ fn footprint_from_sqlite_probe(probe: &scanner::HarnessProbe) -> HarnessFootprin
         unreadable_count: probe.unreadable_count,
         unreadable_entry_count: probe.unreadable_entry_count,
         total_bytes: probe.bytes,
+        // W1006d: a single-file family has no additional roots today, but
+        // the marking travels the same seam the counts do, so a future
+        // sqlite entry declaring source_roots cannot lose it here.
+        unverified_roots: probe
+            .unverified_roots
+            .iter()
+            .map(|root| root.id.clone())
+            .collect(),
+        // A single-file family today has no additional source roots, but the
+        // W1009 rows travel the same seam the counts do — a future sqlite
+        // entry that declares `source_roots` cannot lose them here.
+        source_roots: probe.source_roots.clone(),
         // The probe read the store's own time column, not the .db file's mtime,
         // so this row is on the conversation clock.
         time_basis: TimeBasis::SessionTime,
@@ -726,6 +1573,41 @@ fn footprint_from_dir_probe<'a>(
     };
     let root = probe.root.clone().unwrap_or(fallback_root);
     if !probe.installed_p() {
+        // W1006d: the lower-bound shape with no scanned root — the
+        // measured primary was found ABSENT while a declared sibling
+        // stayed unverified. The family is partially unknown, so this row
+        // is presence-unknown (never a measured "not installed"), and the
+        // session count is the probe's qualified floor: what the measured
+        // roots hold (`≥0`), never a bare 0 that reads as the family
+        // total. `doctor_consistency_test` joins this to the registry
+        // probe row, so taking the count from the probe is what keeps the
+        // two tables from contradicting each other.
+        if !probe.unverified_roots.is_empty() {
+            return HarnessFootprint {
+                installed: false,
+                presence_unknown: true,
+                session_count: probe.record_count,
+                candidate_count: probe.candidate_count,
+                unreadable_count: probe.unreadable_count,
+                unreadable_entry_count: probe.unreadable_entry_count,
+                unverified_roots: probe
+                    .unverified_roots
+                    .iter()
+                    .map(|root| root.id.clone())
+                    .collect(),
+                // W1009: a partially-unknown family still names its roots —
+                // the unverified one's own row is where the mark lives now.
+                source_roots: probe.source_roots.clone(),
+                note: if probe.note.is_empty() {
+                    "one or more declared source roots are unverified; total is a lower \
+                     bound"
+                        .to_string()
+                } else {
+                    probe.note.clone()
+                },
+                ..default_footprint(name, root)
+            };
+        }
         return HarnessFootprint {
             presence_unknown: probe.not_probed_p(),
             note: if probe.note.is_empty() {
@@ -733,17 +1615,37 @@ fn footprint_from_dir_probe<'a>(
             } else {
                 probe.note.clone()
             },
+            // W1009: carry the per-root rows for the data (a family whose
+            // roots were all measured absent still has rows); the human
+            // table decides which of them to print.
+            source_roots: probe.source_roots.clone(),
             ..default_footprint(name, root)
         };
     }
     let mut footprint = coverage_from_records(name, root, recs);
     footprint.installed = true;
+    footprint.source_roots = probe.source_roots.clone();
     footprint.candidate_count = probe.candidate_count;
     footprint.unreadable_count = probe.unreadable_count;
     footprint.unreadable_entry_count = probe.unreadable_entry_count;
     if probe.unreadable_count.is_some_and(|count| count > 0)
         || probe.unreadable_entry_count.is_some_and(|count| count > 0)
     {
+        footprint.note = probe.note.clone();
+    }
+    // W1006d: the installed lower-bound shape (a scanned primary beside an
+    // unverified sibling). The count stays the records' own — the same set
+    // the probe counted, so the two tables agree by construction — and the
+    // marking plus the note are what keeps it from reading as a family
+    // total. The note wins over any unreadable wording above for the same
+    // reason the count wins over silence: the qualification is the more
+    // important of two true things this row has to say.
+    if !probe.unverified_roots.is_empty() {
+        footprint.unverified_roots = probe
+            .unverified_roots
+            .iter()
+            .map(|root| root.id.clone())
+            .collect();
         footprint.note = probe.note.clone();
     }
     footprint
@@ -760,6 +1662,8 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
         unreadable_count: None,
         unreadable_entry_count: None,
         total_bytes: None,
+        unverified_roots: Vec::new(),
+        source_roots: Vec::new(),
         time_basis: TimeBasis::Unmeasured,
         earliest: None,
         latest: None,
@@ -769,16 +1673,21 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
     }
 }
 
-/// Turn the D1/D2/D3 findings into a short list of "so what + when" lines.
+/// Turn the D1/D2/D1½/D3 findings into a short list of "so what + when" lines.
 ///
 /// `scan_failed` means the registry-driven scan could not run: the
 /// claude/codex risk lines depend on session counts and are *omitted* rather
-/// than fabricated from a bogus zero.
+/// than fabricated from a bogus zero. `checks` carries the per-check
+/// budgets that expired (W1043): every timed-out check's lines are replaced
+/// by one that words the unknown, never a finding built from the
+/// placeholder the run assembled to keep the report's shape.
 fn build_risks(
     claude: &ClaudeCheck,
     gemini: &GeminiRetention,
+    desktop_retention: &Option<DesktopRetentionCheck>,
     footprints: &[HarnessFootprint],
     scan_failed: bool,
+    checks: &CheckRunner,
 ) -> Vec<String> {
     let today = format_date(SystemTime::now());
     let mut risks = Vec::new();
@@ -790,9 +1699,20 @@ fn build_risks(
         .cloned()
         .unwrap_or_else(|| default_footprint("claude-code", PathBuf::new()));
     if scan_failed {
-        risks.push(
-            "🔴 registry missing / unparseable — session coverage unknown; refusing to fake a full scan with hardcoded paths.".to_string(),
-        );
+        // W1043: a scan that never answered is a different finding from a
+        // registry that could not be parsed, and the reader who waited for
+        // the budget deserves the sentence that names what happened.
+        if let Some(secs) = checks.timed_out_after(D3_SCAN_CHECK) {
+            risks.push(format!(
+                "🔴 the harness scan did not answer within {secs}s — session coverage unknown; \
+                 refusing to fake a full scan with hardcoded paths."
+            ));
+        } else {
+            risks.push(
+                "🔴 registry missing / unparseable — session coverage unknown; refusing to fake a full scan with hardcoded paths."
+                    .to_string(),
+            );
+        }
     } else {
         match &claude.verdict {
             ClaudeRetention::UnsetDefault => {
@@ -857,14 +1777,47 @@ fn build_risks(
                 path.display()
             ));
             }
+            // W1043: the settings read never answered, so no layer was read
+            // and no window — neither the 30-day default nor a configured
+            // one — was measured. Saying "unset" or "parse failed" here
+            // would each be a claim about files nobody read; the exact
+            // budget is in the report's `timed_out` block and D1's line.
+            ClaudeRetention::TimedOut => {
+                risks.push(
+                    "🔴 Claude Code: the settings read did not answer within its deadline — \
+                     whether cleanupPeriodDays puts your sessions in a deletion window is \
+                     UNKNOWN, not the 30-day default and not proof of safety. Re-run `doctor` \
+                     once the files answer."
+                        .to_string(),
+                );
+            }
         }
+    }
+
+    // --- Claude Desktop/Cowork retention (D1½ → D4, W1009/DSK-3) --------
+    // Present only when the registry declares the probe — a registry that
+    // declares none gets no line, which reads as "not checked here", never
+    // as "no risk". The line speaks even when the scan failed, because the
+    // settings files it reads are not scan-derived (the same standing the
+    // Claude line above has within its own scan-dependent half).
+    if let Some(check) = desktop_retention {
+        risks.push(check.risk_line());
     }
 
     // --- Gemini -----------------------------------------------------------
     let gem_fp = footprints.iter().find(|f| f.name == "gemini");
     let gem_earliest = gem_fp.and_then(|f| f.earliest).map(format_date);
     let gem_days = gem_fp.and_then(|f| f.earliest).and_then(days_since);
-    if let Some(error) = &gemini.unreadable {
+    if let Some(secs) = checks.timed_out_after(D2_CHECK) {
+        // W1043: same standing as the D1 `TimedOut` arm — a settings read
+        // that never answered is not "unchanged" and not "the default", and
+        // certainly not a policy the doctor may quote a window from.
+        risks.push(format!(
+            "🟡 Gemini: sessionRetention UNKNOWN — the settings read did not answer within \
+             {secs}s. The retention risk is not being guessed from a default; re-run `doctor` \
+             once the files answer."
+        ));
+    } else if let Some(error) = &gemini.unreadable {
         // A failed settings read is a policy unknown, even when the session
         // directory happens to be absent; defaulting here would bless a
         // retention decision the doctor did not actually inspect.
@@ -948,6 +1901,47 @@ fn build_risks(
 // The main `doctor` entry point
 // ---------------------------------------------------------------------------
 
+/// One machine-log row in `doctor` (ADR-053 D4): a declared per-machine input
+/// log, its fate, and — when the configured stage can be read — how much of it
+/// is sealed. Counts only; never a prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineLogFootprint {
+    /// Registry harness id that declares the log.
+    pub harness: String,
+    /// The log's own declared id.
+    pub log_id: String,
+    /// The declared file exists on this machine.
+    pub present: bool,
+    /// Sealed generations on the configured stage. `None` is "not measured" —
+    /// no stage configured or readable, or no machine identity to key the
+    /// namespace with — and must never be printed as `0`.
+    pub generations: Option<usize>,
+    /// Lines sealed across those generations, same `None` rule.
+    pub lines: Option<u64>,
+}
+
+/// The machine-log half of a `doctor` report (ADR-053 D4).
+///
+/// Machine logs are **not** sessions: they are their own product kind, so they
+/// get their own rows and their own tallies. Nothing here is summed into the
+/// session footprints above, and a log that was not looked at is reported as
+/// such rather than as a log that was found empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MachineLogRows {
+    /// One row per declared log that exists on this machine.
+    pub present: Vec<MachineLogFootprint>,
+    /// Declared logs this machine never looked at (no registry cell for this
+    /// platform, an `unascertained` cell, an unresolvable template).
+    pub unlooked: usize,
+    /// Declared logs that were looked at but whose shape could not be
+    /// established.
+    pub indeterminate: usize,
+    /// Why each unlooked log was not looked at, in the scanner's fixed
+    /// vocabulary — so a reader can tell a policy decision (an `unascertained`
+    /// registry cell, this platform has no cell) from an oversight.
+    pub unlooked_reasons: Vec<&'static str>,
+}
+
 /// Result of one full `doctor` run.
 #[derive(Debug)]
 pub struct DoctorReport {
@@ -958,8 +1952,31 @@ pub struct DoctorReport {
     /// the condition under which the empty collections in this report mean "did
     /// not look" rather than "found nothing".
     pub config_error: Option<String>,
+    /// The configuration this report was measured from — the already-read
+    /// result [`run`]'s own config check (W1043) produced behind its deadline,
+    /// and the one config any caller layering a config-derived step on top of
+    /// this report must reuse. `None` exactly when
+    /// [`config_error`](Self::config_error) is `Some`: with no usable config
+    /// there is nothing to reuse. Re-reading the file instead —
+    /// [`Config::load`] is a deadline-less `fs::read_to_string` with no cache —
+    /// would hand a wedged config read a second, unbounded chance to hang the
+    /// command after the bounded first read already reported it timed out (the
+    /// review's W1043f High), and would let a file edited mid-run disagree
+    /// with the rest of the report. The CLI's destination probes
+    /// ([`probe_destinations`]) read this field and nothing else, so
+    /// `destinations` can only fill from a config the report itself says was
+    /// read — `config_error`, `not_checked` and a measured destination can
+    /// never tell three stories about one run.
+    pub config: Option<crate::config::Config>,
     pub claude: ClaudeCheck,
     pub gemini: GeminiRetention,
+    /// D1½ — the registry-declared `desktopSessionCleanupPeriodDays` probe
+    /// (ADR-059 draft D5, W1009/DSK-3): the Desktop/Cowork retention state
+    /// and the sources that decided it. `None` when this registry declares
+    /// no such probe (so the check was not performed — never "performed and
+    /// found nothing"); `Some` even on a config the run could not read,
+    /// because the settings files it probes are not config-derived.
+    pub desktop_retention: Option<DesktopRetentionCheck>,
     pub footprints: Vec<HarnessFootprint>,
     pub other_present: Vec<PathBuf>,
     pub risks: Vec<String>,
@@ -986,6 +2003,10 @@ pub struct DoctorReport {
     /// Registry-recognised sessions that are not represented by a
     /// `SessionRecord` and therefore cannot be consumed by `collect`.
     pub archive_gaps: Vec<scanner::ArchiveGap>,
+    /// Declared machine logs and how much is sealed (ADR-053 D4). Separate
+    /// from `footprints`, which counts sessions: a machine log that appeared in
+    /// a session table would falsify that table's every number.
+    pub machine_logs: MachineLogRows,
     /// True when the registry-driven scan failed (registry missing/unparseable)
     /// — the coverage numbers are then *unknown*, never faked zeros.
     pub scan_failed: bool,
@@ -1008,6 +2029,36 @@ pub struct DoctorReport {
     /// there is no answer rather than an empty one (the same distinction
     /// `fts_indexes` and `native_host` carry).
     pub keys: Option<Vec<KeyInventoryRow>>,
+    /// W1012 / SG-1 C1: the four-fact destination reconciliation — timer
+    /// push coverage, timer-resolvable credentials, last recorded push,
+    /// reclaim share — from [`crate::destdiag::reconcile`], which owns the
+    /// wording all three surfaces share. `None` for the same reason as
+    /// `keys`: every fact is derived from the config and the paths under
+    /// its defaults.
+    ///
+    /// Unlike `destinations` (D7) this is filled by the library's own
+    /// [`run()`]: it reads only files (timer unit files, state records),
+    /// never the network, so the test-suite-visible entry point can keep
+    /// producing it.
+    pub dest_reconcile: Option<crate::destdiag::Reconciliation>,
+    /// D13 — the local mirror's settled field family and worded rows
+    /// (ADR-062 D3/D6.3, LM-4): size, last sync, snapshots behind,
+    /// orphans. Built by [`crate::mirror::mirror_status`], the one
+    /// function that owns the wording, so this page shows the same rows
+    /// `status` prints and the menu bar displays. `None` for the same
+    /// reason as `dest_reconcile`: `mirror_of`, the state records and
+    /// the mirror directory all derive from a config this run could not
+    /// read. Filled by the library's own [`run()`] — file reads and one
+    /// directory walk only, never a destination connection.
+    pub mirror: Option<crate::mirror::MirrorStatus>,
+    /// W1043 — the checks that outlived their own deadline, in the order
+    /// they ran. Not empty ⇒ each named check's section is an **unknown**:
+    /// its field carries a placeholder (`None`, a `TimedOut` verdict, an
+    /// empty collection, a `ScanReport::default`) that no reader may take
+    /// as a measurement, the report prints a block saying so before any
+    /// section, and the CLI exits 3 — the same "did not finish" family as
+    /// [`Self::config_error`], never exit 0 for a half-inspected machine.
+    pub timed_out: Vec<CheckTimedOut>,
 }
 
 /// D10 state for one destination's disposable full-text index.
@@ -1028,6 +2079,106 @@ pub struct DestinationProbe {
     /// the running CLI. `None` means **not checked** (the destination was not
     /// reached, is not configured, or holds no repository yet) — never "fresh".
     pub activity_index: Option<ActivityIndexFreshness>,
+    /// Interrupted-push debris at this destination (ISSUE-006 step A), by
+    /// the shared classification. `None` means **not checked** for the same
+    /// reasons [`Self::activity_index`] has; a checked-but-unestablished
+    /// answer is the `NotChecked` variant with its reason, never a zero.
+    pub debris: Option<DebrisProbe>,
+}
+
+/// What a connection classified as debris, or why it could not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DebrisProbe {
+    /// The survey finished and measured.
+    Measured(Box<DebrisAtDestination>),
+    /// The survey could not establish anything — the fail-closed convention:
+    /// an unreadable key or an unfinished read is an unknown, never "no
+    /// debris".
+    NotChecked {
+        /// Redacted reason, in the shape the rest of D7's lines carry.
+        why: String,
+    },
+}
+
+/// Interrupted-push debris at one declared destination, as the shared
+/// classification measured it: torn and stranded report **separate** counts
+/// and byte totals, and an unclassifiable pack counts as unknown — never as
+/// debris and never as a zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebrisAtDestination {
+    /// Torn debris: no index file names it and it cannot be read as a pack.
+    /// It belongs to no backup and can be ignored
+    /// ([`crate::debris::INTERRUPTED_PUSH_SENTENCE`] — the row's sentence).
+    pub torn: usize,
+    /// Backend bytes those torn packs occupy.
+    pub torn_bytes: u64,
+    /// Stranded content: complete, verified, adoptable by the next open.
+    pub stranded: usize,
+    /// Backend bytes those stranded packs occupy.
+    pub stranded_bytes: u64,
+    /// Packs whose bytes could not be classified, so their status is unknown.
+    pub unknown: usize,
+    /// Backend bytes those unknown packs occupy.
+    pub unknown_bytes: u64,
+}
+
+impl DebrisAtDestination {
+    /// From the read-only inventory `prune-orphans` computes — the same survey,
+    /// so `doctor`'s lines and a pasted `prune-orphans` report describe the
+    /// same measured set.
+    #[must_use]
+    pub fn from_inventory(inventory: &crate::prune_orphans::Inventory) -> Self {
+        Self {
+            torn: inventory.torn_packs(),
+            torn_bytes: inventory.torn_bytes(),
+            stranded: inventory.stranded_packs(),
+            stranded_bytes: inventory.stranded_bytes(),
+            unknown: inventory.unknown_packs(),
+            unknown_bytes: inventory.unknown_bytes(),
+        }
+    }
+
+    /// Whether there is any debris fact a D7 line owes the reader. A measured
+    /// empty is silence, which the doctor's healthy-run convention keeps.
+    #[must_use]
+    pub fn has_anything_to_say(&self) -> bool {
+        self.torn > 0 || self.stranded > 0 || self.unknown > 0
+    }
+}
+
+/// Classify the debris at one declared destination's repository, read-only.
+///
+/// Only called once the destination answered and holds a repository; a key
+/// that cannot be read or a survey that cannot finish is
+/// [`DebrisProbe::NotChecked`] — the doctor's unknown, never a zero. The
+/// costs track `prune-orphans`'s (one listing, one index pass, the
+/// unindexed set only): a healthy destination adds nothing but those two
+/// passes, and debris is the one reason a destination is worth this look.
+fn probe_debris(cfg: &StoreConfig) -> DebrisProbe {
+    let mk = match store::load_key_file(cfg) {
+        Ok(mk) => mk,
+        Err(error) => {
+            return DebrisProbe::NotChecked {
+                why: format!("cannot read the destination's masterkey: {error:#}"),
+            };
+        }
+    };
+    let backends = match crate::store::BackupStore::for_metadata_query(cfg.clone()).backends() {
+        Ok(backends) => backends,
+        Err(error) => {
+            return DebrisProbe::NotChecked {
+                why: crate::prune_orphans::redact(&error),
+            };
+        }
+    };
+    match crate::prune_orphans::survey(cfg, &backends, &mk) {
+        Ok(inventory) => {
+            DebrisProbe::Measured(Box::new(DebrisAtDestination::from_inventory(&inventory)))
+        }
+        Err(error) => DebrisProbe::NotChecked {
+            why: crate::prune_orphans::error_line(&error),
+        },
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1152,9 +2303,9 @@ pub fn probe_activity_index(cfg: &StoreConfig, name: &str) -> ActivityIndexFresh
 
 /// The answers a destination can give, kept apart for the same reason the rest
 /// of this file keeps its tri-states apart: "the host said there is no
-/// repository", "the host did not answer" and "this destination is not filled
-/// in" are three different findings, and only the first one is about the
-/// archive.
+/// repository", "the host did not answer", "this destination is not filled
+/// in" and "the probe's own deadline expired first" are four different
+/// findings, and only the first one is about the archive.
 #[derive(Debug, Clone)]
 pub enum DestinationOutcome {
     /// The host answered. `repository_exists` is what it answered.
@@ -1171,6 +2322,14 @@ pub enum DestinationOutcome {
     /// there is no address to dial. Reporting this as "unreachable" would put
     /// a config mistake and a dead network in the same bucket.
     NotConfigured { detail: String },
+    /// The probe outlived its own deadline (W1043): the connection neither
+    /// completed nor failed within it, so the destination's reachability
+    /// **and** its repository are unknown. Deliberately its own variant and
+    /// not [`Self::Unreachable`]: unreachable is a *measured* "the host
+    /// said no", while this is "my deadline expired first" — collapsing the
+    /// two words a decision about the archive from a decision about the
+    /// clock.
+    ProbeTimedOut { seconds: u64 },
 }
 
 /// One archive copy's key file, and whether it exists on this machine and has
@@ -1272,7 +2431,7 @@ pub fn key_inventory(config: &Config) -> Vec<KeyInventoryRow> {
 /// A local copy of what `resolve_store_config` does in the CLI, minus its
 /// `exit(2)` calls: `doctor` must be able to report a half-configured
 /// destination instead of dying on it.
-fn destination_store_config(
+pub fn destination_store_config(
     config: &Config,
     name: &str,
     entry: &crate::config::DestinationConfig,
@@ -1302,6 +2461,41 @@ fn destination_store_config(
     )
 }
 
+/// The store configuration of a machine with no `[destinations.<name>]` —
+/// the pre-ADR-013 single-repository mode, defined **once** because three
+/// hand-kept copies of its defaults are how the CLI and the diagnostics
+/// drift (W1034f2, rev4 Low 1): the CLI's `store_config_from` layers its
+/// CLI-argument expansion over each config-sourced half and falls back to
+/// this for every *unset* half, and `destdiag`'s destination proof reads
+/// exactly this for the destination-less machine, so a change to the
+/// defaults can never again move one reader and not the other.
+///
+/// The config-sourced values arrive already `~`-expanded at load
+/// (`config::expand_and_verify`); this builder performs no expansion and no
+/// I/O of its own.
+pub fn home_repository_store_config(config: &Config) -> StoreConfig {
+    let data_root = default_data_root();
+    StoreConfig {
+        repo_root: config
+            .rustic_repo
+            .clone()
+            .unwrap_or_else(|| data_root.join("repo").to_string_lossy().into_owned()),
+        key_file: config
+            .rustic_key_file
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_root.join("masterkey.json")),
+        connections: 0,
+        options: std::collections::BTreeMap::new(),
+        cache_dir: config.rustic_cache_dir.as_deref().map(PathBuf::from),
+        // reason: rustic_no_cache unset means rustic's own default (cache
+        // on) — a config default, not an unknown read result collapsed to
+        // false
+        no_cache: config.rustic_no_cache.unwrap_or(false),
+    }
+    .with_capped_connections(config.rustic_connections)
+}
+
 /// Connect once to every declared destination, read-only.
 ///
 /// Deliberately not called from [`run()`]: `run()` is a library entry point
@@ -1309,8 +2503,18 @@ fn destination_store_config(
 /// test may do. The real connection belongs to the CLI, so `cmd_doctor` fills
 /// the report in. The probe only ever lists — it creates nothing, so running
 /// `doctor` can never be the reason a repository appears.
-pub fn probe_destinations(config: &Config) -> Vec<DestinationProbe> {
-    config
+///
+/// W1043: each of the three reads per destination (the connection, the
+/// activity indexes, the debris survey) runs behind its own deadline, so a
+/// destination that accepts the connection and then answers nothing can no
+/// longer freeze the whole report. A check that outlives its budget is
+/// abandoned and reported as an unknown ([`DestinationOutcome::ProbeTimedOut`]
+/// for the connection, a `timed out` note in the returned list for the two
+/// reads that only make sense once it was reachable); the destinations that
+/// did answer are probed and reported as usual.
+pub fn probe_destinations(config: &Config) -> (Vec<DestinationProbe>, Vec<CheckTimedOut>) {
+    let mut checks = CheckRunner::new();
+    let probes = config
         .destinations
         .iter()
         .map(|(name, entry)| {
@@ -1320,52 +2524,121 @@ pub fn probe_destinations(config: &Config) -> Vec<DestinationProbe> {
                     repo_root: "(not configured)".to_string(),
                     outcome: DestinationOutcome::NotConfigured {
                         detail: "this destination declares no `repo`, so no connection was \
-                                 attempted and nothing about it is known"
+                                  attempted and nothing about it is known"
                             .to_string(),
                     },
                     activity_index: None,
+                    debris: None,
                 };
             };
             let repo_root = cfg.repo_root.clone();
-            let (outcome, activity_index) =
-                match crate::remote_err::probe_destination_connectivity(&cfg) {
-                    Ok(repository_exists) => {
-                        // The index check only means something once there is a
-                        // repository to read; with none, "fresh" would be a
-                        // statement about an archive that does not exist.
-                        let activity_index = if repository_exists {
-                            Some(probe_activity_index(&cfg, name))
-                        } else {
-                            None
-                        };
+            let connect_check = format!("D7 destination probe ({name}) — connection");
+            let activity_check = format!("D7 destination probe ({name}) — activity index");
+            let debris_check = format!("D7 destination probe ({name}) — debris");
+            // The classification runs on the worker so the caller only ever
+            // sees the classified shapes: `Ok(exists)` is a measured answer,
+            // `Err((kind, detail))` carries the classifier's verdict and
+            // the formatted chain, and `None` is the deadline — the only
+            // thing this step's `run` may add on top of the raw probe.
+            let reached = {
+                let cfg = cfg.clone();
+                checks.run(&connect_check, DESTINATION_CONNECT_BUDGET_SECS, move || {
+                    crate::remote_err::probe_destination_connectivity(&cfg).map_err(|e| {
                         (
-                            DestinationOutcome::Reached { repository_exists },
-                            activity_index,
+                            crate::remote_err::classify_error_str(&format!("{e:#}")),
+                            crate::remote_err::format_remote_error("doctor", &e, &cfg),
                         )
-                    }
-                    Err(e) => (
-                        DestinationOutcome::Unreachable {
-                            kind: crate::remote_err::classify_error_str(&format!("{e:#}")),
-                            detail: crate::remote_err::format_remote_error("doctor", &e, &cfg),
-                        },
-                        // The connection failed, so nothing was read. Saying
-                        // nothing here is "not checked", which the field
-                        // already means.
-                        None,
-                    ),
-                };
+                    })
+                })
+            };
+
+            // The outcome, with the timeout its own state: a deadline that
+            // expired is unknown, not a refused connection. The gate below
+            // is taken before the match because the match may move the
+            // probe's error fields into the outcome.
+            let repository_available = matches!(reached, Some(Ok(true)));
+            let outcome = match reached {
+                Some(Ok(exists)) => DestinationOutcome::Reached {
+                    repository_exists: exists,
+                },
+                Some(Err((kind, detail))) => DestinationOutcome::Unreachable { kind, detail },
+                // The seconds the runner itself recorded for this check's
+                // note (W1043f): one source for the number, not a second
+                // re-derivation of the override — so the printed line, the
+                // JSON and the `timed_out` note can never disagree about
+                // what the budget was.
+                None => DestinationOutcome::ProbeTimedOut {
+                    seconds: match checks.timed_out_after(&connect_check) {
+                        Some(secs) => secs,
+                        None => std::unreachable!(
+                            "a connect-check timeout on its own label always records its \
+                             budget — the same `run` call that returned None pushed the note"
+                        ),
+                    },
+                },
+            };
+
+            // The two reads that only mean something once the destination
+            // answered and holds a repository; with none, "fresh" would be a
+            // statement about an archive that does not exist. `None` keeps
+            // meaning "not checked", and a timed-out read leaves it that way
+            // while the note in `checks` says why.
+            let activity_index = if repository_available {
+                let cfg = cfg.clone();
+                let name = name.clone();
+                checks.run(&activity_check, DESTINATION_READ_BUDGET_SECS, move || {
+                    probe_activity_index(&cfg, &name)
+                })
+            } else {
+                None
+            };
+            // Debris needs the same two things the activity check does — a
+            // repository and its key — and it is the same read-only family:
+            // D7 already dialed the destination to say "reachable", and the
+            // debris it can leave behind is the question an interrupted
+            // push makes worth an answer.
+            let debris = if repository_available {
+                let cfg = cfg.clone();
+                checks.run(&debris_check, DESTINATION_READ_BUDGET_SECS, move || {
+                    probe_debris(&cfg)
+                })
+            } else {
+                None
+            };
             DestinationProbe {
                 name: name.clone(),
                 repo_root,
                 outcome,
                 activity_index,
+                debris,
             }
         })
-        .collect()
+        .collect();
+    (probes, checks.notes().to_vec())
 }
 
 /// JSON shape for one destination probe.
 fn destination_probe_json(p: &DestinationProbe) -> serde_json::Value {
+    let debris = match &p.debris {
+        None => serde_json::Value::Null,
+        Some(DebrisProbe::Measured(debris)) => serde_json::json!({
+            "kind": "measured",
+            "torn": debris.torn,
+            "torn_bytes": debris.torn_bytes,
+            "stranded": debris.stranded,
+            "stranded_bytes": debris.stranded_bytes,
+            "unknown": debris.unknown,
+            "unknown_bytes": debris.unknown_bytes,
+            "torn_sentence": crate::debris::INTERRUPTED_PUSH_SENTENCE,
+            // Every candidate's earliest-seen time: the backend interface
+            // carries no modification time, and this document never
+            // fabricates a clock (ISSUE-006 step A).
+            "first_seen": {"kind": "unknown", "why": crate::debris::NO_MTIME_SENTENCE},
+        }),
+        Some(DebrisProbe::NotChecked { why }) => {
+            serde_json::json!({"kind": "not_checked", "why": why})
+        }
+    };
     match &p.outcome {
         DestinationOutcome::Reached { repository_exists } => serde_json::json!({
             "name": p.name,
@@ -1375,6 +2648,9 @@ fn destination_probe_json(p: &DestinationProbe) -> serde_json::Value {
             // connection failed) — a script must not read "not checked" as
             // "every index is current".
             "activity_index": p.activity_index.as_ref().map(activity_index_json),
+            // `null` for the same "not checked" reasons above; a checked
+            // answer never folds an unknown into a zero.
+            "debris": debris,
         }),
         DestinationOutcome::Unreachable { kind, detail } => serde_json::json!({
             "name": p.name,
@@ -1390,6 +2666,17 @@ fn destination_probe_json(p: &DestinationProbe) -> serde_json::Value {
             "repo_root": p.repo_root,
             "kind": "not_configured",
             "detail": detail,
+        }),
+        DestinationOutcome::ProbeTimedOut { seconds } => serde_json::json!({
+            "name": p.name,
+            "repo_root": p.repo_root,
+            "kind": "probe_timed_out",
+            // Not `unreachable`, which is a measured answer: the probe's
+            // deadline expired with no answer in either direction, so both
+            // this destination's reachability and its repository are
+            // unknown; `activity_index` and `debris` above are `null` for
+            // the same reason — not checked, never "fine".
+            "budget_secs": seconds,
         }),
     }
 }
@@ -1510,7 +2797,7 @@ fn activity_index_json(freshness: &ActivityIndexFreshness) -> serde_json::Value 
 /// The checks a run cannot perform without a usable config, in the order
 /// [`print_report`] presents them. [`DoctorReport::not_checked`] returns this
 /// list only for a report whose `config_error` is set.
-const CHECKS_NEEDING_CONFIG: [&str; 10] = [
+const CHECKS_NEEDING_CONFIG: [&str; 12] = [
     "D3 harness scan, footprints and archive gaps",
     "D4 risk summary",
     "D5 repository reclaim",
@@ -1520,36 +2807,76 @@ const CHECKS_NEEDING_CONFIG: [&str; 10] = [
     "D7 destination probes",
     "D8 native host stage",
     "D11 stage duplicate scan",
+    "D12 destination reconciliation (timers, credentials, last push, reclaim)",
+    "D13 local mirror (size, last sync, snapshots behind, orphans)",
     "machine identity",
 ];
 
 /// The report for a config file that exists and cannot be used.
 ///
-/// Deliberately **not** a diagnosis: it carries the two checks that read no
-/// config (D1 Claude settings, D2 Gemini settings, and the directories merely
-/// listed) plus the reason, and says out loud which checks were skipped. Every
-/// config-derived field is left empty, except that an unexpandable
-/// `rustic_cache_dir` gets a specific unavailable result so the user knows
-/// which configured path failed. `config_error` tells consumers that all other
-/// empty config-derived fields mean "did not look" — this is the whole reason
-/// `doctor` is the one command that does not refuse: the user needs to be told
-/// *which* half of their setup is broken, and that answer is worthless if it is
-/// dressed up as a healthy machine.
-pub fn config_unreadable(error: String) -> DoctorReport {
+/// Deliberately **not** a diagnosis: it carries the checks that read no
+/// config (D1 Claude settings, D2 Gemini settings, and the directories
+/// merely listed) plus the reason, and says out loud which checks were
+/// skipped. Every config-derived field is left empty, except that an
+/// unexpandable `rustic_cache_dir` gets a specific unavailable result so the
+/// user knows which configured path failed. `config_error` tells consumers
+/// that all other empty config-derived fields mean "did not look" — this is
+/// the whole reason `doctor` is the one command that does not refuse: the
+/// user needs to be told *which* half of their setup is broken, and that
+/// answer is worthless if it is dressed up as a healthy machine.
+///
+/// W1043: takes the D1/D2 results [`run`] already measured (behind their own
+/// deadlines) rather than re-reading the same files unbounded, and keeps
+/// filling `timed_out` for the checks that run from here, so a wedged
+/// settings file cannot turn the *broken-config* answer into a hang either.
+pub fn config_unreadable(
+    mut checks: CheckRunner,
+    error: String,
+    claude: ClaudeCheck,
+    gemini: GeminiRetention,
+) -> DoctorReport {
     let home = crate::config::home_dir();
-    let other_present = OTHER_HARNESS_DIRS
-        .iter()
-        .filter(|d| home.join(d).is_dir())
-        .map(|d| home.join(d))
-        .collect();
+    let other_present = {
+        let home = home.clone();
+        checks
+            .run(OTHER_HARNESS_CHECK, SETTINGS_BUDGET_SECS, move || {
+                OTHER_HARNESS_DIRS
+                    .iter()
+                    .filter(|d| home.join(d).is_dir())
+                    .map(|d| home.join(d))
+                    .collect::<Vec<_>>()
+            })
+            // reason: same placeholder rule as the settings pair above —
+            // the `timed_out` note qualifies it.
+            .unwrap_or_default()
+    };
     let cache = error.contains("rustic_cache_dir:").then(|| CacheCheck::Unavailable {
         detail: "`rustic_cache_dir` could not be expanded; fix that value in the config and run `chat-stasher doctor` again".to_string(),
     });
+    // D1½ reads the same class of file D1 does, through the registry's
+    // declared probe locations, so a broken config does not silence it
+    // either (W1009/DSK-3) — and its own deadline keeps a wedged settings
+    // file from hanging the broken-config answer.
+    let desktop_retention = {
+        let claude = claude.clone();
+        checks
+            .run(DESKTOP_RETENTION_CHECK, SETTINGS_BUDGET_SECS, move || {
+                scanner::load_registry_from_repo()
+                    .ok()
+                    .and_then(|registry| inspect_desktop_retention(&registry, &claude))
+            })
+            .flatten()
+    };
     DoctorReport {
         config_source: crate::config::ConfigSource::Unreadable,
         config_error: Some(error),
-        claude: inspect_claude_settings(&home),
-        gemini: inspect_gemini_settings(&home),
+        // W1043f: nothing was read, so there is nothing to reuse — a report
+        // whose config check never answered carries no config, and the CLI
+        // must not substitute one by reading the file again.
+        config: None,
+        claude,
+        gemini,
+        desktop_retention,
         footprints: Vec::new(),
         other_present,
         risks: Vec::new(),
@@ -1564,6 +2891,10 @@ pub fn config_unreadable(error: String) -> DoctorReport {
         // True as well: the scan is one of the checks that did not run, and this
         // is the field a consumer that predates `config_error` already reads.
         scan_failed: true,
+        // Nothing was looked at, and the stage path itself comes from the
+        // config that could not be read: no rows, no tallies — not zeros that
+        // would read as "there are none".
+        machine_logs: MachineLogRows::default(),
         destinations: Vec::new(),
         stage_duplicate_shards: None,
         native_host: None,
@@ -1571,6 +2902,136 @@ pub fn config_unreadable(error: String) -> DoctorReport {
         // override and each destination's), so an unreadable config means the
         // inventory was not computed — `None`, not an empty list.
         keys: None,
+        // W1012 / SG-1 C1: same source (the config every destination name
+        // and credential reference comes from), same "not computed".
+        dest_reconcile: None,
+        // LM-4 / ADR-062 D13: every mirror fact is config-derived (the
+        // mirrored destination's name, its state records' location, the
+        // mirror directory under the data root), so an unreadable config
+        // means this check did not run.
+        mirror: None,
+        timed_out: checks.notes().to_vec(),
+    }
+}
+
+/// Measure the machine-log rows of a doctor report (ADR-053 D4).
+///
+/// Read-only, counts only. It takes the declared files the scan already found
+/// and — only when the configured stage is a readable directory *and* a machine
+/// identity exists, since the namespace is machine-keyed — counts that
+/// machine's sealed generations and the lines in them. Prompt text is never
+/// read: the "lines" number counts newline bytes in the sealed shards, which
+/// are the harness's own complete lines (ADR-053 D2).
+///
+/// The scan's fields are taken by value so a W1043 check can run the
+/// computation on a worker thread (the scanner's report is not `Clone`, and
+/// these fields are the whole of its dependence on it).
+fn machine_log_rows_from(
+    config: Config,
+    machine_logs: Vec<scanner::MachineLogRecord>,
+    unlooked: usize,
+    indeterminate: usize,
+    unlooked_reasons: Vec<&'static str>,
+) -> MachineLogRows {
+    let stage = config
+        .native_host
+        .as_ref()
+        .and_then(|native| native.stage.as_deref())
+        .map(expand_tilde)
+        .filter(|root| root.is_dir());
+    let machine = crate::id::machine_id();
+    let mut rows = MachineLogRows {
+        present: Vec::new(),
+        unlooked,
+        indeterminate,
+        unlooked_reasons,
+    };
+    for record in &machine_logs {
+        // An unmeasured stage is `None`, never 0: the namespace is machine-keyed
+        // and the stage path comes from the config, so a report that could not
+        // read either has no answer rather than an empty one.
+        let measured = match (stage.as_deref(), machine.as_deref()) {
+            (Some(stage), Some(machine)) => {
+                let dir = crate::store::machine_log_shard_dir(
+                    stage,
+                    machine,
+                    &record.harness,
+                    &record.log_id,
+                );
+                crate::store::sealed_shard_entries(&dir)
+                    .ok()
+                    .and_then(|entries| {
+                        crate::store::concat_shards_in_dir(&dir).ok().map(|sealed| {
+                            (
+                                entries.len(),
+                                sealed.iter().filter(|byte| **byte == b'\n').count() as u64,
+                            )
+                        })
+                    })
+            }
+            _ => None,
+        };
+        rows.present.push(MachineLogFootprint {
+            harness: record.harness.clone(),
+            log_id: record.log_id.clone(),
+            present: true,
+            generations: measured.map(|(generations, _)| generations),
+            lines: measured.map(|(_, lines)| lines),
+        });
+    }
+    rows
+}
+
+/// The machine-log row of one log, for both channels.
+fn machine_log_footprint_line(log: &MachineLogFootprint) -> String {
+    match (log.generations, log.lines) {
+        (Some(generations), Some(lines)) => format!(
+            "{} {}: {lines} lines sealed in {generations} generation(s)",
+            log.harness, log.log_id
+        ),
+        _ => format!(
+            "{} {}: not measured (no readable stage or no machine identity)",
+            log.harness, log.log_id
+        ),
+    }
+}
+
+/// The machine-log rows of the report, for both channels.
+///
+/// A wedged machine-log check (W1043f2) prints its own sub-block line — the
+/// same UNKNOWN idiom every timed-out section gets — because the rows the
+/// runner would have built are the default empty set, which on paper reads
+/// as "no logs exist": the one state that must never be worded as a
+/// measurement. With no deadline note the old shapes stand: truly empty
+/// rows stay silent under the coverage table, and non-empty rows print.
+fn print_machine_logs(rows: &MachineLogRows, timed_out_after_secs: Option<u64>) {
+    if let Some(secs) = timed_out_after_secs {
+        print_timed_out_section(
+            "  machine logs (per-machine input logs, ADR-053 — not sessions, never counted in the table above)",
+            MACHINE_LOGS_CHECK,
+            secs,
+            "the machine-log rows are unknown, not empty",
+        );
+        return;
+    }
+    if rows.present.is_empty() && rows.unlooked == 0 && rows.indeterminate == 0 {
+        return;
+    }
+    eprintln!(
+        "  machine logs (per-machine input logs, ADR-053 — not sessions, never counted in the table above):"
+    );
+    for log in &rows.present {
+        eprintln!("    {}", machine_log_footprint_line(log));
+    }
+    if rows.unlooked > 0 || rows.indeterminate > 0 {
+        eprintln!(
+            "    declared but not looked at: {unlooked} unlooked, {indeterminate} indeterminate",
+            unlooked = rows.unlooked,
+            indeterminate = rows.indeterminate
+        );
+        for reason in &rows.unlooked_reasons {
+            eprintln!("      {reason}");
+        }
     }
 }
 
@@ -1748,36 +3209,137 @@ impl DoctorReport {
             &[]
         }
     }
+
+    /// The budget that expired for `check`, when that check outlived its
+    /// deadline (W1043) — the one place a printer asks "did this check
+    /// answer?" so every renderer words the same timeout the same way.
+    pub fn check_timed_out_after(&self, check: &str) -> Option<u64> {
+        self.timed_out
+            .iter()
+            .find(|note| note.check == check)
+            .map(|note| note.budget_secs)
+    }
 }
 
 /// Run every check against the real machine and assemble the report.
+///
+/// W1043: every check runs through [`CheckRunner`] — its trace is on stderr
+/// before it starts, and it answers within its own budget or is abandoned
+/// with a [`CheckTimedOut`] note in [`DoctorReport::timed_out`]. A report
+/// with a non-empty `timed_out` carries placeholders in exactly the sections
+/// its notes name; the notes are the one place that says so, and the CLI
+/// turns them into the same exit 3 that an unreadable config gets — never a
+/// clean-looking 0 for a machine only half of which was inspected.
+///
+/// W1043f: the config the run read rides out in
+/// [`DoctorReport::config`], so the CLI's config-derived steps (the
+/// destination probes) reuse the bounded read instead of issuing a second
+/// deadline-less one.
 pub fn run() -> DoctorReport {
+    let mut checks = CheckRunner::new();
     let home = crate::config::home_dir();
 
-    // D1
-    let claude = inspect_claude_settings(&home);
+    // D1 (measured even later against a broken config: these settings files
+    // are not config-derived).
+    let claude = {
+        let home = home.clone();
+        checks
+            .run(D1_CHECK, SETTINGS_BUDGET_SECS, move || {
+                inspect_claude_settings(&home)
+            })
+            // reason: the `TimedOut` verdict is not a placeholder that can
+            // be misread — it owns every word every renderer gives it, and
+            // `layers` stays empty because no layer was read.
+            .unwrap_or(ClaudeCheck {
+                layers: Vec::new(),
+                verdict: ClaudeRetention::TimedOut,
+            })
+    };
 
-    // D2
-    let gemini = inspect_gemini_settings(&home);
+    // D2 — on a timeout the synthesized `unreadable` field keeps any path
+    // that somehow reads the struct from seeing a policy; the guarded
+    // renderers (D2's line, D4, `gemini_json`) word it themselves.
+    let gemini = {
+        let home = home.clone();
+        checks
+            .run(D2_CHECK, SETTINGS_BUDGET_SECS, move || {
+                inspect_gemini_settings(&home)
+            })
+            // reason: the defaults are the struct's own (never shown: every
+            // renderer of `gemini` checks `timed_out` first); `unreadable` is
+            // the honest unknown, not a policy.
+            .unwrap_or_else(|| GeminiRetention {
+                enabled: GeminiRetention::default().enabled,
+                max_age: GeminiRetention::default().max_age,
+                min_retention: GeminiRetention::default().min_retention,
+                unreadable: Some(
+                    "the settings read did not answer within its deadline".to_string(),
+                ),
+            })
+    };
 
     // The config gates more than half of this report, so an unusable one is an
     // early, explicit answer rather than a report about a machine the tool could
     // not see. Filling the config-derived sections from `Config::default()`
     // would print "no destination declared", "no repository", "no stage" —
     // findings about a config nobody read.
-    let config = match Config::load() {
-        Ok(config) => config,
-        Err(e) => return config_unreadable(format!("{e:#}")),
+    let config = match checks.run(CONFIG_CHECK, CONFIG_BUDGET_SECS, Config::load) {
+        Some(Ok(config)) => config,
+        Some(Err(e)) => return config_unreadable(checks, format!("{e:#}"), claude, gemini),
+        None => {
+            // The seconds the runner itself recorded for this check's note
+            // (W1043f's D7 precedent, applied to the config site the round
+            // after the review flagged it): one source for the number, not a
+            // second re-derivation of the env override — so the sentence,
+            // the `timed_out` note and any later reader of the budget can
+            // never disagree about what this run waited.
+            let secs = match checks.timed_out_after(CONFIG_CHECK) {
+                Some(secs) => secs,
+                None => std::unreachable!(
+                    "a config-check timeout on its own label always records its \
+                     budget — the same `run` call that returned None pushed the note"
+                ),
+            };
+            let error = format!(
+                "reading the configuration did not answer within {secs}s — the file exists \
+                 but was never read to the end, so whether it is usable is UNKNOWN, not \
+                 invalid"
+            );
+            return config_unreadable(checks, error, claude, gemini);
+        }
     };
 
     // D3 — use the registry-driven scanner for every directory harness. The
     // doctor no longer has a second Gemini suffix/pattern implementation.
-    let (scan, scan_failed) = match scanner::scan(&config) {
-        Ok(s) => (s, false),
-        Err(e) => {
-            eprintln!("doctor: scan failed: {e}");
-            (scanner::ScanReport::default(), true)
-        }
+    // The registry is loaded once and shared with the D1½ retention probe
+    // (W1009/DSK-3): the scan that failed is the same registry the probe
+    // would have read, so the two checks can never disagree about what the
+    // registry declares.
+    let (registry, scan, scan_failed) = {
+        let config = config.clone();
+        checks
+            .run(
+                D3_SCAN_CHECK,
+                SCAN_BUDGET_SECS,
+                move || match scanner::load_registry_from_repo() {
+                    Ok(registry) => match scanner::scan_with_registry(&config, &registry) {
+                        Ok(s) => (Some(registry), s, false),
+                        Err(e) => {
+                            eprintln!("doctor: scan failed: {e}");
+                            (Some(registry), scanner::ScanReport::default(), true)
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("doctor: scan failed: {e}");
+                        (None, scanner::ScanReport::default(), true)
+                    }
+                },
+            )
+            // reason: on a timeout the scan never answered, so the honest
+            // shape is exactly this — no registry, no report, scan_failed
+            // true — while the `timed_out` note keeps the placeholder from
+            // being read as "no registry is declared".
+            .unwrap_or((None, scanner::ScanReport::default(), true))
     };
     let archive_gaps = scan.archive_gaps();
 
@@ -1852,60 +3414,241 @@ pub fn run() -> DoctorReport {
         }
     }
 
-    let other_present = OTHER_HARNESS_DIRS
-        .iter()
-        .filter(|d| home.join(d).is_dir())
-        .map(|d| home.join(d))
-        .collect();
+    let other_present = {
+        let home = home.clone();
+        checks
+            .run(OTHER_HARNESS_CHECK, SETTINGS_BUDGET_SECS, move || {
+                OTHER_HARNESS_DIRS
+                    .iter()
+                    .filter(|d| home.join(d).is_dir())
+                    .map(|d| home.join(d))
+                    .collect::<Vec<_>>()
+            })
+            // reason: an empty list under a `timed_out` note is "did not
+            // look", and the report's block says so — silent absence is the
+            // fail-open this note must prevent.
+            .unwrap_or_default()
+    };
+
+    // D1½ — the Desktop/Cowork retention state, from the same registry the
+    // scan ran with. `None` only when that registry declares no probe or
+    // could not be read — in which shape `scan_failed` is true too (or the
+    // config is unreadable, which `config_unreadable` handles), and the
+    // report says the check was not performed rather than finding nothing.
+    let desktop_retention = match registry.clone() {
+        Some(registry) => {
+            let claude = claude.clone();
+            checks
+                .run(DESKTOP_RETENTION_CHECK, SETTINGS_BUDGET_SECS, move || {
+                    inspect_desktop_retention(&registry, &claude)
+                })
+                .flatten()
+        }
+        // reason: no registry to probe against — the check was not
+        // performed, which `None` is the established shape for.
+        None => None,
+    };
 
     // D4
-    let risks = build_risks(&claude, &gemini, &footprints, scan_failed);
+    let risks = build_risks(
+        &claude,
+        &gemini,
+        &desktop_retention,
+        &footprints,
+        scan_failed,
+        &checks,
+    );
 
     // D5
-    let reclaim = inspect_reclaim(&config);
+    let reclaim = {
+        let config = config.clone();
+        checks.run(RECLAIM_CHECK, RECLAIM_BUDGET_SECS, move || {
+            inspect_reclaim(&config)
+        })
+    };
 
     // D6
-    let cache = inspect_cache(&config);
+    let cache = {
+        let config = config.clone();
+        checks.run(CACHE_CHECK, BACKED_WALK_BUDGET_SECS, move || {
+            inspect_cache(&config)
+        })
+    };
 
     // D9
-    let body_cache = inspect_body_cache(&config);
+    let body_cache = {
+        let config = config.clone();
+        checks.run(BODY_CACHE_CHECK, BACKED_WALK_BUDGET_SECS, move || {
+            inspect_body_cache(&config)
+        })
+    };
 
     // D10 — local-only, no repository connection and no document payload reads.
-    let fts_indexes = Some(inspect_fts_indexes(&config));
+    let fts_indexes = {
+        let config = config.clone();
+        checks
+            .run(FTS_CHECK, BACKED_WALK_BUDGET_SECS, move || {
+                Some(inspect_fts_indexes(&config))
+            })
+            .flatten()
+    };
 
     // D11 — inspect only the stage the user explicitly configured for the
     // browser host. The check reads shard bytes and reports counts only.
-    let stage_duplicate_shards = inspect_stage_duplicates(&config);
+    let stage_duplicate_shards = {
+        let config = config.clone();
+        checks.run(STAGE_DUP_CHECK, BACKED_WALK_BUDGET_SECS, move || {
+            inspect_stage_duplicates(&config)
+        })
+    };
 
     // D8 — read-only, opens nothing but the manifests themselves. The root is
     // the machine's, resolved here because this is the one caller that means the
     // real machine: `%LOCALAPPDATA%` on Windows, and `home` everywhere else.
-    let native_host_root =
-        crate::nativehost::machine_root(crate::nativehost::Platform::current(), &home);
-    let native_host = inspect_native_host(&config, &native_host_root);
+    let native_host = {
+        let config = config.clone();
+        let native_host_root =
+            crate::nativehost::machine_root(crate::nativehost::Platform::current(), &home);
+        checks.run(NATIVE_HOST_CHECK, BACKED_WALK_BUDGET_SECS, move || {
+            inspect_native_host(&config, &native_host_root)
+        })
+    };
 
+    // ADR-053 D4 — measured read-only, and reported in its own rows.
+    let machine_logs = {
+        let config = config.clone();
+        let machine_logs_declared = scan.machine_logs.clone();
+        let unlooked = scan.machine_logs_unlooked;
+        let indeterminate = scan.machine_logs_indeterminate;
+        let unlooked_reasons = scan.machine_logs_unlooked_reasons.clone();
+        checks
+            .run(MACHINE_LOGS_CHECK, BACKED_WALK_BUDGET_SECS, move || {
+                machine_log_rows_from(
+                    config,
+                    machine_logs_declared,
+                    unlooked,
+                    indeterminate,
+                    unlooked_reasons,
+                )
+            })
+            // reason: the default rows carry no presence claims at all —
+            // zero unlooked here would otherwise read as "there are none",
+            // which the `timed_out` block is the qualifier for.
+            .unwrap_or_default()
+    };
     let probes = scan.probes;
+
+    // W1012 / SG-1 C1 — the four-fact destination reconciliation, filled here
+    // rather than in the CLI because every input is a file read (the
+    // installed timer unit files, the state records the product itself
+    // writes, and — for W1034's upgrade-window proof — the snapshot
+    // listing of a repository on this machine's own *un-mounted*
+    // filesystem: no destination is dialed, and no mount root —
+    // `/Volumes/…` among them — is read either (the gate
+    // [`crate::store::repository_is_local`] carries both halves), so the
+    // test-suite-visible entry point can keep producing it. The platform's
+    // format follows the same split `setup_schedule_format` makes in the
+    // CLI.
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // reason: NOT an honest default — the same (a)-fragile
+        // pre-1970-clock branch `runstate::now_unix` documents. Reached
+        // only by a clock before the epoch; the wrong stamp lands in a
+        // staleness age so the reconciliation would report the records as
+        // ancient rather than as fresh.
+        .unwrap_or(0);
+    let dest_reconcile = {
+        let config = config.clone();
+        let home = home.clone();
+        let now = now_unix;
+        checks.run(DEST_RECONCILE_CHECK, BACKED_WALK_BUDGET_SECS, move || {
+            crate::destdiag::reconcile(&crate::destdiag::Inputs {
+                config: &config,
+                format: match cfg!(target_os = "macos") {
+                    true => crate::schedule::Format::Launchd,
+                    false => crate::schedule::Format::Systemd,
+                },
+                home: &home,
+                state_dir: &crate::collect::default_state_dir(),
+                now_unix: now,
+                // The lib-side half of the same platform fact the CLI decides
+                // through `schedule_platform_refusal`: Windows schedules through a
+                // Task Scheduler this build has no reader for, so the
+                // reconciliation must not read any directory's silence there as
+                // "no timer pushes". `schedule::scheduler_readable_on` is the one
+                // place this fact lives, so the reader's capability and the test's
+                // branch cannot drift apart the way three hand-rolled copies did.
+                scheduler_readable: crate::schedule::scheduler_readable_on(std::env::consts::OS),
+                // The one stage the config itself names — expanded at load, the
+                // same source the D11 duplicate scan reads, so the affected
+                // ADR-060 D5 cap fact and the duplicate scan walk one tree.
+                stage: config
+                    .native_host
+                    .as_ref()
+                    .and_then(|native_host| native_host.stage.as_deref())
+                    .map(std::path::Path::new),
+            })
+        })
+    };
+
+    // D13 (ADR-062 D3/D6.3, LM-4): the mirror's settled field family, from
+    // the one function that owns the wording all three surfaces share —
+    // the same `now` the reconciliation used, so a printed age in the
+    // steady row agrees with every other age this report words. Reads the
+    // state records and walks the mirror directory; no destination is
+    // dialed.
+    let mirror = {
+        let config = config.clone();
+        let now = now_unix;
+        checks.run(MIRROR_CHECK, BACKED_WALK_BUDGET_SECS, move || {
+            crate::mirror::mirror_status(
+                &config,
+                &crate::config::default_data_root(),
+                &crate::collect::default_state_dir(),
+                now,
+            )
+        })
+    };
+
+    let keys = {
+        let config = config.clone();
+        checks.run(KEYS_CHECK, BACKED_WALK_BUDGET_SECS, move || {
+            key_inventory(&config)
+        })
+    };
+
     DoctorReport {
         config_source: config.source,
         config_error: None,
+        // W1043f — the one config this report was measured from, handed to
+        // the caller so no config-derived step has to re-read the file
+        // unbounded. `ConfigSource` is `Copy`, so reading `config.source`
+        // above moved nothing out.
+        config: Some(config),
         claude,
         gemini,
+        desktop_retention,
         footprints,
         other_present,
         risks,
-        reclaim: Some(reclaim),
-        cache: Some(cache),
-        body_cache: Some(body_cache),
+        reclaim,
+        cache,
+        body_cache,
         fts_indexes,
         probes,
         archive_gaps,
+        machine_logs,
         scan_failed,
         // Filled in by the CLI: connecting to a destination is a real network
         // action and this entry point is called directly by the test suite.
         destinations: Vec::new(),
-        stage_duplicate_shards: Some(stage_duplicate_shards),
-        native_host: Some(native_host),
-        keys: Some(key_inventory(&config)),
+        stage_duplicate_shards,
+        native_host,
+        keys,
+        dest_reconcile,
+        mirror,
+        timed_out: checks.notes().to_vec(),
     }
 }
 
@@ -3037,27 +4780,77 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
         // without it, `"probes": []` would read as a machine with no harness.
         "config_error": r.config_error,
         "not_checked": r.not_checked(),
-        "claude": claude_json(&r.claude),
-        "gemini": gemini_json(&r.gemini),
+        // W1043: the checks that outlived their own deadline. Not empty ⇒ the
+        // named checks' sections below carry placeholders, exactly as under
+        // `config_error`: a script must read an absent/null section as "did
+        // not look", never as a clean zero, and the named checks are why.
+        "timed_out": r.timed_out.iter().map(CheckTimedOut::json).collect::<Vec<_>>(),
+        "claude": match r.check_timed_out_after(D1_CHECK) {
+            // The synthesized `TimedOut` verdict would be a measurement
+            // about layers nobody read; the note above says the unknown.
+            Some(secs) => serde_json::json!({
+                "checked": false,
+                "timed_out_after_secs": secs,
+            }),
+            None => claude_json(&r.claude),
+        },
+        "gemini": match r.check_timed_out_after(D2_CHECK) {
+            Some(secs) => serde_json::json!({
+                "checked": false,
+                "timed_out_after_secs": secs,
+            }),
+            None => gemini_json(&r.gemini),
+        },
+        // W1009/DSK-3: the Desktop/Cowork retention probe, additive in the
+        // same `checked` style as `keys` — `checked: false` means this run
+        // never looked (the registry declares no probe / could not be read),
+        // which no state value could say by itself.
+        "desktop_retention": match (&r.desktop_retention, r.check_timed_out_after(DESKTOP_RETENTION_CHECK)) {
+            (Some(check), _) => desktop_retention_json(check),
+            (None, Some(secs)) => serde_json::json!({"checked": false, "timed_out_after_secs": secs}),
+            (None, None) => serde_json::json!({"checked": false}),
+        },
         "footprints": r.footprints.iter().map(footprint_json).collect::<Vec<_>>(),
+        // ADR-053 D4: machine logs are a product of their own, so they get
+        // their own object rather than a row in `footprints`. A count that was
+        // not measured is a tri-state, never a 0.
+        "machine_logs": match r.check_timed_out_after(MACHINE_LOGS_CHECK) {
+            // The default rows would carry "0 unlooked" as a measured count;
+            // the note above owns the unknown instead.
+            Some(secs) => serde_json::json!({
+                "checked": false,
+                "timed_out_after_secs": secs,
+            }),
+            None => machine_logs_json(&r.machine_logs),
+        },
         "other_present": r.other_present.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "risks": r.risks.iter().map(|text| risk_json(text)).collect::<Vec<_>>(),
-        "reclaim": match &r.reclaim {
-            Some(reclaim) => reclaim_json(reclaim),
+        "reclaim": match (&r.reclaim, r.check_timed_out_after(RECLAIM_CHECK)) {
+            (Some(reclaim), _) => reclaim_json(reclaim),
             // Same idiom as `native_host` below: not "no repository", but "this
-            // run did not look", which is a different finding.
-            None => serde_json::json!({"checked": false}),
+            // run did not look", which is a different finding. With a deadline
+            // note (W1043f) the section also says when it walked away.
+            (None, Some(secs)) => {
+                serde_json::json!({"checked": false, "timed_out_after_secs": secs})
+            }
+            (None, None) => serde_json::json!({"checked": false}),
         },
-        "cache": match &r.cache {
-            Some(cache) => cache_json(cache),
-            None => serde_json::json!({"checked": false}),
+        "cache": match (&r.cache, r.check_timed_out_after(CACHE_CHECK)) {
+            (Some(cache), _) => cache_json(cache),
+            (None, Some(secs)) => {
+                serde_json::json!({"checked": false, "timed_out_after_secs": secs})
+            }
+            (None, None) => serde_json::json!({"checked": false}),
         },
-        "body_cache": match &r.body_cache {
-            Some(body_cache) => body_cache_json(body_cache),
-            None => serde_json::json!({"checked": false}),
+        "body_cache": match (&r.body_cache, r.check_timed_out_after(BODY_CACHE_CHECK)) {
+            (Some(body_cache), _) => body_cache_json(body_cache),
+            (None, Some(secs)) => {
+                serde_json::json!({"checked": false, "timed_out_after_secs": secs})
+            }
+            (None, None) => serde_json::json!({"checked": false}),
         },
-        "fts_indexes": match &r.fts_indexes {
-            Some(indexes) => serde_json::json!({
+        "fts_indexes": match (&r.fts_indexes, r.check_timed_out_after(FTS_CHECK)) {
+            (Some(indexes), _) => serde_json::json!({
                 "checked": true,
                 "destinations": indexes.iter().map(|index| serde_json::json!({
                     "destination": index.destination,
@@ -3065,13 +4858,16 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
                     "documents": index.documents,
                 })).collect::<Vec<_>>(),
             }),
-            None => serde_json::json!({"checked": false}),
+            (None, Some(secs)) => {
+                serde_json::json!({"checked": false, "timed_out_after_secs": secs})
+            }
+            (None, None) => serde_json::json!({"checked": false}),
         },
         "archive_gaps": r.archive_gaps.iter().map(archive_gap_json).collect::<Vec<_>>(),
         "probes": r.probes.iter().map(scanner::probe_json).collect::<Vec<_>>(),
         "destinations": r.destinations.iter().map(destination_probe_json).collect::<Vec<_>>(),
-        "stage_duplicate_shards": match &r.stage_duplicate_shards {
-            Some(check) => serde_json::json!({
+        "stage_duplicate_shards": match (&r.stage_duplicate_shards, r.check_timed_out_after(STAGE_DUP_CHECK)) {
+            (Some(check), _) => serde_json::json!({
                 "checked": true,
                 "state": check.state,
                 "machines": check.machines.as_ref().map(|machines| machines.iter().map(|machine| serde_json::json!({
@@ -3083,22 +4879,114 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
                 "why": check.why,
                 "repair_command": check.repair_command,
             }),
-            None => serde_json::json!({"checked": false}),
+            (None, Some(secs)) => {
+                serde_json::json!({"checked": false, "timed_out_after_secs": secs})
+            }
+            // Not "there are no duplicates": this run could not read the config
+            // the stage comes from, so it never looked.
+            (None, None) => serde_json::json!({"checked": false}),
         },
-        "keys": match &r.keys {
-            Some(rows) => serde_json::json!({
+        "keys": match (&r.keys, r.check_timed_out_after(KEYS_CHECK)) {
+            (Some(rows), _) => serde_json::json!({
                 "checked": true,
                 "copies": rows.iter().map(key_inventory_json).collect::<Vec<_>>(),
             }),
-            // Not "there are no keys": this run could not read the config the
+            // Not "there are no keys" and not "checked and none were found":
+            // with a deadline note this run walked away from the inventory
+            // walk (W1043f); without one it could not read the config the
             // inventory is derived from, so it never looked.
-            None => serde_json::json!({"checked": false}),
+            (None, Some(secs)) => {
+                serde_json::json!({"checked": false, "timed_out_after_secs": secs})
+            }
+            (None, None) => serde_json::json!({"checked": false}),
         },
-        "native_host": match &r.native_host {
-            Some(check) => native_host_json(check),
+        // W1012 / SG-1 C1: the four facts and the shared alert wording, in
+        // the same tag-first shape the rest of this document uses. `checked:
+        // false` is the did-not-look case, distinct from every "checked and
+        // the answer is" kind inside.
+        "destination_reconciliation": match (&r.dest_reconcile, r.check_timed_out_after(DEST_RECONCILE_CHECK)) {
+            (Some(reconciliation), _) => {
+                let value = crate::destdiag::destinations_json(reconciliation);
+                serde_json::json!({
+                    "checked": true,
+                    "destinations": value["destinations"],
+                    "alerts": value["alerts"],
+                    "reclaim": value["reclaim"],
+                    // ADR-060 D5: the stage-cap fact rides beside the
+                    // facts — measured / unknown, never a zero-shaped
+                    // silence, the same shape `status --json` prints.
+                    "stage_cap": value["stage_cap"],
+                })
+            }
+            (None, Some(secs)) => {
+                serde_json::json!({"checked": false, "timed_out_after_secs": secs})
+            }
+            (None, None) => serde_json::json!({"checked": false}),
+        },
+        "native_host": match (&r.native_host, r.check_timed_out_after(NATIVE_HOST_CHECK)) {
+            (Some(check), _) => native_host_json(check),
             // Not the same as "there is no registration": this run did not look.
-            None => serde_json::json!({"checked": false}),
+            (None, Some(secs)) => {
+                serde_json::json!({"checked": false, "timed_out_after_secs": secs})
+            }
+            (None, None) => serde_json::json!({"checked": false}),
         },
+        // LM-4 / ADR-062 D13: the mirror's settled field family in the same
+        // tagged-`kind` shape `status --json`'s `local.mirror` carries, so
+        // the two objects can never disagree about a mirror; `checked:
+        // false` is the did-not-look case on the config-unreadable path,
+        // and carries the walked-away-at seconds when the walk wedged.
+        "mirror": match (&r.mirror, r.check_timed_out_after(MIRROR_CHECK)) {
+            (Some(status), _) => serde_json::json!({
+                "checked": true,
+                "configured": status.configured,
+                "enabled": status.enabled,
+                "mirror_of": status.mirror_of,
+                "declared": status.declared,
+                "size": status.size,
+                "last_sync": status.last_sync,
+                "snapshots_behind": status.snapshots_behind,
+                "orphans": status.orphans,
+                "rows": status.rows.iter().map(|row| serde_json::json!({
+                    "severity": row.severity,
+                    "sentence": row.sentence,
+                })).collect::<Vec<_>>(),
+            }),
+            (None, Some(secs)) => {
+                serde_json::json!({"checked": false, "timed_out_after_secs": secs})
+            }
+            (None, None) => serde_json::json!({"checked": false}),
+        },
+    })
+}
+
+/// The `machine_logs` object of `doctor --json` (ADR-053 D4).
+///
+/// `present` rows carry counts only — never a prompt, never a source path.
+/// `generations` and `lines` are [`CountState`]s: a stage that could not be
+/// read makes them `unknown`, not `0`.
+fn machine_logs_json(rows: &MachineLogRows) -> serde_json::Value {
+    serde_json::json!({
+        "present": rows
+            .present
+            .iter()
+            .map(|log| serde_json::json!({
+                "harness": log.harness,
+                "log_id": log.log_id,
+                "present": log.present,
+                "generations": match log.generations {
+                    Some(generations) => CountState::known(generations as u64),
+                    None => CountState::unknown("the configured stage could not be measured"),
+                },
+                "lines": match log.lines {
+                    Some(lines) => CountState::known(lines),
+                    None => CountState::unknown("the configured stage could not be measured"),
+                },
+            }))
+            .collect::<Vec<_>>(),
+        "unlooked": CountState::known(rows.unlooked as u64),
+        "indeterminate": CountState::known(rows.indeterminate as u64),
+        "unlooked_reasons": rows.unlooked_reasons,
     })
 }
 
@@ -3122,6 +5010,7 @@ fn claude_layer_json(v: &ClaudeRetention) -> serde_json::Value {
             "path": path.display().to_string(),
             "error": error,
         }),
+        ClaudeRetention::TimedOut => serde_json::json!({"kind": "timed_out"}),
     }
 }
 
@@ -3133,6 +5022,98 @@ fn claude_json(check: &ClaudeCheck) -> serde_json::Value {
             "path": path.display().to_string(),
             "verdict": claude_layer_json(v),
         })).collect::<Vec<_>>(),
+    })
+}
+
+/// The `desktop_retention` object of `doctor --json` (W1009/DSK-3). Every
+/// source the probe consulted is a row whose outcome *is* its state, and the
+/// merged verdict is tagged so a script can never read `unbounded` as
+/// `bounded` or a managed override as a user choice. `effective_days` is
+/// the state's own answer to "how long do Desktop/Cowork transcripts
+/// survive": `unbounded` carries the never-a-number shapes, and a `null`
+/// inside `ceiling` means the longer-of-two comparison itself is unknown
+/// (D1 could not classify the CLI side), never the absence of a cap.
+fn desktop_retention_json(check: &DesktopRetentionCheck) -> serde_json::Value {
+    let sources: Vec<serde_json::Value> = check
+        .sources
+        .iter()
+        .map(|source| {
+            let outcome = match &source.outcome {
+                DesktopSourceOutcome::Absent => serde_json::json!({"kind": "absent"}),
+                DesktopSourceOutcome::Unreadable(e) => {
+                    serde_json::json!({"kind": "unreadable", "why": e})
+                }
+                DesktopSourceOutcome::ParseFailed(e) => {
+                    serde_json::json!({"kind": "parse_failed", "why": e})
+                }
+                DesktopSourceOutcome::InvalidValue(w) => {
+                    serde_json::json!({"kind": "invalid_value", "why": w})
+                }
+                DesktopSourceOutcome::Read {
+                    desktop_days,
+                    cleanup_days,
+                } => serde_json::json!({
+                    "kind": "read",
+                    "desktop_session_cleanup_period_days": desktop_days,
+                    "cleanup_period_days": cleanup_days,
+                }),
+            };
+            serde_json::json!({
+                "path": source.path.display().to_string(),
+                "kind": source.kind.word(),
+                "outcome": outcome,
+            })
+        })
+        .collect();
+    let state = match &check.state {
+        DesktopRetention::DefaultZero => serde_json::json!({
+            "kind": "default_zero_unbounded",
+            "unbounded": true,
+            "effective_days": serde_json::Value::Null,
+        }),
+        DesktopRetention::ExplicitZero { source } => serde_json::json!({
+            "kind": "explicit_zero_unbounded",
+            "unbounded": true,
+            "source": source.display().to_string(),
+            "effective_days": serde_json::Value::Null,
+        }),
+        DesktopRetention::Ceiling {
+            days,
+            source,
+            cleanup_days,
+            effective_days,
+        } => serde_json::json!({
+            "kind": "ceiling",
+            "unbounded": false,
+            "days": days,
+            "source": source.display().to_string(),
+            "cleanup_period_days": cleanup_days,
+            "effective_days": effective_days,
+        }),
+        DesktopRetention::ManagedOverride { days, source } => serde_json::json!({
+            "kind": "managed_override",
+            "unbounded": false,
+            "ignored_key": true,
+            "days": days,
+            "source": source.display().to_string(),
+            "effective_days": days,
+        }),
+        DesktopRetention::Unknown { why } => serde_json::json!({
+            "kind": "unknown",
+            "unbounded": serde_json::Value::Null,
+            "why": why,
+            "effective_days": serde_json::Value::Null,
+        }),
+    };
+    serde_json::json!({
+        "checked": true,
+        "probe_id": check.probe_id,
+        "key": check.key,
+        "sources": sources,
+        "state": state,
+        // The D1½ line the D4 risk is synthesized from, carried verbatim so
+        // a script and a human never read two different verdicts.
+        "risk_line": check.risk_line(),
     })
 }
 
@@ -3174,6 +5155,25 @@ fn footprint_json(f: &HarnessFootprint) -> serde_json::Value {
             serde_json::json!(f.installed)
         },
         "root": f.root.as_ref().map(|root| root.display().to_string()),
+        // W1006d: additive in the `found_staged` sense — present on every
+        // row, empty where the family was fully measured (or fully
+        // unknown: the state fields already say that). Where it is
+        // non-empty, `session_count` is a qualified lower bound over the
+        // measured roots only; a consumer summing these counts without
+        // consulting this key reads a floor as a total.
+        "unverified_roots": f.unverified_roots,
+        // W1009/DSK-3: the family's per-root rows, rendered by the same
+        // scanner-side function the registry probe rows use, so the two
+        // doctor tables can never disagree about a root. Additive in the
+        // `unverified_roots` sense: present on every row, empty where the
+        // family is not a primary-plus-roots shape. Where it is non-empty
+        // the family's `session_count` stays the D6-qualified aggregate —
+        // a consumer summing these rows' counts is summing a floor.
+        "source_roots": f
+            .source_roots
+            .iter()
+            .map(scanner::source_root_row_json)
+            .collect::<Vec<_>>(),
         "session_count": match f.session_count {
             Some(n) => CountState::known(n),
             None if f.installed || f.presence_unknown => CountState::unknown(
@@ -3349,13 +5349,116 @@ fn archive_gap_json(g: &scanner::ArchiveGap) -> serde_json::Value {
 // ---------------------------------------------------------------------------
 
 fn footprint_count_label(f: &HarnessFootprint) -> String {
-    match f.session_count {
+    // W1006d: a count beside unverified roots is a *qualified lower
+    // bound* — the measured roots' exact count. `≥` is the whole point:
+    // an unqualified `N` would silently claim the family total, and
+    // `unknown` would erase a measurement already taken. Either of those
+    // is the exact rendering the ADR-059 draft review rejected.
+    if let Some(count) = f.session_count {
+        if f.unverified_roots.is_empty() {
+            return count.to_string();
+        }
+        return format!("≥{count}");
+    }
+    // Installed but the store is not enumerable (schema not recognised):
+    // "unknown", never a fake zero. A source whose presence was
+    // never established is the same answer for the same reason.
+    if f.installed || f.presence_unknown {
+        "unknown".to_string()
+    } else {
+        "N/A".to_string()
+    }
+}
+
+/// One source root's own D3 row (W1009/DSK-3, ADR-059 draft D5/D6): the
+/// per-root companion of the family row above it, printed one per declared
+/// root so the count a reader acts on is never "the family total" by
+/// accident.
+///
+/// The count's scope is the root only — one session id sitting in two roots
+/// of a movable store counts in each row it appears in, while the family row
+/// above counts it once — which is also why this row never carries a `≥`:
+/// a measured root's own count is exact (the family aggregate is where the
+/// D6 lower-bound marking lives). A root this scan never looked at stays
+/// `unknown` **with its state word and an explicit tie to that marking** —
+/// the row exists precisely so an unverified root cannot be silently folded
+/// into a number that reads as the family total.
+///
+/// Never a path in the label: the id is ours to name (D6's rule), and the
+/// `primary` role word is the registry's own term for the harness's `paths`
+/// store.
+fn source_root_row_line(row: &scanner::SourceRootProbe) -> String {
+    let label = if row.primary {
+        "primary".to_string()
+    } else {
+        row.id.clone()
+    };
+    let state = scanner::probe_state_word(row.state);
+    let unverified = matches!(
+        row.state,
+        scanner::ProbeState::SkipUnascertained
+            | scanner::ProbeState::SkipUnresolvable
+            | scanner::ProbeState::Indeterminate
+    );
+    let count = match row.record_count {
         Some(count) => count.to_string(),
-        // Installed but the store is not enumerable (schema not recognised):
-        // "unknown", never a fake zero. A source whose presence was
-        // never established is the same answer for the same reason.
-        None if f.installed || f.presence_unknown => "unknown".to_string(),
-        None => "N/A".to_string(),
+        None => match row.state {
+            // A root that was looked for and found absent earns its zero —
+            // the same measured-absence rule every other count here follows.
+            scanner::ProbeState::Missing => "0".to_string(),
+            scanner::ProbeState::SkipWrongPlatform => "N/A".to_string(),
+            // reason: a root this scan never measured — `state` and the mark
+            // below name why; a number here would be the exact fabricated
+            // zero the family aggregate refuses.
+            _ => "unknown".to_string(),
+        },
+    };
+    let bytes = match row.total_bytes {
+        Some(bytes) => format!("{} ({} B)", fmt_bytes(bytes), bytes),
+        None => match row.state {
+            scanner::ProbeState::Missing => "root not present".to_string(),
+            scanner::ProbeState::SkipWrongPlatform => "N/A".to_string(),
+            _ => "unknown".to_string(),
+        },
+    };
+    let mark = if unverified {
+        " — unverified root: never looked at; the family count above is a \
+         ≥ lower bound over its measured roots only"
+            .to_string()
+    } else {
+        String::new()
+    };
+    format!(
+        "    {:<24} sessions {:<7} · {:<24} [{}]{}",
+        label, count, bytes, state, mark
+    )
+}
+
+/// Whether a family's per-root rows are worth their lines: a family whose
+/// every visible root was measured absent already said "not installed", and
+/// repeating measured zeros one level down is noise — while a family with
+/// any measuring **or any unverified root** keeps its rows, because the
+/// marks are the point of the change and `never silently smaller` wins over
+/// quiet (W1009/DSK-3).
+fn source_root_rows_worth_printing(rows: &[scanner::SourceRootProbe]) -> bool {
+    rows.iter().any(|row| {
+        !matches!(
+            row.state,
+            scanner::ProbeState::Missing | scanner::ProbeState::SkipWrongPlatform
+        )
+    })
+}
+
+/// Print the per-root rows of one footprint row's family (W1009/DSK-3).
+fn print_source_root_rows(f: &HarnessFootprint) {
+    if !f.source_roots.is_empty() && source_root_rows_worth_printing(&f.source_roots) {
+        for row in &f.source_roots {
+            let line = source_root_row_line(row);
+            eprintln!("{line}");
+            if !row.note.is_empty() {
+                eprintln!("        ({})", row.note);
+            }
+        }
     }
 }
 
@@ -3397,6 +5500,26 @@ fn footprint_count_detail(f: &HarnessFootprint) -> String {
     format!("({})", parts.join(", "))
 }
 
+/// W1043f — the one line a section prints when its check outlived its
+/// deadline and the section's field carries no answer.
+///
+/// D1, D2, D3 and D7 already had a dedicated per-section line for this; the
+/// nine `Option`-shaped sections below (and D1½) used to disappear from the
+/// page instead, which contradicts the rule this file states for the
+/// config-unreadable early return — an absent section under a "did not look"
+/// banner reads as "no findings", the same mistake an absent heading is. A
+/// timed-out section now gets its own heading plus one UNKNOWN sentence, so
+/// the table of contents a reader scans stays complete and every hole is
+/// named where it sits, not only in the 🔴 block. `check` is the exact label
+/// the `doctor: checking …` trace printed before the check ran, so the line
+/// re-answers the trace that named the wedge.
+fn print_timed_out_section(heading: &str, check: &str, secs: u64, what: &str) {
+    eprintln!(
+        "{heading} — 🔴 UNKNOWN: the {check} check did not answer within {secs}s, so {what}."
+    );
+    eprintln!();
+}
+
 pub fn print_report(r: &DoctorReport) {
     eprintln!();
     eprintln!("doctor — “Is your harness silently deleting your data?”");
@@ -3436,46 +5559,102 @@ pub fn print_report(r: &DoctorReport) {
         eprintln!();
     }
 
+    // W1043 — the checks that never answered. Named before any section so a
+    // reader sees which sections are holes before reading a single finding,
+    // in the same register as the NOT CHECKED block above: a section listed
+    // here is a question this run walked away from at its deadline, not an
+    // answer, and the sections that follow are the ones that did answer.
+    if !r.timed_out.is_empty() {
+        eprintln!("🔴 CHECK TIMED OUT — these checks outlived their own deadline, so their sections are UNKNOWN, not zero:");
+        for note in &r.timed_out {
+            eprintln!(
+                "     · {} (no answer within {}s)",
+                note.check, note.budget_secs
+            );
+        }
+        eprintln!(
+            "   The other sections below did answer and stand as printed. An exit code of 3 \
+             (not 0) is what carries this: a machine only half of which was inspected is not a \
+             healthy machine."
+        );
+        eprintln!();
+    }
+
     // D1
     eprintln!("D1 · Claude Code rotation settings");
-    eprintln!(
-        "  cleanupPeriodDays: {} ({})",
-        r.claude.verdict.label(),
-        match &r.claude.verdict {
-            ClaudeRetention::UnsetDefault => "unset → default 30 days = dangerous".to_string(),
-            ClaudeRetention::Safe { .. } =>
-                "large value set, safe, but see D4's fail-destructive note".to_string(),
-            ClaudeRetention::SmallValue { days, .. } => {
-                format!("explicitly set {days} days, below the safe threshold = still rotating")
-            }
-            ClaudeRetention::ParseFailed { path, error } => {
-                format!(
+    if let Some(secs) = r.check_timed_out_after(D1_CHECK) {
+        eprintln!(
+            "  cleanupPeriodDays: UNKNOWN — the settings read did not answer within {secs}s \
+             (no answer, not the 30-day default and not proof it is safe)."
+        );
+    } else {
+        eprintln!(
+            "  cleanupPeriodDays: {} ({})",
+            r.claude.verdict.label(),
+            match &r.claude.verdict {
+                ClaudeRetention::UnsetDefault => "unset → default 30 days = dangerous".to_string(),
+                ClaudeRetention::Safe { .. } =>
+                    "large value set, safe, but see D4's fail-destructive note".to_string(),
+                ClaudeRetention::SmallValue { days, .. } => {
+                    format!("explicitly set {days} days, below the safe threshold = still rotating")
+                }
+                ClaudeRetention::ParseFailed { path, error } => {
+                    format!(
                     "🔴 file present but parse failed (this is the fail-destructive trigger): {} — {error}",
                     path.display()
                 )
+                }
+                // Reachable only for a hand-built report where D1's verdict was
+                // set without the check being run through the goalpost: the
+                // label already words the unknown.
+                ClaudeRetention::TimedOut => "the settings read did not answer".to_string(),
             }
+        );
+        for (path, v) in &r.claude.layers {
+            eprintln!("    {:<52} {}", path.display(), v.label());
         }
-    );
-    for (path, v) in &r.claude.layers {
-        eprintln!("    {:<52} {}", path.display(), v.label());
+    }
+    // D1½ — the Desktop/Cowork half of Claude Code's retention story
+    // (W1009/DSK-3): a second, separately-governed key the sweep reads.
+    // Its state is next to D1's because it *is* a Claude Code rotation
+    // setting; the synthesized risk is D4's.
+    if let Some(check) = &r.desktop_retention {
+        eprintln!();
+        check.print();
+    } else if let Some(secs) = r.check_timed_out_after(DESKTOP_RETENTION_CHECK) {
+        // W1043f: the same dedicated line D1 itself got above — a registry
+        // that declares no probe stays silent on purpose, but a wedged
+        // desktop settings read must not vanish from the page.
+        eprintln!(
+            "  Desktop/Cowork transcripts: UNKNOWN — the desktop settings read did not \
+             answer within {secs}s (no answer, so neither the desktop exemption nor a \
+             cap was confirmed)."
+        );
     }
     eprintln!();
 
     // D2
     eprintln!("D2 · Gemini CLI retention policy");
-    eprintln!("  sessionRetention: {}", r.gemini.summarize());
-    let home = crate::config::home_dir();
-    let present: Vec<String> = [".gemini/config.json", ".gemini/settings.json"]
-        .iter()
-        .filter(|p| home.join(p).is_file())
-        .map(|p| home.join(p).display().to_string())
-        .collect();
-    if present.is_empty() {
+    if let Some(secs) = r.check_timed_out_after(D2_CHECK) {
         eprintln!(
-            "  no config file exists → using the CLI built-in defaults (enabled=true, maxAge=30d)."
+            "  sessionRetention: UNKNOWN — the settings read did not answer within {secs}s \
+             (no answer, so whether Gemini cleans is unknown, not the 30-day default)."
         );
     } else {
-        eprintln!("  source file(s): {}", present.join(", "));
+        eprintln!("  sessionRetention: {}", r.gemini.summarize());
+        let home = crate::config::home_dir();
+        let present: Vec<String> = [".gemini/config.json", ".gemini/settings.json"]
+            .iter()
+            .filter(|p| home.join(p).is_file())
+            .map(|p| home.join(p).display().to_string())
+            .collect();
+        if present.is_empty() {
+            eprintln!(
+                "  no config file exists → using the CLI built-in defaults (enabled=true, maxAge=30d)."
+            );
+        } else {
+            eprintln!("  source file(s): {}", present.join(", "));
+        }
     }
     eprintln!();
 
@@ -3500,7 +5679,19 @@ pub fn print_report(r: &DoctorReport) {
     }
 
     if r.scan_failed {
-        eprintln!("D3 · Coverage — 🔴 registry missing / unparseable, session coverage unknown.");
+        // W1043: a scan that outlived its deadline is a different D3 line
+        // from a registry that could not be parsed — the reader who waited
+        // for the budget is told which of the two they got.
+        if let Some(secs) = r.check_timed_out_after(D3_SCAN_CHECK) {
+            eprintln!(
+                "D3 · Coverage — 🔴 the registry-driven scan did not answer within {secs}s, \
+                 session coverage unknown."
+            );
+        } else {
+            eprintln!(
+                "D3 · Coverage — 🔴 registry missing / unparseable, session coverage unknown."
+            );
+        }
         eprintln!(
             "    refusing to fake a full scan with hardcoded paths (see “Refusing to scan with hardcoded roots” above in stderr)."
         );
@@ -3531,42 +5722,98 @@ pub fn print_report(r: &DoctorReport) {
                 eprintln!("             ({})", f.note);
             }
         }
+        // The machine-log rows check runs behind the scan's verdict, not
+        // behind the scan itself (its deadline is its own), so a wedge
+        // there keeps its name on this path too — otherwise text and
+        // `--json` would tell two stories about a section whose check did
+        // not answer (`machine_logs` carries `{"checked": false}` and the
+        // walked-away-at seconds under `--json`; W1043f2). With no note
+        // the helper stays silent, which is the shape this branch always
+        // had for a measured — possibly empty — row list.
+        print_machine_logs(&r.machine_logs, r.check_timed_out_after(MACHINE_LOGS_CHECK));
         eprintln!();
         eprintln!("D4 · Risk summary — so what happens + when");
         for (i, risk) in r.risks.iter().enumerate() {
             eprintln!("  {}. {risk}", i + 1);
         }
         eprintln!();
-        // These three are `Option` only because a report whose config could not
+        // These three are `Option` because a report whose config could not
         // be read has no repository or cache path to measure. That report has
-        // returned above, so a `None` here would mean a caller assembled a report
-        // by hand: printing the section without an answer would be worse than
-        // leaving it out, and `not_checked` is what names it.
+        // returned above; here W1043f gives a `None` its third and only other
+        // meaning — the check outlived its budget — a dedicated UNKNOWN line
+        // rather than a silently absent section (a caller that assembled a
+        // report by hand keeps the old silence).
         if let Some(reclaim) = &r.reclaim {
             eprintln!("D5 · How much reclaimable garbage is in the repository?");
             eprintln!("     `prune_plan` computes without deleting — doctor never runs prune, nor touches append_only.");
             print_reclaim(reclaim);
             eprintln!();
+        } else if let Some(secs) = r.check_timed_out_after(RECLAIM_CHECK) {
+            print_timed_out_section(
+                "D5 · How much reclaimable garbage is in the repository?",
+                RECLAIM_CHECK,
+                secs,
+                "the reclaimable garbage is unknown, not zero",
+            );
         }
         if let Some(cache) = &r.cache {
             eprintln!("D6 · Local metadata cache occupancy");
             print_cache(cache);
             eprintln!();
+        } else if let Some(secs) = r.check_timed_out_after(CACHE_CHECK) {
+            print_timed_out_section(
+                "D6 · Local metadata cache occupancy",
+                CACHE_CHECK,
+                secs,
+                "the cache's occupancy is unknown, not zero",
+            );
         }
         if let Some(body_cache) = &r.body_cache {
             eprintln!("D9 · Body cache (conversation bodies, ADR-034)");
             print_body_cache(body_cache);
             eprintln!();
+        } else if let Some(secs) = r.check_timed_out_after(BODY_CACHE_CHECK) {
+            print_timed_out_section(
+                "D9 · Body cache (conversation bodies, ADR-034)",
+                BODY_CACHE_CHECK,
+                secs,
+                "the body cache's occupancy is unknown, not zero",
+            );
         }
-        print_fts_indexes(&r.fts_indexes);
+        print_fts_indexes(&r.fts_indexes, r.check_timed_out_after(FTS_CHECK));
         print_destinations(&r.destinations);
-        print_stage_duplicates(&r.stage_duplicate_shards);
+        print_stage_duplicates(
+            &r.stage_duplicate_shards,
+            r.check_timed_out_after(STAGE_DUP_CHECK),
+        );
         // D8 does not depend on the scan at all — it reads the browser
         // manifests and the config — so it is reported on this path too.
         if let Some(check) = &r.native_host {
             eprintln!();
             print_native_host(check);
+        } else if let Some(secs) = r.check_timed_out_after(NATIVE_HOST_CHECK) {
+            print_timed_out_section(
+                "D8 · Native Messaging host (protocol v1)",
+                NATIVE_HOST_CHECK,
+                secs,
+                "the host registration and the stage are unknown, not absent",
+            );
         }
+        // D12, D13 and the key inventory are not gated on the scan either:
+        // `run()` measures all three whether the registry answered or not,
+        // so this path owes the reader the same three sections below that
+        // the normal path prints. The shared dispatch keeps every shape
+        // one story — a measured section prints what it measured, a
+        // wedged one keeps its heading and words the unknown (W1043f2 —
+        // before this, a wedged or measured D12/D13/keys had no heading in
+        // text on this path while `--json` answered `{"checked": false …}`
+        // beside measured sections).
+        print_dest_reconcile(
+            &r.dest_reconcile,
+            r.check_timed_out_after(DEST_RECONCILE_CHECK),
+        );
+        print_mirror(&r.mirror, r.check_timed_out_after(MIRROR_CHECK));
+        print_keys(&r.keys, r.check_timed_out_after(KEYS_CHECK));
         return;
     }
 
@@ -3602,7 +5849,12 @@ pub fn print_report(r: &DoctorReport) {
         if !f.note.is_empty() {
             eprintln!("             ({})", f.note);
         }
+        // W1009/DSK-3 (45-DESKTOP-STORES §5 item 4): one row per source root
+        // beside the family row, unverified roots explicitly marked per the
+        // D6 lower-bound language (`≥N` stays on the family row above).
+        print_source_root_rows(f);
     }
+    print_machine_logs(&r.machine_logs, r.check_timed_out_after(MACHINE_LOGS_CHECK));
     if !r.other_present.is_empty() {
         #[allow(
             clippy::unwrap_used,
@@ -3635,11 +5887,20 @@ pub fn print_report(r: &DoctorReport) {
     // D5 — reclaimable garbage in the archive repository (prune_plan, read-only).
     // `Option` because a report with no usable config has no repository path to
     // measure; see the note on the same pair on the scan-failed path above.
+    // W1043f adds the same else-branch that path got: a `None` with a
+    // deadline note is a wedged check that must not silently drop its section.
     if let Some(reclaim) = &r.reclaim {
         eprintln!("D5 · How much reclaimable garbage is in the repository?");
         eprintln!("     `prune_plan` computes without deleting — doctor never runs prune, nor touches append_only.");
         print_reclaim(reclaim);
         eprintln!();
+    } else if let Some(secs) = r.check_timed_out_after(RECLAIM_CHECK) {
+        print_timed_out_section(
+            "D5 · How much reclaimable garbage is in the repository?",
+            RECLAIM_CHECK,
+            secs,
+            "the reclaimable garbage is unknown, not zero",
+        );
     }
 
     // D6 — how much the local metadata cache actually occupies
@@ -3647,6 +5908,13 @@ pub fn print_report(r: &DoctorReport) {
         eprintln!("D6 · Local metadata cache occupancy");
         print_cache(cache);
         eprintln!();
+    } else if let Some(secs) = r.check_timed_out_after(CACHE_CHECK) {
+        print_timed_out_section(
+            "D6 · Local metadata cache occupancy",
+            CACHE_CHECK,
+            secs,
+            "the cache's occupancy is unknown, not zero",
+        );
     }
 
     // D9 — how much the body cache occupies, against the quota ADR-034 gives it.
@@ -3655,119 +5923,188 @@ pub fn print_report(r: &DoctorReport) {
         eprintln!("D9 · Body cache (conversation bodies, ADR-034)");
         print_body_cache(body_cache);
         eprintln!();
+    } else if let Some(secs) = r.check_timed_out_after(BODY_CACHE_CHECK) {
+        print_timed_out_section(
+            "D9 · Body cache (conversation bodies, ADR-034)",
+            BODY_CACHE_CHECK,
+            secs,
+            "the body cache's occupancy is unknown, not zero",
+        );
     }
-    print_fts_indexes(&r.fts_indexes);
+    print_fts_indexes(&r.fts_indexes, r.check_timed_out_after(FTS_CHECK));
 
     // D7 — can each declared destination actually be reached? (ADR-023)
     print_destinations(&r.destinations);
-    print_stage_duplicates(&r.stage_duplicate_shards);
+
+    // D12 — does the declared set agree with what the timers and the
+    // reclaim actually do on this machine? (W1012 / SG-1 C1)
+    print_dest_reconcile(
+        &r.dest_reconcile,
+        r.check_timed_out_after(DEST_RECONCILE_CHECK),
+    );
+
+    // D13 — the local mirror's settled field family (ADR-062 D3/D6.3, LM-4)
+    print_mirror(&r.mirror, r.check_timed_out_after(MIRROR_CHECK));
+
+    print_stage_duplicates(
+        &r.stage_duplicate_shards,
+        r.check_timed_out_after(STAGE_DUP_CHECK),
+    );
 
     // Every archive copy has its own key, so a backup that names only the
     // local one leaves the off-site copies unreadable (W281 BUG-2). Reported
     // per copy rather than as one "key" for that reason.
-    print_keys(&r.keys);
+    print_keys(&r.keys, r.check_timed_out_after(KEYS_CHECK));
 
     // D8 — is the browser-side host actually usable?
     if let Some(check) = &r.native_host {
         eprintln!();
         print_native_host(check);
+    } else if let Some(secs) = r.check_timed_out_after(NATIVE_HOST_CHECK) {
+        print_timed_out_section(
+            "D8 · Native Messaging host (protocol v1)",
+            NATIVE_HOST_CHECK,
+            secs,
+            "the host registration and the stage are unknown, not absent",
+        );
     }
 }
 
-fn print_stage_duplicates(check: &Option<StageDuplicateCheck>) {
-    let Some(check) = check else { return };
-    eprintln!("D11 · Identical duplicate shards in the configured stage");
-    match check.state {
-        "clean" => eprintln!("  no identical duplicate shards found"),
-        "duplicates_found" => {
-            if let Some(machines) = &check.machines {
-                for machine in machines.iter().filter(|row| row.duplicate_sessions > 0) {
-                    eprintln!(
-                        "  {} · {} session(s), {} duplicate shard(s), {} bytes",
-                        machine.machine,
-                        machine.duplicate_sessions,
-                        machine.duplicate_shards,
-                        machine.duplicate_bytes
-                    );
+/// W1043f: a `None` with a deadline note is a wedged check, and gets the
+/// dedicated UNKNOWN line every timed-out section gets instead of silence;
+/// a `None` without one stays silent (the report's config was unreadable —
+/// a story `not_checked` already tells — or a caller assembled the report
+/// by hand).
+fn print_stage_duplicates(check: &Option<StageDuplicateCheck>, timed_out_after_secs: Option<u64>) {
+    match (check, timed_out_after_secs) {
+        (Some(check), _) => {
+            eprintln!("D11 · Identical duplicate shards in the configured stage");
+            match check.state {
+                "clean" => eprintln!("  no identical duplicate shards found"),
+                "duplicates_found" => {
+                    if let Some(machines) = &check.machines {
+                        for machine in machines.iter().filter(|row| row.duplicate_sessions > 0) {
+                            eprintln!(
+                                "  {} · {} session(s), {} duplicate shard(s), {} bytes",
+                                machine.machine,
+                                machine.duplicate_sessions,
+                                machine.duplicate_shards,
+                                machine.duplicate_bytes
+                            );
+                        }
+                    }
+                    eprintln!("  inspect the destination with `{}`", check.repair_command);
+                    eprintln!("  no shards or snapshots were removed");
+                }
+                _ => {
+                    eprintln!("  unknown");
+                    if let Some(why) = &check.why {
+                        eprintln!("  reason: {why}");
+                    }
+                    eprintln!("  inspect archived data with `{}`", check.repair_command);
                 }
             }
-            eprintln!("  inspect the destination with `{}`", check.repair_command);
-            eprintln!("  no shards or snapshots were removed");
+            eprintln!();
         }
-        _ => {
-            eprintln!("  unknown");
-            if let Some(why) = &check.why {
-                eprintln!("  reason: {why}");
-            }
-            eprintln!("  inspect archived data with `{}`", check.repair_command);
-        }
+        (None, Some(secs)) => print_timed_out_section(
+            "D11 · Identical duplicate shards in the configured stage",
+            STAGE_DUP_CHECK,
+            secs,
+            "the duplicate count is unknown, not zero",
+        ),
+        (None, None) => {}
     }
-    eprintln!();
 }
 
 /// Which key files this machine holds, per archive copy, and which of them the
 /// user has said they keep a copy of.
 ///
-/// Silent for `None` (a report whose config could not be read): the inventory is
-/// derived from the config, so there is nothing to say rather than nothing to
-/// list. `not_checked` already names that check as skipped.
-fn print_keys(keys: &Option<Vec<KeyInventoryRow>>) {
-    let Some(rows) = keys else { return };
-    eprintln!();
-    eprintln!("Keys · one file per archive copy — each opens only its own copy");
-    eprintln!("     A second machine reads a copy with that copy's key. Back up every one.");
-    for row in rows {
-        // `present`/`not on this machine` rather than yes/no: the file belongs to
-        // a copy that may live elsewhere, so its absence here is a fact about
-        // *this* machine and not a claim that the key was never created.
-        let where_ = if row.exists {
-            "present on this machine"
-        } else {
-            "not on this machine"
-        };
-        // Three states, because the file's comparison against the recorded
-        // declaration has three answers and two of them must not be worded as
-        // each other: a key that exists but cannot be read is an *unknown*,
-        // not a "NOT declared" (which says the bytes were seen and did not
-        // match), and never a "declared saved".
-        let declared = match row.declared_saved {
-            crate::keydecl::DeclaredFor::Declared => "declared saved",
-            crate::keydecl::DeclaredFor::NotDeclared => "NOT declared saved",
-            crate::keydecl::DeclaredFor::Unreadable => {
-                "unreadable — unknown whether the declaration covers it"
+/// Silent for a `None` with no deadline note (a report whose config could not
+/// be read): the inventory is derived from the config, so there is nothing to
+/// say rather than nothing to list. `not_checked` already names that check as
+/// skipped. A `None` that carries a note (W1043f) is a wedged walk instead,
+/// and prints the section's UNKNOWN line.
+fn print_keys(keys: &Option<Vec<KeyInventoryRow>>, timed_out_after_secs: Option<u64>) {
+    match (keys, timed_out_after_secs) {
+        (Some(rows), _) => {
+            eprintln!();
+            eprintln!("Keys · one file per archive copy — each opens only its own copy");
+            eprintln!(
+                "     A second machine reads a copy with that copy's key. Back up every one."
+            );
+            for row in rows {
+                // `present`/`not on this machine` rather than yes/no: the file belongs to
+                // a copy that may live elsewhere, so its absence here is a fact about
+                // *this* machine and not a claim that the key was never created.
+                let where_ = if row.exists {
+                    "present on this machine"
+                } else {
+                    "not on this machine"
+                };
+                // Three states, because the file's comparison against the recorded
+                // declaration has three answers and two of them must not be worded as
+                // each other: a key that exists but cannot be read is an *unknown*,
+                // not a "NOT declared" (which says the bytes were seen and did not
+                // match), and never a "declared saved".
+                let declared = match row.declared_saved {
+                    crate::keydecl::DeclaredFor::Declared => "declared saved",
+                    crate::keydecl::DeclaredFor::NotDeclared => "NOT declared saved",
+                    crate::keydecl::DeclaredFor::Unreadable => {
+                        "unreadable — unknown whether the declaration covers it"
+                    }
+                };
+                let label = match &row.name {
+                    Some(name) => format!("{name} (destination)"),
+                    None => "local (this machine's archive)".to_string(),
+                };
+                eprintln!(
+                    "  {:<28} {} — {where_}; {declared}",
+                    label,
+                    row.path.display()
+                );
             }
-        };
-        let label = match &row.name {
-            Some(name) => format!("{name} (destination)"),
-            None => "local (this machine's archive)".to_string(),
-        };
-        eprintln!(
-            "  {:<28} {} — {where_}; {declared}",
-            label,
-            row.path.display()
+            eprintln!(
+            "     A declaration is a statement, not a check: doctor cannot see your backup, so \
+             `declared saved` never means the copy exists."
         );
+        }
+        (None, Some(secs)) => print_timed_out_section(
+            "Keys · one file per archive copy — each opens only its own copy",
+            KEYS_CHECK,
+            secs,
+            "which key files this machine holds is unknown, not empty",
+        ),
+        (None, None) => {}
     }
-    eprintln!(
-        "     A declaration is a statement, not a check: doctor cannot see your backup, so \
-         `declared saved` never means the copy exists."
-    );
 }
 
-fn print_fts_indexes(indexes: &Option<Vec<FtsIndexCheck>>) {
-    let Some(indexes) = indexes else { return };
-    eprintln!("D10 · Full-text indexes (local, per destination)");
-    if indexes.is_empty() {
-        eprintln!("  no destination configured");
-    }
-    for index in indexes {
-        match (index.state, index.documents) {
-            ("valid", Some(count)) => {
-                eprintln!("  {} · valid · {count} document(s)", index.destination)
+/// W1043f: the same `Option` + deadline-note dispatch the stage-duplicate and
+/// key sections use — a wedged walk keeps its heading and words the unknown.
+fn print_fts_indexes(indexes: &Option<Vec<FtsIndexCheck>>, timed_out_after_secs: Option<u64>) {
+    match (indexes, timed_out_after_secs) {
+        (Some(indexes), _) => {
+            eprintln!("D10 · Full-text indexes (local, per destination)");
+            if indexes.is_empty() {
+                eprintln!("  no destination configured");
             }
-            (state, _) => eprintln!("  {} · {state}", index.destination),
+            for index in indexes {
+                match (index.state, index.documents) {
+                    ("valid", Some(count)) => {
+                        eprintln!("  {} · valid · {count} document(s)", index.destination)
+                    }
+                    (state, _) => eprintln!("  {} · {state}", index.destination),
+                }
+            }
+            eprintln!();
         }
+        (None, Some(secs)) => print_timed_out_section(
+            "D10 · Full-text indexes (local, per destination)",
+            FTS_CHECK,
+            secs,
+            "every index's health is unknown, not absent",
+        ),
+        (None, None) => {}
     }
-    eprintln!();
 }
 
 /// The one line that says what `detected` is and is not, printed before the
@@ -3967,6 +6304,9 @@ fn print_destinations(probes: &[DestinationProbe]) {
                 if let Some(freshness) = &p.activity_index {
                     print_activity_index(freshness);
                 }
+                if let Some(debris) = &p.debris {
+                    print_debris(debris);
+                }
             }
             DestinationOutcome::Unreachable { kind, detail } => {
                 eprintln!(
@@ -3991,6 +6331,17 @@ fn print_destinations(probes: &[DestinationProbe]) {
                 for line in detail.lines() {
                     eprintln!("               {line}");
                 }
+            }
+            DestinationOutcome::ProbeTimedOut { seconds } => {
+                eprintln!(
+                    "  {:<12} {} — NO ANSWER WITHIN {seconds}s (the probe outlived its deadline)",
+                    p.name, p.repo_root
+                );
+                eprintln!(
+                    "               Reachability is UNKNOWN, not absent: the connection neither \
+                     completed nor failed before the deadline, so whether this destination holds \
+                     the archive is a question this run did not get to answer."
+                );
             }
         }
     }
@@ -4043,6 +6394,182 @@ fn print_activity_index(freshness: &ActivityIndexFreshness) {
         ActivityIndexFreshness::Unknown { detail } => {
             eprintln!("               activity index: UNKNOWN — {detail}");
         }
+    }
+}
+
+/// D7 printing — interrupted-push debris at this destination (ISSUE-006 step
+/// A), as the shared classification measured it.
+///
+/// Only spoken when there is debris to name: a destination whose packs are
+/// all indexed holds none, and a line reading "0 torn, 0 stranded" would be
+/// noise the doctor's healthy-run convention exists to avoid. Torn and
+/// stranded carry **separate** counts and byte totals, torn rides the one
+/// sentence every surface shares
+/// ([`crate::debris::INTERRUPTED_PUSH_SENTENCE`]), and the earliest-seen time
+/// stays the honest unknown it is ([`crate::debris::NO_MTIME_SENTENCE`]) —
+/// never a fabricated clock. A survey that could not establish anything says
+/// UNKNOWN with its reason, in the same shape the activity-index line keeps.
+fn print_debris(debris: &DebrisProbe) {
+    let measured = match debris {
+        DebrisProbe::NotChecked { why } => {
+            eprintln!("               debris: UNKNOWN — {why}");
+            return;
+        }
+        DebrisProbe::Measured(measured) => measured,
+    };
+    if !measured.has_anything_to_say() {
+        return;
+    }
+    if measured.torn > 0 {
+        eprintln!(
+            "               debris: {} torn pack(s) ({}) — {}",
+            measured.torn,
+            fmt_bytes(measured.torn_bytes),
+            crate::debris::INTERRUPTED_PUSH_SENTENCE
+        );
+    }
+    if measured.stranded > 0 {
+        eprintln!(
+            "               debris: {} stranded pack(s) ({}) — complete and verified; the \
+             next open adopts them, `prune-orphans --destination <name>` reports the set in full",
+            measured.stranded,
+            fmt_bytes(measured.stranded_bytes)
+        );
+    }
+    if measured.unknown > 0 {
+        eprintln!(
+            "               debris: {} pack(s) ({}) with an unknown status — neither torn \
+             nor verified; `prune-orphans --destination <name>` carries each one's reason",
+            measured.unknown,
+            fmt_bytes(measured.unknown_bytes)
+        );
+    }
+    eprintln!(
+        "               debris: earliest-seen time unknown — {}",
+        crate::debris::NO_MTIME_SENTENCE
+    );
+}
+
+/// D12 printing — the four-fact destination reconciliation (W1012 / SG-1
+/// C1). The facts come from [`crate::destdiag::reconcile`] and the alerts
+/// are its wording, printed unchanged: `status`'s `[dest]` / `[reclaim]`
+/// lines, this page and the menu bar app all display one vocabulary, which
+/// is the requirement the "one function" in `destdiag` exists to satisfy.
+///
+/// The alert lines — sentence and fix, the English gloss and repair advice
+/// a degraded destination carries — arrive *inside*
+/// [`crate::destdiag::doctor_lines`]: its tail renders every alert and each
+/// one's fix the same way `status` renders its loop, so a page that shows
+/// the D12 table cell (the mandated sentence alone, a table row) always
+/// carries the gloss and the roads under it. W1034f2's note: this function
+/// has no `all_alerts` loop of its own, and the rev4 review read exactly
+/// that loop's absence as the gloss "not printed anywhere on the page" —
+/// the alerts' path into this page is the `doctor_lines` tail, asserted on
+/// the D12 step of `w1023_sg2_degraded_reclaim_test`.
+///
+/// Silent when the reconciliation was not computed (config unreadable —
+/// `not_checked` names it there) and prints nothing for a machine with
+/// nothing declared beyond its default-repository row: a start.md machine
+/// with one timer has facts, and its printed lines are the facts, not
+/// findings — the alert lines stay empty and stay unprinted. A `None` that
+/// carries a deadline note (W1043f) is a wedged reconcile instead, and
+/// prints the section's UNKNOWN line.
+fn print_dest_reconcile(
+    reconciliation: &Option<crate::destdiag::Reconciliation>,
+    timed_out_after_secs: Option<u64>,
+) {
+    match (reconciliation, timed_out_after_secs) {
+        (Some(reconciliation), _) => {
+            eprintln!("D12 · Declared destinations vs installed timers — push coverage, credentials, last push, reclaim");
+            eprintln!(
+                "     read-only: reads the timer files, the reclaim/push state records, and — for the \
+                  upgrade-window proof — one local repository's snapshot listing; never opens a \
+                  destination behind a backend string, never reads one under a mounted volume."
+            );
+            for line in crate::destdiag::doctor_lines(reconciliation) {
+                eprintln!("{line}");
+            }
+            eprintln!();
+        }
+        (None, Some(secs)) => print_timed_out_section(
+            "D12 · Declared destinations vs installed timers — push coverage, credentials, last push, reclaim",
+            DEST_RECONCILE_CHECK,
+            secs,
+            "every one of the four facts is unknown, not zero",
+        ),
+        (None, None) => {}
+    }
+}
+
+/// D13 printing — the local mirror's settled field family (ADR-062
+/// D3/D6.3, LM-4). The sentences are [`crate::mirror::mirror_status`]'s
+/// own — the same words `status` prints and the menu bar displays —
+/// because one vocabulary across the three surfaces is the requirement
+/// ADR-062 ruling 8 states. Silent when no `[mirror]` section exists:
+/// a machine that mirrors nothing has no mirror facts to check, the same
+/// silence `key_alerts` keeps for a machine with every key present.
+///
+/// The one doctor-only line is the orphan's handling instruction
+/// (ADR-062 D2: orphans are never deleted automatically, `doctor` reports
+/// the reclaimable bytes, the user cleans by the documented manual act):
+/// orphans are never reclaimed automatically (ADR-001), and the manual
+/// act is the one `docs/cli.md` documents. A `None` that carries a
+/// deadline note (W1043f) is a wedged mirror walk instead, and prints the
+/// section's UNKNOWN line.
+fn print_mirror(status: &Option<crate::mirror::MirrorStatus>, timed_out_after_secs: Option<u64>) {
+    match (status, timed_out_after_secs) {
+        (Some(status), _) => {
+            if !status.configured {
+                return;
+            }
+            eprintln!("D13 · Local mirror — size, last sync, snapshots behind, orphans (ADR-062)");
+            eprintln!(
+                "     read-only: reads the sync state records and walks the mirror directory; \
+                 never opens a destination, never deletes anything."
+            );
+            if !status.enabled {
+                // With a leftover copy on disk, the rows [`mirror_status`] worded
+                // already carry its measured size (rev0 ⑧: the ADR's every-byte
+                // promise shows its number, the same sentence `status` and the
+                // menu bar print); with nothing left, the off-state keeps its one
+                // doctor-only wording.
+                if status.rows.is_empty() {
+                    eprintln!(
+                        "  [mirror] configured but `enabled = false` — this machine mirrors nothing; \
+                         the mirror directory, if one is left from before, keeps every byte it holds \
+                         until you delete it"
+                    );
+                } else {
+                    for row in &status.rows {
+                        eprintln!("  {}", row.sentence);
+                    }
+                }
+                eprintln!();
+                return;
+            }
+            for row in &status.rows {
+                eprintln!("  {}", row.sentence);
+            }
+            if let crate::mirror::MirrorUsageState::Known { files, bytes } = &status.orphans {
+                if *files > 0 {
+                    eprintln!(
+                        "  orphans are never deleted automatically (ADR-001): a remote cleanup left \
+                         files this mirror no longer needs ({} reclaimable); the manual cleanup is \
+                         documented under `mirror` in the CLI docs — removing the whole directory \
+                         and re-running `mirror sync` rebuilds a copy without them",
+                        crate::destdiag::fmt_bytes(*bytes)
+                    );
+                }
+            }
+            eprintln!();
+        }
+        (None, Some(secs)) => print_timed_out_section(
+            "D13 · Local mirror — size, last sync, snapshots behind, orphans (ADR-062)",
+            MIRROR_CHECK,
+            secs,
+            "the mirror's facts are unknown, not zero",
+        ),
+        (None, None) => {}
     }
 }
 
@@ -4258,20 +6785,30 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
         // skip(template), and could-not-determine are all "I didn't look"; printing 0 equates not-checked
         // with checked-and-empty — exactly the falsehood eliminated here. "missing" retains 0 because
         // it was genuinely checked: the path does not exist.
+        // W1006d: a count beside unverified roots is the measured roots'
+        // floor — `≥N` (or `≥0`), never the plain number, which is exactly
+        // the silent-family-total reading the ADR-059 draft review
+        // rejected. The unverified roots themselves are already named in
+        // the probe's note, printed in the same row.
         let count = match p.state {
-            scanner::ProbeState::FileTarget => match p.record_count {
-                Some(c) => c.to_string(),
-                None => "unknown".to_string(),
-            },
-            // B90: `unwrap_or(0)` here is unreachable today (a Scanned probe
-            // always carries a count) — which is exactly why it was worth
-            // removing: it is a fallback that would print the B82 lie again
-            // the moment the invariant moves. Same shape as FileTarget above.
-            scanner::ProbeState::Scanned => match p.record_count {
-                Some(c) => c.to_string(),
-                None => "unknown".to_string(),
-            },
-            scanner::ProbeState::Missing => "0".to_string(),
+            scanner::ProbeState::FileTarget | scanner::ProbeState::Scanned => {
+                match p.record_count {
+                    Some(c) if !p.unverified_roots.is_empty() => format!("≥{c}"),
+                    // B90: `unwrap_or(0)` here is unreachable today (a Scanned
+                    // probe always carries a count) — which is exactly why it
+                    // was worth removing: it is a fallback that would print the
+                    // B82 lie again the moment the invariant moves.
+                    Some(c) => c.to_string(),
+                    None => "unknown".to_string(),
+                }
+            }
+            scanner::ProbeState::Missing => {
+                if p.unverified_roots.is_empty() {
+                    "0".to_string()
+                } else {
+                    "≥0".to_string()
+                }
+            }
             scanner::ProbeState::SkipWrongPlatform => "N/A".to_string(),
             scanner::ProbeState::Indeterminate
             | scanner::ProbeState::SkipUnascertained
@@ -4356,6 +6893,46 @@ mod tests {
     }
 
     use super::*;
+
+    /// W1034f2 (rev4 Low 1): the destination-less machine's repository and
+    /// key file, from the one definition the CLI's `store_config_from` falls
+    /// back to and `destdiag`'s proof reads — so a change to the default
+    /// repository location moves both readers together, and this test pins
+    /// that the definition is still the data-dir one (unconfigured) and
+    /// still passes config-sourced values through untouched.
+    #[test]
+    fn home_repository_store_config_is_the_single_default_definition() {
+        let base = home_repository_store_config(&Config::default());
+        let data_root = default_data_root();
+        assert_eq!(
+            base.repo_root,
+            data_root.join("repo").to_string_lossy().into_owned(),
+            "an unconfigured machine keeps the data-dir repository default"
+        );
+        assert_eq!(
+            base.key_file,
+            data_root.join("masterkey.json"),
+            "an unconfigured machine keeps the data-dir key default"
+        );
+        assert_eq!(base.connections, crate::store::DEFAULT_CONNECTIONS);
+
+        let mut config = Config::default();
+        config.rustic_repo = Some("/srv/backup-repo".to_string());
+        config.rustic_key_file = Some("/srv/backup.key".to_string());
+        config.rustic_cache_dir = Some("/srv/cache".to_string());
+        let configured = home_repository_store_config(&config);
+        assert_eq!(configured.repo_root, "/srv/backup-repo");
+        assert_eq!(
+            configured.key_file,
+            std::path::PathBuf::from("/srv/backup.key")
+        );
+        assert_eq!(
+            configured.cache_dir,
+            Some(std::path::PathBuf::from("/srv/cache")),
+            "config-sourced values pass through unexpanded — the config loader \
+             expanded them, and expansion gates are the CLI wrapper's own"
+        );
+    }
 
     #[test]
     fn configured_stage_duplicate_scan_counts_and_names_the_repair_command() {
@@ -4544,6 +7121,8 @@ mod b90_unknown_count_tests {
             unreadable_count: unreadable,
             unreadable_entry_count: Some(0),
             total_bytes: None,
+            unverified_roots: Vec::new(),
+            source_roots: Vec::new(),
             time_basis: TimeBasis::Unmeasured,
             earliest: None,
             latest: None,
@@ -4621,6 +7200,8 @@ mod json_tests {
             unreadable_count: None,
             unreadable_entry_count: Some(0),
             total_bytes: Some(4096),
+            unverified_roots: Vec::new(),
+            source_roots: Vec::new(),
             time_basis: TimeBasis::SessionTime,
             earliest: Some(UNIX_EPOCH),
             latest: None,
@@ -4637,6 +7218,8 @@ mod json_tests {
             root: Some(PathBuf::from("/nowhere/.claude")),
             confidence: crate::scanner::Confidence::Confirmed,
             state: scanner::ProbeState::Scanned,
+            unverified_roots: Vec::new(),
+            source_roots: Vec::new(),
             record_count: Some(2),
             candidate_count: Some(2),
             unreadable_count: Some(0),
@@ -4654,6 +7237,7 @@ mod json_tests {
         DoctorReport {
             config_source: crate::config::ConfigSource::DefaultsMissing,
             config_error: None,
+            config: None,
             claude: ClaudeCheck {
                 layers: vec![(
                     PathBuf::from("/nowhere/.claude/settings.json"),
@@ -4662,6 +7246,9 @@ mod json_tests {
                 verdict: ClaudeRetention::UnsetDefault,
             },
             gemini: GeminiRetention::default(),
+            // No registry in this no-IO fixture, so the retention probe
+            // was not performed — `checked: false`, never a state.
+            desktop_retention: None,
             footprints: vec![fp()],
             other_present: vec![PathBuf::from("/nowhere/.cursor")],
             risks: vec![
@@ -4680,11 +7267,16 @@ mod json_tests {
             fts_indexes: Some(Vec::new()),
             probes: vec![probe()],
             archive_gaps: Vec::new(),
+            machine_logs: MachineLogRows::default(),
             scan_failed: false,
             destinations: Vec::new(),
             native_host: None,
             stage_duplicate_shards: None,
             keys: Some(Vec::new()),
+            dest_reconcile: None,
+            mirror: None,
+
+            timed_out: Vec::new(),
         }
     }
 
@@ -4711,6 +7303,32 @@ mod json_tests {
     /// `keys` follows the same rule: every archive copy has its own key file
     /// (ADR-013/ADR-039), so "which keys does this machine hold" has no answer
     /// to fold into an existing field. New key, nothing renamed or removed.
+    ///
+    /// W1009 (DSK-3) adds `desktop_retention` under the same rule: the
+    /// Desktop/Cowork retention probe is a distinct check (its own sources,
+    /// its own three-state vocabulary, `checked: false` when the registry
+    /// declares no probe) that has no half of an existing field to live in.
+    ///
+    /// W1012 (SG-1 C1) adds `destination_reconciliation` the same way: the
+    /// four-fact per-destination reconciliation is a new check with its own
+    /// tri-state vocabulary (`checked: false` when the config was never
+    /// read), reported beside `destinations` — D7's live probes and the
+    /// reconciliation's file-derived facts answer different questions about
+    /// the same names, so neither could live in the other.
+    ///
+    /// W1025 (LM-4 / ADR-062 D13) adds `mirror` the same way: the local
+    /// mirror's owned-words field family (size, last sync, snapshots
+    /// behind, orphans, rows) is a new check over its own records and
+    /// its own directory, in the tagged shapes `status --json`'s
+    /// `local.mirror` already carries, so the two objects cannot
+    /// disagree about one mirror.
+    ///
+    /// W1043 adds `timed_out` the same way: the checks that outlived their
+    /// own deadline are a new fact about the *run* (which sections are
+    /// holes) rather than about the machine, and no section's shape could
+    /// carry it — a placeholder value must never be presentable as a
+    /// measurement, so the note that says "this section did not answer"
+    /// lives one level up, where a script reads it before any section.
     #[test]
     fn doctor_json_top_level_field_names_are_stable() {
         let v = report_to_json(&report());
@@ -4725,11 +7343,15 @@ mod json_tests {
                 "command",
                 "config_error",
                 "config_source",
+                "desktop_retention",
+                "destination_reconciliation",
                 "destinations",
                 "footprints",
                 "fts_indexes",
                 "gemini",
                 "keys",
+                "machine_logs",
+                "mirror",
                 "native_host",
                 "not_checked",
                 "other_present",
@@ -4739,6 +7361,7 @@ mod json_tests {
                 "scan_failed",
                 "schema_version",
                 "stage_duplicate_shards",
+                "timed_out",
             ]
         );
     }
@@ -5151,11 +7774,13 @@ mod report_to_json_shape_tests {
         DoctorReport {
             config_source: crate::config::ConfigSource::DefaultsMissing,
             config_error: None,
+            config: None,
             claude: ClaudeCheck {
                 layers: Vec::new(),
                 verdict: ClaudeRetention::UnsetDefault,
             },
             gemini: GeminiRetention::default(),
+            desktop_retention: None,
             footprints: Vec::new(),
             other_present: Vec::new(),
             risks: Vec::new(),
@@ -5165,11 +7790,16 @@ mod report_to_json_shape_tests {
             fts_indexes: None,
             probes: Vec::new(),
             archive_gaps: Vec::new(),
+            machine_logs: MachineLogRows::default(),
             scan_failed: false,
             destinations: Vec::new(),
             stage_duplicate_shards: None,
             native_host: None,
             keys: None,
+            dest_reconcile: None,
+            mirror: None,
+
+            timed_out: Vec::new(),
         }
     }
 
@@ -5188,6 +7818,7 @@ mod report_to_json_shape_tests {
             "keys",
             "native_host",
             "stage_duplicate_shards",
+            "mirror",
         ] {
             assert!(
                 v.get(key).is_some(),
@@ -5329,6 +7960,8 @@ mod w285_coverage_and_clock_tests {
             root: None,
             confidence: Confidence::Unascertained,
             state,
+            unverified_roots: Vec::new(),
+            source_roots: Vec::new(),
             record_count: None,
             candidate_count: None,
             unreadable_count: None,
@@ -5493,5 +8126,1191 @@ mod w285_coverage_and_clock_tests {
             !threshold_phrase(47.0, 30.0).contains("from"),
             "a session older than the window is past the threshold, not still approaching it"
         );
+    }
+}
+
+#[cfg(test)]
+mod w1006d_lower_bound_tests {
+    use super::*;
+
+    /// W1006d (ADR-059 draft D6): the doctor's two count surfaces state a
+    /// *qualified lower bound* as one — a `≥` prefixed number in the human
+    /// tables, the unverified roots listed in the JSON row, and never a
+    /// plain number that reads as the family total, never an unknown that
+    /// erases the measured part (the D6 side effect the draft's external review
+    /// rejected).
+    #[test]
+    fn a_marked_footprint_prints_a_lower_bound_and_names_its_unverified_roots() {
+        let mut f = default_footprint("claude-code", PathBuf::from("/nowhere/projects"));
+        f.installed = true;
+        f.session_count = Some(2);
+        f.unverified_roots = vec!["claude-desktop-cowork".to_string()];
+        assert_eq!(
+            footprint_count_label(&f),
+            "≥2",
+            "a count beside unverified roots is a floor, not the family total"
+        );
+        let v = footprint_json(&f);
+        assert_eq!(
+            v["unverified_roots"],
+            serde_json::json!(["claude-desktop-cowork"]),
+            "the JSON row lists the roots the count excludes"
+        );
+        assert_eq!(
+            v["session_count"],
+            serde_json::json!({"kind": "known", "count": 2})
+        );
+
+        // The measured-absent floor: the family's presence is partially
+        // unknown, so the row is presence-unknown (never a measured "not
+        // installed") and its floor renders `≥0`, not a plain 0.
+        f.installed = false;
+        f.presence_unknown = true;
+        f.session_count = Some(0);
+        assert_eq!(footprint_count_label(&f), "≥0");
+    }
+
+    #[test]
+    fn an_unmarked_footprint_keeps_its_plain_number() {
+        let mut f = default_footprint("claude-code", PathBuf::from("/nowhere/projects"));
+        f.installed = true;
+        f.session_count = Some(2);
+        assert_eq!(footprint_count_label(&f), "2");
+        assert_eq!(
+            footprint_json(&f)["unverified_roots"],
+            serde_json::json!([]),
+            "a fully measured family keeps its exact-count reading"
+        );
+    }
+
+    fn session_record(i: u8) -> crate::models::SessionRecord {
+        crate::models::SessionRecord {
+            id: format!("claude-code.fixture.0000000{i}"),
+            absolute_path: PathBuf::from(format!("/nowhere/projects/s{i}.jsonl")),
+            byte_size: 1,
+            mtime: UNIX_EPOCH,
+            source: crate::models::HarnessSource::ClaudeCode,
+            compressed: false,
+            sqlite_layout: None,
+            provenance: Default::default(),
+            session_dir: None,
+            movable_root: false,
+        }
+    }
+
+    /// The dir-probe seam is where the footprint row and the registry probe
+    /// row could drift apart (`doctor_consistency_test` joins them), so the
+    /// lower-bound marking and count must both travel from the probe:
+    /// count for count, root id for root id, in the scanned shape and in
+    /// the measured-absent shape alike.
+    #[test]
+    fn the_dir_probe_carries_the_marking_in_the_scanned_and_measured_absent_shapes() {
+        let marked = |state, count| scanner::HarnessProbe {
+            id: "claude-code".to_string(),
+            display_name: "Claude Code".to_string(),
+            root: Some(PathBuf::from("/nowhere/projects")),
+            confidence: crate::scanner::Confidence::Confirmed,
+            state,
+            unverified_roots: vec![scanner::UnverifiedRoot {
+                id: "claude-desktop-cowork".to_string(),
+                state: scanner::ProbeState::SkipUnascertained,
+            }],
+            source_roots: Vec::new(),
+            record_count: Some(count),
+            candidate_count: Some(count),
+            unreadable_count: Some(0),
+            unreadable_entry_count: Some(0),
+            earliest: None,
+            latest: None,
+            bytes: None,
+            recognized_files: Vec::new(),
+            note: "2 declared source roots checked; total is a lower bound — 1 unverified \
+                   source root(s): claude-desktop-cowork (skip_unascertained)"
+                .to_string(),
+        };
+
+        let records = vec![session_record(0), session_record(1)];
+        let records_ref: Vec<&crate::models::SessionRecord> = records.iter().collect();
+        let scanned = marked(scanner::ProbeState::Scanned, 2);
+        let fp = footprint_from_dir_probe(
+            "claude-code",
+            PathBuf::from("/fallback"),
+            Some(&scanned),
+            records_ref.into_iter(),
+        );
+        assert_eq!(fp.session_count, Some(2), "count for count");
+        assert_eq!(
+            fp.unverified_roots,
+            vec!["claude-desktop-cowork".to_string()],
+            "root id for root id"
+        );
+        assert_eq!(fp.note, scanned.note, "note for note");
+
+        let absent = marked(scanner::ProbeState::Missing, 0);
+        let fp = footprint_from_dir_probe(
+            "claude-code",
+            PathBuf::from("/fallback"),
+            Some(&absent),
+            [].into_iter(),
+        );
+        assert_eq!(
+            fp.session_count,
+            Some(0),
+            "the measured-absent floor, taken from the probe so the tables agree"
+        );
+        assert!(
+            fp.presence_unknown,
+            "a family with an unverified sibling is partially unknown, never a measured \
+             \"not installed\""
+        );
+        assert_eq!(
+            fp.unverified_roots,
+            vec!["claude-desktop-cowork".to_string()]
+        );
+        assert_eq!(fp.session_count, absent.record_count);
+    }
+}
+
+#[cfg(test)]
+mod w1009_doctor_desktop_tests {
+    use super::*;
+    use crate::scanner::{HarnessRegistry, ProbeState, SourceRootProbe};
+
+    // -----------------------------------------------------------------
+    // D3 — per-root rows
+    // -----------------------------------------------------------------
+
+    fn row(id: &str, primary: bool, state: ProbeState) -> SourceRootProbe {
+        SourceRootProbe {
+            id: id.to_string(),
+            primary,
+            state,
+            root: Some(PathBuf::from("/nowhere/roots").join(id)),
+            record_count: (state == ProbeState::Scanned).then_some(1),
+            unreadable_count: Some(0),
+            unreadable_entry_count: Some(0),
+            total_bytes: (state == ProbeState::Scanned).then_some(23),
+            // The doctor prints a row's scope and measurement, not the
+            // registry's move semantics, so the fixture here stays false —
+            // the collector owns the one decision this fact feeds (W1049).
+            movable: false,
+            note: String::new(),
+        }
+    }
+
+    /// W1009/DSK-3, the row's scope rule: a measured root's own count is
+    /// exact — no `≥`, because the D6 lower-bound marking belongs to the
+    /// family aggregate the row sits under, and a root cannot qualify itself.
+    #[test]
+    fn a_scanned_root_row_prints_its_exact_count_and_state() {
+        let line = source_root_row_line(&row("codex-archived", false, ProbeState::Scanned));
+        assert!(
+            line.contains("codex-archived") && line.contains("sessions 1"),
+            "the row names its root and its own count; got: {line:?}"
+        );
+        assert!(
+            line.contains("[scanned]"),
+            "the state word travels with the row; got: {line:?}"
+        );
+        assert!(
+            !line.contains('≥'),
+            "a per-root count is the root's own measurement, never a lower bound"
+        );
+        assert!(
+            !line.contains("primary"),
+            "an additional root is named by id"
+        );
+    }
+
+    /// The primary row is named by its role, not by a guessed store name —
+    /// `primary` is the registry's own term for the harness's `paths` store.
+    #[test]
+    fn the_primary_row_is_named_by_its_role() {
+        let line = source_root_row_line(&row("claude-code", true, ProbeState::Scanned));
+        assert!(
+            line.contains("primary") && !line.contains("claude-code"),
+            "the primary row's label is the role word; got: {line:?}"
+        );
+    }
+
+    /// The unverified mark: a root this scan never looked at prints `unknown`
+    /// with its state word and the explicit tie back to the family aggregate
+    /// — exactly the "explicitly marked" D6 language asks for, so the family
+    /// number can never silently count as exact.
+    #[test]
+    fn an_unverified_root_row_prints_the_mark_and_no_count() {
+        let mut unverified = row(
+            "claude-desktop-cowork",
+            false,
+            ProbeState::SkipUnascertained,
+        );
+        unverified.record_count = None;
+        unverified.total_bytes = None;
+        let line = source_root_row_line(&unverified);
+        assert!(
+            line.contains("sessions unknown"),
+            "a root nobody looked at carries no count; got: {line:?}"
+        );
+        assert!(
+            line.contains("[skip_unascertained]"),
+            "the row names why it never measured; got: {line:?}"
+        );
+        assert!(
+            line.contains("unverified root") && line.contains("lower bound"),
+            "the mark ties the row to the family's ≥ aggregate; got: {line:?}"
+        );
+    }
+
+    /// A measured absence is the one count that is earned: a root that was
+    /// looked for and found absent prints `0` — the same rule every other
+    /// count in this file follows.
+    #[test]
+    fn a_missing_root_row_prints_its_earned_zero() {
+        let mut missing = row("codex-archived", false, ProbeState::Missing);
+        missing.record_count = None;
+        missing.total_bytes = None;
+        let line = source_root_row_line(&missing);
+        assert!(
+            line.contains("sessions 0") && line.contains("root not present"),
+            "a missing root's row is the measured absence; got: {line:?}"
+        );
+        assert!(
+            !line.contains("unknown") && !line.contains("unverified"),
+            "a measured absence is neither an unknown nor a mark; got: {line:?}"
+        );
+    }
+
+    /// The print rule: rows stay quiet only when every visible root was
+    /// measured absent (the family already said "not installed"); anything
+    /// else — a measurement, an unverified root, an indeterminate one —
+    /// keeps its rows, because `never silently smaller` beats quiet.
+    #[test]
+    fn rows_print_unless_every_root_was_measured_absent() {
+        assert!(
+            !source_root_rows_worth_printing(&[]),
+            "no rows, nothing to print"
+        );
+        assert!(
+            !source_root_rows_worth_printing(&[
+                row("claude-code", true, ProbeState::Missing),
+                row("claude-desktop-cowork", false, ProbeState::Missing),
+            ]),
+            "an all-absent family already said 'not installed'; rows would repeat zeros"
+        );
+        assert!(
+            source_root_rows_worth_printing(&[
+                row("claude-code", true, ProbeState::Scanned),
+                row("claude-desktop-cowork", false, ProbeState::Missing),
+            ]),
+            "a scanned primary keeps its rows beside the measured-absent sibling"
+        );
+        assert!(
+            source_root_rows_worth_printing(&[
+                row("claude-code", true, ProbeState::Missing),
+                row(
+                    "claude-desktop-cowork",
+                    false,
+                    ProbeState::SkipUnascertained
+                ),
+            ]),
+            "the W1006e floor shape keeps its rows — the unverified mark is the point"
+        );
+    }
+
+    /// The two doctor tables share one renderer per root, so they can never
+    /// disagree about a root (`doctor_consistency_test` joins the family
+    /// counts; this pins the root rows to the same single source).
+    #[test]
+    fn the_footprint_row_and_the_registry_probe_row_agree_per_root() {
+        let mut probe = scanner::HarnessProbe {
+            id: "claude-code".to_string(),
+            display_name: "Claude Code".to_string(),
+            root: Some(PathBuf::from("/nowhere/projects")),
+            confidence: crate::scanner::Confidence::Confirmed,
+            state: ProbeState::Scanned,
+            unverified_roots: Vec::new(),
+            source_roots: vec![
+                row("claude-code", true, ProbeState::Scanned),
+                row("claude-desktop-cowork", false, ProbeState::Scanned),
+            ],
+            record_count: Some(2),
+            candidate_count: Some(2),
+            unreadable_count: Some(0),
+            unreadable_entry_count: Some(0),
+            earliest: None,
+            latest: None,
+            bytes: None,
+            recognized_files: Vec::new(),
+            note: String::new(),
+        };
+        let records = [w1006d_lower_bound_records(0), w1006d_lower_bound_records(1)];
+        let footprint = footprint_from_dir_probe(
+            "claude-code",
+            PathBuf::from("/fallback"),
+            Some(&probe),
+            records.iter(),
+        );
+        assert_eq!(footprint.source_roots.len(), 2);
+        assert_eq!(
+            footprint.source_roots[0].id, probe.source_roots[0].id,
+            "the footprint row carries the probe's own rows, id for id"
+        );
+        let footprint_json_rows: Vec<serde_json::Value> = footprint_json(&footprint)
+            ["source_roots"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let probe_json_rows: Vec<serde_json::Value> = scanner::probe_json(&probe)["source_roots"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            footprint_json_rows, probe_json_rows,
+            "the two tables render each root through the same function"
+        );
+        probe.source_roots.clear();
+    }
+
+    // -----------------------------------------------------------------
+    // D1½ — the desktop retention probe
+    // -----------------------------------------------------------------
+
+    /// A scratch registry whose retention probe declares *absolute* source
+    /// files inside `dir` — no `~` expansion, so the test never touches the
+    /// machine's real settings files and needs no env mutation.
+    fn retention_registry(dir: &Path) -> HarnessRegistry {
+        let platform_key = scanner::current_platform();
+        let cell = serde_json::json!({
+            "user_sources": [dir.join("user-settings.json").to_str().unwrap()],
+            "managed_sources": [dir.join("managed-settings.json").to_str().unwrap()],
+            "confidence": "measured-locally",
+            "source": "synthetic fixture",
+        });
+        let platforms = serde_json::json!({ platform_key: cell });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": {},
+                "retention_probes": [{
+                    "id": "desktop-session-cleanup",
+                    "key": "desktopSessionCleanupPeriodDays",
+                    "states": {
+                        "missing": "synthetic missing",
+                        "zero": "synthetic zero",
+                        "positive_int": "synthetic positive"
+                    },
+                    "platforms": platforms,
+                }],
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn claude_verdict(days: Option<u64>) -> ClaudeCheck {
+        let verdict = match days {
+            None => ClaudeRetention::UnsetDefault,
+            Some(days) => ClaudeRetention::Safe {
+                days,
+                source: PathBuf::from("/nowhere/.claude/settings.json"),
+            },
+        };
+        ClaudeCheck {
+            layers: vec![(
+                PathBuf::from("/nowhere/.claude/settings.json"),
+                verdict.clone(),
+            )],
+            verdict,
+        }
+    }
+
+    fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn inspect(dir: &Path, user: &str, managed: &str, days: Option<u64>) -> DesktopRetentionCheck {
+        write(dir, "user-settings.json", user);
+        write(dir, "managed-settings.json", managed);
+        inspect_desktop_retention(&retention_registry(dir), &claude_verdict(days))
+            .expect("the fixture registry declares the probe")
+    }
+
+    /// Missing → the built-in default 0 = no ceiling — and the state is
+    /// worded as exactly that, never as the 30-day CLI default, because the
+    /// desktop exemption is governed by a *different* key with a different
+    /// default (DSK-0a, the retention-probe semantics section, item 2).
+    #[test]
+    fn a_missing_desktop_key_is_the_unbounded_default_never_thirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(&dir.path(), "{\"cleanupPeriodDays\": 90}", "{}", Some(90));
+        assert!(matches!(check.state, DesktopRetention::DefaultZero));
+        let line = check.risk_line();
+        assert!(
+            line.contains("default 0 = no ceiling"),
+            "the line states the real default; got: {line:?}"
+        );
+        assert!(
+            line.contains("NOT the 30-day"),
+            "the line distinguishes the CLI default explicitly; got: {line:?}"
+        );
+        assert!(
+            !check.state.is_dangerous(),
+            "unbounded retention is not a deletion window"
+        );
+    }
+
+    /// Explicit 0 is the same retention as the default (no ceiling) but a
+    /// different fact about who set it — the state says the user did.
+    #[test]
+    fn an_explicit_zero_is_unbounded_by_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": 0, \"cleanupPeriodDays\": 36500}",
+            "{}",
+            Some(36500),
+        );
+        match &check.state {
+            DesktopRetention::ExplicitZero { source } => assert_eq!(
+                source,
+                &dir.path().join("user-settings.json"),
+                "the state names which file set the explicit zero"
+            ),
+            other => panic!("expected ExplicitZero, got {other:?}"),
+        }
+    }
+
+    /// A positive ceiling makes the effective retention the LONGER of the two
+    /// periods — never the smaller one, and never the ceiling alone when D1
+    /// could classify the CLI side. Both sides of the max are pinned.
+    #[test]
+    fn a_positive_ceiling_takes_the_longer_of_the_two_periods() {
+        let dir = tempfile::tempdir().unwrap();
+        // Desktop ceiling below the CLI cleanup: the CLI side wins.
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": 14, \"cleanupPeriodDays\": 36500}",
+            "{}",
+            Some(36500),
+        );
+        match &check.state {
+            DesktopRetention::Ceiling {
+                days,
+                cleanup_days,
+                effective_days,
+                ..
+            } => {
+                assert_eq!(*days, 14);
+                assert_eq!(*cleanup_days, Some(36500));
+                assert_eq!(*effective_days, Some(36500));
+            }
+            other => panic!("expected Ceiling, got {other:?}"),
+        }
+        // Desktop ceiling above the CLI cleanup: the ceiling wins — the key
+        // bounds an exemption, so it can only loosen, never tighten the
+        // effective retention below cleanupPeriodDays.
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": 20000, \"cleanupPeriodDays\": 30}",
+            "{}",
+            Some(30),
+        );
+        match &check.state {
+            DesktopRetention::Ceiling { effective_days, .. } => {
+                assert_eq!(*effective_days, Some(20000))
+            }
+            other => panic!("expected Ceiling, got {other:?}"),
+        }
+        // Unset cleanupPeriodDays means the runtime's 30-day default is the
+        // comparison floor — and a ceiling below the safe threshold is a
+        // live deletion window for transcripts that were exempt before.
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": 15}",
+            "{}",
+            None,
+        );
+        match &check.state {
+            DesktopRetention::Ceiling {
+                cleanup_days,
+                effective_days,
+                ..
+            } => {
+                assert_eq!(*cleanup_days, Some(30));
+                assert_eq!(*effective_days, Some(30));
+            }
+            other => panic!("expected Ceiling, got {other:?}"),
+        }
+        assert!(
+            check.state.is_dangerous(),
+            "an effective 30 days is the same live window D1 flags for the CLI side"
+        );
+        let line = check.risk_line();
+        assert!(
+            line.starts_with('🔴'),
+            "a small effective ceiling is red; got: {line:?}"
+        );
+    }
+
+    /// When D1's cleanupPeriodDays layer could not classify (parse failure),
+    /// the longer-of-two comparison itself is unknown — stated as such,
+    /// never silently dropped to the ceiling's own number.
+    #[test]
+    fn an_unclassifiable_cleanup_side_keeps_the_comparison_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path(),
+            "user-settings.json",
+            "{\"desktopSessionCleanupPeriodDays\": 90}",
+        );
+        write(&dir.path(), "managed-settings.json", "{}");
+        // A parse-failed D1 verdict, which no day count can be built from.
+        let parse_failed = ClaudeCheck {
+            layers: vec![(
+                PathBuf::from("/nowhere/.claude/settings.json"),
+                ClaudeRetention::UnsetDefault,
+            )],
+            verdict: ClaudeRetention::ParseFailed {
+                path: PathBuf::from("/nowhere/.claude/settings.json"),
+                error: "synthetic parse failure".to_string(),
+            },
+        };
+        let check = inspect_desktop_retention(&retention_registry(dir.path()), &parse_failed)
+            .expect("the fixture registry declares the probe");
+        match &check.state {
+            DesktopRetention::Ceiling {
+                cleanup_days,
+                effective_days,
+                ..
+            } => {
+                assert_eq!(*cleanup_days, None);
+                assert_eq!(
+                    *effective_days, None,
+                    "the comparison cannot fabricate a floor from a parse failure"
+                );
+            }
+            other => panic!("expected Ceiling with unknown floor, got {other:?}"),
+        }
+        let line = check.risk_line();
+        assert!(
+            line.contains("cannot be computed"),
+            "the risk line states the comparison itself is unknown; got: {line:?}"
+        );
+    }
+
+    /// The managed override (DSK-0a item 3): a managed source that sets
+    /// `cleanupPeriodDays` makes the desktop key ignored entirely, whatever
+    /// the user's file says — the state must name the managing source, or
+    /// "overridden by org policy" reads as "the user set X".
+    #[test]
+    fn a_managed_cleanup_period_overrides_and_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": 20000, \"cleanupPeriodDays\": 36500}",
+            "{\"cleanupPeriodDays\": 45}",
+            Some(45),
+        );
+        match &check.state {
+            DesktopRetention::ManagedOverride { days, source } => {
+                assert_eq!(*days, 45);
+                assert_eq!(
+                    source,
+                    &dir.path().join("managed-settings.json"),
+                    "the state names the managed source that governs"
+                );
+            }
+            other => panic!("expected ManagedOverride, got {other:?}"),
+        }
+        let line = check.risk_line();
+        assert!(
+            line.contains("ignored") && line.contains("managed"),
+            "the line says the desktop key is ignored, and why; got: {line:?}"
+        );
+        assert!(
+            check.state.is_dangerous(),
+            "a 45-day policy window is a live deletion window"
+        );
+    }
+
+    /// The runtime's own precedence for the key: managed (policySettings)
+    /// before user — the scope is "User or managed", so a managed desktop
+    /// value wins over the user's, while a managed cleanup override never
+    /// leaves room for the user's desktop value at all.
+    #[test]
+    fn a_managed_desktop_value_outranks_the_user_one() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path(),
+            "user-settings.json",
+            "{\"desktopSessionCleanupPeriodDays\": 5}",
+        );
+        write(
+            dir.path(),
+            "managed-settings.json",
+            "{\"desktopSessionCleanupPeriodDays\": 400}",
+        );
+        let check = inspect_desktop_retention(
+            &retention_registry(dir.path()),
+            &claude_verdict(Some(36500)),
+        )
+        .expect("the fixture registry declares the probe");
+        match &check.state {
+            DesktopRetention::Ceiling {
+                days,
+                source,
+                effective_days,
+                ..
+            } => {
+                assert_eq!(*days, 400, "the managed value wins for this key");
+                assert_eq!(
+                    source,
+                    &dir.path().join("managed-settings.json"),
+                    "the governed value is attributed to the managed file"
+                );
+                assert_eq!(*effective_days, Some(36500));
+            }
+            other => panic!("expected Ceiling from the managed value, got {other:?}"),
+        }
+    }
+
+    /// A settings file that is there but cannot be parsed (or holds a value
+    /// this probe cannot interpret) keeps the state unknown — the runtime's
+    /// fail-destructive fallback for this key would read as *unbounded*, but
+    /// reporting that as if it were the configured value is exactly the
+    /// "parse failure read as unset" lie D1 exists to prevent.
+    #[test]
+    fn broken_or_uninterpretable_sources_stay_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": ",
+            "{}",
+            None,
+        );
+        assert!(
+            matches!(check.state, DesktopRetention::Unknown { .. }),
+            "a parse failure is unknown, never the (fail-open) default; got {:?}",
+            check.state
+        );
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": -7}",
+            "{}",
+            None,
+        );
+        match &check.state {
+            DesktopRetention::Unknown { why } => assert!(
+                why.contains("not a nonnegative integer"),
+                "an invalid value says what was found; got: {why:?}"
+            ),
+            other => panic!("expected Unknown for an invalid value, got {other:?}"),
+        }
+        let line = check.risk_line();
+        assert!(
+            line.starts_with('🟡') && line.contains("not guessing"),
+            "an unknown state is yellow and refuses to guess; got: {line:?}"
+        );
+    }
+
+    // The desktop key present in an unreadable file + the key's real value
+    // in others? A file that exists but cannot be read: `fs::read_to_string`
+    // with a directory in the path is the deterministic shape.
+    #[test]
+    fn an_unreadable_source_keeps_the_state_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = retention_registry(dir.path());
+        let unreadable = dir.path().join("user-settings.json");
+        std::fs::create_dir(&unreadable).unwrap();
+        std::fs::write(dir.path().join("managed-settings.json"), "{}").unwrap();
+        let check = inspect_desktop_retention(&registry, &claude_verdict(None))
+            .expect("the fixture registry declares the probe");
+        assert!(
+            matches!(check.state, DesktopRetention::Unknown { .. }),
+            "a source that cannot be read keeps the state unknown; got {:?}",
+            check.state
+        );
+    }
+
+    /// A registry that declares no such probe means the check was not
+    /// performed — `None`, never a state, never a default. The same answer
+    /// a platform without a retention cell gives.
+    #[test]
+    fn a_registry_without_the_probe_is_not_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let no_probe: HarnessRegistry = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": {},
+            }]
+        }))
+        .unwrap();
+        assert!(
+            inspect_desktop_retention(&no_probe, &claude_verdict(None)).is_none(),
+            "no declared probe → not performed"
+        );
+        // A probe whose cells name only *other* platforms: same answer.
+        let platform_key = scanner::current_platform();
+        let other = if platform_key == "macos" {
+            "linux"
+        } else {
+            "macos"
+        };
+        let only_elsewhere: HarnessRegistry = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": {},
+                "retention_probes": [{
+                    "id": "desktop-session-cleanup",
+                    "key": "desktopSessionCleanupPeriodDays",
+                    "states": {},
+                    "platforms": { other: {
+                        "user_sources": ["/nowhere/elsewhere/settings.json"],
+                        "managed_sources": [],
+                        "confidence": "measured-locally",
+                        "source": "synthetic fixture"
+                    }},
+                }],
+            }]
+        }))
+        .unwrap();
+        assert!(
+            inspect_desktop_retention(&only_elsewhere, &claude_verdict(None)).is_none(),
+            "no cell for this platform → not performed"
+        );
+    }
+
+    /// The D4 line rides the risks list when (and only when) the check ran —
+    /// a script and a human read the same verdict, and the risks list grows
+    /// by exactly one Claude-desktop line beside the existing Claude one.
+    #[test]
+    fn build_risks_carries_the_desktop_line_only_when_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(&dir.path(), "{}", "{}", None);
+        let claude = claude_verdict(Some(36500));
+        let gemini = GeminiRetention {
+            enabled: false,
+            ..GeminiRetention::default()
+        };
+        let with = build_risks(
+            &claude,
+            &gemini,
+            &Some(check.clone()),
+            &[],
+            false,
+            &CheckRunner::new(),
+        );
+        assert_eq!(with.len(), 3, "claude + desktop + gemini lines");
+        assert!(
+            with[1].starts_with('🟢') && with[1].contains("Claude Desktop/Cowork"),
+            "the desktop line sits beside the Claude line, green for the unbounded default; got: {:?}",
+            with[1]
+        );
+        let without = build_risks(&claude, &gemini, &None, &[], false, &CheckRunner::new());
+        assert_eq!(without.len(), 2, "no declared probe → no desktop line");
+        assert!(
+            !without
+                .iter()
+                .any(|line| line.contains("Claude Desktop/Cowork")),
+            "the only Claude lines left are the pre-existing ones"
+        );
+        // JSON mirrors the state: checked with tagged kinds, unchecked null.
+        let value = desktop_retention_json(&check);
+        assert_eq!(
+            value["checked"],
+            serde_json::json!(true),
+            "a performed check says so"
+        );
+        assert_eq!(
+            value["state"]["kind"],
+            serde_json::json!("default_zero_unbounded")
+        );
+    }
+
+    /// The sources table: one row per declared file, stating its kind and
+    /// what it said — a managed source that set nothing renders "not set"
+    /// beside an absent one, so which layer spoke is always readable.
+    #[test]
+    fn every_declared_source_gets_a_row_with_its_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": 60}",
+            "{\"cleanupPeriodDays\": 90}",
+            Some(90),
+        );
+        assert_eq!(check.sources.len(), 2);
+        let user = &check.sources[0];
+        assert_eq!(user.kind, DesktopSourceKind::User);
+        assert_eq!(
+            user.outcome,
+            DesktopSourceOutcome::Read {
+                desktop_days: Some(60),
+                cleanup_days: None,
+            }
+        );
+        let managed = &check.sources[1];
+        assert_eq!(managed.kind, DesktopSourceKind::Managed);
+        // The managed file sets cleanupPeriodDays, so the override rule
+        // decides the state — the desktop key the user file set is ignored
+        // entirely. The source rows still record what each file said,
+        // which is what makes the override readable instead of silent.
+        assert_eq!(
+            managed.outcome,
+            DesktopSourceOutcome::Read {
+                desktop_days: None,
+                cleanup_days: Some(90),
+            }
+        );
+        assert!(
+            matches!(
+                check.state,
+                DesktopRetention::ManagedOverride { days: 90, .. }
+            ),
+            "a managed cleanupPeriodDays overrides the desktop key; got {:?}",
+            check.state
+        );
+    }
+
+    /// The JSON state variants a script needs: a managed override is tagged
+    /// `ignored_key`, matching the "never read the override as a user
+    /// choice" rule in two channels, not one.
+    #[test]
+    fn the_json_tags_the_managed_override_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": 400}",
+            "{\"cleanupPeriodDays\": 30}",
+            None,
+        );
+        let value = desktop_retention_json(&check);
+        assert_eq!(
+            value["state"]["kind"],
+            serde_json::json!("managed_override")
+        );
+        assert_eq!(
+            value["state"]["ignored_key"],
+            serde_json::json!(true),
+            "a script must be able to tell a policy override from a user choice"
+        );
+        assert_eq!(value["state"]["days"], serde_json::json!(30));
+    }
+
+    /// The `--settings` invisibility note travels with every state — a
+    /// one-run flag value that never lands on disk is expected to be absent
+    /// from this probe, and the reader must not mistake that absence for a
+    /// gap (DSK-0a item 4).
+    #[test]
+    fn every_state_carries_the_settings_flag_invisibility_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(&dir.path(), "{}", "{}", None);
+        assert!(
+            check.risk_line().contains("--settings"),
+            "the note names the invisible source; got: {}",
+            check.risk_line()
+        );
+        // And the D1-block headline states the state, not just the risk.
+        let label = check.state.label();
+        assert!(
+            label.contains("default 0 = no ceiling"),
+            "the label answers 'what is the desktop retention' directly; got: {label:?}"
+        );
+    }
+
+    // Helper: synthetic SessionRecords for the dir-probe seam test above,
+    // in the shape W1006d's `session_record` helper uses.
+    fn w1006d_lower_bound_records(i: u8) -> crate::models::SessionRecord {
+        crate::models::SessionRecord {
+            id: format!("claude-code.fixture.0000000{i}"),
+            absolute_path: PathBuf::from(format!("/nowhere/projects/s{i}.jsonl")),
+            byte_size: 1,
+            mtime: UNIX_EPOCH,
+            source: crate::models::HarnessSource::ClaudeCode,
+            compressed: false,
+            sqlite_layout: None,
+            provenance: Default::default(),
+            session_dir: None,
+            movable_root: false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod w1043_deadline_tests {
+    //! W1043 — a check that never answers must not become a hang or a lie.
+    //!
+    //! Rollback proof: before the change, `doctor` had no per-check deadline
+    //! at all — one wedged check (a destination probe holding a connection
+    //! that never answered was the observed case) froze the whole command
+    //! with zero output, because every section printed only at the end.
+    //! Each fixture below asserts the deadline machinery's answer, so
+    //! reverting the harness makes the fixture red (or makes the wiped
+    //! `timed_out` field fail to compile).
+
+    use super::*;
+
+    /// A check that answers within its budget passes its answer through
+    /// unchanged and records nothing.
+    #[test]
+    fn a_check_that_answers_within_its_budget_passes_through() {
+        let mut checks = CheckRunner::new();
+        let answer = checks
+            .run("D-test answers", 5, || 41 + 1)
+            .expect("a check that answers must return Some");
+        assert_eq!(answer, 42);
+        assert!(checks.notes().is_empty(), "nothing timed out");
+        assert_eq!(checks.timed_out_after("D-test answers"), None);
+    }
+
+    /// A check that never answers is abandoned at its budget: the note
+    /// carries the label the trace printed, the run continues (this test
+    /// would not finish otherwise), and the answer is `None` — the timeout
+    /// and nothing else.
+    #[test]
+    fn a_check_that_outlives_its_budget_is_abandoned_with_a_note() {
+        let mut checks = CheckRunner::new();
+        let started = std::time::Instant::now();
+        let answer: Option<u64> = checks.run("D-test wedged", 1, || {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            7
+        });
+        assert!(answer.is_none(), "the budget must be the only path to None");
+        let waited = started.elapsed();
+        // The abandoned worker keeps its own 30s sleep (detached — joining it
+        // would be the hang again); this test only waits for the 1s budget,
+        // with slack for a busy CI machine.
+        assert!(
+            waited < std::time::Duration::from_secs(20),
+            "the run must continue once the budget expires, not wait the check out; waited \
+             {waited:?}"
+        );
+        let [note] = checks.notes() else {
+            panic!("exactly one note: {:?}", checks.notes());
+        };
+        assert_eq!(note.check, "D-test wedged");
+        assert_eq!(note.budget_secs, 1);
+        assert_eq!(checks.timed_out_after("D-test wedged"), Some(1));
+    }
+
+    /// A panicking check propagates its panic: the deadline machinery fences
+    /// the wedge, not the bug.
+    #[test]
+    #[should_panic(expected = "synthetic checkpoint panic")]
+    fn a_panicking_check_propagates_its_panic() {
+        let mut checks = CheckRunner::new();
+        let _ = checks.run("D-test panics", 5, || -> u8 {
+            panic!("synthetic checkpoint panic");
+        });
+    }
+
+    /// A timed-out D1 renders as an unknown in every channel: the verdict is
+    /// its own `TimedOut` state, the JSON hides the placeholder behind
+    /// `checked: false`, and the risk line words the unknown rather than the
+    /// 30-day default.
+    #[test]
+    fn a_timed_out_d1_is_unknown_in_verdict_json_and_risk_line() {
+        let mut report = minimal_w1043_report();
+        report.claude = ClaudeCheck {
+            layers: Vec::new(),
+            verdict: ClaudeRetention::TimedOut,
+        };
+        report.timed_out.push(CheckTimedOut {
+            check: D1_CHECK.to_string(),
+            budget_secs: 30,
+        });
+        // JSON: `timed_out` named the check, and `claude` answers "not
+        // checked" rather than a measurement about layers nobody read.
+        let value = report_to_json(&report);
+        assert_eq!(
+            value["timed_out"],
+            serde_json::json!([{"check": D1_CHECK, "budget_secs": 30}])
+        );
+        assert_eq!(
+            value["claude"],
+            serde_json::json!({"checked": false, "timed_out_after_secs": 30})
+        );
+        // The risk line words the unknown; it must not borrow the 30-day
+        // default plain `UnsetDefault` would have stated.
+        let checks = CheckRunner::new();
+        let risks = build_risks(
+            &report.claude,
+            &report.gemini,
+            &report.desktop_retention,
+            &report.footprints,
+            false,
+            &checks,
+        );
+        let line = risks
+            .iter()
+            .find(|line| line.contains("Claude Code: the settings read did not answer"))
+            .expect("the timed-out D1 risk line exists");
+        assert!(
+            line.contains("UNKNOWN, not the 30-day default and not proof of safety"),
+            "the risk words the unknown, not a default: {line}"
+        );
+        // `is_dangerous` stays false: a non-answer is not a finding.
+        assert!(!report.claude.verdict.is_dangerous());
+        // `d1_effective_cleanup_days` keeps the CLI side of the Desktop
+        // longer-of-two comparison unknown rather than borrowing a default.
+        assert_eq!(d1_effective_cleanup_days(&report.claude.verdict), None);
+    }
+
+    /// A timed-out destination probe is its own outcome, never
+    /// `unreachable`: the deadline expiring is a decision about the clock,
+    /// and the JSON carries a kind a script can never confuse with the
+    /// measured "the host said no".
+    #[test]
+    fn a_probe_timed_out_destination_is_not_an_unreachable_one() {
+        let probe = DestinationProbe {
+            name: "synthetic-destination".to_string(),
+            repo_root: "opendal:synthetic".to_string(),
+            outcome: DestinationOutcome::ProbeTimedOut { seconds: 45 },
+            activity_index: None,
+            debris: None,
+        };
+        let value = destination_probe_json(&probe);
+        assert_eq!(value["kind"], serde_json::json!("probe_timed_out"));
+        assert_eq!(value["budget_secs"], serde_json::json!(45));
+        assert_eq!(
+            value["activity_index"],
+            serde_json::json!(null),
+            "nothing after a deadline is 'not checked', never fine"
+        );
+        // `budget_secs` is the only number the probe outcome carries — the
+        // runner-recorded budget (W1043f L6), not a second source that could
+        // disagree with the `timed_out` note the run also prints.
+    }
+
+    /// W1043f (M1): a timed-out `Option`-shaped section keeps the `checked:
+    /// false` placeholder a config-unreadable report gets, and adds the
+    /// seconds it walked away at — the same shape D1/D2/machine_logs already
+    /// had — so `--json` never words a wedged check's placeholder as a
+    /// bare "did not look"; and without a note the plain `{"checked":
+    /// false}` stands, so the config-unreadable story is unchanged.
+    #[test]
+    fn a_timed_out_option_section_carries_the_deadline_under_checked_false() {
+        // Every `Option` section of `--json`, with the check label that owns
+        // its deadline and the note that a wedged run leaves behind. The
+        // labels are the same consts `run()` traces, so a section can never
+        // claim a budget a different check waited out.
+        let sections: [(&str, &str); 10] = [
+            ("desktop_retention", DESKTOP_RETENTION_CHECK),
+            ("reclaim", RECLAIM_CHECK),
+            ("cache", CACHE_CHECK),
+            ("body_cache", BODY_CACHE_CHECK),
+            ("fts_indexes", FTS_CHECK),
+            ("stage_duplicate_shards", STAGE_DUP_CHECK),
+            ("keys", KEYS_CHECK),
+            ("destination_reconciliation", DEST_RECONCILE_CHECK),
+            ("native_host", NATIVE_HOST_CHECK),
+            ("mirror", MIRROR_CHECK),
+        ];
+        for (key, check) in sections {
+            let mut report = minimal_w1043_report();
+            report.timed_out.push(CheckTimedOut {
+                check: check.to_string(),
+                budget_secs: 90,
+            });
+            let value = report_to_json(&report);
+            assert_eq!(
+                value[key],
+                serde_json::json!({"checked": false, "timed_out_after_secs": 90}),
+                "{key} must word the deadline, not a bare did-not-look"
+            );
+            // The note names the check itself, so a script that only reads
+            // one section finds the culprit there too.
+            assert_eq!(
+                value["timed_out"],
+                serde_json::json!([{"check": check, "budget_secs": 90}]),
+                "the note rides at the top level: {value}"
+            );
+            // And without a note the plain did-not-look shape stands — the
+            // config-unreadable report keeps the byte shape it always had.
+            let value = report_to_json(&minimal_w1043_report());
+            assert_eq!(
+                value[key],
+                serde_json::json!({"checked": false}),
+                "{key} without a note is the plain not-checked tag"
+            );
+        }
+    }
+
+    /// W1043f (High): the report a wedged or broken config read produces
+    /// carries **no** config to reuse — the CLI must not be able to
+    /// substitute one by re-reading the file, which is the unbounded second
+    /// read the review found. `not_checked` and `config_error` stay the one
+    /// story about what was inspected.
+    #[test]
+    fn an_unreadable_config_report_carries_no_config_to_reuse() {
+        let report = config_unreadable(
+            CheckRunner::new(),
+            "reading the configuration did not answer within 2s — the file exists but was \
+             never read to the end, so whether it is usable is UNKNOWN, not invalid"
+                .to_string(),
+            ClaudeCheck {
+                layers: Vec::new(),
+                verdict: ClaudeRetention::TimedOut,
+            },
+            GeminiRetention::default(),
+        );
+        assert!(
+            report.config.is_none(),
+            "no usable config was read, so there is nothing for a caller to reuse"
+        );
+        assert!(report.config_error.is_some());
+        assert!(
+            !report.not_checked().is_empty(),
+            "the did-not-look story is carried by not_checked"
+        );
+        // The healthy half of the invariant is enforced where it runs: a
+        // report whose config was read carries it — the spawned-doctor
+        // regression (`w1043_doctor_hang_test`) pins the end-to-end reuse
+        // and the carrier's Some half against a planted config.
+    }
+
+    /// The smallest report whose sections the deadline machinery can hollow
+    /// out: same skeleton `report_to_json_shape_tests` uses, with the
+    /// optional checks left unfilled.
+    fn minimal_w1043_report() -> DoctorReport {
+        DoctorReport {
+            config_source: crate::config::ConfigSource::DefaultsMissing,
+            config_error: None,
+            config: None,
+            claude: ClaudeCheck {
+                layers: Vec::new(),
+                verdict: ClaudeRetention::UnsetDefault,
+            },
+            gemini: GeminiRetention::default(),
+            desktop_retention: None,
+            footprints: Vec::new(),
+            other_present: Vec::new(),
+            risks: Vec::new(),
+            reclaim: None,
+            cache: None,
+            body_cache: None,
+            fts_indexes: None,
+            probes: Vec::new(),
+            archive_gaps: Vec::new(),
+            machine_logs: MachineLogRows::default(),
+            scan_failed: false,
+            destinations: Vec::new(),
+            stage_duplicate_shards: None,
+            native_host: None,
+            keys: None,
+            dest_reconcile: None,
+            mirror: None,
+            timed_out: Vec::new(),
+        }
     }
 }

@@ -56,7 +56,7 @@ const BASE_MARKERS: [&str; 11] = [
 /// 4. Split on either path separator and drop empty / lone-`.` (CWD) segments.
 fn normalized_segments(template: &str) -> Vec<String> {
     let t: &str = template
-        .split('（')
+        .split('（') // t5-allow: registry templates carry CJK annotation tails; test data quotes one on purpose
         .next()
         .unwrap_or("")
         .split(" + ")

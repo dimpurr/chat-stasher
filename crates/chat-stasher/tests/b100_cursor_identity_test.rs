@@ -523,11 +523,69 @@ fn a_cursor_that_advanced_over_identical_bytes_writes_no_shard() {
     );
 }
 
-/// The safety net, safe direction: when the previous export hash is not
-/// available, "we cannot tell" must not be read as "identical". The shard is
-/// written exactly as before the net existed.
+/// The safety net, as ADR-061 leaves it. In the increment era the per-record
+/// map is the finer truth and *subsumes* the whole-export hash: an entry
+/// whose record map is intact does not fall back to comparing whole-library
+/// bytes, so a cursor that advanced with an unavailable previous export
+/// hash — and with not one record changed — writes nothing. The map is the
+/// second dedup layer's replacement, not a weaker guard.
+///
+/// Fails before ADR-061 in the opposite direction: the whole-file era had
+/// no map and would have re-exported the session here. Post-ADR-061 the
+/// unknown-safety direction this test used to carry moved to the map level
+/// — see `w1020_sg3_opencode_increment_test::map_loss_degrades…` and the
+/// companion case below.
 #[test]
-fn an_unavailable_previous_export_hash_still_writes_a_shard() {
+fn an_unavailable_previous_export_hash_is_covered_by_the_increment_map() {
+    let fx = Fixture::new();
+    let first = fx.collect();
+    assert_eq!(first.shards_written, 2);
+    let id_a = fx.session_id(SESSION_A);
+    let a_before = fx.concat(&id_a);
+    let live = sqlite_probe::opencode_session_cursor(&fx.db, SESSION_A).unwrap();
+
+    // Move the *stored* cursor ahead of the live one so the per-session
+    // comparison has to say "changed" and the session is read for real, and
+    // blank the whole-export hash: the old safety net has nothing to
+    // compare against. The increment map is left intact.
+    edit_state(&fx, SESSION_A, |entry| {
+        entry["cursor"]["opencode"]["session_time_updated"] = json!(
+            live.session_time_updated
+                .expect("OpenCode records a session time")
+                + 1
+        );
+        entry["cursor"]["prefix_sha256"] = json!("");
+    });
+    write_unrelated(&fx.db);
+
+    let second = fx.collect();
+    assert_eq!(
+        second.shards_written, 0,
+        "no record changed, so the intact increment map covers the unavailable hash"
+    );
+    assert_eq!(fx.shard_count(&id_a), 1);
+    assert_eq!(fx.concat(&id_a), a_before);
+
+    // Bookkeeping still happens: skipping the write must not skip the cursor.
+    let stored = fx.read_state();
+    assert_eq!(
+        state_entry(&stored, SESSION_A)["cursor"]["opencode"]["session_time_updated"].as_i64(),
+        live.session_time_updated,
+        "the stored cursor must advance to the value the pass just read"
+    );
+    println!(
+        "b100 content_net_map_covered shards={} a_shards={} a_bytes={}",
+        second.shards_written,
+        fx.shard_count(&id_a),
+        a_before.len()
+    );
+}
+
+/// The same net, safe direction at the map level: when neither the increment
+/// map nor any whole-export hash can be consulted, "we cannot tell" must
+/// still not be read as "nothing to write". The shard is written.
+#[test]
+fn an_entry_with_no_map_and_no_hash_still_writes_a_shard() {
     let fx = Fixture::new();
     let first = fx.collect();
     assert_eq!(first.shards_written, 2);
@@ -541,16 +599,24 @@ fn an_unavailable_previous_export_hash_still_writes_a_shard() {
                 .expect("OpenCode records a session time")
                 + 1
         );
-        // An absent / unreadable previous hash, not a hash that happens to
-        // match: the net has nothing to compare against.
         entry["cursor"]["prefix_sha256"] = json!("");
+        // ADR-061: strip the increment caches too, so the entry belongs to
+        // no era that can answer "what did we already deliver".
+        entry["cursor"]
+            .as_object_mut()
+            .unwrap()
+            .remove("opencode_record_digests");
+        entry["cursor"]
+            .as_object_mut()
+            .unwrap()
+            .remove("opencode_map_digest");
     });
     write_unrelated(&fx.db);
 
     let second = fx.collect();
     assert_eq!(
         second.shards_written, 1,
-        "an unavailable previous hash must still produce a shard"
+        "with no map and no hash the pass must still produce a shard"
     );
     assert_eq!(fx.shard_count(&id_a), 2);
     let a_after = fx.concat(&id_a);
@@ -559,7 +625,7 @@ fn an_unavailable_previous_export_hash_still_writes_a_shard() {
         "the write is a normal append"
     );
     println!(
-        "b100 content_net_unavailable shards={} a_shards={} a_bytes_before={} a_bytes_after={}",
+        "b100 content_net_neither_map_nor_hash shards={} a_shards={} a_bytes_before={} a_bytes_after={}",
         second.shards_written,
         fx.shard_count(&id_a),
         a_before.len(),

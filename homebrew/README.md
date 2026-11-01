@@ -21,14 +21,14 @@ your `PATH`.
 ## Install
 
 ```sh
-brew install dimpurr/chat-stasher/chat-stasher
+brew install dimpurr/tap/chat-stasher
 ```
 
 Homebrew will fetch the tap and install the formula automatically. If you
 prefer to tap explicitly first:
 
 ```sh
-brew tap dimpurr/chat-stasher
+brew tap dimpurr/tap
 brew install chat-stasher
 ```
 
@@ -54,7 +54,7 @@ chat-stasher doctor
 brew upgrade chat-stasher
 ```
 
-(Or `brew upgrade dimpurr/chat-stasher/chat-stasher` when you have multiple
+(Or `brew upgrade dimpurr/tap/chat-stasher` when you have multiple
 taps.)
 
 ## Uninstall
@@ -66,7 +66,7 @@ brew uninstall chat-stasher
 The tap itself stays registered. To remove it too:
 
 ```sh
-brew untap dimpurr/chat-stasher
+brew untap dimpurr/tap
 ```
 
 ## How this tap works (and why it is a formula, not a cask)

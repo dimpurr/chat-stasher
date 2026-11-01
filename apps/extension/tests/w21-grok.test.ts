@@ -357,22 +357,44 @@ describe('W21-3 · the passive hook', () => {
 // 4 · The list parser
 // ---------------------------------------------------------------------------
 describe('W21-4 · parsing one page of the conversation list', () => {
+  /**
+   * The listing `w21`'s own `listPage` fixture produces for a row: the nth row
+   * carries `title: synthetic-${n}` (see the fixture above). 🔴 W984 · The
+   * parser now carries this map on pages whose rows named metadata; before
+   * W984 the page carried no `listings` key at all, and the empty page below
+   * still carries none (no row, nothing to name).
+   */
+  const listingOf = (conversationId: string, index: number) => new Map([
+    [conversationId, {
+      title: `synthetic-${index}`,
+      starred: false,
+      createTime: '2026-07-01T10:00:00.000000Z',
+      modifyTime: '2026-07-01T10:01:10.000Z',
+    }],
+  ]);
+
   it('reads the ids, reports no total, and only carries a non-empty token forward', () => {
     const withToken = parseGrokListPage(listPage([ID, ID2], 'token-1'));
     expect(withToken).toEqual({
       ok: true,
-      page: { ids: [ID, ID2], total: null, nextToken: 'token-1' },
+      page: {
+        ids: [ID, ID2],
+        total: null,
+        nextToken: 'token-1',
+        listings: new Map([...listingOf(ID, 0), ...listingOf(ID2, 1)]),
+      },
     });
     // Absent ⇒ the API's own "there is no next page"; an explicit empty string means the same thing.
     expect(parseGrokListPage(listPage([ID]))).toEqual({
       ok: true,
-      page: { ids: [ID], total: null, nextToken: null },
+      page: { ids: [ID], total: null, nextToken: null, listings: listingOf(ID, 0) },
     });
     expect(parseGrokListPage(listPage([ID], null))).toEqual({
       ok: true,
-      page: { ids: [ID], total: null, nextToken: null },
+      page: { ids: [ID], total: null, nextToken: null, listings: listingOf(ID, 0) },
     });
-    // An empty page is a readable page with zero rows — not a shape problem.
+    // An empty page is a readable page with zero rows — not a shape problem,
+    // and (W984) no metadata was named, so no `listings` key at all.
     expect(parseGrokListPage(listPage([], 'token-1'))).toEqual({
       ok: true,
       page: { ids: [], total: null, nextToken: 'token-1' },
