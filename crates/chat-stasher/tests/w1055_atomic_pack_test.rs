@@ -873,19 +873,14 @@ fn the_real_push_publishes_every_pack_through_the_wrapper_on_both_local_shapes()
     // and snapshot files still depend on it. Packs go through the wrapper
     // with it set, and nothing is left staged after a clean push.
     assert!(cfg.backend_options().contains_key("atomic_write_dir"));
-    let staged: Vec<_> = data_files(&repo)
+    let mut staged: Vec<String> = data_files(&repo)
         .keys()
+        .filter(|name| classify(name).is_some())
         .cloned()
-        .chain(
-            fs::read_dir(repo.join(".chat-stasher-tmp"))
-                .map(|d| {
-                    d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-                        .collect()
-                })
-                .unwrap_or_default(),
-        )
-        .filter(|name| classify(name).is_some() || name.contains(".chat-stasher-tmp"))
         .collect();
+    if let Ok(dir) = fs::read_dir(repo.join(".chat-stasher-tmp")) {
+        staged.extend(dir.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()));
+    }
     assert!(
         staged.is_empty(),
         "nothing is left staged after a push: {staged:?}"
