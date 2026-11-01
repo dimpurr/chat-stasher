@@ -326,8 +326,20 @@ describe('W64-5 · the user is told to sign in, not that the API changed', () =>
     expect(sentence).not.toBe(t('popup.notes.halted.waitingRetry', {
       reason: 'auth-refused', attempts: 1, minutes: 30, detail: 'kimi list returned HTTP 401',
     }));
-    // "the fix is to open kimi and sign in again" — the action a 401 has.
+    // The action a 401 has: "open kimi and sign in again". (Until W914 this line read
+    // "the fix is to open kimi and sign in again" — the promise around the action is
+    // what the assertions below forbid, not the action itself.)
     expect(sentence.toLowerCase()).toContain('sign in');
+    // 🔴 W914 · But the action may not be sold as the whole fix. The reason is raised on a
+    //    refusal measured on the credential path (`engine.ts:783`), not on a measurement that
+    //    the profile is logged out — a malformed batch that took that path reads the same —
+    //    and the field case that forced this had a platform hold the reason for eleven days
+    //    without recovering. So the sentence offers the login as the first thing to try and
+    //    says it is not a guarantee. The old wording ("the fix is … and that is all it takes")
+    //    fails both of these, which is what makes this a regression test rather than a tautology.
+    expect(sentence.toLowerCase()).not.toContain('all it takes');
+    expect(sentence.toLowerCase()).not.toContain('the fix is');
+    expect(sentence.toLowerCase()).toContain('not a guarantee');
     // And it does not claim the platform changed, which is what the old reason said.
     expect(sentence.toLowerCase()).not.toContain('api changed');
   });
