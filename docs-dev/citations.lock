@@ -839,21 +839,21 @@ crates/chat-stasher/src/main.rs:11047-11052  13896e8d543a  lines=6
   <- SECURITY.md:70, docs-dev/threat-model.md:878  :: eprintln!("push: cannot check stage metadata: {e:#}");
 crates/chat-stasher/src/main.rs:12020-12052  d0f0c8ab4f38  lines=33
   <- docs-dev/threat-model.md:942  :: if let Some(line) = body_cache_stats_line(&body_cache) {
-crates/chat-stasher/src/main.rs:16763-16814  eb6db4f4050d  lines=52
+crates/chat-stasher/src/main.rs:16775-16826  eb6db4f4050d  lines=52
   <- docs-dev/install.md:306  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:16763-16774  8f911ffc9cf6  lines=12
+crates/chat-stasher/src/main.rs:16775-16786  8f911ffc9cf6  lines=12
   <- docs-dev/install.md:1038  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:17543-17557  da484ba556b2  lines=15
+crates/chat-stasher/src/main.rs:17555-17569  da484ba556b2  lines=15
   <- docs-dev/install.md:630  :: `dest-init`) — the destination block itself does not have t…
-crates/chat-stasher/src/main.rs:17980-17987  c5ec574f3326  lines=8
+crates/chat-stasher/src/main.rs:17992-17999  c5ec574f3326  lines=8
   <- docs-dev/install.md:629  :: )
-crates/chat-stasher/src/main.rs:20854-20861  9cd8be148a6b  lines=8
+crates/chat-stasher/src/main.rs:20866-20873  9cd8be148a6b  lines=8
   <- docs-dev/install.md:1028  :: render_status(report, false)
-crates/chat-stasher/src/main.rs:20879-20880  d745898fe057  lines=2
+crates/chat-stasher/src/main.rs:20891-20892  d745898fe057  lines=2
   <- docs-dev/install.md:999  :: // would answer "is my timer healthy?" from a machine the t…
-crates/chat-stasher/src/main.rs:21387-21388  f5217dab38af  lines=2
+crates/chat-stasher/src/main.rs:21399-21400  f5217dab38af  lines=2
   <- docs-dev/install.md:994  :: // them. `destinations` and `reclaim` are the machine-reada…
-crates/chat-stasher/src/main.rs:21479-21486  7df1b5962a59  lines=8
+crates/chat-stasher/src/main.rs:21491-21498  7df1b5962a59  lines=8
   <- docs-dev/install.md:1015  :: };
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:447, docs-dev/threat-model.md:722  :: //! ADR-022: content-addressed hash tracking for stage meta…
