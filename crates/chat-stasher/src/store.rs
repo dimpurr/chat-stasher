@@ -416,6 +416,26 @@ impl BackupStore {
         self.mirror_reads.as_ref()
     }
 
+    /// An owned twin of this store: the same configuration values and the same
+    /// cache/mirror handles (shared [`std::sync::Arc`]s, so every counter the
+    /// twin moves shows up here too) — one store for a worker thread the run
+    /// may have to abandon (W1052's detached deadline workers cannot borrow
+    /// this one, and a wedged worker must not take the only store with it).
+    ///
+    /// Every field is either copied, cloned or `Arc`-cloned in; nothing is
+    /// opened or dialed here — a twin opens backends exactly when the store
+    /// it came from does, at the first operation.
+    pub fn owned_twin(&self) -> Self {
+        BackupStore {
+            cfg: self.cfg.clone(),
+            machine: self.machine.clone(),
+            body_cache: self.body_cache.clone(),
+            snapshot_cache: self.snapshot_cache.clone(),
+            mirror_reads: self.mirror_reads.clone(),
+            shard_policy: self.shard_policy,
+        }
+    }
+
     /// Build the backend handles.
     ///
     /// Local paths use rustic_backend's `LocalBackend` directly. When a remote

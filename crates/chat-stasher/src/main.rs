@@ -11467,6 +11467,71 @@ fn cmd_repair_duplicates(
     }
 }
 
+/// One `read` step that outlived its deadline (W1052): the human verdict and
+/// the exit code, in one place so every bounded step words the clock the same
+/// way `doctor`'s checks do (W1043).
+///
+/// The wording keeps the three states apart that `CLAUDE.md` holds invariant:
+/// a deadline is a decision about the clock, so the step is *unknown* — never
+/// worded as unreachable (a measured refusal the remote made), never as a
+/// failure of the thing being read, and never as an absent session. The exit
+/// code follows the exit-code table already in `docs/cli.md` for "did not
+/// finish": `3`, which is what an unanswered step owes — anything printed
+/// before it stands, and nothing after it is a statement about the archive.
+fn read_step_timed_out(
+    timed_out: &chat_stasher::readstep::StepTimedOut,
+    consequence: &str,
+) -> ExitCode {
+    eprintln!(
+        "read: 🔴 {} did not answer within {} — {}. This is unknown, not a measurement: retry, \
+         and if a healthy read on this machine truly needs longer, lift every read budget at \
+         once with {}=<seconds>.",
+        timed_out.step,
+        timed_out.budget_word(),
+        consequence,
+        chat_stasher::readstep::READ_STEP_BUDGET_ENV,
+    );
+    eprintln!(
+        "read: INCOMPLETE exit_code=3 — {} did not answer within {}, so the read did not finish \
+         and nothing below is a statement about the archive.",
+        timed_out.step,
+        timed_out.budget_word(),
+    );
+    ExitCode::from(3)
+}
+
+/// `read`'s bounded ssh-master teardown: [`reap_remote`] housekeeping, run
+/// behind its own small deadline so the exit after a finished read cannot
+/// become the hang the report already survived (W1052).
+///
+/// A reap that outlives its budget is *not* a read failure: the command's
+/// answer has already printed, so the verdict is a note that the masters stay
+/// open — the exact state `--keep-ssh-masters` leaves on purpose — and the
+/// run's real exit code stands unchanged. The trace prints only when there is
+/// reaping to do (an endpoint the run dialed), so a local read never sees a
+/// line about ssh masters it never had.
+fn reap_read_remote(cfg: &store::StoreConfig, keep_ssh_masters: bool) {
+    if keep_ssh_masters || !cfg.options.contains_key("endpoint") {
+        reap_remote(cfg, keep_ssh_masters);
+        return;
+    }
+    let worker_cfg = cfg.clone();
+    match chat_stasher::readstep::run_behind_deadline(
+        "[read] reap          : shutting down this run's ssh master processes",
+        "shutting down this run's ssh masters",
+        chat_stasher::readstep::SSH_REAP_BUDGET_SECS,
+        move || reap_remote(&worker_cfg, keep_ssh_masters),
+    ) {
+        Ok(()) => {}
+        Err(timed_out) => eprintln!(
+            "read: reaping this run's ssh masters did not answer within {} — the masters stay \
+             open and the run's answer above stands; a later `chat-stasher doctor` reaps them, \
+             or `--keep-ssh-masters` leaves them on purpose.",
+            timed_out.budget_word()
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_read(
     stage: &Option<PathBuf>,
@@ -11483,16 +11548,70 @@ fn cmd_read(
     options: &[String],
     keep_ssh_masters: bool,
 ) -> ExitCode {
-    let config = match config_or_refuse("read") {
-        Ok(config) => config,
-        Err(code) => return code,
+    // W1052: every step below prints what it is doing before it runs, and
+    // every step that can block on something this machine does not control —
+    // a file on a wedged filesystem, a backend call with no timeout of its
+    // own — runs behind its own deadline, the DOCTOR-HANG fix (W1043) applied
+    // to this command. A step that outlives its budget is abandoned (its
+    // worker is detached, never joined) and the run ends in the "did not
+    // finish" family instead of sitting silent: the observed incident hung a
+    // 1373-byte session read for 120 s with five printed lines and no exit
+    // code, because nothing in this path bounded the archive walk.
+    let config = match chat_stasher::readstep::run_behind_deadline(
+        "[read] config         : reading the configuration file",
+        "reading the configuration file",
+        chat_stasher::readstep::CONFIG_FILE_BUDGET_SECS,
+        || config_or_refuse("read"),
+    ) {
+        Ok(Ok(config)) => config,
+        // The refusal below is `config_or_refuse`'s own: it already worded the
+        // unusable config and chose the exit code, and a config that answered
+        // "unusable" is not a timeout to re-word.
+        Ok(Err(code)) => return code,
+        Err(timed_out) => {
+            // No store config exists yet, so there is nothing to reap and
+            // nothing that was dialed.
+            return read_step_timed_out(
+                &timed_out,
+                "the configuration is unknown, so this machine's destinations and archive \
+                 layout are unknown",
+            );
+        }
     };
     let machine = if all_machines {
-        query_machine(&config, machine)
+        let query_cfg = config.clone();
+        let explicit_machine = machine.map(str::to_string);
+        match chat_stasher::readstep::run_behind_deadline(
+            "[read] identity       : resolving this machine's archive partition",
+            "resolving this machine's archive partition",
+            chat_stasher::readstep::IDENTITY_BUDGET_SECS,
+            move || query_machine(&query_cfg, explicit_machine.as_deref()),
+        ) {
+            Ok(machine) => machine,
+            Err(timed_out) => {
+                return read_step_timed_out(
+                    &timed_out,
+                    "which archive partition this machine reads through is unknown",
+                );
+            }
+        }
     } else {
-        match resolve_machine("read", &config, machine) {
-            Ok(machine) => Some(machine),
-            Err(code) => return code,
+        let identity_cfg = config.clone();
+        let identity_machine = machine.map(str::to_string);
+        match chat_stasher::readstep::run_behind_deadline(
+            "[read] identity       : resolving this machine's archive partition",
+            "resolving this machine's archive partition",
+            chat_stasher::readstep::IDENTITY_BUDGET_SECS,
+            move || resolve_machine("read", &identity_cfg, identity_machine.as_deref()),
+        ) {
+            Ok(Ok(machine)) => Some(machine),
+            Ok(Err(code)) => return code,
+            Err(timed_out) => {
+                return read_step_timed_out(
+                    &timed_out,
+                    "which archive partition this machine writes under is unknown",
+                );
+            }
         }
     };
     let cfg = resolve_store_config(
@@ -11512,7 +11631,38 @@ fn cmd_read(
     } else {
         chat_stasher::body_cache::Policy::ReadThrough
     };
-    let body_cache = chat_stasher::body_cache::for_operation(&config, cache_policy);
+    // The body cache and the mirror decision walk this machine's own
+    // directories before the archive is touched; doctor bounds its equivalent
+    // local walks (D6/D9), and a stale mounted-storage handle can wedge a
+    // local stat the same way a destination wedges a list — so the tier runs
+    // traced and bounded like everything else.
+    let (body_cache, mirror_decision) = {
+        let tiers_cfg = cfg.clone();
+        let tiers_config = config.clone();
+        let tiers_data_root = data_root();
+        match chat_stasher::readstep::run_behind_deadline(
+            "[read] tiers          : the body cache directory and the mirror decision",
+            "the body cache and mirror lookups",
+            chat_stasher::readstep::LOCAL_TIERS_BUDGET_SECS,
+            move || {
+                let body_cache =
+                    chat_stasher::body_cache::for_operation(&tiers_config, cache_policy);
+                let mirror_decision =
+                    chat_stasher::mirror_read::decide(&tiers_config, &tiers_cfg, &tiers_data_root);
+                (body_cache, mirror_decision)
+            },
+        ) {
+            Ok(tiers) => tiers,
+            Err(timed_out) => {
+                reap_read_remote(&cfg, keep_ssh_masters);
+                return read_step_timed_out(
+                    &timed_out,
+                    "whether this read could use the local body cache or mirror is unknown, and \
+                     nothing was read from the archive",
+                );
+            }
+        }
+    };
     let shard_policy = if no_collapse {
         store::DuplicateShardPolicy::KeepAll
     } else {
@@ -11522,7 +11672,6 @@ fn cmd_read(
     // reader that never attaches one (47 §5.5: a copy may not certify itself),
     // which is also why the seam is an opt-in per store, not a property of
     // [`resolve_store_config`].
-    let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
     let store = match machine.as_deref() {
         Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
         None => BackupStore::for_metadata_query(cfg.clone()),
@@ -11537,33 +11686,48 @@ fn cmd_read(
     if let Some(line) = mirror_decision.state_line() {
         println!("[read] mirror         : {line}");
     }
-    let mk = match store::load_key_file(&cfg) {
-        Ok(mk) => mk,
-        Err(e) => {
-            eprintln!("read: {e}");
-            reap_remote(&cfg, keep_ssh_masters);
-            // Deliberately 3, not 1. A missing key means the archive was never
-            // consulted, which is "did not finish / never started", not
-            // "read it all and failed". Keep `read` aligned with `search` and
-            // `collect`: 3 means the archive was not read; 1 means reading
-            // completed and the result itself failed.
-            return ExitCode::from(3);
+    let mk = {
+        let key_cfg = cfg.clone();
+        match chat_stasher::readstep::run_behind_deadline(
+            "[read] master key     : reading the master key file",
+            "reading the master key file",
+            chat_stasher::readstep::KEY_FILE_BUDGET_SECS,
+            move || store::load_key_file(&key_cfg),
+        ) {
+            Ok(Ok(mk)) => mk,
+            Ok(Err(e)) => {
+                eprintln!("read: {e}");
+                reap_read_remote(&cfg, keep_ssh_masters);
+                // Deliberately 3, not 1. A missing key means the archive was never
+                // consulted, which is "did not finish / never started", not
+                // "read it all and failed". Keep `read` aligned with `search` and
+                // `collect`: 3 means the archive was not read; 1 means reading
+                // completed and the result itself failed.
+                return ExitCode::from(3);
+            }
+            Err(timed_out) => {
+                reap_read_remote(&cfg, keep_ssh_masters);
+                return read_step_timed_out(
+                    &timed_out,
+                    "the master key was not read, so nothing in the archive could be decrypted",
+                );
+            }
         }
     };
 
     let code = if all_machines {
-        cmd_read_all_machines(&store, &mk, full_ids)
+        cmd_read_all_machines(store.owned_twin(), &mk, full_ids)
     } else {
         let Some(machine) = machine.as_deref() else {
             eprintln!("read: local machine identity is required unless --all-machines is set");
-            reap_remote(&cfg, keep_ssh_masters);
+            reap_read_remote(&cfg, keep_ssh_masters);
             return ExitCode::from(3);
         };
         let session = match session {
             Some(s) => s,
             None => {
                 eprintln!("read: `--session` is required unless `--all-machines` is set");
-                reap_remote(&cfg, keep_ssh_masters);
+                reap_read_remote(&cfg, keep_ssh_masters);
                 // Deliberately 2, not 1 or 3. The command is missing required
                 // syntax, so this is a usage error before any archive read;
                 // repository semantics reserve 2 for usage errors.
@@ -11593,20 +11757,47 @@ fn cmd_read(
         // the prefix it wanted nor the prefix the archive holds (W253 C3). The
         // stage root is only useful locally, as the thing to compare the read
         // against, so that is the one job it keeps below.
-        let (bytez, hashes) = match chat_stasher::reader_guard::catching_panic("read", || {
-            store.read_session_concat_with_view(
-                machine,
-                session,
-                &mk,
-                if include_deleted {
-                    store::BodyView::IncludeDeleted
-                } else {
-                    store::BodyView::Current
-                },
-            )
-        }) {
-            Ok(v) => v,
-            Err(e) => {
+        //
+        // The read itself runs behind its own deadline (W1052): this is the
+        // one step that dials the destination, and an archive walk on a
+        // backend whose calls carry no timeout is the step that held a
+        // 1373-byte session hostage before this fix. The store the worker
+        // reads through is an owned twin: a detached worker cannot borrow
+        // this one, and a wedged worker must not stop the run from exiting.
+        // The twin shares the body-cache and mirror handles, so every counter
+        // the read moves still shows up in the lines below.
+        let archive_trace = format!(
+            "[read] archive        : reading session {} (machine {}), cumulatively, newest \
+             snapshot first",
+            chat_stasher::id::short_session_id(session),
+            machine
+        );
+        let step_store = store.owned_twin();
+        let step_machine = machine.to_string();
+        let step_session = session.to_string();
+        let step_mk = mk.clone();
+        let step_view = if include_deleted {
+            store::BodyView::IncludeDeleted
+        } else {
+            store::BodyView::Current
+        };
+        let (bytez, hashes) = match chat_stasher::readstep::run_behind_deadline(
+            &archive_trace,
+            "reading the session from the archive",
+            chat_stasher::readstep::ARCHIVE_READ_BUDGET_SECS,
+            move || {
+                chat_stasher::reader_guard::catching_panic("read", move || {
+                    step_store.read_session_concat_with_view(
+                        &step_machine,
+                        &step_session,
+                        &step_mk,
+                        step_view,
+                    )
+                })
+            },
+        ) {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
                 // A finished read that an effective control state refuses is
                 // a deliberate omission (ADR-046 draft Phase 1), not a read
                 // that did not finish: 1, never 3, so the user can tell a
@@ -11620,16 +11811,25 @@ fn cmd_read(
                     eprintln!(
                         "read: the control stream was read to completion; this refusal is the answer, not a read failure. `unhide` restores a hidden session."
                     );
-                    reap_remote(&cfg, keep_ssh_masters);
+                    reap_read_remote(&cfg, keep_ssh_masters);
                     return ExitCode::FAILURE;
                 }
                 chat_stasher::remote_err::eprint_remote_error("read", &e, &cfg);
-                reap_remote(&cfg, keep_ssh_masters);
+                reap_read_remote(&cfg, keep_ssh_masters);
                 // Deliberately 3, not 1. A session readback that does not
                 // finish cannot claim a complete result; this is the same
                 // "did not finish" family as `search` and `collect`, while 1
                 // is reserved for a read that completed and then failed.
                 return ExitCode::from(3);
+            }
+            Err(timed_out) => {
+                reap_read_remote(&cfg, keep_ssh_masters);
+                return read_step_timed_out(
+                    &timed_out,
+                    "the session's shards were not read to the end, so the shard list, the \
+                     length and the sha256 are all unknown — the session is neither confirmed \
+                     nor absent",
+                );
             }
         };
         if let Some(line) = body_cache_stats_line(&body_cache) {
@@ -11673,7 +11873,7 @@ fn cmd_read(
     if let Some(mirror) = store.mirror_reads() {
         println!("[read] mirror served  : {}", mirror.served_line());
     }
-    reap_remote(&cfg, keep_ssh_masters);
+    reap_read_remote(&cfg, keep_ssh_masters);
     code
 }
 
@@ -12418,19 +12618,43 @@ fn body_cache_stats_line(availability: &chat_stasher::body_cache::Availability) 
 ///
 /// This reads the whole destination: unlike `search` it downloads and hashes
 /// every shard it lists. It is therefore expensive by design, and the header
-/// says so rather than describing itself as a listing.
-fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey, full_ids: bool) -> ExitCode {
+/// says so rather than describing itself as a listing. The walk still runs
+/// behind its own deadline (W1052) — a bulk read is a *deliberately* slow
+/// operation, so its budget is an hour, but it is not an unbounded one, and a
+/// walk that stops part-way is worded as the unknown it is, never as an empty
+/// archive.
+fn cmd_read_all_machines(store: BackupStore, mk: &MasterKey, full_ids: bool) -> ExitCode {
     println!("[read] mode           : all-machines (every snapshot, cumulatively)");
     println!("[read] repo           : {}", store.cfg.repo_root);
+    // The twin shares this store's handles, so the counters the walk moves
+    // reach the report; an owned store, because the deadline's worker must
+    // survive being detached without borrowing this one.
+    let step_store = store.owned_twin();
+    let step_mk = mk.clone();
     let report =
-        match chat_stasher::reader_guard::catching_panic("read", || store.read_all_machines(mk)) {
-            Ok(r) => r,
-            Err(e) => {
+        match chat_stasher::readstep::run_behind_deadline(
+            "[read] archive        : reading every snapshot of every machine (downloads and hashes every shard)",
+            "the all-machines archive read",
+            chat_stasher::readstep::ALL_MACHINES_READ_BUDGET_SECS,
+            move || {
+                chat_stasher::reader_guard::catching_panic("read", move || {
+                    step_store.read_all_machines(&step_mk)
+                })
+            },
+        ) {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
                 chat_stasher::remote_err::eprint_remote_error("read", &e, &store.cfg);
                 // Deliberately 3, not 1. `read_all_machines` failed before it
                 // produced a complete archive report, so the archive was not read
                 // to completion; 1 is for a completed read whose result failed.
                 return ExitCode::from(3);
+            }
+            Err(timed_out) => {
+                return read_step_timed_out(
+                    &timed_out,
+                    "the walk stopped part-way, so every machine's session counts are unknown",
+                );
             }
         };
     println!(
