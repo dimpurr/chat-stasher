@@ -4435,7 +4435,7 @@ fn process_opencode(
         if increment_era {
             reconcile_opencode_increment_map(entry, state_dir, &record.id, stage, machine)
         } else {
-            None
+            reclaimed_opencode_baseline_map(&record.id, state_dir, stage, machine, manifest_facts)
         }
     } else {
         fold_opencode_staged_map(stage, machine, &record.id)
@@ -4650,6 +4650,57 @@ fn incremental_write_allowed(
             .as_ref()
             .is_some_and(|previous| previous != cursor)
     })
+}
+
+/// SG-2d: the post-reclaim baseline of a **pre-increment** opencode entry.
+///
+/// An entry written before ADR-061 (no record digests) endorses no map, so a
+/// session it covers is observed whole the next time its cursor moves. While
+/// the stage still held the body that was a cost; once the body is reclaimed
+/// it must not be a second one: the stage is no longer a baseline, and a
+/// session the archive provably holds would be re-exported in full for a
+/// handful of new records. The durable map under `meta/<machine>` (SG-2b:
+/// persisted by every collect pass and synthesized by the reclaim pre-pass
+/// before the body went) is the baseline instead.
+///
+/// It is trusted only when all three hold, and answers `None` otherwise, so
+/// the caller falls back to the one complete observation (unknown is never
+/// "nothing new"):
+///
+/// - the caller already got past `force_reset`: the stored debt discharged
+///   itself (stage, archive or the retained summary), which is what lets an
+///   entry's cursor be believed at all;
+/// - the session's staged body is gone (every shard reclaimed) and the
+///   retained manifest summary names the session: reclaim removes a body
+///   only after proving the archive holds it, and writes the summary first;
+///   a missing body with no summary is a stage that lost data, not a
+///   reclaim;
+/// - a durable map is readable. A map ahead of this destination's cursor is
+///   safe: the stage is shared, and a record the map counts as delivered
+///   reached the archives through shards the reclaim proved. A map behind
+///   the cursor only re-delivers a record (last version per record wins on
+///   read).
+///
+/// Destination scoping (H1) is untouched: only an entry with a cursor of its
+/// own gets here; a destination that never pushed the session still folds
+/// the stage and, finding nothing, exports in full.
+fn reclaimed_opencode_baseline_map(
+    session_id: &str,
+    state_dir: &Path,
+    stage: &Path,
+    machine: &str,
+    manifest_facts: Option<&BTreeMap<String, ShardFact>>,
+) -> Option<BTreeMap<String, String>> {
+    manifest_facts?.get(session_id)?;
+    let dir = store::session_shard_dir(stage, machine, session_id);
+    match store::sealed_shard_entries(&dir) {
+        Ok(shards) if shards.is_empty() => {}
+        Err(e)
+            if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) => {}
+        _ => return None,
+    }
+    load_opencode_record_map_any(stage, machine, state_dir, session_id)
 }
 
 /// Fold the session's staged shard set into its live record map — the map
