@@ -417,7 +417,7 @@ fn title_and_reason_are_bounded_and_privacy_safe() {
     let exactly_a_hundred = AgentObservationRow::new(
         AgentObservation {
             projection: AgentProjection {
-                title: Some("标".repeat(100)),
+                title: Some("\u{6807}".repeat(100)),
                 ..full_projection()
             },
             ..observation()

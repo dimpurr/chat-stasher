@@ -997,11 +997,11 @@ crates/chat-stasher/src/runstate.rs:436-522  502605d7d0f4  lines=87
   <- docs-dev/install.md:1000  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:443-451  109067636f30  lines=9
   <- docs-dev/install.md:1298  :: }
-crates/chat-stasher/src/scanner.rs:4240-4300  9db74cb60f65  lines=61
+crates/chat-stasher/src/scanner.rs:4342-4402  9db74cb60f65  lines=61
   <- docs-dev/privacy.md:1183  :: /// through the ordinary whole-file collector.
-crates/chat-stasher/src/scanner.rs:4302-4363  d8480d0822d0  lines=62
+crates/chat-stasher/src/scanner.rs:4404-4465  d8480d0822d0  lines=62
   <- docs-dev/privacy.md:1183  :: /// The native Grok CLI transcripts — `chat_history.jsonl`,…
-crates/chat-stasher/src/scanner.rs:4520-4530  3f94015d6ac2  lines=11
+crates/chat-stasher/src/scanner.rs:4622-4632  3f94015d6ac2  lines=11
   <- docs-dev/openclaw-scanner.md:32  :: /// Probe Cursor's current global store and, when it cannot…
 crates/chat-stasher/src/schedule.rs:231-266  31cde3d34520  lines=36
   <- docs-dev/install.md:943  :: /// Resolve the executable that a persistent scheduler may …
