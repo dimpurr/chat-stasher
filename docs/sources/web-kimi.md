@@ -44,6 +44,6 @@ Build the development extension (`pnpm build:dev` in `apps/extension`), load it 
 
 ## Changelog
 
-2026-08-17 — the first row was written from four outside implementations that agree on the `ListMessages` route (checked as source code on that date).
+2026-08-17 — the contract records four outside implementations, read as source code on this date, that agree on the `ListMessages` route; the row was first written from them, before the 2026-09-14 measurement.
 2026-09-14 — the list and detail routes were measured in a logged-in www.kimi.com session (five short conversations), and the backfill plan was written from that measurement (W22).
 2026-09-24 — live acceptance of the stable channel did not include this platform: it was inert in that build.
