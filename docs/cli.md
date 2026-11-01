@@ -384,8 +384,8 @@ the switch refuse before anything is read, exit `3`.
 
 One run is one bounded round: a large first fill spans several rounds, each
 resuming where the previous stopped, and `status` reports the progress as
-progress — a round that stops early is not a failure. Before a first fill
-starts, the command estimates whether the remaining download plus the
+progress — a round that stops early is not a failure. Before each round
+copies files, the command estimates whether the remaining download plus the
 free-disk floor fits the free space, and refuses with both numbers when it
 does not. A mirror file that is present but unreadable is never quietly
 re-fetched mid-read: a command reading over it stops with the file's name
