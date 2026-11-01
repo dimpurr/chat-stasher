@@ -956,16 +956,32 @@ pub fn export_sessions(
         let bytes = match dumped.get(&(hit.machine.clone(), hit.session_id.clone())) {
             Some((bytes, _shards)) => bytes,
             None => {
-                out.failed.push(FailedSession {
-                    machine: hit.machine.clone(),
-                    session_id: hit.session_id.clone(),
-                    harness: hit.harness.clone(),
-                    why: format!(
+                // Offline (W1053), the walk that did not return this session
+                // read the local mirror copy only, so the sentence below must
+                // not claim snapshots the copy never saw are the whole story:
+                // the destination was not contacted, and its absence here
+                // proves nothing about the archive — the run's exit status
+                // (3, incomplete) and this row carry that untold-ness.
+                let why = if store.is_offline_mirror() {
+                    format!(
+                        "the local mirror copy does not hold this session's shards (--offline; \
+                         the destination was not contacted, so nothing here proves the archive \
+                         lacks it) — the session is absent from this export, which is not the \
+                         same as it being empty",
+                    )
+                } else {
+                    format!(
                         "no snapshot of machine `{}` holds this session's shards, so its bytes \
                          could not be read back — the session is absent from this export, which \
                          is not the same as it being empty",
                         hit.machine
-                    ),
+                    )
+                };
+                out.failed.push(FailedSession {
+                    machine: hit.machine.clone(),
+                    session_id: hit.session_id.clone(),
+                    harness: hit.harness.clone(),
+                    why,
                 });
                 continue;
             }

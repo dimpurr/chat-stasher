@@ -25,6 +25,7 @@ use std::fs;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(test)]
@@ -524,7 +525,7 @@ enum Command {
         /// Backend option `key=value`, repeatable.
         #[arg(long = "option")]
         options: Vec<String>,
-        /// Keep ssh ControlMaster processes open after this run.
+        /// Keep the ssh ControlMaster processes open after this run.
         #[arg(long)]
         keep_ssh_masters: bool,
     },
@@ -569,6 +570,17 @@ enum Command {
         /// harnesses ignore the switch (their bodies are growth logs).
         #[arg(long)]
         include_deleted: bool,
+        /// Serve this read from the local mirror copy only (W1053): the
+        /// destination is never contacted — no connection is opened at all
+        /// — and every byte answers from the mirror, the body cache or
+        /// rustic's local metadata cache. A file none of them holds reports
+        /// "did not finish" (exit `3`) rather than reaching for the
+        /// remote, so an offline absence is unknown, never empty, and the
+        /// report says `served from mirror`. Requires a usable mirror of
+        /// the destination being read; refused before anything is read
+        /// when there is none.
+        #[arg(long)]
+        offline: bool,
         /// Machine partition to read. Uses this machine's id when available;
         /// if it is unavailable, use `--machine` explicitly. Unused by
         /// `--all-machines`, which reads every machine.
@@ -621,6 +633,20 @@ enum Command {
         /// Print full session ids in L3 rows (default: privacy-safe short ids).
         #[arg(long)]
         full_ids: bool,
+        /// Certify the local mirror copy instead of the destination (W1053):
+        /// the destination is never contacted — the copy answers every
+        /// read, and the verdict that comes back certifies **the copy**,
+        /// never the destination's repository, so it is worded that way
+        /// and the report says `served from mirror`. L1/L2 grade the copy's
+        /// own integrity: packs the copy lacks its index name are the
+        /// copy's own finding, exit 1. L3 reconciles the stage against
+        /// what the copy holds, and a session the copy never synced is an
+        /// unknown about the archive — a `NOT IN THE LOCAL COPY` row and
+        /// RESULT INCOMPLETE, exit 3 — never `MISSING IN ARCHIVE`, which a
+        /// not-contacted destination cannot prove. An online `verify` (no
+        /// switch) still never consults the copy.
+        #[arg(long)]
+        offline: bool,
         /// Machine partition (default: config `machine`, else this machine's
         /// identity; use `--machine` explicitly to choose the partition).
         #[arg(long)]
@@ -890,6 +916,14 @@ enum Command {
         /// written.
         #[arg(long)]
         dry_run: bool,
+        /// Serve the export from the local mirror copy only (W1053): the
+        /// destination is never contacted, and the report says
+        /// `served from mirror`. A selected session whose bytes the copy
+        /// does not hold is listed in the manifest's failed sessions with
+        /// an unknown-worded reason and makes the run exit `3` (incomplete
+        /// — it never reads as "the archive does not have it").
+        #[arg(long)]
+        offline: bool,
         /// Repository path override.
         #[arg(long)]
         repo: Option<String>,
@@ -2296,6 +2330,7 @@ fn run() -> ExitCode {
             full_ids,
             no_collapse,
             include_deleted,
+            offline,
             machine,
             destination,
             repo,
@@ -2310,6 +2345,7 @@ fn run() -> ExitCode {
             full_ids,
             no_collapse,
             include_deleted,
+            offline,
             machine.as_deref(),
             destination,
             repo,
@@ -2325,6 +2361,7 @@ fn run() -> ExitCode {
             level,
             stage,
             full_ids,
+            offline,
             machine,
             destination,
             repo,
@@ -2336,6 +2373,7 @@ fn run() -> ExitCode {
             level,
             &stage,
             full_ids,
+            offline,
             machine.as_deref(),
             destination,
             repo,
@@ -2513,6 +2551,7 @@ fn run() -> ExitCode {
             force,
             no_collapse,
             dry_run,
+            offline,
             repo,
             key_file,
             connections,
@@ -2528,6 +2567,7 @@ fn run() -> ExitCode {
             force,
             no_collapse,
             dry_run,
+            offline,
             repo,
             key_file,
             connections,
@@ -6206,6 +6246,7 @@ fn cmd_export(
     force: bool,
     no_collapse: bool,
     dry_run: bool,
+    offline: bool,
     repo: Option<String>,
     key_file: Option<String>,
     connections: Option<usize>,
@@ -6262,19 +6303,61 @@ fn cmd_export(
     // tier, not a cache — and what it reads there never enters the body cache
     // (this store keeps none anyway: ADR-034 holds bulk readers out of it).
     // The lines go to stderr: `export`'s stdout carries the plan and report.
+    // Offline (W1053) the seam is the mirror-only twin and no remote backend
+    // is ever built; the two states that can keep the offline promise are the
+    // serving mirror and the copy itself, and every other one refuses before
+    // the scan — nothing read, exit 3, never "selected nothing".
     let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
-    if let Some(line) = mirror_decision.state_line() {
+    if offline {
+        if let Some(refusal) = mirror_decision.offline_refusal() {
+            eprintln!("export: --offline cannot serve this export — {refusal}");
+            eprintln!(
+                "export: nothing was read and no remote connection was opened — this is not an \
+                 empty selection"
+            );
+            return ExitCode::from(3);
+        }
+    }
+    if offline {
+        // `served from mirror` on every offline output (W1053), before the
+        // plan: stdout's report tells what was written, stderr's lines tell
+        // where every byte came from. The copy itself keeps the long-standing
+        // warning line — the copy *is* the mirror.
+        match &mirror_decision {
+            chat_stasher::mirror_read::MirrorReadDecision::Serving(reads) => {
+                eprintln!("[export] mirror         : {}", reads.offline_state_line());
+            }
+            chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { .. } => {
+                if let Some(line) = mirror_decision.state_line() {
+                    eprintln!("[export] mirror         : {line}");
+                }
+            }
+            _ => {}
+        }
+    } else if let Some(line) = mirror_decision.state_line() {
         eprintln!("[export] mirror         : {line}");
     }
-    let store = BackupStore::for_metadata_query(cfg.clone())
-        .with_shard_policy(shard_policy)
-        .with_mirror_reads(mirror_decision.handle());
+    let store = {
+        let store = BackupStore::for_metadata_query(cfg.clone()).with_shard_policy(shard_policy);
+        match (&mirror_decision, offline) {
+            (chat_stasher::mirror_read::MirrorReadDecision::Serving(reads), true) => {
+                store.with_offline_mirror(Arc::clone(reads))
+            }
+            (_, true) => store,
+            _ => store.with_mirror_reads(mirror_decision.handle()),
+        }
+    };
+    let reap_once = |off: bool| {
+        if !off {
+            reap_remote(&cfg, keep_ssh_masters);
+        }
+    };
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
             eprintln!("export: {e}");
             eprintln!("export: without the key nothing was read — this is not an empty export");
-            reap_remote(&cfg, keep_ssh_masters);
+            reap_once(offline);
             // 3, not 1: the archive was never consulted.
             return ExitCode::from(3);
         }
@@ -6282,7 +6365,7 @@ fn cmd_export(
 
     if let Err(error) = chat_stasher::export::check_out(out, force) {
         eprintln!("export: {error}");
-        reap_remote(&cfg, keep_ssh_masters);
+        reap_once(offline);
         return ExitCode::from(2);
     }
 
@@ -6290,7 +6373,7 @@ fn cmd_export(
         Ok(report) => report,
         Err(error) => {
             eprintln!("export: destination scan failed before planning: {error:#}");
-            reap_remote(&cfg, keep_ssh_masters);
+            reap_once(offline);
             return ExitCode::from(3);
         }
     };
@@ -6329,7 +6412,7 @@ fn cmd_export(
                     );
                     }
                 }
-                reap_remote(&cfg, keep_ssh_masters);
+                reap_once(offline);
                 return ExitCode::from(code);
             }
         };
@@ -6337,10 +6420,28 @@ fn cmd_export(
     for line in chat_stasher::export::print_report(&report) {
         println!("{line}");
     }
-    if let Some(mirror) = store.mirror_reads() {
+    // The visible-status half, offline-rewilded the same way as `read`'s
+    // (W1053): the served line always states which disk answered, including
+    // over the copy itself, where no handle exists to count with.
+    if offline {
+        match &mirror_decision {
+            chat_stasher::mirror_read::MirrorReadDecision::Serving(reads) => {
+                eprintln!("[export] mirror served  : {}", reads.offline_served_line());
+            }
+            chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { name } => {
+                eprintln!(
+                    "[export] mirror served  : served from mirror `{name}` itself — every byte \
+                     came from the copy on this machine's disk; this run opened no remote \
+                     connection"
+                );
+            }
+            // Unreachable: every other decision refused before the scan.
+            _ => {}
+        }
+    } else if let Some(mirror) = store.mirror_reads() {
         eprintln!("[export] mirror served  : {}", mirror.served_line());
     }
-    reap_remote(&cfg, keep_ssh_masters);
+    reap_once(offline);
     ExitCode::from(report.exit_status())
 }
 
@@ -9333,6 +9434,7 @@ fn run_once_pass_with(
                         VerifyLevel::L1,
                         &None,
                         false,
+                        false,
                         Some(&machine_name),
                         destination.clone(),
                         repo,
@@ -9440,6 +9542,7 @@ fn run_once_pass_with(
         let code = cmd_verify(
             VerifyLevel::L1,
             &None,
+            false,
             false,
             Some(&machine_name),
             destination,
@@ -11509,8 +11612,13 @@ fn read_step_timed_out(
 /// open — the exact state `--keep-ssh-masters` leaves on purpose — and the
 /// run's real exit code stands unchanged. The trace prints only when there is
 /// reaping to do (an endpoint the run dialed), so a local read never sees a
-/// line about ssh masters it never had.
-fn reap_read_remote(cfg: &store::StoreConfig, keep_ssh_masters: bool) {
+/// line about ssh masters it never had. An offline run (W1053) skips the
+/// whole step for the same reason it skips the remote: no master was ever
+/// opened, so there is nothing of *this run's* to shut down.
+fn reap_read_remote(cfg: &store::StoreConfig, keep_ssh_masters: bool, offline: bool) {
+    if offline {
+        return;
+    }
     if keep_ssh_masters || !cfg.options.contains_key("endpoint") {
         reap_remote(cfg, keep_ssh_masters);
         return;
@@ -11540,6 +11648,7 @@ fn cmd_read(
     full_ids: bool,
     no_collapse: bool,
     include_deleted: bool,
+    offline: bool,
     machine: Option<&str>,
     destination: Option<String>,
     repo: Option<String>,
@@ -11654,7 +11763,7 @@ fn cmd_read(
         ) {
             Ok(tiers) => tiers,
             Err(timed_out) => {
-                reap_read_remote(&cfg, keep_ssh_masters);
+                reap_read_remote(&cfg, keep_ssh_masters, offline);
                 return read_step_timed_out(
                     &timed_out,
                     "whether this read could use the local body cache or mirror is unknown, and \
@@ -11668,22 +11777,71 @@ fn cmd_read(
     } else {
         store::DuplicateShardPolicy::Collapse
     };
+    // W1053: `--offline` names a promise this machine state has to be able
+    // to keep — no remote connection — and only two states can: a serving
+    // mirror (the store below attaches the offline seam instead of the
+    // mirror-first one) and the copy itself (already a local repository,
+    // which a plain read serves without a seam). Every other state refuses
+    // *before* anything is read, in the "did not finish" family like the
+    // missing-key case — nothing was consulted, so nothing here may read
+    // as an empty archive or a measured absence.
+    if offline {
+        if let Some(refusal) = mirror_decision.offline_refusal() {
+            eprintln!("read: --offline cannot serve this read — {refusal}");
+            eprintln!(
+                "read: nothing was read and no remote connection was opened — this is not an \
+                 empty result"
+            );
+            return ExitCode::from(3);
+        }
+    }
     // ADR-062 D3 (LM-3): `read` is a mirror-first reader. `verify` is the one
     // reader that never attaches one (47 §5.5: a copy may not certify itself),
     // which is also why the seam is an opt-in per store, not a property of
-    // [`resolve_store_config`].
-    let store = match machine.as_deref() {
-        Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
-        None => BackupStore::for_metadata_query(cfg.clone()),
-    }
-    .with_body_cache(body_cache.handle())
-    .with_shard_policy(shard_policy)
-    .with_mirror_reads(mirror_decision.handle());
+    // [`resolve_store_config`]. Offline (W1053) the seam is the mirror-only
+    // twin, which never builds the destination's backend at all; the
+    // copy-itself state carries no seam either way, because there is no
+    // handle for the store to attach (the copy has no copy).
+    let store = {
+        let store = match machine.as_deref() {
+            Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
+            None => BackupStore::for_metadata_query(cfg.clone()),
+        }
+        .with_body_cache(body_cache.handle())
+        .with_shard_policy(shard_policy);
+        match (&mirror_decision, offline) {
+            // The offline seam keeps the same `MirrorReads` handle, so the
+            // counters this run moves still reach the served line reworded
+            // below.
+            (chat_stasher::mirror_read::MirrorReadDecision::Serving(reads), true) => {
+                store.with_offline_mirror(Arc::clone(reads))
+            }
+            (_, true) => store,
+            _ => store.with_mirror_reads(mirror_decision.handle()),
+        }
+    };
     println!(
         "[read] body cache     : {}",
         body_cache_state_line(&body_cache)
     );
-    if let Some(line) = mirror_decision.state_line() {
+    if offline {
+        // `served from mirror` on every offline output (W1053), stated before
+        // any step can wedge: the pre-flight family a hung run leaves on
+        // screen names its sources. The copy-itself state keeps its own
+        // long-standing warning line — the copy *is* the mirror, and the
+        // line's own wording says a verdict here certifies the copy.
+        match &mirror_decision {
+            chat_stasher::mirror_read::MirrorReadDecision::Serving(reads) => {
+                println!("[read] mirror         : {}", reads.offline_state_line());
+            }
+            chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { .. } => {
+                if let Some(line) = mirror_decision.state_line() {
+                    println!("[read] mirror         : {line}");
+                }
+            }
+            _ => {}
+        }
+    } else if let Some(line) = mirror_decision.state_line() {
         println!("[read] mirror         : {line}");
     }
     let mk = {
@@ -11697,7 +11855,7 @@ fn cmd_read(
             Ok(Ok(mk)) => mk,
             Ok(Err(e)) => {
                 eprintln!("read: {e}");
-                reap_read_remote(&cfg, keep_ssh_masters);
+                reap_read_remote(&cfg, keep_ssh_masters, offline);
                 // Deliberately 3, not 1. A missing key means the archive was never
                 // consulted, which is "did not finish / never started", not
                 // "read it all and failed". Keep `read` aligned with `search` and
@@ -11706,7 +11864,7 @@ fn cmd_read(
                 return ExitCode::from(3);
             }
             Err(timed_out) => {
-                reap_read_remote(&cfg, keep_ssh_masters);
+                reap_read_remote(&cfg, keep_ssh_masters, offline);
                 return read_step_timed_out(
                     &timed_out,
                     "the master key was not read, so nothing in the archive could be decrypted",
@@ -11716,18 +11874,18 @@ fn cmd_read(
     };
 
     let code = if all_machines {
-        cmd_read_all_machines(store.owned_twin(), &mk, full_ids)
+        cmd_read_all_machines(store.owned_twin(), &mk, full_ids, offline)
     } else {
         let Some(machine) = machine.as_deref() else {
             eprintln!("read: local machine identity is required unless --all-machines is set");
-            reap_read_remote(&cfg, keep_ssh_masters);
+            reap_read_remote(&cfg, keep_ssh_masters, offline);
             return ExitCode::from(3);
         };
         let session = match session {
             Some(s) => s,
             None => {
                 eprintln!("read: `--session` is required unless `--all-machines` is set");
-                reap_read_remote(&cfg, keep_ssh_masters);
+                reap_read_remote(&cfg, keep_ssh_masters, offline);
                 // Deliberately 2, not 1 or 3. The command is missing required
                 // syntax, so this is a usage error before any archive read;
                 // repository semantics reserve 2 for usage errors.
@@ -11738,7 +11896,12 @@ fn cmd_read(
         println!("[read] repo           : {}", store.cfg.repo_root);
         println!(
             "[read] ssh reap       : {}",
-            if keep_ssh_masters {
+            if offline {
+                // No master was opened (W1053): the line owes the run's own
+                // state, not the family's default — a greppable "no reap
+                // because nothing was dialed" beats a silent absence.
+                "N/A (--offline; this run opened no ssh master)"
+            } else if keep_ssh_masters {
                 "OFF (--keep-ssh-masters)"
             } else {
                 "ON"
@@ -11765,13 +11928,31 @@ fn cmd_read(
         // reads through is an owned twin: a detached worker cannot borrow
         // this one, and a wedged worker must not stop the run from exiting.
         // The twin shares the body-cache and mirror handles, so every counter
-        // the read moves still shows up in the lines below.
-        let archive_trace = format!(
-            "[read] archive        : reading session {} (machine {}), cumulatively, newest \
-             snapshot first",
-            chat_stasher::id::short_session_id(session),
-            machine
-        );
+        // the read moves still shows up in the lines below. Offline (W1053)
+        // the step cannot dial anything — the twin's backends are the copy
+        // — but a wedged local disk still deserves the same named exit, so
+        // the step keeps its trace and its deadline with the mirror in the
+        // wording.
+        let archive_trace = if offline {
+            format!(
+                "[read] archive        : reading session {} (machine {}) served from mirror, \
+                 cumulatively, newest snapshot first — the destination is not contacted",
+                chat_stasher::id::short_session_id(session),
+                machine
+            )
+        } else {
+            format!(
+                "[read] archive        : reading session {} (machine {}), cumulatively, newest \
+                 snapshot first",
+                chat_stasher::id::short_session_id(session),
+                machine
+            )
+        };
+        let archive_step_label = if offline {
+            "reading the session from the local mirror copy"
+        } else {
+            "reading the session from the archive"
+        };
         let step_store = store.owned_twin();
         let step_machine = machine.to_string();
         let step_session = session.to_string();
@@ -11783,7 +11964,7 @@ fn cmd_read(
         };
         let (bytez, hashes) = match chat_stasher::readstep::run_behind_deadline(
             &archive_trace,
-            "reading the session from the archive",
+            archive_step_label,
             chat_stasher::readstep::ARCHIVE_READ_BUDGET_SECS,
             move || {
                 chat_stasher::reader_guard::catching_panic("read", move || {
@@ -11811,19 +11992,23 @@ fn cmd_read(
                     eprintln!(
                         "read: the control stream was read to completion; this refusal is the answer, not a read failure. `unhide` restores a hidden session."
                     );
-                    reap_read_remote(&cfg, keep_ssh_masters);
+                    reap_read_remote(&cfg, keep_ssh_masters, offline);
                     return ExitCode::FAILURE;
                 }
                 chat_stasher::remote_err::eprint_remote_error("read", &e, &cfg);
-                reap_read_remote(&cfg, keep_ssh_masters);
+                reap_read_remote(&cfg, keep_ssh_masters, offline);
                 // Deliberately 3, not 1. A session readback that does not
                 // finish cannot claim a complete result; this is the same
                 // "did not finish" family as `search` and `collect`, while 1
                 // is reserved for a read that completed and then failed.
+                // Offline the same code carries the seam's refusals (a file
+                // the copy lacks, a session the copy's snapshots do not
+                // hold), which are unknowns about the archive by
+                // construction — the exact shape this exit family owns.
                 return ExitCode::from(3);
             }
             Err(timed_out) => {
-                reap_read_remote(&cfg, keep_ssh_masters);
+                reap_read_remote(&cfg, keep_ssh_masters, offline);
                 return read_step_timed_out(
                     &timed_out,
                     "the session's shards were not read to the end, so the shard list, the \
@@ -11869,11 +12054,31 @@ fn cmd_read(
     // The visible-status half of the fallback rule: what served says so, with the
     // numbers this run moved. Unreachable on the `did not finish` paths —
     // their exit already says the read did not happen, and a half-answer's
-    // counters would read as a measurement.
-    if let Some(mirror) = store.mirror_reads() {
+    // counters would read as a measurement. Offline (W1053) the served line
+    // always prints — the ruling's "served from mirror" is the phrase that
+    // says which disk answered, and it prints over the copy itself too,
+    // where no `MirrorReads` handle exists to count with (the copy has no
+    // copy).
+    if offline {
+        match &mirror_decision {
+            chat_stasher::mirror_read::MirrorReadDecision::Serving(reads) => {
+                println!("[read] mirror served  : {}", reads.offline_served_line());
+            }
+            chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { name } => {
+                println!(
+                    "[read] mirror served  : served from mirror `{name}` itself — every byte \
+                     came from the copy on this machine's disk; this run opened no remote \
+                     connection"
+                );
+            }
+            // Unreachable: every other decision returned before the store was
+            // built (`--offline`'s refusal above is the only other exit).
+            _ => {}
+        }
+    } else if let Some(mirror) = store.mirror_reads() {
         println!("[read] mirror served  : {}", mirror.served_line());
     }
-    reap_read_remote(&cfg, keep_ssh_masters);
+    reap_read_remote(&cfg, keep_ssh_masters, offline);
     code
 }
 
@@ -12623,7 +12828,12 @@ fn body_cache_stats_line(availability: &chat_stasher::body_cache::Availability) 
 /// operation, so its budget is an hour, but it is not an unbounded one, and a
 /// walk that stops part-way is worded as the unknown it is, never as an empty
 /// archive.
-fn cmd_read_all_machines(store: BackupStore, mk: &MasterKey, full_ids: bool) -> ExitCode {
+fn cmd_read_all_machines(
+    store: BackupStore,
+    mk: &MasterKey,
+    full_ids: bool,
+    offline: bool,
+) -> ExitCode {
     println!("[read] mode           : all-machines (every snapshot, cumulatively)");
     println!("[read] repo           : {}", store.cfg.repo_root);
     // The twin shares this store's handles, so the counters the walk moves
@@ -12631,32 +12841,43 @@ fn cmd_read_all_machines(store: BackupStore, mk: &MasterKey, full_ids: bool) -> 
     // survive being detached without borrowing this one.
     let step_store = store.owned_twin();
     let step_mk = mk.clone();
-    let report =
-        match chat_stasher::readstep::run_behind_deadline(
+    let (trace, step_label) = if offline {
+        (
+            "[read] archive        : reading every snapshot of every machine (downloads and \
+             hashes every shard served from mirror — the destination is not contacted)",
+            "the all-machines read from the local mirror copy",
+        )
+    } else {
+        (
             "[read] archive        : reading every snapshot of every machine (downloads and hashes every shard)",
             "the all-machines archive read",
-            chat_stasher::readstep::ALL_MACHINES_READ_BUDGET_SECS,
-            move || {
-                chat_stasher::reader_guard::catching_panic("read", move || {
-                    step_store.read_all_machines(&step_mk)
-                })
-            },
-        ) {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
-                chat_stasher::remote_err::eprint_remote_error("read", &e, &store.cfg);
-                // Deliberately 3, not 1. `read_all_machines` failed before it
-                // produced a complete archive report, so the archive was not read
-                // to completion; 1 is for a completed read whose result failed.
-                return ExitCode::from(3);
-            }
-            Err(timed_out) => {
-                return read_step_timed_out(
-                    &timed_out,
-                    "the walk stopped part-way, so every machine's session counts are unknown",
-                );
-            }
-        };
+        )
+    };
+    let report = match chat_stasher::readstep::run_behind_deadline(
+        trace,
+        step_label,
+        chat_stasher::readstep::ALL_MACHINES_READ_BUDGET_SECS,
+        move || {
+            chat_stasher::reader_guard::catching_panic("read", move || {
+                step_store.read_all_machines(&step_mk)
+            })
+        },
+    ) {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            chat_stasher::remote_err::eprint_remote_error("read", &e, &store.cfg);
+            // Deliberately 3, not 1. `read_all_machines` failed before it
+            // produced a complete archive report, so the archive was not read
+            // to completion; 1 is for a completed read whose result failed.
+            return ExitCode::from(3);
+        }
+        Err(timed_out) => {
+            return read_step_timed_out(
+                &timed_out,
+                "the walk stopped part-way, so every machine's session counts are unknown",
+            );
+        }
+    };
     println!(
         "[read] snapshots read : {} (get_all_snapshots lists every snapshot file)",
         report.snapshots_in_repo
@@ -12711,6 +12932,7 @@ fn cmd_verify(
     level: VerifyLevel,
     stage: &Option<PathBuf>,
     full_ids: bool,
+    offline: bool,
     machine: Option<&str>,
     destination: Option<String>,
     repo: Option<String>,
@@ -12732,15 +12954,50 @@ fn cmd_verify(
         connections,
         options,
     );
-    let store = match machine.as_deref() {
-        Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
-        None => BackupStore::for_metadata_query(cfg.clone()),
+    // W1053: `--offline` decides before the store is built, the same two
+    // states `read` accepts (a serving mirror; the copy itself, whose
+    // plain local read is the offline shape already). Every other state
+    // refuses before a level runs — "did not finish", nothing checked, so
+    // no verdict below could be mistaken for one about the archive. The
+    // decision the copy-detection line prints below is the same object.
+    let mirror_decision = match offline {
+        true => match chat_stasher::mirror_read::decide(&config, &cfg, &data_root()) {
+            decision if decision.offline_capable() => decision,
+            refused => {
+                eprintln!(
+                    "verify: --offline cannot certify anything here — {}",
+                    refused
+                        .offline_refusal()
+                        .unwrap_or_else(|| "no usable local mirror".to_string())
+                );
+                eprintln!(
+                    "verify: nothing was checked and no remote connection was opened — this \
+                     is not a verdict, and an online `verify` still never consults the copy"
+                );
+                return ExitCode::from(3);
+            }
+        },
+        false => chat_stasher::mirror_read::decide(&config, &cfg, &data_root()),
+    };
+    let store = {
+        let store = match machine.as_deref() {
+            Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
+            None => BackupStore::for_metadata_query(cfg.clone()),
+        };
+        match (&mirror_decision, offline) {
+            (chat_stasher::mirror_read::MirrorReadDecision::Serving(reads), true) => {
+                store.with_offline_mirror(Arc::clone(reads))
+            }
+            _ => store,
+        }
     };
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
             eprintln!("verify: {e}");
-            reap_remote(&cfg, keep_ssh_masters);
+            if !offline {
+                reap_remote(&cfg, keep_ssh_masters);
+            }
             return ExitCode::from(3);
         }
     };
@@ -12749,7 +13006,9 @@ fn cmd_verify(
         (true, Some(s)) => s.clone(),
         (true, None) => {
             eprintln!("verify: `--stage` is required for level l3 / all");
-            reap_remote(&cfg, keep_ssh_masters);
+            if !offline {
+                reap_remote(&cfg, keep_ssh_masters);
+            }
             return ExitCode::from(2);
         }
         (false, _) => PathBuf::from("."),
@@ -12762,7 +13021,9 @@ fn cmd_verify(
     );
     println!(
         "[verify] ssh reap       : {}",
-        if keep_ssh_masters {
+        if offline {
+            "N/A (--offline; this run opened no ssh master)"
+        } else if keep_ssh_masters {
             "OFF (--keep-ssh-masters)"
         } else {
             "ON"
@@ -12775,12 +13036,19 @@ fn cmd_verify(
     // `verify --repo <data root>/mirror/<name>` certifies this machine's
     // copy, never the copied destination, and silence would let a copy's
     // verdict pass as the archive's own (47 §5.5: a copy may not certify
-    // itself).
-    let mirror_decision = chat_stasher::mirror_read::decide(&config, &cfg, &data_root());
-    let copy_line = match &mirror_decision {
-        chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { .. } => {
+    // itself). W1053's `--offline` is the same stance with the copy named
+    // up front: the switch certifies the copy (it cannot reach anything
+    // else), so its line says so before a verdict can be read.
+    let copy_line = match (&mirror_decision, offline) {
+        (chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { .. }, _) => {
             mirror_decision.state_line()
         }
+        (chat_stasher::mirror_read::MirrorReadDecision::Serving(reads), true) => Some(format!(
+            "served from mirror `{}` — verifying the local mirror copy only, so the verdict \
+             certifies the copy, never the destination's repository; the destination is not \
+             contacted",
+            reads.mirror_of
+        )),
         _ => None,
     };
     if let Some(line) = copy_line {
@@ -12818,7 +13086,29 @@ fn cmd_verify(
         }
     }
 
-    reap_remote(&cfg, keep_ssh_masters);
+    // The ruling's phrase on every offline output (W1053): an offline run
+    // answers from the copy, and the RESULT lines below are honest about
+    // the copy only if this line has said so first.
+    if offline {
+        match &mirror_decision {
+            chat_stasher::mirror_read::MirrorReadDecision::Serving(reads) => {
+                println!("[verify] mirror served  : {}", reads.offline_served_line());
+            }
+            chat_stasher::mirror_read::MirrorReadDecision::MirrorCopyItself { name } => {
+                println!(
+                    "[verify] mirror served  : served from mirror `{name}` itself — every byte \
+                     came from the copy on this machine's disk; this run opened no remote \
+                     connection"
+                );
+            }
+            // Unreachable: every other decision returned before a level
+            // ran (`--offline`'s refusal above is the only other exit).
+            _ => {}
+        }
+    }
+    if !offline {
+        reap_remote(&cfg, keep_ssh_masters);
+    }
     if unreadable > 0 {
         if not_attempted > 0 {
             println!("[verify] RESULT         : INCOMPLETE ({unreadable} level(s) unreadable, {not_attempted} not attempted)");
@@ -12955,7 +13245,16 @@ fn run_reconcile(
     }) {
         Ok(report) => {
             print_reconcile(&report, full_ids);
-            if !report.ok() {
+            // W1053: offline, a row the expected manifest wants that the
+            // copy does not hold is an unknown about the archive, and this
+            // level could not answer for it — the level is unreadable
+            // (RESULT INCOMPLETE, exit 3), never "checked and failed": a
+            // copy that is behind the newest push cannot grade what it has
+            // not synced. Online the same rows stay MissingInArchive and
+            // count as failures exactly as before.
+            if store.is_offline_mirror() && report.absent_from_mirror_copy() > 0 {
+                *unreadable += 1;
+            } else if !report.ok() {
                 *failed += 1;
             }
             LevelOutcome::Read
@@ -12980,6 +13279,7 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
         let mark = match &row.outcome {
             SessionOutcome::Match => "ok ",
             SessionOutcome::Unverifiable { .. } => "?? ",
+            SessionOutcome::AbsentFromMirrorCopy => "?? ",
             _ => "!! ",
         };
         match &row.outcome {
@@ -12996,6 +13296,11 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
             }
             SessionOutcome::MissingInArchive => println!(
                 "  {mark} {:<12} {:<20} MISSING IN ARCHIVE",
+                row.machine, session
+            ),
+            SessionOutcome::AbsentFromMirrorCopy => println!(
+                "  {mark} {:<12} {:<20} NOT IN THE LOCAL COPY (--offline; unknown whether the \
+                 archive holds it — the remote was not contacted)",
                 row.machine, session
             ),
             SessionOutcome::ShardCountMismatch { expected, observed } => println!(
@@ -13072,7 +13377,18 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
              `chat-stasher repair-duplicates` for the read-only inventory)"
         );
     }
-    let verdict = if r.ok() {
+    let absent_from_copy = r.absent_from_mirror_copy();
+    let verdict = if absent_from_copy > 0 {
+        // W1053: the offline rows are unknowns, and an L3 that could not
+        // answer for every expected row is INCOMPLETE by the same rule an
+        // unreadable one is — the run's RESULT line takes this count into
+        // its unreadable levels and exits 3.
+        format!(
+            "INCOMPLETE ({} expected row(s) not in the local mirror copy --offline; unknown \
+             whether the archive holds them — the remote was not contacted)",
+            absent_from_copy
+        )
+    } else if r.ok() {
         if r.possible_duplicate_seals.is_empty() {
             "OK".to_string()
         } else {

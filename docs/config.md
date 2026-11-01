@@ -210,6 +210,16 @@ is a hard failure that stops the read with the file's name and the repair
 (`mirror sync` re-downloads a file that no longer hashes to its name) —
 it is never quietly replaced from the remote mid-read.
 
+The `--offline` switch (`read`, `export`, `verify`) takes the fallback
+away for one run: the destination is not contacted at all — its backend
+is never even built — and every byte comes from the copy and the local
+caches, with `served from mirror` on the output and a "did not finish"
+exit (`3`, never an empty result or a claimed absence) for anything the
+copy cannot serve. `verify --offline` is the switch's one exception to
+"never certifies anything from the copy": it certifies the copy, by name,
+and words the verdict that way — an online `verify` still never consults
+it.
+
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | The switch. A machine that declares no section, or sets this false, mirrors nothing and reads only the remote — the read behaviour above is the switch's, not a separate one. |
