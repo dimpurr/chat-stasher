@@ -64,6 +64,15 @@ else
   sha256_of() { cat "$@" | shasum -a 256 | awk '{print $1}'; }
 fi
 
+file_digest() {
+  local path="$1"
+  if [ -f "$path" ] && [ -r "$path" ]; then
+    sha256_of "$path" 2>/dev/null || echo ABSENT
+  else
+    echo ABSENT
+  fi
+}
+
 # Portable file size in bytes. BSD stat formats with `-f %z`; GNU stat uses
 # `-c %s` (`stat -f %z` is exactly the macOS-only flag that broke the ubuntu
 # CI cell for two days on 2026-08-28). Probe once and reuse — never branch
@@ -80,12 +89,13 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/cs-gate.XXXXXX")"
 # The self-built fixture lives under $TMP, so removing $TMP on exit also
 # removes it. A caller-supplied CLAUDE_PROJECTS_DIR lives OUTSIDE $TMP and is
 # only ever read (cp), never removed — even on failure/interrupt.
+GUARD_ASSERTED=0
 CLEANING_UP=0
 cleanup() {
   local exit_code=$?
   if [ "$CLEANING_UP" -eq 0 ]; then
     CLEANING_UP=1
-    if [ "${REAL_DATA:-0}" -eq 0 ] && [ "${IN_FAIL_GATE:-0}" -eq 0 ] && [ -n "${REAL_DATA_BASELINE:-}" ] && [ -f "${REAL_DATA_BASELINE:-}" ]; then
+    if [ "${REAL_DATA:-0}" -eq 0 ] && [ "${IN_FAIL_GATE:-0}" -eq 0 ] && [ "${GUARD_ASSERTED:-0}" -eq 0 ] && [ -n "${REAL_DATA_BASELINE:-}" ] && [ -f "${REAL_DATA_BASELINE:-}" ]; then
       assert_real_home_untouched || true
     fi
   fi
@@ -161,10 +171,11 @@ case "$(uname -s 2>/dev/null)" in
     ;;
 esac
 
-FIXTURE_TOKENS="synthetic fixture probe dummy gate-mbp"
+FIXTURE_TOKENS=("gate-mbp" "gate-" "synthetic" "fixture" "probe" "dummy")
 GATE_MARKER="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
 [ -n "$GATE_MARKER" ] || GATE_MARKER="cs-gate-$$"
 export CHAT_STASHER_TEST_ISOLATION_MARKER="$GATE_MARKER"
+GATE_MACHINE_META_HASH="$(printf '%s' "${MACHINE:-gate-mbp}" | sha256_of | cut -c1-12)"
 
 GATE_HOME="$TMP/home"
 mkdir -p "$GATE_HOME"
@@ -186,6 +197,8 @@ fi
 REAL_DATA_BASELINE="$TMP/real-data-baseline.txt"
 REAL_DATA_CURRENT="$TMP/real-data-current.txt"
 REAL_DATA_DIFF="$TMP/real-data-diff.txt"
+BASELINE_PUSH_STATE="$TMP/baseline-push-state.json"
+BASELINE_RUN_STATE="$TMP/baseline-run-state.json"
 
 snapshot_real_roots() {
   local target_file="$1"
@@ -194,7 +207,7 @@ snapshot_real_roots() {
   # Config root
   if [ -n "$REAL_CONFIG_ROOT" ] && [ -d "$REAL_CONFIG_ROOT" ]; then
     find "$REAL_CONFIG_ROOT" -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
-      printf 'config:%s %s\n' "${f#$REAL_CONFIG_ROOT/}" "$(sha256_of "$f" 2>/dev/null || echo ABSENT)"
+      printf 'config:%s %s\n' "${f#$REAL_CONFIG_ROOT/}" "$(file_digest "$f")"
     done >> "$target_file"
   elif [ -n "$REAL_CONFIG_ROOT" ]; then
     printf 'config:ABSENT %s\n' "$REAL_CONFIG_ROOT" >> "$target_file"
@@ -203,7 +216,7 @@ snapshot_real_roots() {
   # State root (XDG_STATE_HOME)
   if [ -n "$REAL_STATE_ROOT" ] && [ -d "$REAL_STATE_ROOT" ]; then
     find "$REAL_STATE_ROOT" -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
-      printf 'state_home:%s %s\n' "${f#$REAL_STATE_ROOT/}" "$(sha256_of "$f" 2>/dev/null || echo ABSENT)"
+      printf 'state_home:%s %s\n' "${f#$REAL_STATE_ROOT/}" "$(file_digest "$f")"
     done >> "$target_file"
   elif [ -n "$REAL_STATE_ROOT" ]; then
     printf 'state_home:ABSENT %s\n' "$REAL_STATE_ROOT" >> "$target_file"
@@ -212,7 +225,7 @@ snapshot_real_roots() {
   # Cache root
   if [ -n "$REAL_CACHE_ROOT" ] && [ -d "$REAL_CACHE_ROOT" ]; then
     find "$REAL_CACHE_ROOT" -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
-      printf 'cache:%s %s\n' "${f#$REAL_CACHE_ROOT/}" "$(sha256_of "$f" 2>/dev/null || echo ABSENT)"
+      printf 'cache:%s %s\n' "${f#$REAL_CACHE_ROOT/}" "$(file_digest "$f")"
     done >> "$target_file"
   elif [ -n "$REAL_CACHE_ROOT" ]; then
     printf 'cache:ABSENT %s\n' "$REAL_CACHE_ROOT" >> "$target_file"
@@ -222,13 +235,13 @@ snapshot_real_roots() {
   if [ -d "$REAL_DATA_ROOT" ]; then
     # Top-level entries under data root (masterkey, etc.)
     find "$REAL_DATA_ROOT" -maxdepth 1 -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
-      printf 'data_top:%s %s\n' "${f#$REAL_DATA_ROOT/}" "$(sha256_of "$f" 2>/dev/null || echo ABSENT)"
+      printf 'data_top:%s %s\n' "${f#$REAL_DATA_ROOT/}" "$(file_digest "$f")"
     done >> "$target_file"
 
     # State files: digest every file the baseline snapshots
     if [ -d "$REAL_DATA_ROOT/state" ]; then
       find "$REAL_DATA_ROOT/state" \( -name opencode-session-maps -prune \) -o -type f -print 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
-        printf 'data_state:%s %s\n' "${f#$REAL_DATA_ROOT/state/}" "$(sha256_of "$f" 2>/dev/null || echo ABSENT)"
+        printf 'data_state:%s %s\n' "${f#$REAL_DATA_ROOT/state/}" "$(file_digest "$f")"
       done >> "$target_file"
     else
       printf 'data_state:ABSENT %s\n' "$REAL_DATA_ROOT/state" >> "$target_file"
@@ -237,7 +250,7 @@ snapshot_real_roots() {
     # Stage sessions
     if [ -d "$REAL_DATA_ROOT/stage/sessions" ]; then
       find "$REAL_DATA_ROOT/stage/sessions" -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
-        printf 'data_stage_sessions:%s %s\n' "${f#$REAL_DATA_ROOT/stage/sessions/}" "$(sha256_of "$f" 2>/dev/null || echo ABSENT)"
+        printf 'data_stage_sessions:%s %s\n' "${f#$REAL_DATA_ROOT/stage/sessions/}" "$(file_digest "$f")"
       done >> "$target_file"
     else
       printf 'data_stage_sessions:ABSENT %s\n' "$REAL_DATA_ROOT/stage/sessions" >> "$target_file"
@@ -246,12 +259,12 @@ snapshot_real_roots() {
     # Stage ext-status and meta
     if [ -d "$REAL_DATA_ROOT/stage/ext-status" ]; then
       find "$REAL_DATA_ROOT/stage/ext-status" -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
-        printf 'data_ext_status:%s %s\n' "${f#$REAL_DATA_ROOT/stage/ext-status/}" "$(sha256_of "$f" 2>/dev/null || echo ABSENT)"
+        printf 'data_ext_status:%s %s\n' "${f#$REAL_DATA_ROOT/stage/ext-status/}" "$(file_digest "$f")"
       done >> "$target_file"
     fi
     if [ -d "$REAL_DATA_ROOT/stage/meta" ]; then
       find "$REAL_DATA_ROOT/stage/meta" -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
-        printf 'data_meta:%s %s\n' "${f#$REAL_DATA_ROOT/stage/meta/}" "$(sha256_of "$f" 2>/dev/null || echo ABSENT)"
+        printf 'data_meta:%s %s\n' "${f#$REAL_DATA_ROOT/stage/meta/}" "$(file_digest "$f")"
       done >> "$target_file"
     fi
   else
@@ -259,40 +272,104 @@ snapshot_real_roots() {
   fi
 }
 
-snapshot_real_data_root() {
-  snapshot_real_roots "$@"
-}
-
 snapshot_real_roots "$REAL_DATA_BASELINE"
+
+if [ -n "$REAL_DATA_ROOT" ] && [ -d "$REAL_DATA_ROOT/state" ]; then
+  [ -f "$REAL_DATA_ROOT/state/push-state.json" ] && cp "$REAL_DATA_ROOT/state/push-state.json" "$BASELINE_PUSH_STATE" || true
+  [ -f "$REAL_DATA_ROOT/state/run-state.json" ] && cp "$REAL_DATA_ROOT/state/run-state.json" "$BASELINE_RUN_STATE" || true
+fi
 
 if [ ! -f "$REAL_DATA_BASELINE" ]; then
   echo "[gate] GUARD FAILURE (W1033): could not capture real data root baseline"
   exit 1
 fi
 
-is_heartbeat_diff_line() {
-  local line="$1"
-  case "$line" in
-    [+-]data_ext_status:*|[+-]data_meta:*) ;;
-    *) return 1 ;;
-  esac
-
+line_has_leak_tokens() {
+  local str="$1"
   local lowered
-  lowered="$(printf '%s' "$line" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
-
-  # Check if line carries any fixture token, gate machine, or run marker
-  if [[ "$lowered" == *"gate-mbp"* ]] || [[ "$lowered" == *"gate-"* ]] || [[ "$lowered" == *"synthetic"* ]] || \
-     [[ "$lowered" == *"fixture"* ]] || [[ "$lowered" == *"probe"* ]] || [[ "$lowered" == *"dummy"* ]]; then
-    return 1
-  fi
-  if [ -n "${GATE_MARKER:-}" ] && [[ "$line" == *"$GATE_MARKER"* ]]; then
-    return 1
+  lowered="$(printf '%s' "$str" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  for token in "${FIXTURE_TOKENS[@]}"; do
+    if [[ "$lowered" == *"$token"* ]]; then
+      return 0
+    fi
+  done
+  if [ -n "${GATE_MARKER:-}" ] && [[ "$str" == *"$GATE_MARKER"* ]]; then
+    return 0
   fi
   if [ -n "${MACHINE:-}" ] && [[ "$lowered" == *"$MACHINE"* ]]; then
+    return 0
+  fi
+  if [ -n "${GATE_MACHINE_META_HASH:-}" ] && [[ "$lowered" == *"$GATE_MACHINE_META_HASH"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+is_tolerated_diff_line() {
+  local line="$1"
+
+  # Lines carrying any fixture token, gate machine, marker, or meta hash are never tolerated.
+  if line_has_leak_tokens "$line"; then
     return 1
   fi
 
-  return 0
+  case "$line" in
+    # Heartbeat files under stage/
+    [+-]data_ext_status:*|[+-]data_meta:*)
+      return 0
+      ;;
+
+    # Extension SQLite database churn
+    [+-]data_state:extension-coordination.sqlite3*)
+      return 0
+      ;;
+
+    # Background daemon state churn
+    [+-]data_state:debts-*.json*|[+-]data_state:mirror-*.json*|[+-]data_state:reclaim-*.json*|[+-]data_state:machine-logs-*.json*)
+      return 0
+      ;;
+
+    # Concurrent real-machine pushed-meta records (line_has_leak_tokens already checked gate meta hash)
+    [+-]data_state:pushed-meta-*.sha256*)
+      return 0
+      ;;
+
+    # Real-machine scheduled push churn under state/
+    [+-]data_state:push-state.json*)
+      local current_file="$REAL_DATA_ROOT/state/push-state.json"
+      local base_file="${BASELINE_PUSH_STATE:-/dev/null}"
+      [ -f "$base_file" ] || base_file="/dev/null"
+      if [ -f "$current_file" ]; then
+        local file_diff
+        file_diff="$(diff -u "$base_file" "$current_file" 2>/dev/null | grep '^[+-]' | grep -v '^[+-][+-][+-]' || true)"
+        if line_has_leak_tokens "$file_diff"; then
+          return 1
+        fi
+        return 0
+      fi
+      return 1
+      ;;
+
+    # Real-machine scheduled run-once churn under state/
+    [+-]data_state:run-state.json*)
+      local current_file="$REAL_DATA_ROOT/state/run-state.json"
+      local base_file="${BASELINE_RUN_STATE:-/dev/null}"
+      [ -f "$base_file" ] || base_file="/dev/null"
+      if [ -f "$current_file" ]; then
+        local file_diff
+        file_diff="$(diff -u "$base_file" "$current_file" 2>/dev/null | grep '^[+-]' | grep -v '^[+-][+-][+-]' || true)"
+        if line_has_leak_tokens "$file_diff"; then
+          return 1
+        fi
+        return 0
+      fi
+      return 1
+      ;;
+
+    *)
+      return 1
+      ;;
+  esac
 }
 
 IN_FAIL_GATE=0
@@ -322,7 +399,7 @@ assert_real_home_untouched() {
     case "$line" in
       ---*|+++*|@@*) continue ;;
       [-+]*)
-        if is_heartbeat_diff_line "$line"; then
+        if is_tolerated_diff_line "$line"; then
           continue
         fi
         real_leaks=$(( real_leaks + 1 ))
@@ -390,11 +467,11 @@ collect_sources() {
 }
 
 if [ "$REAL_DATA" -eq 1 ]; then
-  SRC_ROOT="${CLAUDE_PROJECTS_DIR:-${REAL_HOME:-$HOME}/.claude/projects}"
+  SRC_ROOT="${CLAUDE_PROJECTS_DIR:-${REAL_HOME:-${HOME:-}}/.claude/projects}"
   if [ -n "${CLAUDE_PROJECTS_DIR:-}" ]; then
     SRC_LABEL="CLAUDE_PROJECTS_DIR override"
   else
-    SRC_LABEL='${REAL_HOME:-$HOME}/.claude/projects'
+    SRC_LABEL='${REAL_HOME:-${HOME:-}}/.claude/projects'
   fi
   collect_sources "$SRC_ROOT"
   if [ "${#sources[@]}" -lt "$N_SESSIONS" ]; then
@@ -576,12 +653,12 @@ if [ "$REAL_DATA" -eq 0 ]; then
   fi
 else
   gate "step 7/8 · doctor (real-data opt-in)"
-  if ! out=$(HOME="$REAL_HOME" \
-             USERPROFILE="$REAL_HOME" \
-             XDG_DATA_HOME="${REAL_XDG_DATA_HOME:-$REAL_HOME/.local/share}" \
-             XDG_CONFIG_HOME="${REAL_XDG_CONFIG_HOME:-$REAL_HOME/.config}" \
-             XDG_STATE_HOME="${REAL_XDG_STATE_HOME:-$REAL_HOME/.local/state}" \
-             XDG_CACHE_HOME="${REAL_XDG_CACHE_HOME:-$REAL_HOME/.cache}" \
+  if ! out=$(HOME="${REAL_HOME:-${HOME:-}}" \
+             USERPROFILE="${REAL_HOME:-${USERPROFILE:-}}" \
+             XDG_DATA_HOME="${REAL_XDG_DATA_HOME:-${REAL_HOME:-${HOME:-}}/.local/share}" \
+             XDG_CONFIG_HOME="${REAL_XDG_CONFIG_HOME:-${REAL_HOME:-${HOME:-}}/.config}" \
+             XDG_STATE_HOME="${REAL_XDG_STATE_HOME:-${REAL_HOME:-${HOME:-}}/.local/state}" \
+             XDG_CACHE_HOME="${REAL_XDG_CACHE_HOME:-${REAL_HOME:-${HOME:-}}/.cache}" \
              "$BIN" doctor 2>&1); then
     echo "$out"; echo "[gate] doctor errored"; fail_gate
   fi
@@ -666,14 +743,14 @@ if [ "$SELFTEST" -eq 1 ]; then
     fail_gate
   fi
   gate "SELFTEST OK · corruption detected, verify l3 failed as required"
-  assert_real_home_untouched
+  assert_real_home_untouched && GUARD_ASSERTED=1
   echo "[gate] elapsed $(elapsed)"
   echo "GATE: FAIL"
   exit 1
 fi
 
 # --------------------------------------------------------------------- pass
-assert_real_home_untouched
+assert_real_home_untouched && GUARD_ASSERTED=1
 echo "[gate] elapsed $(elapsed)"
 echo "GATE: PASS"
 exit 0
