@@ -79,6 +79,9 @@ binrw = "0.15"
 aes256ctr_poly1305aes = "0.2.1"
 jsonschema = { version = "0.58.5", default-features = false }
 base64 = "0.22.1"
+# ADR-063 ruling 4: the tmp name's random part comes from the operating system.
+# Already in the lock file (rand and tokio resolve it), so no new package.
+getrandom = "0.3"
 
 [dev-dependencies]
 # The protocol tests have to compute the SHA-256 the extension would send, from
