@@ -251,7 +251,7 @@ ABSENT = "-"
 REQUEST_SUPPORT_LINE = (
     "**Request support.** A tool or chat site that is not in this table, or one listed "
     "without a verified date, can be requested by opening an issue that names it and says "
-    "where it keeps its sessions; [CONTRIBUTING.md](CONTRIBUTING.md#issues) says how to "
+    "where it keeps its sessions; the Issues section of `CONTRIBUTING.md` says how to "
     "write one without private data."
 )
 
