@@ -2,7 +2,7 @@
 //! rename, and tmp debris is swept by name.
 //!
 //! One section per ruling the principal approved on 2026-10-28
-//! (`nm/ADR-063-REVIEW.md`), each failing against the pre-change code:
+//! (the ADR-063 review), each checked to fail when its mechanism is removed:
 //!
 //! * **M1** · a repository holding a `.tmp-*` file completes `push`, `read`,
 //!   `verify`, `prune-orphans` and `mirror sync`, and third-party listers
