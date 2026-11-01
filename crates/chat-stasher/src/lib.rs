@@ -46,6 +46,7 @@ pub mod orphans;
 pub mod overview;
 pub mod packcheck;
 pub mod paseo;
+pub mod paseo_codex;
 pub mod provenance;
 pub mod prune_orphans;
 pub mod push_progress;
