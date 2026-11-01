@@ -28,7 +28,7 @@ anyhow       crates/chat-stasher/src/atomic_pack.rs:148  "could not start the at
 anyhow       crates/chat-stasher/src/atomic_pack.rs:432  "the operating system gave no randomness"
 anyhow       crates/chat-stasher/src/atomic_pack.rs:531  "the atomic pack writer lock was poisoned"
 anyhow       crates/chat-stasher/src/atomic_pack.rs:545  "the atomic pack writer lock was poisoned"
-context      crates/chat-stasher/src/atomic_pack.rs:849  "open the destination"
+context      crates/chat-stasher/src/atomic_pack.rs:852  "open the destination"
 anyhow       crates/chat-stasher/src/audit_store.rs:14  "audit join key is unreadable"
 anyhow       crates/chat-stasher/src/audit_store.rs:23  "audit join key is unreadable"
 anyhow       crates/chat-stasher/src/audit_store.rs:26  "audit join key must contain exactly 32 bytes"

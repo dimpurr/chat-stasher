@@ -552,11 +552,13 @@ impl AtomicPackBackend {
     /// Best-effort removal of `tmp` (and anything an earlier failure could
     /// not remove) on a fresh connection. Returns how many files remain.
     fn clean_up(&self, tmp: &str) -> usize {
-        let mut wanted: Vec<String> = self
-            .pending
-            .lock()
-            .map(|mut pending| std::mem::take(&mut *pending))
-            .unwrap_or_default();
+        // A poisoned lock still holds the list; losing it would forget files.
+        let mut wanted: Vec<String> = std::mem::take(
+            &mut *self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         wanted.push(tmp.to_string());
         let mut left = Vec::new();
         match self.fresh_io() {
@@ -570,9 +572,10 @@ impl AtomicPackBackend {
             Err(_) => left = wanted,
         }
         let count = left.len();
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.extend(left);
-        }
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(left);
         count
     }
 
