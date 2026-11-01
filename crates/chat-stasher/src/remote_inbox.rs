@@ -351,3 +351,82 @@ impl PullReport {
         }
     }
 }
+
+/// Coordinates of an S3-compatible inbox (Cloudflare R2). Secrets are never
+/// printed: `Debug` redacts them and every error from this module is a fixed
+/// phrase.
+#[derive(Clone)]
+pub struct S3InboxConfig {
+    pub bucket: String,
+    pub endpoint: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    /// Object-key prefix dedicated to this inbox. Required and never the
+    /// bucket root, so one inbox cannot list or retire another's objects.
+    pub prefix: String,
+}
+impl std::fmt::Debug for S3InboxConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3InboxConfig")
+            .field("bucket", &self.bucket)
+            .field("prefix", &self.prefix)
+            .field("credentials", &"<redacted>")
+            .finish()
+    }
+}
+impl RemoteInbox {
+    /// Open an S3-compatible bucket prefix as an inbox. As with [`Self::new`]
+    /// the caller must hold a Tokio runtime context (`runtime.enter()`) while
+    /// calling this. Nothing is sent to the network until the first use.
+    pub fn open_s3(config: &S3InboxConfig, max_object_bytes: usize) -> anyhow::Result<Self> {
+        let prefix = config.prefix.trim_matches('/');
+        anyhow::ensure!(
+            !config.bucket.is_empty()
+                && !config.endpoint.is_empty()
+                && !config.access_key_id.is_empty()
+                && !config.secret_access_key.is_empty(),
+            "inbox backend configuration incomplete"
+        );
+        anyhow::ensure!(
+            !prefix.is_empty()
+                && prefix
+                    .split('/')
+                    .all(|s| !s.is_empty() && s != "." && s != ".."),
+            "inbox prefix must be a dedicated non-root path"
+        );
+        let builder = opendal::services::S3::default()
+            .bucket(&config.bucket)
+            .endpoint(&config.endpoint)
+            .region("auto")
+            .access_key_id(&config.access_key_id)
+            .secret_access_key(&config.secret_access_key)
+            .disable_config_load()
+            .disable_ec2_metadata()
+            .root(&format!("/{prefix}"));
+        let operator = opendal::Operator::new(builder)
+            .map_err(|_| anyhow::anyhow!("inbox backend unavailable"))?
+            .finish();
+        let operator = opendal::blocking::Operator::new(operator)
+            .map_err(|_| anyhow::anyhow!("inbox backend unavailable"))?;
+        Ok(Self::new(operator, max_object_bytes))
+    }
+    /// Delete every object directly under this inbox's operator root. Meant
+    /// for tests that own a unique prefix; returns how many were deleted.
+    pub fn purge_flat(&self) -> anyhow::Result<usize> {
+        let mut n = 0;
+        for entry in self
+            .operator
+            .list("/")
+            .map_err(|_| anyhow::anyhow!("inbox listing unavailable"))?
+        {
+            if entry.metadata().is_dir() {
+                continue;
+            }
+            self.operator
+                .delete(entry.path())
+                .map_err(|_| anyhow::anyhow!("inbox purge unavailable"))?;
+            n += 1;
+        }
+        Ok(n)
+    }
+}
