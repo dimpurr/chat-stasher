@@ -60,7 +60,7 @@ earliest-seen time is stated as unknown rather than invented):
 
 ```
   offsite       … — reachable; repository present
-               debris: 1 torn pack(s) (1.9 MiB) — An interrupted push left a partial file. It belongs to no backup and can be ignored.
+               debris: 1 torn pack(s) (1.9 MiB) under a final name (historical) — An interrupted push left a partial file. It belongs to no backup and can be ignored.
                debris: earliest-seen time unknown — the backend interface carries no modification time, so the earliest-seen time is unknown
 ```
 
@@ -81,13 +81,21 @@ the rest, and the verifier's own reason per pack:
 
 ```
 [prune] unindexed   : 3 (5.7 MiB) — 1 torn (1.9 MiB), 1 stranded (1.9 MiB), 1 unknown (1.9 MiB)
-[prune] torn        : 1 file(s) belong to no backup — An interrupted push left a partial file. It belongs to no backup and can be ignored.
+[prune] torn        : 1 file(s) under a final name (historical) belong to no backup — An interrupted push left a partial file. It belongs to no backup and can be ignored.
+[prune] tmp debris  : 2 leftover tmp file(s) (1.2 MiB) from interrupted pushes — never part of any backup and safe to ignore; 1 older than 7 days will be removed by the next push
 [prune] first seen  : unknown — the backend interface carries no modification time, so the earliest-seen time is unknown
 ```
 
 ## What is normal
 
-- **The debris stays.** Nothing in this build deletes it, remotely or locally:
+- **New interruptions leave tmp files, not torn packs.** Since ADR-063 a push
+  writes each pack under a temporary name (`<id>.tmp-<time>-<random>`), checks
+  it by reading it back, and only then renames it into place, so an
+  interruption can no longer leave a half-written file under a pack's real
+  name. What it leaves is a tmp file, shown on its own `tmp debris` line next
+  to the historical one. Tmp files belong to no backup; a later push deletes
+  the ones older than seven days (nothing else ever deletes anything).
+- **The historical debris stays.** Nothing in this build deletes a torn pack under a final name, remotely or locally:
   the repository is append-only, and a safe delete would need capabilities
   (a repository-wide lock, a conditional delete, a trustworthy modification
   time) that this build deliberately does not pretend to have. A future change
