@@ -14454,6 +14454,7 @@ fn prune_orphans_json(inventory: &chat_stasher::prune_orphans::Inventory) -> ser
             "unknown_bytes": inventory.unknown_bytes(),
         },
         "torn_sentence": chat_stasher::debris::INTERRUPTED_PUSH_SENTENCE,
+        "tmp_debris": inventory.tmp.json(chat_stasher::atomic_pack::now_secs()),
         "missing_packs": {
             "count": inventory.missing.len(),
             "ids": inventory.missing,
@@ -14513,10 +14514,18 @@ fn print_prune_orphans(inventory: &chat_stasher::prune_orphans::Inventory, dry_r
     );
     if inventory.torn_packs() > 0 {
         println!(
-            "[prune] torn        : {} file(s) belong to no backup — {}",
+            "[prune] torn        : {} file(s) under a final name (historical) belong to no backup — {}",
             inventory.torn_packs(),
             chat_stasher::debris::INTERRUPTED_PUSH_SENTENCE
         );
+    }
+    // ADR-063 ruling 6: the same class on its second line. Silent on a
+    // healthy repository.
+    if let Some(line) = inventory
+        .tmp
+        .line(chat_stasher::atomic_pack::now_secs(), fmt_bytes)
+    {
+        println!("[prune] tmp debris  : {line}");
     }
     // The earliest-seen time of any torn or stranded pack: unknown, stated as
     // such — the backend interface carries no modification time, and a
