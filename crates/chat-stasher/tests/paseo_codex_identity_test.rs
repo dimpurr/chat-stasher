@@ -357,3 +357,34 @@ fn an_observation_records_the_handle_and_leaves_the_archive_id_to_the_stem() {
         _ => unreachable!(),
     }
 }
+
+/// Low-1 (PASEO-1c review): the `type == session_meta` check was not pinned;
+/// removing it survived mutation. A first record of any other type that merely
+/// carries `payload.id == handle` is not proof of identity.
+#[test]
+fn a_first_record_that_is_not_session_meta_is_not_identity_proof() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let home = dir.path().join("codex-home");
+    let impostor = format!("{{\"type\":\"event_msg\",\"payload\":{{\"id\":\"{UUID}\"}}}}\n");
+    plant(
+        &home,
+        "sessions",
+        &format!("{STEM}.jsonl"),
+        impostor.as_bytes(),
+    );
+    assert!(
+        matches!(resolve(&home), CodexResolution::Unreadable { .. }),
+        "a non-session_meta first record must not resolve, got {:?}",
+        resolve(&home)
+    );
+
+    // Positive control: the same bytes under type session_meta do resolve.
+    let ok_home = dir.path().join("codex-home-ok");
+    plant(
+        &ok_home,
+        "sessions",
+        &format!("{STEM}.jsonl"),
+        &meta_line(UUID),
+    );
+    assert!(matches!(resolve(&ok_home), CodexResolution::Resolved(_)));
+}
