@@ -1409,23 +1409,8 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
     for snap in snapshots {
         let snap_id = snap.id.to_hex().as_str().to_string();
         let short = &snap_id[..8.min(snap_id.len())];
-        let root = repo
-            .node_from_snapshot_and_path(snap, "")
-            .with_context(|| {
-                format!(
-                    "UNKNOWN: session `{}` cannot be resolved for machine `{machine}`: snapshot {short} tree root",
-                    crate::id::short_session_id(session_id)
-                )
-            })?;
-        let entries = repo
-            .ls(&root, &LsOptions::default())
-            .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
-            .with_context(|| {
-                format!(
-                    "UNKNOWN: session `{}` cannot be resolved for machine `{machine}`: snapshot {short} tree walk",
-                    crate::id::short_session_id(session_id)
-                )
-            })?;
+        let entries =
+            snapshot_session_entries(repo, snap, machine, session_id, short, policy.collapses())?;
         for (path, node) in entries {
             if node.node_type != NodeType::File {
                 continue;
@@ -1530,6 +1515,142 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
         concat
     };
     Ok(Some((body, hashes)))
+}
+
+/// The files of one snapshot that [`dump_cumulative_session`] can possibly
+/// care about: `(path relative to the snapshot root, node)`, in the same form
+/// a recursive `ls` of the root yields them.
+///
+/// W1059. The walk used to list the *whole* snapshot tree and filter, so one
+/// small session cost every file of every session of the machine, once per
+/// snapshot (field: 982 snapshots, 760-981 s for 1373 bytes). A dir-backup's
+/// tree mirrors the stage root's absolute path (`snapshot.paths` minus the
+/// leading `/`), under which the writer's layout is fixed:
+/// `sessions/<machine>/<session>/[<bucket>/]<shard>` and
+/// `meta/<machine>/provenance-v1.jsonl`. This reads exactly those directories
+/// (a handful of tree blobs plus the one session's subtree), so the cost is
+/// the session's, not the machine's.
+///
+/// The fast path is taken only when it is *known* to see what the full listing
+/// would: every `snapshot.paths` entry resolves to a directory that has a
+/// `sessions` child. Anything else (a tree not shaped like a stage, a missing
+/// path) falls back to the full recursive listing, so an odd snapshot is
+/// still walked completely rather than guessed at. A tree blob that cannot be
+/// read is an error on either path, never an absence: only "this directory has
+/// no such child" means the snapshot does not hold the session.
+///
+/// Narrowing, stated: the full listing matched the *last* `sessions` path
+/// component anywhere, so a `sessions` directory nested below
+/// `sessions/<x>/` could in theory also match. The writer never produces one
+/// (session ids are `harness.machine.uuid`, shards are `.jsonl` files), and
+/// the fast path does not look for it.
+fn snapshot_session_entries<S: rustic_core::IndexedFull>(
+    repo: &Repository<S>,
+    snap: &SnapshotFile,
+    machine: &str,
+    session_id: &str,
+    short: &str,
+    want_provenance: bool,
+) -> anyhow::Result<Vec<(PathBuf, rustic_core::repofile::Node)>> {
+    let unknown = |what: &str| {
+        format!(
+            "UNKNOWN: session `{}` cannot be resolved for machine `{machine}`: snapshot {short} {what}",
+            crate::id::short_session_id(session_id)
+        )
+    };
+    let root = repo
+        .node_from_snapshot_and_path(snap, "")
+        .with_context(|| unknown("tree root"))?;
+    if let Some(found) = fast_session_entries(
+        repo,
+        snap,
+        &root,
+        machine,
+        session_id,
+        want_provenance,
+        &unknown,
+    )? {
+        return Ok(found);
+    }
+    repo.ls(&root, &LsOptions::default())
+        .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
+        .with_context(|| unknown("tree walk"))
+}
+
+/// `Some(entries)` when every stage root resolved and holds `sessions/`;
+/// `None` to ask for the full listing.
+fn fast_session_entries<S: rustic_core::IndexedFull>(
+    repo: &Repository<S>,
+    snap: &SnapshotFile,
+    root: &rustic_core::repofile::Node,
+    machine: &str,
+    session_id: &str,
+    want_provenance: bool,
+    unknown: &dyn Fn(&str) -> String,
+) -> anyhow::Result<Option<Vec<(PathBuf, rustic_core::repofile::Node)>>> {
+    fn child<S: rustic_core::IndexedFull>(
+        repo: &Repository<S>,
+        dir: &rustic_core::repofile::Node,
+        name: &std::ffi::OsStr,
+        unknown: &dyn Fn(&str) -> String,
+    ) -> anyhow::Result<Option<rustic_core::repofile::Node>> {
+        let Some(id) = dir.subtree else {
+            return Ok(None);
+        };
+        let tree = repo.get_tree(&id).with_context(|| unknown("tree walk"))?;
+        Ok(tree.nodes.into_iter().find(|n| n.name() == name))
+    }
+
+    let stage_paths: Vec<PathBuf> = (&snap.paths).into_iter().map(PathBuf::from).collect();
+    if stage_paths.is_empty() {
+        return Ok(None);
+    }
+    let mut out = Vec::new();
+    for stage_path in stage_paths {
+        let rel: PathBuf = stage_path
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+            .collect();
+        let mut stage = root.clone();
+        for comp in rel.components() {
+            match child(repo, &stage, comp.as_os_str(), unknown)? {
+                Some(next) if next.node_type == NodeType::Dir => stage = next,
+                _ => return Ok(None),
+            }
+        }
+        let Some(sessions) = child(repo, &stage, SESSIONS_DIR.as_ref(), unknown)? else {
+            return Ok(None);
+        };
+        if sessions.node_type != NodeType::Dir {
+            return Ok(None);
+        }
+        if let Some(machine_dir) = child(repo, &sessions, machine.as_ref(), unknown)? {
+            if let Some(session_dir) = child(repo, &machine_dir, session_id.as_ref(), unknown)? {
+                if session_dir.node_type == NodeType::Dir {
+                    let base = rel.join(SESSIONS_DIR).join(machine).join(session_id);
+                    let listed = repo
+                        .ls(&session_dir, &LsOptions::default())
+                        .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
+                        .with_context(|| unknown("tree walk"))?;
+                    out.extend(listed.into_iter().map(|(p, n)| (base.join(p), n)));
+                }
+            }
+        }
+        if want_provenance {
+            if let Some(meta) = child(repo, &stage, "meta".as_ref(), unknown)? {
+                if let Some(mdir) = child(repo, &meta, machine.as_ref(), unknown)? {
+                    if let Some(file) = child(repo, &mdir, "provenance-v1.jsonl".as_ref(), unknown)?
+                    {
+                        out.push((
+                            rel.join("meta").join(machine).join("provenance-v1.jsonl"),
+                            file,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(Some(out))
 }
 
 /// Declare the plaintext size of the session about to be dumped, so ADR-034's
