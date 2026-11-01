@@ -46,8 +46,17 @@ const SESSION: &str = "opencode.b79-fixture.019bf00d-97b6-7eb2-9bf8-eacbacc09765
 /// the old header text back reproduces the previous digest exactly
 /// (`3e031951…`), so that one line is the whole delta. The verify digest did
 /// not move, which is the same check from the other side.
+///
+/// W1052 · the read digest moved a fourth time, delta-checked the same way:
+/// `read` now traces every step before it runs and bounds each behind a
+/// deadline, so five trace lines joined the report — the configuration, the
+/// machine identity, the body-cache-and-mirror tier, the master key file and
+/// the archive walk itself. Removing exactly those five lines from the
+/// canonical report reproduces the previous digest (`73adef7e…`) byte for
+/// byte, so nothing else about the report moved. The verify digest did not
+/// move, the same check from the other side.
 const READ_DEFAULT_REPORT_SHA256: &str =
-    "73adef7e6f72091247bdf19cdca8031b00e4004369074d2a316a1269fafd29b0";
+    "2d38364e02a0de7582b09922ac918499b7fc693b8e84f803595c27f186b41093";
 const VERIFY_DEFAULT_REPORT_SHA256: &str =
     "f62693877a728e95bef872ef4bd419bea21f6f643b833d3edd1da130efdb29d7";
 
