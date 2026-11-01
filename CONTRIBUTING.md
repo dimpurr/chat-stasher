@@ -475,7 +475,7 @@ One run covers the clone and every worktree of it (`.git/config` is shared). The
 driver is an inline command, not a path: a path into a worktree breaks the day
 that worktree is removed, and git then reports a plain conflict even though the
 config still looks registered. A fresh clone, or a second clone such as a build
-farm's base, needs the command again; `.private/bootstrap/init.sh` runs it.
+farm's base, needs the command again; the repository bootstrap runs it.
 Check with `git config --get merge.regenerate-citations.driver`, which prints the
 command, not a path.
 
