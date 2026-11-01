@@ -167,6 +167,11 @@ REGISTRY_REL = os.path.join("crates", "chat-stasher", "data", "harness-registry-
 CONTRACT_REL = os.path.join("apps", "extension", "lib", "contract.ts")
 SHORT_FIXTURE_REL = os.path.join("scripts", "support-matrix", "short-table.md")
 FULL_FIXTURE_REL = os.path.join("scripts", "support-matrix", "full-table.md")
+# The top layer of the two-layer support statement (BR-3): only the sources with a
+# current dated end-to-end verification. No marker block: it is consumed as a file.
+SITE_FIXTURE_REL = os.path.join("scripts", "support-matrix", "site-table.md")
+HOLDS_REL = os.path.join("scripts", "support-matrix", "top-layer-holds.json")
+SOURCE_PAGE_DIR = "../../docs/sources"
 
 SHORT_START = "<!-- support-matrix:short:start -->"
 SHORT_END = "<!-- support-matrix:short:end -->"
@@ -241,6 +246,14 @@ BROWSER_TIER_LABEL = {
 # renderings and the probes that guard them cannot disagree about the glyph; see
 # the module docstring for why it is a plain ASCII hyphen and not an em dash.
 ABSENT = "-"
+
+# README layer (BR-3): the request-support entry that closes the short block.
+REQUEST_SUPPORT_LINE = (
+    "**Request support.** A tool or chat site that is not in this table, or one listed "
+    "without a verified date, can be requested by opening an issue that names it and says "
+    "where it keeps its sessions; [CONTRIBUTING.md](CONTRIBUTING.md#issues) says how to "
+    "write one without private data."
+)
 
 
 class SupportMatrixError(Exception):
@@ -857,6 +870,8 @@ def render_short(
         out.append(f"| {esc(b['display_name'])} | " + " | ".join(esc(c) for c in cells) + " |")
     out.append("")
     out.append(browser_legend_short())
+    out.append("")
+    out.append(REQUEST_SUPPORT_LINE)
     return "\n".join(out) + "\n"
 
 
@@ -985,10 +1000,140 @@ def render_full(
     return "\n".join(out) + "\n"
 
 
+def load_top_layer_holds(root: str) -> dict[str, str]:
+    """Editorial holds: sources kept OUT of the verified-only layer although a
+    dated record exists, because that record no longer covers the current path.
+
+    Keys are `local:<id>` or `web:<id>`; each value is the public reason. The
+    file is hand-written evidence, so it is validated hard: a hold on a source
+    that does not exist, or without a reason, is an error, never a no-op.
+    """
+    path = os.path.join(root, HOLDS_REL)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise SupportMatrixError(f"{HOLDS_REL}: cannot be read: {exc}") from None
+    holds = data.get("holds") if isinstance(data, dict) else None
+    if not isinstance(holds, dict):
+        raise SupportMatrixError(f"{HOLDS_REL}: needs a top-level `holds` object")
+    known = {f"local:{h['id']}" for h in load_harnesses(root)} | {
+        f"web:{p['id']}" for p in parse_contract_platforms(root)
+    }
+    for key, reason in holds.items():
+        if key not in known:
+            raise SupportMatrixError(f"{HOLDS_REL}: hold `{key}` names no source in the registry or the contract")
+        if not isinstance(reason, str) or not reason.strip():
+            raise SupportMatrixError(f"{HOLDS_REL}: hold `{key}` needs a non-empty reason")
+    return dict(holds)
+
+
+def top_layer_exclusion(
+    record: dict[str, Any] | None, as_of: date, hold: str | None = None
+) -> str | None:
+    """Why a source is NOT in the top layer, or None when it belongs there.
+
+    The top layer carries a source only on real, current, dated evidence:
+    a recorded end-to-end verification, no older than the freshness window,
+    that still speaks for the capture path as it stands. Everything else is
+    named here and stays in the full list.
+    """
+    if record is None:
+        return "no end-to-end verification is recorded"
+    if hold:
+        return "the recorded verification no longer covers the current path: " + hold
+    when = date.fromisoformat(record["date"])
+    if (as_of - when).days > RECHECK_DAYS:
+        return f"the recorded verification ({record['date']}) is older than {RECHECK_DAYS} days"
+    return None
+
+
+def top_layer_rows(
+    harnesses: list[dict[str, Any]],
+    platforms: list[dict[str, Any]],
+    as_of: date,
+    holds: dict[str, str] | None = None,
+) -> tuple[list[dict[str, str]], list[tuple[str, str, str]]]:
+    """(included rows, excluded (kind, name, reason)) in table order."""
+    holds = holds or {}
+    included: list[dict[str, str]] = []
+    excluded: list[tuple[str, str, str]] = []
+    for h in harnesses:
+        name = h.get("display_name") or h["id"]
+        surface = "Agent platform" if h.get("product_group") == "agent-platforms" else "Local"
+        record = harness_verified(h)
+        why = top_layer_exclusion(record, as_of, holds.get(f"local:{h['id']}"))
+        if why is not None:
+            excluded.append((surface, name, why))
+            continue
+        assert record is not None
+        if record.get("platform"):
+            on = OS_LABEL[record["platform"]]
+        else:
+            on = "OS not recorded"
+            if any(root_name not in ("", "primary") for root_name, _ in harness_root_entries(h)):
+                on += "; primary store only"
+        included.append({
+            "name": name,
+            "surface": surface,
+            "date": record["date"],
+            "on": on,
+            "issue": h.get("known_issue") or ABSENT,
+            "page": f"{SOURCE_PAGE_DIR}/{h['id']}.md",
+        })
+    for p in platforms:
+        record = p.get("lastVerified")
+        why = top_layer_exclusion(record, as_of, holds.get(f"web:{p['id']}"))
+        if why is not None:
+            excluded.append(("Web", p["id"], why))
+            continue
+        assert record is not None
+        on = (record.get("version") or "browser extension") + "; OS not recorded"
+        included.append({
+            "name": p["id"],
+            "surface": "Web",
+            "date": record["date"],
+            "on": on,
+            "issue": known_issue_cell(p) or ABSENT,
+            "page": f"{SOURCE_PAGE_DIR}/web-{p['id']}.md",
+        })
+    return included, excluded
+
+
+def render_site(
+    harnesses: list[dict[str, Any]],
+    platforms: list[dict[str, Any]],
+    as_of: date | None = None,
+    holds: dict[str, str] | None = None,
+) -> str:
+    as_of = resolve_as_of(as_of)
+    rows, _ = top_layer_rows(harnesses, platforms, as_of, holds)
+    out: list[str] = []
+    out.append("| Source | Surface | Verified end to end | Verified on | Known issue | Page |")
+    out.append("|---|---|---|---|---|---|")
+    for r in rows:
+        out.append(
+            f"| {esc(r['name'])} | {r['surface']} | {r['date']} | {esc(r['on'])} "
+            f"| {esc(r['issue'])} | [{esc(r['name'])}]({r['page']}) |"
+        )
+    out.append("")
+    out.append(
+        "Only sources with a recorded end-to-end verification (a real session archived on a "
+        f"real machine, dated) no more than {RECHECK_DAYS} days old are listed. A source that "
+        "is supported but has no such record, is experimental, or whose recorded run has "
+        "expired is not hidden: it is in the full list, with its own status."
+    )
+    return "\n".join(out) + "\n"
+
+
 def render(kind: str, root: str, as_of: date | None = None) -> str:
     harnesses = load_harnesses(root)
     platforms = parse_contract_platforms(root)
     browsers = load_browsers(root)
+    if kind == "site":
+        return render_site(harnesses, platforms, as_of, load_top_layer_holds(root))
     if kind == "short":
         return render_short(harnesses, platforms, browsers, as_of)
     if kind == "full":
@@ -1065,9 +1210,13 @@ def check(root: str, as_of: date | None = None) -> tuple[list[str], list[str]]:
     """
     failures: list[str] = []
     notes: list[str] = []
-    expected = {"short": render("short", root, as_of), "full": render("full", root, as_of)}
+    expected = {
+        "short": render("short", root, as_of),
+        "full": render("full", root, as_of),
+        "site": render("site", root, as_of),
+    }
 
-    fixtures = {"short": SHORT_FIXTURE_REL, "full": FULL_FIXTURE_REL}
+    fixtures = {"short": SHORT_FIXTURE_REL, "full": FULL_FIXTURE_REL, "site": SITE_FIXTURE_REL}
     for kind, rel in fixtures.items():
         path = os.path.join(root, rel)
         if not os.path.isfile(path):
@@ -1141,11 +1290,15 @@ def run_check(root: str, as_of: date | None = None) -> int:
 
 def update_fixtures(root: str, as_of: date | None = None) -> int:
     try:
-        expected = {"short": render("short", root, as_of), "full": render("full", root, as_of)}
+        expected = {
+            "short": render("short", root, as_of),
+            "full": render("full", root, as_of),
+            "site": render("site", root, as_of),
+        }
     except SupportMatrixError as exc:
         print(f"[support-matrix] cannot render the matrix: {exc}", file=sys.stderr)
         return 2
-    mapping = {"short": SHORT_FIXTURE_REL, "full": FULL_FIXTURE_REL}
+    mapping = {"short": SHORT_FIXTURE_REL, "full": FULL_FIXTURE_REL, "site": SITE_FIXTURE_REL}
     for kind, rel in mapping.items():
         path = os.path.join(root, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1452,6 +1605,52 @@ def selftest() -> int:
         )
         probe("experimental channel is experimental", web_status(web["p-exp"]) == STATUS_EXPERIMENTAL)
         probe("unverified credibility is uncertain", web_status(web["p-unver"]) == STATUS_UNCERTAIN)
+
+        # Top layer (BR-3): a source is listed only on a current dated record.
+        site_rows, site_excluded = top_layer_rows(harnesses, platforms, SELFTEST_AS_OF)
+        probe(
+            "top layer lists exactly the sources with a current record",
+            [r["name"] for r in site_rows] == [by_id["delta"].get("display_name") or "delta", "p-stable"],
+        )
+        probe(
+            "every excluded source is named with a reason",
+            len(site_rows) + len(site_excluded) == len(harnesses) + len(platforms)
+            and all(why for _, _, why in site_excluded),
+        )
+        probe(
+            "a record older than the window is excluded",
+            top_layer_exclusion({"date": SELFTEST_STALE_91}, SELFTEST_AS_OF) is not None
+            and top_layer_exclusion({"date": SELFTEST_FRESH_90}, SELFTEST_AS_OF) is None,
+        )
+        probe(
+            "a held source is excluded even with a fresh record",
+            top_layer_exclusion({"date": SELFTEST_FRESH_90}, SELFTEST_AS_OF, "path changed") is not None,
+        )
+        probe("no record is excluded", top_layer_exclusion(None, SELFTEST_AS_OF) is not None)
+        probe(
+            "the top layer never carries a weaker status word",
+            all(w not in render_site(harnesses, platforms, SELFTEST_AS_OF) for w in ("experimental |", "| supported |")),
+        )
+        held_rows, held_excluded = top_layer_rows(
+            harnesses, platforms, SELFTEST_AS_OF, {"web:p-stable": "reason text"}
+        )
+        probe(
+            "a hold moves a source out of the top layer and names the reason",
+            [r["name"] for r in held_rows] == [r["name"] for r in site_rows if r["name"] != "p-stable"]
+            and ("Web", "p-stable", "the recorded verification no longer covers the current path: reason text")
+            in held_excluded,
+        )
+        holds_path = os.path.join(tmp, HOLDS_REL)
+        os.makedirs(os.path.dirname(holds_path), exist_ok=True)
+        with open(holds_path, "w", encoding="utf-8") as fh:
+            json.dump({"holds": {"web:no-such-source": "x"}}, fh)
+        try:
+            load_top_layer_holds(tmp)
+            hold_diag = None
+        except SupportMatrixError as exc:
+            hold_diag = str(exc)
+        os.remove(holds_path)
+        probe("a hold on an unknown source is an error", hold_diag is not None and "no-such-source" in hold_diag)
         unverified_full = render_full([], [web["p-unver"]], [], SELFTEST_AS_OF)
         probe(
             "an explicitly unverified capability renders as unverified",
@@ -1933,7 +2132,7 @@ def build_parser() -> argparse.ArgumentParser:
     flags exist rather than trusting a second list of them to stay true."""
     ap = argparse.ArgumentParser(description="Render and check the chat-stasher support matrix")
     ap.add_argument("--root", default=default_root(), help="repository root (default: this checkout)")
-    ap.add_argument("--emit", choices=["short", "full", "both"], default="both")
+    ap.add_argument("--emit", choices=["short", "full", "site", "both"], default="both")
     ap.add_argument("--apply", action="store_true", help="update fixtures, README.md, and docs/support.md")
     ap.add_argument("--update-fixtures", action="store_true", help="rewrite the committed tables")
     ap.add_argument("--write-readme", metavar="PATH", help="replace the short block in this file")
@@ -1971,7 +2170,7 @@ def main(argv: list[str] | None = None) -> int:
             return write_into_file(root, args.write_docs, "full")
         if args.check:
             return run_check(root)
-        kinds = ["short", "full"] if args.emit == "both" else [args.emit]
+        kinds = ["short", "full", "site"] if args.emit == "both" else [args.emit]
         for kind in kinds:
             sys.stdout.write(render(kind, root))
             if len(kinds) > 1:
