@@ -31,12 +31,21 @@ use chat_stasher::opencode_records::BodyView;
 use chat_stasher::scanner::{self, HarnessRegistry, ScanReport};
 use chat_stasher::sqlite_probe;
 use chat_stasher::store::{self, BackupStore, StoreConfig};
+
 use rusqlite::Connection;
 use rustic_core::repofile::MasterKey;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Reclaim a body synchronously in a fixture: the delete may take every
+/// shard present, the set a synchronous survey of the same directory would
+/// enumerate.
+fn reclaim_body_sync(stage: &Path, machine: &str, session: &str) -> usize {
+    let proven = chat_stasher::stagereclaim::present_shard_seqs(stage, machine, session).unwrap();
+    chat_stasher::stagereclaim::reclaim_session_body(stage, machine, session, &proven).unwrap()
+}
 
 const MACHINE: &str = "fixture-machine";
 const DESTINATION: &str = "fixture-destination";
@@ -1253,13 +1262,9 @@ fn sg2b_post_reclaim_unchanged_exports_zero_and_changed_writes_increment_only() 
     // Reclaim: write manifest and delete shard bodies from stage
     let fresh = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
     chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
-    let removed_u =
-        chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session_unchanged_id)
-            .unwrap();
+    let removed_u = reclaim_body_sync(&fx.stage, MACHINE, &session_unchanged_id);
     assert_eq!(removed_u, 1);
-    let removed_g =
-        chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session_growing_id)
-            .unwrap();
+    let removed_g = reclaim_body_sync(&fx.stage, MACHINE, &session_growing_id);
     assert_eq!(removed_g, 1);
     assert_eq!(fx.shard_count(&session_unchanged_id), 0);
     assert_eq!(fx.shard_count(&session_growing_id), 0);
@@ -1377,7 +1382,7 @@ fn self_attack_changed_session_treated_as_unchanged_must_fail() {
     // Reclaim
     let fresh = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
     chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
-    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session).unwrap();
+    reclaim_body_sync(&fx.stage, MACHINE, &session);
 
     // Mutate source: session gained a message
     {
@@ -1420,7 +1425,7 @@ fn self_attack_unchanged_session_fully_rewritten_must_fail() {
     // Reclaim
     let fresh = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
     chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
-    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session).unwrap();
+    reclaim_body_sync(&fx.stage, MACHINE, &session);
 
     // Touch opencode.db by creating another unrelated table so store_fingerprint changes,
     // but the session itself is UNCHANGED.
@@ -1497,10 +1502,8 @@ fn sg2b_post_reclaim_with_no_stored_debts_exports_full_body_for_never_pushed_des
     // Reclaim: write manifest and remove bodies from stage
     let fresh = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
     chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
-    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session_unchanged_id)
-        .unwrap();
-    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session_growing_id)
-        .unwrap();
+    reclaim_body_sync(&fx.stage, MACHINE, &session_unchanged_id);
+    reclaim_body_sync(&fx.stage, MACHINE, &session_growing_id);
     assert_eq!(fx.shard_count(&session_unchanged_id), 0);
     assert_eq!(fx.shard_count(&session_growing_id), 0);
 

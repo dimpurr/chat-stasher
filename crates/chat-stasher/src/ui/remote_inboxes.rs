@@ -194,6 +194,7 @@ mod tests {
                 name: "<synthetic>&name".into(),
                 waiting: None,
                 oldest_age_secs: None,
+                backend: None,
                 backend_state: "unknown",
                 history_state: "unknown",
                 last_successful_pull: None,
