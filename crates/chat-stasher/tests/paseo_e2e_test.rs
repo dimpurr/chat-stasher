@@ -914,6 +914,185 @@ fn recollect_after_total_local_loss_keeps_genuinely_new_history_content() {
     );
 }
 
+/// W1065 rework acceptance (verdict H1): a *genuine consecutive repeat* —
+/// a user turn whose bytes equal the turn before it, sealed by a validated
+/// increment — is the `[A,B,B]` shape, and every reader must keep it: read,
+/// export, the full-text index, the activity index and doctor's duplicate
+/// scan alike. The repeated delta shards carry the NEXT sequence numbers
+/// (`[S, d, d]` sealed as sequences 1, 2, 3), so no re-seal evidence exists
+/// and a fold that compared content alone would swallow a real user turn.
+///
+/// One archiving world, three collects: the freeze whole, then the same
+/// append consumed twice in two consecutive collect cycles — the collector's
+/// validated-increment path (`base_offset > 0`, exact byte repeats allowed)
+/// is the production shape this pins, not a hand-built stage.
+#[test]
+fn a_validated_consecutive_repeated_turn_survives_read_export_fts_activity_and_doctor() {
+    const TOKEN: &str = "qzdupturnkappa";
+    const REPEAT: &str = r#"{"timestamp":"2026-09-01T10:00:07.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic repeated turn qzdupturnkappa"}]}}"#;
+    let freeze = Freeze::new();
+    let archive = Archive::new();
+    let world = World::new();
+    freeze.plant(&world.home());
+    run_once(&world, &archive);
+    let before = read_all(&world, &archive);
+    let id = codex_id(CODEX_ACTIVE_STEM);
+    let active = world
+        .home()
+        .join(".codex")
+        .join("sessions")
+        .join("2026")
+        .join("09")
+        .join("01")
+        .join(format!("{CODEX_ACTIVE_STEM}.jsonl"));
+
+    let append = |turn: &str| {
+        let mut bytes = fs::read(&active).unwrap();
+        assert_eq!(bytes.last(), Some(&b'\n'), "the source stays line-complete");
+        bytes.extend_from_slice(turn.as_bytes());
+        bytes.push(b'\n');
+        fs::write(&active, &bytes).unwrap();
+    };
+    append(REPEAT);
+    run_once(&world, &archive);
+    append(REPEAT);
+    run_once(&world, &archive);
+    let after = read_all(&world, &archive);
+
+    // The whole source the archive must hold: the original rollout plus the
+    // same delta twice.
+    let mut expected_body = freeze.codex_active.clone();
+    for _ in 0..2 {
+        expected_body.extend_from_slice(REPEAT.as_bytes());
+        expected_body.push(b'\n');
+    }
+
+    // ---- read ------------------------------------------------------------
+    assert_eq!(
+        after[&id].shards, 3,
+        "two increment cycles after a whole seal are three shards"
+    );
+    assert_eq!(
+        after[&id].bytes,
+        expected_body.len() as u64,
+        "read must keep both copies of the repeated turn — collapsing the \
+         second copy on content alone eats a real user turn"
+    );
+    assert_eq!(
+        after[&id].sha256,
+        sha256_hex(&expected_body),
+        "the body is the source: original plus the same turn twice"
+    );
+    assert!(
+        after[&id].bytes > before[&id].bytes + REPEAT.len() as u64,
+        "both appended turns are present in the read body"
+    );
+
+    // ---- export ----------------------------------------------------------
+    let out = world.path().join("export-repeated");
+    let exported = export_all(&world, &archive, &out);
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export of the repeated-turn session failed:\n{}",
+        text(&exported)
+    );
+    let exported_text: String = files_under(&out)
+        .iter()
+        .map(|p| fs::read_to_string(p).unwrap_or_default())
+        .collect();
+    assert_eq!(
+        exported_text.matches(TOKEN).count(),
+        2,
+        "the exported file must carry the repeated turn exactly twice, once \
+         per real occurrence"
+    );
+
+    // ---- activity index ---------------------------------------------------
+    let activity_index = world
+        .stage()
+        .join("meta")
+        .join(MACHINE)
+        .join("activity-v1.jsonl");
+    let mut activity_row: Option<serde_json::Value> = None;
+    for line in fs::read_to_string(&activity_index)
+        .expect("run-once builds the activity index")
+        .lines()
+    {
+        let row: serde_json::Value = serde_json::from_str(line).expect("activity rows are JSONL");
+        if row["session_id"].as_str() == Some(id.as_str()) {
+            activity_row = Some(row);
+        }
+    }
+    let row = activity_row.expect("the codex session has an activity row");
+    let expected_lines = freeze.codex_active.iter().filter(|b| **b == b'\n').count() + 2;
+    assert_eq!(
+        row["line_count"].as_u64(),
+        Some(expected_lines as u64),
+        "the activity index must count both repeated turns"
+    );
+
+    // ---- full-text index --------------------------------------------------
+    build_index(&world, &archive);
+    let (matched, _plain) = search(&world, &archive, TOKEN);
+    assert_eq!(matched, 1, "the session that repeats the turn matches");
+    let index_path = files_under(world.path())
+        .into_iter()
+        .find(|p| p.file_name().map(|n| n == "index.sqlite3").unwrap_or(false))
+        .expect("the world-local fts index file");
+    let fts = rusqlite::Connection::open(&index_path)
+        .expect("the fts index opens read-write in its own world");
+    let body: String = fts
+        .query_row(
+            "SELECT body FROM documents WHERE id = ?1",
+            [format!("{MACHINE}/{id}")],
+            |row| row.get(0),
+        )
+        .expect("the codex document is indexed under the machine-partitioned id");
+    assert_eq!(
+        body.matches(TOKEN).count(),
+        2,
+        "the full-text document must carry the repeated turn twice — folding \
+         the second copy removes a real turn from every search over it"
+    );
+
+    // ---- doctor -----------------------------------------------------------
+    // Doctor counts the copies a Collapse read would fold, so the configured
+    // stage of this world — which holds exactly the [S, d, d] sequence — must
+    // report clean: the repeated turn is content, not a foldable duplicate.
+    let config_dir = world.path().join("config").join("chat-stasher");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        format!("[native_host]\nstage = {:?}\n", world.stage()),
+    )
+    .unwrap();
+    let doctor = world.cli().args(["doctor", "--json"]).output().unwrap();
+    let report: serde_json::Value =
+        serde_json::from_slice(&doctor.stdout).expect("doctor --json prints one object");
+    let d11 = &report["stage_duplicate_shards"];
+    assert_eq!(
+        d11["checked"].as_bool(),
+        Some(true),
+        "D11 must have run against the configured stage: {d11}"
+    );
+    assert_eq!(
+        d11["state"].as_str(),
+        Some("clean"),
+        "a genuine consecutive repeat must not read as foldable duplicates: {d11}"
+    );
+    for machine in d11["machines"]
+        .as_array()
+        .expect("D11 lists every stage machine")
+    {
+        assert_eq!(
+            machine["duplicate_shards"].as_u64(),
+            Some(0),
+            "no stage machine may count the repeated turn as a foldable copy: {machine}"
+        );
+    }
+}
+
 fn archived_observation(
     agent_id: &str,
     provider: &str,

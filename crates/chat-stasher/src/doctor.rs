@@ -3165,7 +3165,22 @@ fn inspect_stage_duplicates(config: &Config) -> StageDuplicateCheck {
                     }
                 }
             }
-            for index in crate::store::duplicate_shard_indices(&bodies) {
+            // Doctor counts the copies a Collapse read would actually fold,
+            // under the same re-seal evidence rule every reader applies
+            // ([`crate::store::duplicate_shard_indices_sequenced`]): a fold
+            // needs two entries at one sequence number, and one stage
+            // directory holds one file per number, so a stage holds none.
+            // A genuine consecutive repeat — the same bytes sealed as the
+            // NEXT sequence, the shape validated increments produce — is
+            // content the read keeps, and doctor must not suggest repairing
+            // it away; byte-identical pairs like that belong to the
+            // `repair-duplicates` report's kept-column instead.
+            let paired: Vec<(Option<u64>, &Vec<u8>)> = shards
+                .iter()
+                .zip(bodies.iter())
+                .map(|((sequence, _), body)| (Some(*sequence), body))
+                .collect();
+            for index in crate::store::duplicate_shard_indices_sequenced(&paired) {
                 duplicate_shards += 1;
                 duplicate_bytes = match duplicate_bytes.checked_add(bodies[index].len() as u64) {
                     Some(bytes) => bytes,

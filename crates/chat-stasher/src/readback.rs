@@ -97,6 +97,14 @@ pub struct SessionBackedUp {
     /// later single shard. `end` is exclusive and is the index of that later
     /// shard; only indices and digests leave readback, never payload bytes.
     pub shard_run_duplicates: Vec<(usize, usize)>,
+    /// Positions this read folded out under
+    /// [`crate::store::DuplicateShardPolicy::Collapse`] — re-seal copies the
+    /// archive's sequence evidence proved, minus any a provenance observation
+    /// rescued. The repair inventory reads this list instead of re-deriving
+    /// the fold, so the report names exactly the copies the read dropped.
+    /// Empty under [`crate::store::DuplicateShardPolicy::KeepAll`] and on
+    /// reports that never fold.
+    pub folded_shard_indices: Vec<usize>,
 }
 
 impl SessionBackedUp {
@@ -738,6 +746,10 @@ impl BackupStore {
                     shard_sequences,
                     shard_bytes,
                     shard_run_duplicates,
+                    // This newest-snapshot view lists one snapshot's files,
+                    // never the accumulated cross-snapshot set, so it has no
+                    // re-seal copy to fold and no fold decision to report.
+                    folded_shard_indices: Vec::new(),
                 });
             }
 
@@ -1007,36 +1019,49 @@ impl BackupStore {
                     let mut buf = Vec::new();
                     repo.dump(node, &mut buf)
                         .with_context(|| format!("snapshot {snapshot}: dump shard {shard}"))?;
-                    shard_bodies.push((
-                        sequence.filter(|sequence| {
-                            !ambiguous_sequences.contains(&(session_id.clone(), *sequence))
-                        }),
-                        buf,
-                    ));
+                    // The raw sequence is the re-seal evidence the fold rule
+                    // decides on; the nulled one is the identity a
+                    // provenance observation may bind to. See
+                    // [`crate::store::duplicate_shard_indices_sequenced`].
+                    shard_bodies.push((*sequence, buf));
                 }
                 let duplicate_indices: BTreeSet<_> = if shard_policy.collapses() {
-                    let bodies: Vec<_> =
-                        shard_bodies.iter().map(|(_, body)| body.clone()).collect();
-                    crate::store::duplicate_shard_indices(&bodies)
+                    crate::store::duplicate_shard_indices_sequenced(&shard_bodies)
                         .into_iter()
                         .collect()
                 } else {
                     BTreeSet::new()
                 };
+                let observed_bodies: Vec<_> = shard_bodies
+                    .iter()
+                    .map(|(sequence, body)| {
+                        (
+                            sequence.filter(|sequence| {
+                                !ambiguous_sequences.contains(&(session_id.clone(), *sequence))
+                            }),
+                            body.clone(),
+                        )
+                    })
+                    .collect();
                 let observed_sequences = crate::provenance::verified_observation_sequences(
                     &session_id,
                     observations.get(&session_id).map_or(&[], Vec::as_slice),
-                    &shard_bodies,
+                    &observed_bodies,
                 );
-                for ((_sequence, _snapshot, _shard, _node), (index, (sequence, buf))) in
+                let mut folded_shard_indices = Vec::new();
+                for ((_sequence, _snapshot, _shard, _node), (index, (raw_sequence, buf))) in
                     shards.iter().zip(shard_bodies.iter().enumerate())
                 {
-                    let digest: [u8; 32] = Sha256::digest(&buf).into();
-                    let provenance_bound =
-                        sequence.is_some_and(|sequence| observed_sequences.contains(&sequence));
+                    let published_sequence = raw_sequence.filter(|sequence| {
+                        !ambiguous_sequences.contains(&(session_id.clone(), *sequence))
+                    });
+                    let provenance_bound = published_sequence
+                        .is_some_and(|sequence| observed_sequences.contains(&sequence));
                     if duplicate_indices.contains(&index) && !provenance_bound {
+                        folded_shard_indices.push(index);
                         continue;
                     }
+                    let digest: [u8; 32] = Sha256::digest(&buf).into();
                     let current_index = shard_sha256.len();
                     for (start, offset) in shard_offsets.iter().copied().enumerate() {
                         let Some(end_offset) = offset.checked_add(buf.len()) else {
@@ -1053,7 +1078,7 @@ impl BackupStore {
                     shard_offsets.push(concat.len());
                     shard_sha256.push(hex_digest(&digest));
                     shard_bytes.push(buf.len() as u64);
-                    shard_sequences.push(*sequence);
+                    shard_sequences.push(published_sequence);
                     concat.extend_from_slice(&buf);
                 }
                 sessions.push(SessionBackedUp {
@@ -1066,6 +1091,7 @@ impl BackupStore {
                     shard_sequences,
                     shard_bytes,
                     shard_run_duplicates,
+                    folded_shard_indices,
                 });
             }
 
@@ -1416,6 +1442,10 @@ impl BackupStore {
             }
         }
         for (session, shards) in held {
+            // (raw sequence, body): the raw number is the re-seal evidence the
+            // fold rule needs; the ambiguity-nulled number is what a
+            // provenance observation may safely bind to. The nulled pairs are
+            // derived once, below, so both consumers see one alignment.
             let mut shard_bodies = Vec::with_capacity(shards.len());
             for ((_sort_sequence, _identity), (sequence, snapshot, node)) in shards {
                 let mut buf = Vec::new();
@@ -1425,23 +1455,37 @@ impl BackupStore {
                         crate::id::short_session_id(&session)
                     )
                 })?;
-                let sequence = sequence.filter(|sequence| {
-                    !ambiguous_sequences.contains(&(session.clone(), *sequence))
-                });
                 shard_bodies.push((sequence, buf));
             }
             let selected = if shard_policy.collapses() {
-                let bodies: Vec<_> = shard_bodies.iter().map(|(_, body)| body.clone()).collect();
-                let duplicates: BTreeSet<_> = crate::store::duplicate_shard_indices(&bodies)
-                    .into_iter()
+                let duplicates: BTreeSet<_> =
+                    crate::store::duplicate_shard_indices_sequenced(&shard_bodies)
+                        .into_iter()
+                        .collect();
+                let observed_bodies: Vec<_> = shard_bodies
+                    .iter()
+                    .map(|(sequence, body)| {
+                        (
+                            sequence.filter(|sequence| {
+                                !ambiguous_sequences.contains(&(session.clone(), *sequence))
+                            }),
+                            body.clone(),
+                        )
+                    })
                     .collect();
                 let observed_sequences = crate::provenance::verified_observation_sequences(
                     &session,
                     observations.get(&session).map_or(&[], Vec::as_slice),
-                    &shard_bodies,
+                    &observed_bodies,
                 );
                 shard_bodies
                     .into_iter()
+                    .map(|(raw_sequence, body)| {
+                        let published_sequence = raw_sequence.filter(|sequence| {
+                            !ambiguous_sequences.contains(&(session.clone(), *sequence))
+                        });
+                        (published_sequence, body)
+                    })
                     .enumerate()
                     .filter_map(|(index, shard)| {
                         let provenance_bound = shard
@@ -1762,6 +1806,7 @@ mod tests {
             shard_sequences: vec![Some(1)],
             shard_bytes: vec![payload.len() as u64],
             shard_run_duplicates: Vec::new(),
+            folded_shard_indices: Vec::new(),
         };
         assert!(good.sha_matches(&payload));
         let mut bad = payload.clone();

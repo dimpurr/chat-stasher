@@ -861,6 +861,7 @@ mod tests {
             shard_sequences: (1..=digests.len() as u64).map(Some).collect(),
             shard_bytes: sizes.to_vec(),
             shard_run_duplicates: Vec::new(),
+            folded_shard_indices: Vec::new(),
         };
 
         // The W281 repro: one source shard, then the same bytes sealed again.

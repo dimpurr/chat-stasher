@@ -213,8 +213,10 @@ byte. The three checks above cannot see that — a body stored twice is
 self-consistent — and it is what leaves older versions' `read` and `export`
 returning a conversation twice. It is reported as a **possible** duplicate seal
 and does not fail the run. The count is carried in the `L3 verdict` line so a
-green run cannot hide it. Fixed versions collapse repeated same-session shard
-hashes in readers, but keep the stored shards and snapshots unchanged. The
+green run cannot hide it. Fixed versions collapse, in readers, the
+same-session shard copies whose replay also carries their re-seal evidence
+(the replayed shard's sequence number), but keep the stored shards and
+snapshots unchanged. The
 collapse is a read decision, never a deletion, and it is reversible per run:
 `read` and `export` take `--no-collapse`, and the index builders honour
 `CHAT_STASHER_NO_COLLAPSE` (see [`read`](#read), [`export`](#export) and
@@ -251,12 +253,17 @@ chat-stasher repair-duplicates --destination <name> --json
 
 The report gives duplicate session, shard, and byte counts per machine. A later
 run is a duplicate when it is a byte-identical replay, shard by shard, of the
-tail of the session's preceding shard sequence — a complete replay of the
-whole sequence included, which is the re-seal shape, and now the partial tail
-replay too, which is what a re-collect after total local loss leaves when only
-some of a session's sources are re-sealed. Individual shard repeats outside
-such a replay, including `A,B,A`, are reported separately as suspicious
-and kept. A shard whose bytes equal the concatenation of earlier shards is kept
+tail of the session's preceding shard sequence **and** shares its archived
+sequence number with the shard it replays (W1065): one stage holds one file
+per sequence number, so two entries at one number are one machine instance
+re-sealing, under a second stage root, the sequence file its predecessor
+already held — a whole re-seal replays the numbers number for number and folds
+the same way. Individual shard repeats outside such a replay, including
+`A,B,A`, are reported separately as suspicious
+and kept; so is a byte-identical turn that was sealed as the *next* sequence
+number — a validated consecutive repeat is a real user turn, and repetition
+without the re-seal evidence never proves a duplicate. A shard whose bytes
+equal the concatenation of earlier shards is kept
 unless it also matches the corresponding tail shard individually.
 
 The report also **lists every collapsed run**: each session a read would
@@ -484,7 +491,7 @@ Writes exactly the sessions `search` selects for the same flags, as `<out>/<mach
 | filters | As in `search`. |
 | `--turns all\|user` | `user` keeps only the person's own messages for Claude Code. Other tools' formats do not prove which lines are the person's, so every line is written and the manifest records `turns_filter: "not-supported"`. |
 | `--trim-to-window` | With a date filter, also drop lines timestamped outside it. |
-| `--no-collapse` | Write every stored shard. By default a run that byte-for-byte replays the tail of the session's preceding shard sequence — a complete replay included — is collapsed to its first copy, because that is what a re-seal leaves. |
+| `--no-collapse` | Write every stored shard. By default the copies a proven re-seal leaves are collapsed out of the body — a run that replays kept shards under the same archived sequence numbers another machine instance already held. |
 | `--include-deleted` | For snapshot-source sessions (opencode), also write the records the source deleted, at their original positions, each carrying `"deleted": true`. The default view stays the source's final state; deleted history is never erased from the archive. Other harnesses ignore the switch. |
 | `--dry-run` | Print the plan and its cost. Writes nothing. |
 | `--offline` | Serve the export from the local [mirror](#mirror) copy only (W1053): the destination is never contacted, and the report says `served from mirror`. A selected session whose bytes the copy does not hold is listed in the manifest's failed sessions worded as an unknown (the destination was not contacted, so nothing here proves the archive lacks it) and makes the run exit `3` — never read as "the archive does not have it". |
@@ -512,7 +519,23 @@ There are no text filters here: the flags are `search`'s, minus `--text`. Use a 
 
 Prints one session (`--session <id>`) and its SHA-256, without content: the shard list in sequence order, the concatenated length and digest, and — only when you pass `--stage <dir>` — the digest of the shards on your own disk, to compare against. The archive is addressed by `--machine` and `--session`; `--stage` only adds a comparison. Reads walk the machine's snapshots newest first, keep the newest copy of each shard path, and retain older sequences absent from later snapshots. This preserves history when a push after `reclaim-stage` contains only a new tail. An unreadable snapshot makes the read exit `3`: an incomplete history is never presented as a complete session.
 
-`--no-collapse` reads every stored shard. Default reads collapse replay runs — a replay of the complete preceding shard sequence and, since W1065, a replay of a trailing partial run too, which is what a re-collect after total local loss re-seals — while retaining shards covered by verified sequence-bound capture observations, even when their bytes repeat. A fresh source root's matching prefix alone cannot establish that its records are a replay; provenance-bearing sources are captured conservatively under the same session identity. Nothing is deleted by either policy. Missing provenance retains legacy behavior; malformed provenance makes metadata-dependent default reads fail rather than silently discard a captured repeat. `--no-collapse` remains available for raw body reads and also applies to `--all-machines`.
+`--no-collapse` reads every stored shard. Default reads collapse the copies a
+proven re-seal leaves: a copy that replays, shard by shard, kept shards while
+carrying the same archived sequence number as the shard it replays — one
+stage holds one file per number, so a shared number means a second machine
+instance re-sealed the sequence file its predecessor already held, which is
+what a re-collect after total local loss writes. Reads retain shards covered
+by verified sequence-bound capture observations, even when their bytes repeat.
+A byte-identical turn that was sealed as the *next* sequence number — a
+validated consecutive repeat, a real user turn equal to the turn before it —
+is never collapsed; repetition without the re-seal evidence is kept, not
+dropped. A fresh source root's matching prefix alone cannot establish that its
+records are a replay; provenance-bearing sources are captured conservatively
+under the same session identity. Nothing is deleted by either policy. Missing
+provenance retains legacy behavior; malformed provenance makes
+metadata-dependent default reads fail rather than silently discard a
+captured repeat. `--no-collapse` remains available for raw body reads and
+also applies to `--all-machines`.
 
 For snapshot-source sessions (opencode) the reported body is the **assembled** view, not the raw shard concatenation: every whole-file observation and every increment record the archive holds folds by last-version-per-record, deletions the source performed (revert, compaction) leave the view the same way they left the source's own database, and the reported digest is of that view. At quiescence it equals a fresh export of the source's final state; the older multi-copy era reported the concatenation of every copy, which equaled no single version of anything. The raw shard identities printed beside it remain what `verify` L3 proves. A body that cannot be assembled is an exit `3` read failure — never a short or empty session. `--include-deleted` asks for the other view: deleted records are included at their original positions, each marked `"deleted": true`, so the history the source threw away stays reachable (`read` then reports that view's digest; `export --include-deleted` writes the marked lines).
 
