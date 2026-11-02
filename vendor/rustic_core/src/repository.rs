@@ -55,14 +55,15 @@ use crate::{
     },
     crypto::aespoly1305::Key,
     error::{ErrorKind, RusticResult},
+    id::Id,
     index::{
         GlobalIndex, IndexEntry, ReadGlobalIndex, ReadIndex,
         binarysorted::{IndexCollector, IndexType},
     },
     progress::{HiddenProgress, NoProgressBars, Progress, ProgressBars, ProgressType},
     repofile::{
-        ConfigFile, IndexPack, KeyId, PathList, RepoFile, RepoId, SnapshotFile, SnapshotSummary,
-        Tree,
+        ConfigFile, IndexFile, IndexPack, KeyId, PathList, RepoFile, RepoId, SnapshotFile,
+        SnapshotSummary, Tree,
         configfile::ConfigId,
         keyfile::{MasterKey, find_key_in_backend},
         snapshotfile::SnapshotId,
@@ -1149,6 +1150,42 @@ impl<S: Open> Repository<S> {
         collector.extend(verified_packs);
         let index = GlobalIndex::new_from_index(collector.into_index());
         Ok(self.into_indexed_with_index(index))
+    }
+
+    /// Save the given packs in one new index file in this repository's backend.
+    ///
+    /// chat-stasher pinned-rustic API (W1066): after a push wrote its own index
+    /// and snapshot, its adoption of verified packs no index file named should
+    /// stop being per-open, so the packs do not have to be re-read on every
+    /// later open. This appends exactly one index file naming `packs` and
+    /// touches no existing index file: rustic's own `repair index` rewrites
+    /// them (and is refused on an append-only repository for that reason), so
+    /// this method is deliberately the append-only half of it.
+    ///
+    /// Two callers that name the same pack write two files whose entries are
+    /// identical (the same ids at the same offsets of the same pack), so
+    /// whichever one a reader's lookup hits resolves the same bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `packs` - The packs to name; empty means "nothing to name" and writes
+    ///   no file.
+    ///
+    /// # Errors
+    ///
+    /// * If the index file could not be serialized or written.
+    ///
+    /// # Returns
+    ///
+    /// The id of the index file that was written, or `None` when `packs` was
+    /// empty and nothing was written.
+    pub fn append_index_packs(&self, packs: Vec<IndexPack>) -> RusticResult<Option<Id>> {
+        let mut file = IndexFile::default();
+        file.packs.extend(packs);
+        if file.packs.is_empty() && file.packs_to_delete.is_empty() {
+            return Ok(None);
+        }
+        self.dbe().save_file(&file).map(Some)
     }
 
     // helper function to deduplicate code
