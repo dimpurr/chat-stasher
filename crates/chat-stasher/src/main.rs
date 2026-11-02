@@ -1280,7 +1280,8 @@ enum Command {
     /// verify (budget spent, disk floor, remote unreadable, space
     /// pre-estimate refused — the next round resumes); 1 = a finished
     /// read that failed (the source proved corrupt, a refused local
-    /// write, or the listing named a file over the whole-file bound);
+    /// write, the listing named a file over the whole-file bound, or
+    /// the mirror volume's free space could not be queried);
     /// 2 = usage error (unconfigured, switch off, an undeclared
     /// `mirror_of`, an uninitialised destination, or the destination's
     /// masterkey file missing on this machine or unusable) — nothing
@@ -14152,7 +14153,8 @@ fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode
         Err(e) if e.is::<chat_stasher::mirror::HardFailure>() => {
             // The checked-and-failed class (invariant 2, `CLAUDE.md`):
             // verified source corruption, a refused local write, an
-            // over-bound listing. Exit 1 with the class's own sentence —
+            // over-bound listing, or a free-space query the volume would
+            // not answer. Exit 1 with the class's own sentence —
             // never "did not finish" (exit 3), which a later round cannot
             // heal its way out of for the corruption half.
             if let Some(hard) = e.downcast_ref::<chat_stasher::mirror::HardFailure>() {

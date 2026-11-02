@@ -2796,7 +2796,7 @@ fn mirror_sync_refuses_usage_when_unconfigured_or_off() {
     );
     assert!(
         !mirror_root_of(sandbox).exists(),
-        "an unconfigured mirror must not create anything on disk, and triggers no volume query"
+        "an unconfigured mirror must not create anything on disk (the usage refusal returns before any volume query)"
     );
 
     // Section present, switch off: usage, again saying what to change.
@@ -2809,7 +2809,7 @@ fn mirror_sync_refuses_usage_when_unconfigured_or_off() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("enabled is false"));
     assert!(
         !mirror_root_of(sandbox).exists(),
-        "a disabled mirror must not create anything on disk, and triggers no volume query"
+        "a disabled mirror must not create anything on disk (the usage refusal returns before any volume query)"
     );
 
     // Switch on, name wrong: usage, with the declared list to copy from.
@@ -2827,7 +2827,7 @@ fn mirror_sync_refuses_usage_when_unconfigured_or_off() {
     );
     assert!(
         !mirror_root_of(sandbox).exists(),
-        "a mirror naming no declared destination must not create anything on disk"
+        "a mirror naming no declared destination must not create anything on disk (the usage refusal returns before any volume query)"
     );
 }
 
