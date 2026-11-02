@@ -120,7 +120,7 @@ age gate would have to outlast the slowest concurrent upload (minutes for a larg
 pack) and would then refuse to reuse our own just-killed push's packs, which is
 the entire point of the change. Completeness is also the stronger guard: it is a
 property of the bytes, not a guess about who is writing them.
-`crates/chat-stasher/src/orphans.rs:503-506` is where every failure to validate sends
+`crates/chat-stasher/src/orphans.rs:584-587` is where every failure to validate sends
 the open back to the plain index — the same fallback whether the refuser was a
 pack this open could not verify or a pack set that changed under it.
 
@@ -139,7 +139,7 @@ again and the archive is complete either way.
 **Adoption is fenced by a survey, so a healthy repository is untouched.**
 `crates/chat-stasher/src/orphans.rs:271-309` diffs the backend's pack listing against
 the packs the index files name, and
-`crates/chat-stasher/src/orphans.rs:484-498` refuses to adopt when the index names a
+`crates/chat-stasher/src/orphans.rs:565-579` refuses to adopt when the index names a
 pack the backend no longer has. That case matters: adopting from existing index
 files plus only newly verified packs would otherwise drop that entry — and an
 entry for a missing pack is one the local metadata cache can still serve, a documented

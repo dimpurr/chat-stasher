@@ -152,6 +152,8 @@ enum Kill {
 struct Rig {
     inner: OperatorIo,
     kill: Kill,
+    /// Only paths under this directory prefix are killed (W1068); `None`: all.
+    kill_dir: Option<&'static str>,
     dead: AtomicBool,
     /// SFTP v3: a rename onto an existing name fails.
     strict_rename: bool,
@@ -178,6 +180,7 @@ impl Rig {
         Self {
             inner: OperatorIo::open("fs", options).unwrap(),
             kill: Kill::Never,
+            kill_dir: None,
             dead: AtomicBool::new(false),
             strict_rename: false,
             lie_once: AtomicBool::new(false),
@@ -208,6 +211,16 @@ impl Rig {
         self.log.lock().unwrap().clone()
     }
 
+    /// The kill in force for `path`: the configured one when the path is in
+    /// the targeted directory, otherwise none.
+    fn kill_for(&self, path: &str) -> Kill {
+        if self.kill_dir.is_none_or(|dir| path.starts_with(dir)) {
+            self.kill
+        } else {
+            Kill::Never
+        }
+    }
+
     fn alive(&self) -> anyhow::Result<()> {
         if self.dead.load(Ordering::SeqCst) {
             anyhow::bail!("the process is dead");
@@ -230,13 +243,14 @@ impl PackIo for Rig {
             self.stale.store(true, Ordering::SeqCst);
             anyhow::bail!("injected connection failure");
         }
-        if let Kill::MidWrite(n) = self.kill {
+        let kill = self.kill_for(path);
+        if let Kill::MidWrite(n) = kill {
             let n = n.min(bytes.len().saturating_sub(1));
             self.inner.write(path, bytes.slice(..n))?;
             return Err(self.die());
         }
         self.inner.write(path, bytes)?;
-        if matches!(self.kill, Kill::BeforeVerify) {
+        if matches!(kill, Kill::BeforeVerify) {
             return Err(self.die());
         }
         Ok(())
@@ -265,7 +279,7 @@ impl PackIo for Rig {
     fn rename(&self, from: &str, to: &str) -> anyhow::Result<()> {
         self.alive()?;
         self.note(format!("rename {from} -> {to}"));
-        if matches!(self.kill, Kill::BeforeRename) {
+        if matches!(self.kill_for(from), Kill::BeforeRename) {
             return Err(self.die());
         }
         if self.strict_rename && self.inner.exists(to)? {
@@ -1450,4 +1464,511 @@ fn m2_a_collision_is_not_retried() {
         1,
         "no second connection, no second attempt"
     );
+}
+
+// ======================================================================
+// W1068: index and snapshot files are published like packs on SFTP.
+//
+// The storage-box kill-100 run ended with a zero-byte file under an index's
+// final name (a push killed inside the index write); every open failed with
+// `Data is too short`. Before W1068 only packs were atomic on SFTP.
+// ======================================================================
+
+use chat_stasher::atomic_pack::{publish_file, FileKind};
+use rustic_core::{
+    BackupOptions, Credentials, ErrorKind as RusticErrorKind, PathList, RepositoryBackends,
+    RusticError, SnapshotOptions,
+};
+
+/// Rustic's local backend for everything, except that an index or snapshot
+/// file is written the way SFTP writes it: the final name is created first and
+/// the bytes go into it. A kill leaves what reached the disk under that name.
+struct DirectBackend {
+    inner: Arc<dyn WriteBackend>,
+    root: PathBuf,
+    /// Die after this many bytes of the first file of this type.
+    kill: Option<(FileType, usize)>,
+    dead: AtomicBool,
+}
+
+impl std::fmt::Debug for DirectBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DirectBackend")
+    }
+}
+
+impl ReadBackend for DirectBackend {
+    fn location(&self) -> String {
+        self.inner.location()
+    }
+    fn list_with_size(&self, tpe: FileType) -> RusticResult<Vec<(Id, u32)>> {
+        self.inner.list_with_size(tpe)
+    }
+    fn read_full(&self, tpe: FileType, id: &Id) -> RusticResult<Bytes> {
+        self.inner.read_full(tpe, id)
+    }
+    fn read_partial(
+        &self,
+        tpe: FileType,
+        id: &Id,
+        cacheable: bool,
+        offset: u32,
+        length: u32,
+    ) -> RusticResult<Bytes> {
+        self.inner.read_partial(tpe, id, cacheable, offset, length)
+    }
+    fn warmup_path(&self, tpe: FileType, id: &Id) -> String {
+        self.inner.warmup_path(tpe, id)
+    }
+}
+
+impl WriteBackend for DirectBackend {
+    fn create(&self) -> RusticResult<()> {
+        self.inner.create()
+    }
+    fn write_bytes(&self, tpe: FileType, id: &Id, cacheable: bool, buf: Bytes) -> RusticResult<()> {
+        if self.dead.load(Ordering::SeqCst) {
+            return Err(RusticError::new(
+                RusticErrorKind::Backend,
+                "the process is dead",
+            ));
+        }
+        let dir = match tpe {
+            FileType::Index => "index",
+            FileType::Snapshot => "snapshots",
+            _ => return self.inner.write_bytes(tpe, id, cacheable, buf),
+        };
+        let path = self.root.join(dir).join(id.to_hex().as_str());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        if let Some((kill_tpe, n)) = self.kill {
+            if kill_tpe == tpe {
+                fs::write(&path, &buf[..n.min(buf.len())]).unwrap();
+                self.dead.store(true, Ordering::SeqCst);
+                return Err(RusticError::new(RusticErrorKind::Backend, "killed"));
+            }
+        }
+        fs::write(&path, &buf).unwrap();
+        Ok(())
+    }
+    fn remove(&self, tpe: FileType, id: &Id, cacheable: bool) -> RusticResult<()> {
+        self.inner.remove(tpe, id, cacheable)
+    }
+}
+
+struct Killed {
+    dir: tempfile::TempDir,
+    cfg: StoreConfig,
+    mk: MasterKey,
+}
+
+impl Killed {
+    fn repo(&self) -> PathBuf {
+        self.dir.path().join("remote-repo")
+    }
+    fn store(&self) -> BackupStore {
+        BackupStore::new(self.cfg.clone(), "machine-a".to_string())
+    }
+    fn stage(&self) -> PathBuf {
+        self.dir.path().join("stage")
+    }
+}
+
+/// Every file in `index/` and `snapshots/` of `root`: (dir, name, bytes).
+fn metadata_files(root: &Path) -> Vec<(String, String, Vec<u8>)> {
+    let mut out = Vec::new();
+    for dir in ["index", "snapshots"] {
+        if let Ok(entries) = fs::read_dir(root.join(dir)) {
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.is_file() {
+                    out.push((
+                        dir.to_string(),
+                        path.file_name().unwrap().to_string_lossy().into_owned(),
+                        fs::read(&path).unwrap(),
+                    ));
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The invariant: every file wearing a final name in `index/` and
+/// `snapshots/` is complete (hashes to its name); everything else is tmp
+/// debris. Returns the number of tmp-named leftovers.
+fn assert_metadata_clean(root: &Path, context: &str) -> usize {
+    let mut tmp = 0;
+    for (dir, name, bytes) in metadata_files(root) {
+        if name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit()) {
+            assert_eq!(
+                sha_hex(&bytes),
+                name,
+                "{context}: `{dir}/{name}` is under a final name but is not complete ({} bytes)",
+                bytes.len()
+            );
+        } else {
+            assert!(
+                classify(&format!("{dir}/{name}")).is_some(),
+                "{context}: `{dir}/{name}` is neither complete nor tmp debris"
+            );
+            tmp += 1;
+        }
+    }
+    tmp
+}
+
+/// A healthy one-snapshot repository, then a second push whose process dies
+/// inside the write of the first file of `tpe` (after 0 bytes: the zero-length
+/// file the storage-box run found). `metadata` is whether the SFTP wrapper
+/// covers index and snapshot files (the W1068 behaviour) or only packs (what
+/// shipped before it).
+fn killed_push(tpe: FileType, metadata: bool) -> Killed {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = store_config(
+        &dir.path().join("remote-repo"),
+        &dir.path().join("remote.key"),
+    );
+    let mk = MasterKey::new();
+    store::persist_key_file(&cfg, &mk).unwrap();
+    let killed = Killed { dir, cfg, mk };
+    write_session(&killed.stage(), "machine-a", "session-a1", 3);
+    killed.store().push(&killed.stage(), &killed.mk).unwrap();
+    write_session(&killed.stage(), "machine-a", "session-a2", 3);
+
+    let root = killed.repo();
+    let local = rustic_backend::BackendOptions::default()
+        .repository(root.to_string_lossy())
+        .to_backends()
+        .unwrap()
+        .repository();
+    let direct = Arc::new(DirectBackend {
+        inner: local,
+        root: root.clone(),
+        kill: Some((tpe, 0)),
+        dead: AtomicBool::new(false),
+    });
+    let kill_dir: &'static str = if tpe == FileType::Index {
+        "index"
+    } else {
+        "snapshots"
+    };
+    let made = Arc::new(AtomicUsize::new(0));
+    let factory_root = root.clone();
+    let wrapped = AtomicPackBackend::around_covering(
+        direct,
+        Box::new(move || {
+            let n = made.fetch_add(1, Ordering::SeqCst);
+            let mut rig = Rig::sftp_shaped(&factory_root);
+            if n == 0 {
+                rig.kill = Kill::MidWrite(0);
+                rig.kill_dir = Some(kill_dir);
+            } else {
+                // The process is gone: nothing can clean up after it.
+                rig.dead.store(true, Ordering::SeqCst);
+            }
+            let io: Arc<dyn PackIo> = Arc::new(rig);
+            Ok(io)
+        }),
+        RetryPolicy {
+            attempts: 1,
+            backoff: Duration::from_millis(1),
+        },
+        metadata,
+    );
+    let backends = RepositoryBackends::new(wrapped, None);
+    let repo = rustic_core::Repository::new(&killed.cfg.repository_options(), &backends)
+        .unwrap()
+        .open(&Credentials::Masterkey(killed.mk.clone()))
+        .unwrap()
+        .to_indexed()
+        .unwrap();
+    let snap = SnapshotOptions::default()
+        .host("machine-a".to_string())
+        .to_snapshot()
+        .unwrap();
+    let source = PathList::from_string(killed.stage().canonicalize().unwrap().to_str().unwrap())
+        .unwrap()
+        .sanitize()
+        .unwrap();
+    let error = repo
+        .backup(&BackupOptions::default(), &source, snap)
+        .expect_err("the process was killed inside the write");
+    drop(error);
+    killed
+}
+
+fn open_error(killed: &Killed) -> String {
+    match killed.store().open_indexed(&killed.mk) {
+        Ok(_) => panic!("the repository opened"),
+        Err(error) => format!("{error:#}"),
+    }
+}
+
+fn snapshot_count(killed: &Killed) -> usize {
+    let (repo, _) = killed.store().open_indexed(&killed.mk).expect("opens");
+    repo.get_all_snapshots().expect("snapshots read").len()
+}
+
+/// The production shape, index case: a push killed inside the index write on
+/// an SFTP-semantics destination leaves the repository openable, nothing
+/// under a final name that is not complete, and the next push succeeds.
+#[test]
+fn w1068_a_push_killed_inside_the_index_write_leaves_the_repository_openable() {
+    let killed = killed_push(FileType::Index, true);
+    let leftovers = assert_metadata_clean(&killed.repo(), "after the kill");
+    assert_eq!(leftovers, 1, "the half-written index sits under a tmp name");
+    assert_eq!(
+        snapshot_count(&killed),
+        1,
+        "the repository opens and still holds the earlier snapshot"
+    );
+    // The retry adopts the killed push's packs and publishes.
+    let summary = killed.store().push(&killed.stage(), &killed.mk).unwrap();
+    assert_eq!(summary.snapshots_in_repo, 2);
+    assert_metadata_clean(&killed.repo(), "after the retry");
+    // The by-name sweep removes the debris once it is old, with the same rule.
+    let sweeper = Rig::new(&killed.repo());
+    let report = sweep(&sweeper, unix_now() + SWEEP_AGE_SECS + 3_600);
+    assert_eq!(report.removed, 1);
+    assert_eq!(assert_metadata_clean(&killed.repo(), "after the sweep"), 0);
+}
+
+/// The production shape, snapshot case.
+#[test]
+fn w1068_a_push_killed_inside_the_snapshot_write_leaves_the_repository_openable() {
+    let killed = killed_push(FileType::Snapshot, true);
+    assert_eq!(assert_metadata_clean(&killed.repo(), "after the kill"), 1);
+    assert_eq!(snapshot_count(&killed), 1);
+    let summary = killed.store().push(&killed.stage(), &killed.mk).unwrap();
+    assert_eq!(summary.snapshots_in_repo, 2);
+    assert_metadata_clean(&killed.repo(), "after the retry");
+}
+
+/// The same kill without the new publication (what shipped up to W1055): the
+/// repository cannot be opened, and the error names the file and the recovery.
+#[test]
+fn w1068_control_without_it_the_same_kill_makes_the_repository_unopenable_and_the_error_says_how_to_recover(
+) {
+    let killed = killed_push(FileType::Index, false);
+    let zero: Vec<_> = metadata_files(&killed.repo())
+        .into_iter()
+        .filter(|(dir, name, bytes)| dir == "index" && bytes.is_empty() && name.len() == 64)
+        .collect();
+    assert_eq!(zero.len(), 1, "a zero-length file sits under a final name");
+    let error = open_error(&killed);
+    let name = &zero[0].1;
+    assert!(error.contains(&format!("index/{name}")), "{error}");
+    assert!(error.contains("0 bytes"), "{error}");
+    assert!(error.contains("move exactly the file"), "{error}");
+    assert!(
+        error.contains("Data is too short"),
+        "the original cause stays in the chain: {error}"
+    );
+    // Nothing was changed by the failed open.
+    assert!(metadata_files(&killed.repo())
+        .iter()
+        .any(|(_, n, b)| n == name && b.is_empty()));
+}
+
+/// Snapshot case without it: the index is complete, so the repository opens,
+/// but every snapshot listing fails.
+#[test]
+fn w1068_control_without_it_a_zero_length_snapshot_breaks_the_snapshot_listing() {
+    let killed = killed_push(FileType::Snapshot, false);
+    let (repo, _) = killed.store().open_indexed(&killed.mk).expect("opens");
+    assert!(
+        repo.get_all_snapshots().is_err(),
+        "a zero-length snapshot under a final name breaks the listing"
+    );
+    // The next push cannot proceed either, and it says which file and how to
+    // recover instead of a bare decrypt error.
+    let error = format!(
+        "{:#}",
+        killed
+            .store()
+            .push(&killed.stage(), &killed.mk)
+            .expect_err("the push is stuck behind the short snapshot")
+    );
+    let zero: Vec<String> = metadata_files(&killed.repo())
+        .into_iter()
+        .filter(|(dir, _, bytes)| dir == "snapshots" && bytes.is_empty())
+        .map(|(_, name, _)| name)
+        .collect();
+    assert_eq!(zero.len(), 1);
+    assert!(error.contains(&format!("snapshots/{}", zero[0])), "{error}");
+    assert!(error.contains("move exactly the file"), "{error}");
+}
+
+/// kill-100 for index and snapshot files on SFTP semantics: a process killed
+/// anywhere in the publication never leaves a partial file under a final
+/// name, and the re-push publishes byte-identical content.
+#[test]
+fn w1068_kill_100_on_the_sftp_family_for_index_and_snapshot_files() {
+    for kind in [FileKind::Index, FileKind::Snapshot] {
+        let sub = if kind == FileKind::Index {
+            "index"
+        } else {
+            "snapshots"
+        };
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..100 {
+            let (id, bytes) = pack(i + 200);
+            let kill = match i % 3 {
+                0 => Kill::MidWrite((i * 37) % bytes.len()),
+                1 => Kill::BeforeVerify,
+                _ => Kill::BeforeRename,
+            };
+            let doomed = Rig::sftp_shaped(dir.path()).killed_at(kill);
+            let error = publish_file(
+                &doomed,
+                kind,
+                &id,
+                bytes.clone(),
+                1_000 + i as u64,
+                [i as u8; 8],
+            )
+            .expect_err("a killed publication does not succeed");
+            assert!(matches!(error, PublishError::Io(_)), "{kind:?} #{i}");
+            assert!(
+                !dir.path().join(sub).join(&id).exists(),
+                "{kind:?} #{i}: a killed push left something under a final name"
+            );
+            assert_metadata_clean(dir.path(), &format!("{kind:?} after kill #{i}"));
+            let again = Rig::sftp_shaped(dir.path());
+            assert_eq!(
+                publish_file(
+                    &again,
+                    kind,
+                    &id,
+                    bytes.clone(),
+                    2_000 + i as u64,
+                    [i as u8 + 1; 8]
+                )
+                .unwrap(),
+                Published::Renamed
+            );
+            assert_eq!(
+                fs::read(dir.path().join(sub).join(&id)).unwrap(),
+                bytes.to_vec()
+            );
+        }
+        assert_eq!(assert_metadata_clean(dir.path(), "end"), 100);
+        let report = sweep(&Rig::new(dir.path()), unix_now() + SWEEP_AGE_SECS + 3_600);
+        assert_eq!(report.removed, 100, "{kind:?}: the sweep ages them all");
+        assert_eq!(assert_metadata_clean(dir.path(), "swept"), 0);
+    }
+}
+
+/// A retry is idempotent: the same content again is `AlreadyPresent`, and a
+/// different file under the same name is never overwritten.
+#[test]
+fn w1068_a_second_publish_of_the_same_index_is_idempotent_and_a_collision_stops() {
+    let dir = tempfile::tempdir().unwrap();
+    let (id, bytes) = pack(300);
+    let rig = Rig::sftp_shaped(dir.path());
+    assert_eq!(
+        publish_file(&rig, FileKind::Index, &id, bytes.clone(), 1, [1; 8]).unwrap(),
+        Published::Renamed
+    );
+    assert_eq!(
+        publish_file(&rig, FileKind::Index, &id, bytes.clone(), 2, [2; 8]).unwrap(),
+        Published::AlreadyPresent
+    );
+    assert_eq!(assert_metadata_clean(dir.path(), "after the repeat"), 0);
+    let (other_id, other) = pack(301);
+    fs::create_dir_all(dir.path().join("snapshots")).unwrap();
+    fs::write(dir.path().join("snapshots").join(&other_id), b"wrong").unwrap();
+    assert!(matches!(
+        publish_file(&rig, FileKind::Snapshot, &other_id, other, 3, [3; 8]),
+        Err(PublishError::Collision)
+    ));
+}
+
+/// The wrapper's routing: with the SFTP flag index and snapshot files take the
+/// publication path; without it (local, `opendal:fs`, S3) and for every other
+/// type they reach the inner backend untouched.
+#[test]
+fn w1068_the_wrapper_routes_index_and_snapshot_only_when_asked_and_keys_never() {
+    for covering in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = Arc::new(Recorder::default());
+        let root = dir.path().to_path_buf();
+        let backend = AtomicPackBackend::around_covering(
+            Arc::clone(&recorder) as Arc<dyn WriteBackend>,
+            Box::new(move || {
+                let io: Arc<dyn PackIo> = Arc::new(Rig::sftp_shaped(&root));
+                Ok(io)
+            }),
+            quick(),
+            covering,
+        );
+        for (tpe, seed) in [
+            (FileType::Index, 400),
+            (FileType::Snapshot, 401),
+            (FileType::Key, 402),
+        ] {
+            let (id, bytes) = pack(seed);
+            backend
+                .write_bytes(tpe, &id.parse::<Id>().unwrap(), false, bytes)
+                .unwrap();
+        }
+        let inner = recorder.other_writes.load(Ordering::SeqCst);
+        if covering {
+            assert_eq!(inner, 1, "only the key reaches the inner backend");
+            assert_eq!(metadata_files(dir.path()).len(), 2);
+        } else {
+            assert_eq!(inner, 3, "nothing is published by the wrapper");
+            assert!(metadata_files(dir.path()).is_empty());
+        }
+    }
+}
+
+/// Every reader of `index/` and `snapshots/` copes with tmp names: the
+/// rustic listers (what every command uses) skip them, the product opens and
+/// pushes beside them, and the survey and the sweep treat them with the same
+/// two-clock seven-day rule as in `data/`.
+#[test]
+fn w1068_tmp_names_in_index_and_snapshots_are_ignored_by_readers_and_aged_like_packs() {
+    let sandbox = sandbox_with_repository();
+    let repo = sandbox.repo();
+    let count = |tpe: FileType| -> usize {
+        let store = BackupStore::new(store_config(&repo, &sandbox.key()), "machine-a".to_string());
+        let backends = store.backends().unwrap();
+        let listed = backends.repository().list_with_size(tpe).unwrap();
+        let plain = backends.repository().list(tpe).unwrap();
+        assert_eq!(listed.len(), plain.len());
+        plain.len()
+    };
+    let indexes = count(FileType::Index);
+    let snapshots = count(FileType::Snapshot);
+    assert!(indexes > 0 && snapshots > 0);
+
+    let id = "ab".repeat(32);
+    let old = unix_now() - SWEEP_AGE_SECS - 7_200;
+    let young = unix_now() - 60;
+    let old_index = format!("index/{}", tmp_name(&id, old, [1; 8]));
+    let old_snap = format!("snapshots/{}", tmp_name(&id, old, [2; 8]));
+    let young_index = format!("index/{}", tmp_name(&id, young, [3; 8]));
+    plant(&repo, &old_index, b"torn", old);
+    plant(&repo, &old_snap, b"", old);
+    plant(&repo, &young_index, b"torn", young);
+
+    assert_eq!(count(FileType::Index), indexes, "listers skip tmp names");
+    assert_eq!(count(FileType::Snapshot), snapshots);
+    // The product reads and pushes beside them.
+    let store = BackupStore::new(store_config(&repo, &sandbox.key()), "machine-a".to_string());
+    store.open_indexed(&sandbox.mk).expect("opens beside tmp");
+    let found = survey(&Rig::new(&repo));
+    assert_eq!(found.files(), 3);
+    assert_eq!(
+        found.due(unix_now()),
+        2,
+        "both clocks old: due; young: kept"
+    );
+    let report = sweep(&Rig::new(&repo), unix_now());
+    assert_eq!(report.removed, 2);
+    assert_eq!(report.kept_young, 1);
+    assert!(!repo.join(&old_index).exists() && !repo.join(&old_snap).exists());
+    assert!(repo.join(&young_index).exists());
 }

@@ -1,5 +1,5 @@
 //! Atomic pack publication and the by-name sweep of its debris (ADR-063,
-//! ISSUE-006 step C).
+//! ISSUE-006 step C; extended to index and snapshot files on SFTP by W1068).
 //!
 //! A push can be cut at any moment. On the SFTP backend a pack is written to
 //! its *final* path, so a cut mid-pack left a torn file wearing a real name
@@ -28,6 +28,15 @@
 //! older spellings (ruling 3): rustic's local `<id>-tmp-` and the
 //! `.chat-stasher-tmp` staging directory of the `opendal:fs` default.
 //! Read-only commands call [`survey`], which only counts.
+//!
+//! W1068: the same publication covers the **index and snapshot files** of an
+//! SFTP destination ([`FileKind`]). Their id is also the SHA-256 of the stored
+//! bytes (rustic's `hash_write_full`), so the read-back check is the same; the
+//! tmp sits beside the final name in `index/` or `snapshots/` (rustic's listers
+//! parse each name as an id and ignore a tmp name, like in `data/`). The
+//! local-directory family is left as it was for those two types: rustic's local
+//! backend already writes `<id>-tmp-` and renames, and `opendal:fs` stages in
+//! `atomic_write_dir`; both are atomic at the final name.
 //!
 //! Where the tmp sits (D1a / M1): `data/<xx>/`, next to the final name. That
 //! placement is gated by the lister fixture in
@@ -304,9 +313,53 @@ fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// The final path of a pack.
-fn final_path(id_hex: &str) -> String {
-    format!("data/{}/{}", &id_hex[..2], id_hex)
+/// Which repository file type a publication is for. The id of every one of
+/// them is the SHA-256 of its stored bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Pack,
+    /// `index/<id>` (W1068).
+    Index,
+    /// `snapshots/<id>` (W1068).
+    Snapshot,
+}
+
+impl FileKind {
+    /// The directory the file (and its tmp) sits in.
+    fn dir(self, id_hex: &str) -> String {
+        match self {
+            Self::Pack => format!("data/{}", &id_hex[..2]),
+            Self::Index => "index".to_string(),
+            Self::Snapshot => "snapshots".to_string(),
+        }
+    }
+
+    /// Words for messages: `a pack`, `an index file`, `a snapshot file`.
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Pack => "a pack",
+            Self::Index => "an index file",
+            Self::Snapshot => "a snapshot file",
+        }
+    }
+
+    /// The kind a rustic file type is published as, or `None` for a type this
+    /// module never touches. Index and snapshot files only when `metadata`
+    /// (the SFTP family) is on.
+    #[must_use]
+    pub fn from_type(tpe: FileType, metadata: bool) -> Option<Self> {
+        match tpe {
+            FileType::Pack => Some(Self::Pack),
+            FileType::Index if metadata => Some(Self::Index),
+            FileType::Snapshot if metadata => Some(Self::Snapshot),
+            _ => None,
+        }
+    }
+}
+
+/// The final path of a file.
+fn final_path(kind: FileKind, id_hex: &str) -> String {
+    format!("{}/{}", kind.dir(id_hex), id_hex)
 }
 
 /// What a successful publication did.
@@ -332,16 +385,19 @@ pub enum PublishError {
 }
 
 impl PublishError {
-    fn describe(&self) -> String {
+    fn describe(&self, kind: FileKind) -> String {
+        let noun = kind.noun();
         match self {
             Self::Io(error) => format!("{error:#}"),
-            Self::VerifyMismatch => "the pack read back from the destination did not hash to \
-                 its id, so it was not published"
-                .to_string(),
-            Self::Collision => "atomic pack publication stopped: a file already holds this \
-                 pack's name with different bytes; it was not touched. Someone has written a \
-                 formal pack name wrong; a person needs to look"
-                .to_string(),
+            Self::VerifyMismatch => format!(
+                "{noun} read back from the destination did not hash to its id, so it was not \
+                 published"
+            ),
+            Self::Collision => format!(
+                "atomic publication stopped: a file already holds the name of {noun} with \
+                 different bytes; it was not touched. Someone has written a formal name wrong; \
+                 a person needs to look"
+            ),
         }
     }
 }
@@ -358,21 +414,40 @@ pub fn publish(
     now: u64,
     random: [u8; 8],
 ) -> Result<Published, PublishError> {
-    publish_to(io, id_hex, bytes, &tmp_path(id_hex, now, random))
+    publish_file(io, FileKind::Pack, id_hex, bytes, now, random)
 }
 
-/// The repository-relative path of a pack's tmp file.
-fn tmp_path(id_hex: &str, now: u64, random: [u8; 8]) -> String {
-    format!("data/{}/{}", &id_hex[..2], tmp_name(id_hex, now, random))
+/// [`publish`] for any [`FileKind`] (W1068).
+pub fn publish_file(
+    io: &dyn PackIo,
+    kind: FileKind,
+    id_hex: &str,
+    bytes: Bytes,
+    now: u64,
+    random: [u8; 8],
+) -> Result<Published, PublishError> {
+    publish_to(
+        io,
+        kind,
+        id_hex,
+        bytes,
+        &tmp_path(kind, id_hex, now, random),
+    )
+}
+
+/// The repository-relative path of a file's tmp.
+fn tmp_path(kind: FileKind, id_hex: &str, now: u64, random: [u8; 8]) -> String {
+    format!("{}/{}", kind.dir(id_hex), tmp_name(id_hex, now, random))
 }
 
 fn publish_to(
     io: &dyn PackIo,
+    kind: FileKind,
     id_hex: &str,
     bytes: Bytes,
     tmp: &str,
 ) -> Result<Published, PublishError> {
-    let final_path = final_path(id_hex);
+    let final_path = final_path(kind, id_hex);
     let tmp = tmp.to_string();
 
     if let Err(error) = io.write(&tmp, bytes) {
@@ -450,6 +525,9 @@ pub struct AtomicPackBackend {
     factory: IoFactory,
     io: Mutex<Option<Arc<dyn PackIo>>>,
     policy: RetryPolicy,
+    /// Whether index and snapshot files are published like packs (the SFTP
+    /// family only, W1068).
+    metadata: bool,
     /// Tmp files this process created, failed to remove after a failed
     /// attempt (the destination was unreachable even on a fresh connection),
     /// and will try to remove again on the next attempt that gets through.
@@ -496,11 +574,23 @@ impl AtomicPackBackend {
         factory: IoFactory,
         policy: RetryPolicy,
     ) -> Arc<dyn WriteBackend> {
+        Self::around_covering(inner, factory, policy, false)
+    }
+
+    /// [`Self::around_with_policy`] that also publishes index and snapshot
+    /// files atomically when `metadata` is set (W1068).
+    pub fn around_covering(
+        inner: Arc<dyn WriteBackend>,
+        factory: IoFactory,
+        policy: RetryPolicy,
+        metadata: bool,
+    ) -> Arc<dyn WriteBackend> {
         Arc::new(Self {
             inner,
             factory,
             io: Mutex::new(None),
             policy,
+            metadata,
             pending: Mutex::new(Vec::new()),
         })
     }
@@ -515,12 +605,14 @@ impl AtomicPackBackend {
         let Some((scheme, options)) = cfg.pack_publication_target() else {
             return inner;
         };
-        Self::around(
+        Self::around_covering(
             inner,
             Box::new(move || {
                 let io: Arc<dyn PackIo> = Arc::new(OperatorIo::open(&scheme, options.clone())?);
                 Ok(io)
             }),
+            RetryPolicy::default(),
+            cfg.publishes_metadata_atomically(),
         )
     }
 
@@ -579,15 +671,20 @@ impl AtomicPackBackend {
         count
     }
 
-    fn publish_with_retry(&self, id_hex: &str, bytes: &Bytes) -> Result<(), String> {
+    fn publish_with_retry(
+        &self,
+        kind: FileKind,
+        id_hex: &str,
+        bytes: &Bytes,
+    ) -> Result<(), String> {
         let attempts = self.policy.attempts.max(1);
         let mut io = self.io().map_err(|e| unreachable_words(&e))?;
         let mut last = String::new();
         let mut left = 0;
         for attempt in 1..=attempts {
             let random = os_random().map_err(|e| format!("{e:#}"))?;
-            let tmp = tmp_path(id_hex, unix_now(), random);
-            match publish_to(&*io, id_hex, bytes.clone(), &tmp) {
+            let tmp = tmp_path(kind, id_hex, unix_now(), random);
+            match publish_to(&*io, kind, id_hex, bytes.clone(), &tmp) {
                 Ok(_) => {
                     // A connection that works again can also finish earlier
                     // cleanup.
@@ -596,9 +693,9 @@ impl AtomicPackBackend {
                     }
                     return Ok(());
                 }
-                Err(PublishError::Collision) => return Err(PublishError::Collision.describe()),
+                Err(PublishError::Collision) => return Err(PublishError::Collision.describe(kind)),
                 Err(failure) => {
-                    last = failure.describe();
+                    last = failure.describe(kind);
                     left = self.clean_up(&tmp);
                     if attempt < attempts {
                         std::thread::sleep(self.policy.backoff);
@@ -622,8 +719,9 @@ impl AtomicPackBackend {
             )
         };
         Err(format!(
-            "uploading a pack to the destination failed after {attempts} attempt(s): {last}. \
-             Nothing was published under a final name, and {cleanup}. The next push tries again"
+            "uploading {} to the destination failed after {attempts} attempt(s): {last}. \
+             Nothing was published under a final name, and {cleanup}. The next push tries again",
+            kind.noun()
         ))
     }
 }
@@ -679,10 +777,10 @@ impl WriteBackend for AtomicPackBackend {
     }
 
     fn write_bytes(&self, tpe: FileType, id: &Id, cacheable: bool, buf: Bytes) -> RusticResult<()> {
-        if tpe != FileType::Pack {
+        let Some(kind) = FileKind::from_type(tpe, self.metadata) else {
             return self.inner.write_bytes(tpe, id, cacheable, buf);
-        }
-        self.publish_with_retry(&id.to_hex(), &buf)
+        };
+        self.publish_with_retry(kind, &id.to_hex(), &buf)
             .map_err(backend_error)
     }
 
