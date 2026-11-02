@@ -794,48 +794,121 @@ fn a_record_no_directory_backs_holds_everything_back() {
     assert_eq!(shard_count(&stage, machine, session), 1, "the body stays");
 }
 
-/// The holdback binds only a destination this run actually consulted: a
-/// mirror pointed at a degraded destination is not a proof input (D3's
-/// own rule — a degraded destination may not hold the whole machine's
-/// reclaim hostage), and neither is a name no run consults.
-#[test]
-fn a_mirror_of_a_destination_this_run_does_not_consult_binds_nothing() {
+/// A throwaway rig for the W1060 fail-closed fixtures: one session, one
+/// healthy primary destination that holds it, one lagging (degraded)
+/// destination that does not. Everything lives in the TempDir.
+struct UnresolvedRig {
+    dir: tempfile::TempDir,
+    stage: std::path::PathBuf,
+    dests: Vec<NamedStore>,
+}
+
+const RIG_MACHINE: &str = "m-mirror";
+const RIG_SESSION: &str = "s-mir";
+
+fn unresolved_rig() -> UnresolvedRig {
     let dir = tempfile::TempDir::new().unwrap();
     let stage = dir.path().join("stage");
-    let machine = "m-mirror";
-    let session = "s-mir";
-    write_session(&stage, machine, session, 1);
+    write_session(&stage, RIG_MACHINE, RIG_SESSION, 1);
     let primary = store_config(dir.path(), "repo-primary");
-    init_and_push(&primary, machine, &stage);
+    init_and_push(&primary, RIG_MACHINE, &stage);
     let lagging = store_config(dir.path(), "repo-lagging");
     init_empty_repo(&lagging);
     let dests = vec![
         named(dir.path(), "repo-primary", DestinationHealth::Healthy),
         named(dir.path(), "repo-lagging", DestinationHealth::Lagging),
     ];
+    UnresolvedRig { dir, stage, dests }
+}
 
-    // A name no run consults (never declared) binds nothing.
-    let holdback = mirror_holdback(dir.path(), "nope-never-declared", BTreeSet::new());
-    let report = stagereclaim::reclaim_stage(&stage, &dests, false, Some(&holdback)).unwrap();
-    assert!(
-        !report.blocked(),
-        "an unconsulted mirror_of is not a proof input: {:?}",
-        report.blocked
-    );
+/// W1060 (a), fail closed: with `[mirror]` enabled, a `mirror_of` that names
+/// no declared destination used to bind nothing, so the reclaim proceeded on
+/// the healthy proof alone. It now holds every candidate as
+/// `mirror-unresolved`, with a reason naming the undeclared destination, and
+/// `--apply` deletes nothing.
+#[test]
+fn an_enabled_mirror_of_an_undeclared_destination_holds_every_candidate() {
+    let rig = unresolved_rig();
+    let holdback = mirror_holdback(rig.dir.path(), "nope-never-declared", BTreeSet::new());
+    for apply in [false, true] {
+        let report =
+            stagereclaim::reclaim_stage(&rig.stage, &rig.dests, apply, Some(&holdback)).unwrap();
+        assert!(report.blocked(), "unresolved mirror leg must refuse");
+        assert!(report.reclaimed.is_empty(), "nothing may be deleted");
+        assert_eq!(shard_count(&rig.stage, RIG_MACHINE, RIG_SESSION), 1);
+        assert_eq!(report.blocked.len(), 1, "{:?}", report.blocked);
+        let block = &report.blocked[0];
+        assert_eq!(block.destination, "nope-never-declared");
+        assert_eq!(block.sessions, 1);
+        assert_eq!(
+            stagereclaim::block_kind_word(&block.kind),
+            "mirror-unresolved"
+        );
+        let detail = format!("{:?}", block.kind);
+        assert!(detail.contains("not a declared destination"), "{detail}");
+        assert!(detail.contains("nope-never-declared"), "{detail}");
+    }
+}
 
-    // The degraded destination's own mirror binds nothing either: its
-    // protection is the alarm layer and the union backfill, never stage
-    // retention — the reclaim reclaims what the healthy destination
-    // proved.
-    let holdback = mirror_holdback(dir.path(), "repo-lagging", BTreeSet::new());
-    let report = stagereclaim::reclaim_stage(&stage, &dests, true, Some(&holdback)).unwrap();
-    assert!(
-        !report.blocked(),
-        "D3's rule: a degraded destination's mirror may not hold the reclaim hostage: {:?}",
-        report.blocked
+/// W1060 (b), fail closed (ADR-062 D4: a mirror source outside the healthy
+/// set designates no snapshot, so the leg reads not-covered and reclaim
+/// holds back and alarms): `mirror_of` names a declared but degraded
+/// destination while another healthy destination holds the session. The
+/// reclaim used to proceed on that other proof; it now holds everything.
+#[test]
+fn an_enabled_mirror_of_a_degraded_destination_holds_every_candidate() {
+    let rig = unresolved_rig();
+    let holdback = mirror_holdback(rig.dir.path(), "repo-lagging", BTreeSet::new());
+    let report =
+        stagereclaim::reclaim_stage(&rig.stage, &rig.dests, true, Some(&holdback)).unwrap();
+    assert!(report.blocked(), "a degraded mirror source must refuse");
+    assert!(report.reclaimed.is_empty(), "nothing may be deleted");
+    assert_eq!(shard_count(&rig.stage, RIG_MACHINE, RIG_SESSION), 1);
+    assert_eq!(report.blocked.len(), 1, "{:?}", report.blocked);
+    let block = &report.blocked[0];
+    assert_eq!(block.destination, "repo-lagging");
+    assert_eq!(block.sessions, 1);
+    assert_eq!(
+        stagereclaim::block_kind_word(&block.kind),
+        "mirror-unresolved"
     );
+    let detail = format!("{:?}", block.kind);
+    assert!(detail.contains("repo-lagging"), "{detail}");
+    assert!(detail.contains("was not consulted"), "{detail}");
+    let as_state = stagereclaim::blocks_as_state(&report.blocked);
+    assert_eq!(as_state[0].kind, "mirror-unresolved");
+}
+
+/// An enabled mirror whose `mirror_of` is empty is the same unresolved
+/// case (the config check is "unset", not "silently off").
+#[test]
+fn an_enabled_mirror_with_an_empty_mirror_of_holds_every_candidate() {
+    let rig = unresolved_rig();
+    let holdback = mirror_holdback(rig.dir.path(), "", BTreeSet::new());
+    let report =
+        stagereclaim::reclaim_stage(&rig.stage, &rig.dests, true, Some(&holdback)).unwrap();
+    assert!(report.blocked());
+    assert!(report.reclaimed.is_empty());
+    assert_eq!(shard_count(&rig.stage, RIG_MACHINE, RIG_SESSION), 1);
+}
+
+/// Unchanged behaviour with the mirror disabled (`None`: no section, or
+/// `enabled = false`): the same degraded layout reclaims on the healthy
+/// proof exactly as before, dry-run and apply.
+#[test]
+fn with_the_mirror_disabled_the_degraded_layout_reclaims_as_before() {
+    let rig = unresolved_rig();
+    let report = stagereclaim::reclaim_stage(&rig.stage, &rig.dests, false, None).unwrap();
+    assert!(!report.blocked(), "{:?}", report.blocked);
+    assert_eq!(
+        shard_count(&rig.stage, RIG_MACHINE, RIG_SESSION),
+        1,
+        "dry run"
+    );
+    let report = stagereclaim::reclaim_stage(&rig.stage, &rig.dests, true, None).unwrap();
+    assert!(!report.blocked(), "{:?}", report.blocked);
     assert_eq!(report.reclaimed.len(), 1, "the proven body goes");
-    assert_eq!(shard_count(&stage, machine, session), 0);
+    assert_eq!(shard_count(&rig.stage, RIG_MACHINE, RIG_SESSION), 0);
 }
 
 /// The CLI wires the leg the docs promise: on a machine with

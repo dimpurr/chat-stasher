@@ -14,7 +14,7 @@
 | Local | Grok (xAI CLI) | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | GitHub Copilot CLI | verified end-to-end (2026-10-06) | 2026-10-06 |
 | Local | aider | supported | - |
-| Local | crush | supported | - |
+| Local | crush | not supported | - |
 | Local | Zed | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | Continue | supported | - |
 | Local | Kimi Code | verified end-to-end (2026-10-03) | 2026-10-03 |

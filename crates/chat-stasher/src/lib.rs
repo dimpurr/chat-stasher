@@ -6,6 +6,7 @@
 //! spike, except when `read` verifies a session back from the repository.
 
 pub mod activity;
+pub mod atomic_pack;
 pub mod audit_store;
 pub mod backfill;
 pub mod body_cache;
@@ -59,6 +60,7 @@ pub mod reclaimstate;
 pub mod remote_err;
 pub mod remote_inbox;
 pub mod remote_inbox_archive;
+pub mod resetledger;
 pub mod runstate;
 pub mod scanner;
 pub mod schedule;
