@@ -1413,23 +1413,8 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
     for snap in snapshots {
         let snap_id = snap.id.to_hex().as_str().to_string();
         let short = &snap_id[..8.min(snap_id.len())];
-        let root = repo
-            .node_from_snapshot_and_path(snap, "")
-            .with_context(|| {
-                format!(
-                    "UNKNOWN: session `{}` cannot be resolved for machine `{machine}`: snapshot {short} tree root",
-                    crate::id::short_session_id(session_id)
-                )
-            })?;
-        let entries = repo
-            .ls(&root, &LsOptions::default())
-            .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
-            .with_context(|| {
-                format!(
-                    "UNKNOWN: session `{}` cannot be resolved for machine `{machine}`: snapshot {short} tree walk",
-                    crate::id::short_session_id(session_id)
-                )
-            })?;
+        let entries =
+            snapshot_session_entries(repo, snap, machine, session_id, short, policy.collapses())?;
         for (path, node) in entries {
             if node.node_type != NodeType::File {
                 continue;
@@ -1534,6 +1519,201 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
         concat
     };
     Ok(Some((body, hashes)))
+}
+
+/// The files of one snapshot that [`dump_cumulative_session`] can possibly
+/// care about: `(path relative to the snapshot root, node)`, in the same form
+/// a recursive `ls` of the root yields them.
+///
+/// W1059. The walk used to list the *whole* snapshot tree and filter, so one
+/// small session cost every file of every session of the machine, once per
+/// snapshot (field: 982 snapshots, 760-981 s for 1373 bytes). A dir-backup's
+/// tree mirrors the stage root's absolute path (`snapshot.paths` minus the
+/// leading `/`), under which the writer's layout is fixed:
+/// `sessions/<machine>/<session>/[<bucket>/]<shard>` and
+/// `meta/<machine>/provenance-v1.jsonl`. This reads exactly those directories
+/// (a handful of tree blobs plus the one session's subtree), so the cost is
+/// the session's, not the machine's.
+///
+/// The fast path is taken only when it is *known* to see what the full listing
+/// would: every `snapshot.paths` entry resolves to a directory that has a
+/// `sessions` child and holds nothing beside the writer's own stage-root
+/// names ([`FAST_PATH_STAGE_TOPLEVEL`]). Anything else (a tree not shaped like
+/// a stage, a missing path, a stage root with an unrecognized entry) falls
+/// back to the full recursive listing, so an odd snapshot is
+/// still walked completely rather than guessed at. A tree blob that cannot be
+/// read is an error on either path, never an absence: only "this directory has
+/// no such child" means the snapshot does not hold the session.
+///
+/// Narrowing, stated: the full listing matched the *last* `sessions` path
+/// component anywhere, so a `sessions` directory nested below some other
+/// directory — a second root parked beside the writer's, say — matched too.
+/// The writer never produces one, and the fast path does not look for it: a
+/// stage root holding any name outside [`FAST_PATH_STAGE_TOPLEVEL`] is
+/// refused the shortcut and walked in full, so an unrecognized layout costs
+/// time instead of turning a held session into a false absence.
+fn snapshot_session_entries<S: rustic_core::IndexedFull>(
+    repo: &Repository<S>,
+    snap: &SnapshotFile,
+    machine: &str,
+    session_id: &str,
+    short: &str,
+    want_provenance: bool,
+) -> anyhow::Result<Vec<(PathBuf, rustic_core::repofile::Node)>> {
+    let unknown = |what: &str| {
+        format!(
+            "UNKNOWN: session `{}` cannot be resolved for machine `{machine}`: snapshot {short} {what}",
+            crate::id::short_session_id(session_id)
+        )
+    };
+    let root = repo
+        .node_from_snapshot_and_path(snap, "")
+        .with_context(|| unknown("tree root"))?;
+    if let Some(found) = fast_session_entries(
+        repo,
+        snap,
+        &root,
+        machine,
+        session_id,
+        want_provenance,
+        &unknown,
+    )? {
+        return Ok(found);
+    }
+    repo.ls(&root, &LsOptions::default())
+        .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
+        .with_context(|| unknown("tree walk"))
+}
+
+/// The names the writer itself puts at a stage root.
+///
+/// [`fast_session_entries`] takes its shortcut only through these. The full
+/// listing it replaces matched a session's shards by the *last* `sessions`
+/// component anywhere in the tree, so a `sessions/<machine>/<session>/`
+/// subtree parked somewhere the writer does not put it still counted as held —
+/// which is exactly what a backup reader must keep resolving. The fast path
+/// reads `sessions/` and `meta/` directly and never looks into anything else,
+/// so a stage root holding an unrecognized name is walked in full instead:
+/// the one direction this trade must never fail in is a held session reading
+/// as absent, and every name here is one the fast path can see past because
+/// the writer cannot place a session's shards or provenance under it.
+///
+/// Every writer-side entry at the stage root names itself through one of its
+/// own constants here except `ext-status`, which has no named constant. A new
+/// top-level directory the writer starts creating must join this list in the
+/// same change or the fast path quietly stops applying to stages that contain
+/// it — a cost, never a correctness break, which is the safe direction for
+/// this set to be wrong in.
+const FAST_PATH_STAGE_TOPLEVEL: &[&str] = &[
+    SESSIONS_DIR,
+    crate::manifest::META_DIR,
+    MACHINE_LOGS_DIR,
+    "ext-status",
+    crate::import::IMPORT_RAW_DIR,
+    crate::raw_export::EXPORT_FILES_DIR,
+    crate::inbox::STAGE_LOCK_FILE,
+];
+
+/// `Some(entries)` when every stage root resolved and holds `sessions/` under
+/// the writer's layout alone; `None` to ask for the full listing.
+fn fast_session_entries<S: rustic_core::IndexedFull>(
+    repo: &Repository<S>,
+    snap: &SnapshotFile,
+    root: &rustic_core::repofile::Node,
+    machine: &str,
+    session_id: &str,
+    want_provenance: bool,
+    unknown: &dyn Fn(&str) -> String,
+) -> anyhow::Result<Option<Vec<(PathBuf, rustic_core::repofile::Node)>>> {
+    fn child<S: rustic_core::IndexedFull>(
+        repo: &Repository<S>,
+        dir: &rustic_core::repofile::Node,
+        name: &std::ffi::OsStr,
+        unknown: &dyn Fn(&str) -> String,
+    ) -> anyhow::Result<Option<rustic_core::repofile::Node>> {
+        let Some(id) = dir.subtree else {
+            return Ok(None);
+        };
+        let tree = repo.get_tree(&id).with_context(|| unknown("tree walk"))?;
+        Ok(tree.nodes.into_iter().find(|n| n.name() == name))
+    }
+
+    let stage_paths: Vec<PathBuf> = (&snap.paths).into_iter().map(PathBuf::from).collect();
+    if stage_paths.is_empty() {
+        return Ok(None);
+    }
+    let mut out = Vec::new();
+    for stage_path in stage_paths {
+        let rel: PathBuf = stage_path
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+            .collect();
+        let mut stage = root.clone();
+        for comp in rel.components() {
+            match child(repo, &stage, comp.as_os_str(), unknown)? {
+                Some(next) if next.node_type == NodeType::Dir => stage = next,
+                _ => return Ok(None),
+            }
+        }
+        let Some(stage_tree_id) = stage.subtree else {
+            return Ok(None);
+        };
+        let stage_tree = repo
+            .get_tree(&stage_tree_id)
+            .with_context(|| unknown("tree walk"))?;
+        // One unrecognized entry beside the writer's layout is enough to lose
+        // the shortcut for the whole snapshot: the fast path cannot prove it
+        // still sees every `sessions/<machine>/<session>/` subtree the full
+        // listing would have matched, so the snapshot is walked in full
+        // instead — slower, never a false absence.
+        if stage_tree
+            .nodes
+            .iter()
+            .any(|node| match node.name().to_str() {
+                Some(name) => !FAST_PATH_STAGE_TOPLEVEL.contains(&name),
+                None => true,
+            })
+        {
+            return Ok(None);
+        }
+        let sessions_dir = std::ffi::OsStr::new(SESSIONS_DIR);
+        let Some(sessions) = stage_tree
+            .nodes
+            .iter()
+            .find(|node| node.name() == sessions_dir)
+        else {
+            return Ok(None);
+        };
+        if sessions.node_type != NodeType::Dir {
+            return Ok(None);
+        }
+        if let Some(machine_dir) = child(repo, sessions, machine.as_ref(), unknown)? {
+            if let Some(session_dir) = child(repo, &machine_dir, session_id.as_ref(), unknown)? {
+                if session_dir.node_type == NodeType::Dir {
+                    let base = rel.join(SESSIONS_DIR).join(machine).join(session_id);
+                    let listed = repo
+                        .ls(&session_dir, &LsOptions::default())
+                        .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
+                        .with_context(|| unknown("tree walk"))?;
+                    out.extend(listed.into_iter().map(|(p, n)| (base.join(p), n)));
+                }
+            }
+        }
+        if want_provenance {
+            if let Some(meta) = child(repo, &stage, "meta".as_ref(), unknown)? {
+                if let Some(mdir) = child(repo, &meta, machine.as_ref(), unknown)? {
+                    if let Some(file) = child(repo, &mdir, "provenance-v1.jsonl".as_ref(), unknown)?
+                    {
+                        out.push((
+                            rel.join("meta").join(machine).join("provenance-v1.jsonl"),
+                            file,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(Some(out))
 }
 
 /// Declare the plaintext size of the session about to be dumped, so ADR-034's
@@ -1751,6 +1931,26 @@ pub fn reset_sealed_shard_count_calls() {
     SEALED_SHARD_COUNT_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// How many times [`stage_freshness_token`] has walked the whole sessions
+/// tree in this process. Test-only: the in-process handoff path asserts the
+/// push preflight never repeats that walk, and this is the counter that
+/// proves it.
+#[doc(hidden)]
+pub static STAGE_TOKEN_WALK_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Read [`STAGE_TOKEN_WALK_CALLS`]. Test-only.
+#[doc(hidden)]
+pub fn stage_token_walk_calls() -> usize {
+    STAGE_TOKEN_WALK_CALLS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Reset [`STAGE_TOKEN_WALK_CALLS`]. Test-only.
+#[doc(hidden)]
+pub fn reset_stage_token_walk_calls() {
+    STAGE_TOKEN_WALK_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// A freshness token for the sealed-shard tree under `stage/sessions/`: the
 /// mtime of the sessions root, of every machine directory, and of every
 /// session directory, each paired with its path.
@@ -1785,6 +1985,24 @@ impl StageFreshnessToken {
     }
 }
 
+impl StageFreshnessToken {
+    /// True when the sessions root itself still has the mtime it had when the
+    /// token was taken. This is the single-point recheck of the in-process
+    /// handoff: one `stat`, no tree walk. An unreadable root never matches,
+    /// so the caller recounts and fails closed.
+    fn sessions_root_still_matches(&self, stage_root: &Path) -> bool {
+        let root = stage_root.join(SESSIONS_DIR);
+        let current = match fs::metadata(&root) {
+            Ok(meta) => meta.modified().ok().map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(None),
+            // reason: an unreadable root must read as "changed", never as
+            // "still fresh"; the recount that follows fails closed.
+            Err(_) => None,
+        };
+        current == Some(self.sessions_root)
+    }
+}
+
 /// A sealed-shard count bound to the stage tree it was taken from.
 #[derive(Debug, Clone)]
 pub struct CountedStageShards {
@@ -1814,11 +2032,30 @@ impl CountedStageShards {
     }
 }
 
+impl CountedStageShards {
+    /// The count handed off inside one `run-once` pass, rechecked at a single
+    /// point: the sessions root's mtime. Between the pass's stage audit and
+    /// its push preflight nothing in this process writes under `sessions/`,
+    /// and the pass is the stage's only writer, so the per-directory walk of
+    /// [`Self::fresh_count`] repeats work the audit just did. A changed root
+    /// (a machine directory added or removed) or an unreadable one returns
+    /// `None` and the caller recounts. Standalone `push` keeps
+    /// [`Self::fresh_count`].
+    pub fn handed_off_count(&self, stage_root: &Path) -> Option<usize> {
+        if self.freshness.sessions_root_still_matches(stage_root) {
+            Some(self.count)
+        } else {
+            None
+        }
+    }
+}
+
 /// Recompute the freshness token for `stage_root` cheaply. This enumerates the
 /// sessions root, every machine directory, and every session directory, and
 /// stats each one — it never enumerates bucket contents or stats files, so it
 /// is far cheaper than a full [`sealed_shard_count_with_token`] walk.
 pub fn stage_freshness_token(stage_root: &Path) -> anyhow::Result<StageFreshnessToken> {
+    STAGE_TOKEN_WALK_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let sessions_root = stage_root.join(SESSIONS_DIR);
     let sessions_mtime = match fs::metadata(&sessions_root) {
         Ok(meta) => Some(meta.modified()?),

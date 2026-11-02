@@ -144,6 +144,59 @@ fn duplicate_index_id_in_one_harness_is_rejected() {
     );
 }
 
+/// An index whose single macos cell carries the given raw `session_dir` rule.
+fn index_with_session_dir(rule: &str) -> String {
+    registry(&indexed_harness(
+        "synthetic-index-host",
+        &format!(
+            r#"[{{"id": "agents", "adapter": "paseo-agent-index", "paths": {{
+              "macos": {{"template": "~/.synthetic-host/agents", "format": "agent-index",
+                        "confidence": "measured-locally", "session_dir": {rule}}}}}}}]"#
+        ),
+    ))
+}
+
+#[test]
+fn index_cell_session_dir_with_no_target_is_rejected() {
+    // M1 (PASEO-1a verdict): index cells used to skip validate_registry.
+    let err = load(&index_with_session_dir(r#"{"pattern": "*"}"#))
+        .err()
+        .expect("an index session_dir rule with no transcript target cannot be honoured");
+    let message = err.to_string();
+    assert!(
+        message.contains("synthetic-index-host") && message.contains("agents"),
+        "the rejection must name the harness and the index, got: {message}"
+    );
+}
+
+#[test]
+fn index_cell_session_dir_with_both_targets_is_rejected() {
+    load(&index_with_session_dir(
+        r#"{"pattern": "*", "file": "a.jsonl", "file_glob": "*.jsonl"}"#,
+    ))
+    .err()
+    .expect("an index session_dir rule declaring both targets is ambiguous");
+}
+
+#[test]
+fn index_cell_session_dir_with_a_double_star_glob_is_rejected() {
+    load(&index_with_session_dir(
+        r#"{"pattern": "*", "file_glob": "**/*.jsonl"}"#,
+    ))
+    .err()
+    .expect("a `**` file_glob component is not defined for an index cell either");
+}
+
+#[test]
+fn index_cell_session_dir_with_exactly_one_target_is_accepted() {
+    // Positive control: the three rejections above must come from the checks,
+    // not from the helper producing an unloadable registry.
+    load(&index_with_session_dir(
+        r#"{"pattern": "*", "file": "agent.json"}"#,
+    ))
+    .expect("a well-formed session_dir rule on an index cell loads");
+}
+
 // --- what must keep working -------------------------------------------------
 
 #[test]
