@@ -1333,7 +1333,8 @@ enum Command {
     /// verify (budget spent, disk floor, remote unreadable, space
     /// pre-estimate refused — the next round resumes); 1 = a finished
     /// read that failed (the source proved corrupt, a refused local
-    /// write, or the listing named a file over the whole-file bound);
+    /// write, the listing named a file over the whole-file bound, or
+    /// the mirror volume's free space could not be queried);
     /// 2 = usage error (unconfigured, switch off, an undeclared
     /// `mirror_of`, an uninitialised destination, or the destination's
     /// masterkey file missing on this machine or unusable) — nothing
@@ -10032,6 +10033,13 @@ fn mirror_step_after_push(
                         "each round retries the write and completes once the local \
                          cause is fixed"
                     }
+                    chat_stasher::mirror::HardClass::DiskQuery => {
+                        // The volume would not answer, so the round wrote
+                        // nothing: the next round re-checks before writing
+                        // and completes once the query answers again.
+                        "the mirror re-checks free space every round before writing, \
+                         and completes once the volume answers again"
+                    }
                 };
                 eprintln!(
                     "[run-once] mirror-sync warning: {}: {hard}; {}",
@@ -11547,6 +11555,9 @@ fn cmd_push(
         match summary.persisted.as_ref() {
             Some(chat_stasher::orphans::PersistOutcome::Named { packs, .. }) => println!(
                 "[push] stranded packs : persisted - a new index file names the {packs} verified pack(s), so later opens reuse them without re-reading their bytes"
+            ),
+            Some(chat_stasher::orphans::PersistOutcome::AlreadyNamed { packs }) => println!(
+                "[push] stranded packs : already named - another client's index file names the {packs} verified pack(s), so nothing was written"
             ),
             Some(chat_stasher::orphans::PersistOutcome::NotWritten { why }) => println!(
                 "[push] stranded packs : NOT persisted ({why}) - they stay named by no index file and a later push tries again"
@@ -14404,7 +14415,8 @@ fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode
         Err(e) if e.is::<chat_stasher::mirror::HardFailure>() => {
             // The checked-and-failed class (invariant 2, `CLAUDE.md`):
             // verified source corruption, a refused local write, an
-            // over-bound listing. Exit 1 with the class's own sentence —
+            // over-bound listing, or a free-space query the volume would
+            // not answer. Exit 1 with the class's own sentence —
             // never "did not finish" (exit 3), which a later round cannot
             // heal its way out of for the corruption half.
             if let Some(hard) = e.downcast_ref::<chat_stasher::mirror::HardFailure>() {

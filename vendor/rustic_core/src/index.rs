@@ -1,4 +1,4 @@
-use std::{sync::Arc, thread::sleep, time::Duration};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use derive_more::Constructor;
@@ -303,15 +303,16 @@ impl GlobalIndex {
     }
 
     /// Convert the `Arc<Index>` to an Index
+    ///
+    /// If the index is still shared — e.g. by tree loader threads on a slow
+    /// backend that have not fully shut down when the check ends the tree
+    /// walk — the inner index is cloned instead of unwrapped. The conversion
+    /// must never panic on other live references and must not depend on how
+    /// long they stay alive.
     pub fn into_index(self) -> Index {
         match Arc::try_unwrap(self.index) {
             Ok(index) => index,
-            Err(arc) => {
-                // Seems index is still in use; this could be due to some threads using it which didn't yet completely shut down.
-                // sleep a bit to let threads using the index shut down, after this index should be available to unwrap
-                sleep(Duration::from_millis(100));
-                Arc::try_unwrap(arc).expect("index still in use")
-            }
+            Err(arc) => (*arc).clone(),
         }
     }
 
@@ -323,3 +324,68 @@ impl GlobalIndex {
 }
 
 impl ReadGlobalIndex for GlobalIndex {}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+
+    use super::*;
+    use crate::repofile::indexfile::{IndexBlob, IndexPack};
+
+    /// A `GlobalIndex` holding exactly one tree blob, plus that blob's id.
+    fn global_index_with_tree() -> (GlobalIndex, TreeId) {
+        let blob_id: BlobId = "3b25ec6d16401c31099c259311562160b1b5efbcf70bd69d0463104d3b8148fc"
+            .parse()
+            .unwrap();
+        let index_pack = IndexPack {
+            id: "8431a27d38dd7d192dc37abd43a85d6dc4298de72fc8f583c5d7cdd09fa47274"
+                .parse()
+                .unwrap(),
+            blobs: vec![IndexBlob {
+                id: blob_id,
+                tpe: BlobType::Tree,
+                location: BlobLocation {
+                    offset: 0,
+                    length: 794,
+                    uncompressed_length: NonZeroU32::new(3030),
+                },
+            }],
+            time: None,
+            size: Some(794),
+        };
+
+        let mut collector = IndexCollector::new(IndexType::Full);
+        collector.extend(std::iter::once(index_pack));
+
+        (
+            GlobalIndex::new_from_index(collector.into_index()),
+            blob_id.into(),
+        )
+    }
+
+    /// A check that fails while its tree walk still runs on a slow backend ends
+    /// the walk while `TreeStreamerOnce` loader threads hold their clone of the
+    /// index, and then converts the shared index. `into_index` must hand back
+    /// a usable index instead of panicking on the still-shared `Arc`.
+    #[test]
+    fn into_index_converts_while_the_index_is_still_shared() {
+        let (global_index, tree_id) = global_index_with_tree();
+        let expected = global_index.get_tree(&tree_id);
+        assert!(expected.is_some(), "the fixture must index the tree");
+
+        // A second live reference, held the way a not-yet-shut-down loader
+        // thread on a slow backend holds its index clone when the check ends
+        // the walk. `Arc::try_unwrap` cannot tell which thread holds it, so
+        // this reproduces the shared-index condition without a timing window.
+        let held = global_index.clone();
+
+        let index = global_index.into_index();
+
+        assert_eq!(
+            index.get_tree(&tree_id),
+            expected,
+            "the converted index must carry the same entries"
+        );
+        drop(held);
+    }
+}

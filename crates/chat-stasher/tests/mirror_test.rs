@@ -202,8 +202,11 @@ fn run_round(rig: &Rig, round_ends: &dyn RoundEnds) -> (SyncReport, mirror::Sync
 struct NeverStops;
 
 impl RoundEnds for NeverStops {
-    fn round_end(&self, _next: &mirror::PlannedFile) -> Option<RoundEnd> {
-        None
+    fn round_end(
+        &self,
+        _next: &mirror::PlannedFile,
+    ) -> Result<Option<RoundEnd>, mirror::HardFailure> {
+        Ok(None)
     }
 }
 
@@ -215,11 +218,14 @@ struct EndAfter {
 }
 
 impl RoundEnds for EndAfter {
-    fn round_end(&self, _next: &mirror::PlannedFile) -> Option<RoundEnd> {
+    fn round_end(
+        &self,
+        _next: &mirror::PlannedFile,
+    ) -> Result<Option<RoundEnd>, mirror::HardFailure> {
         if self.asked.fetch_add(1, Ordering::SeqCst) >= self.limit {
-            return Some(RoundEnd::BudgetSpent);
+            return Ok(Some(RoundEnd::BudgetSpent));
         }
-        None
+        Ok(None)
     }
 }
 
@@ -228,11 +234,14 @@ impl RoundEnds for EndAfter {
 struct FloorBroke;
 
 impl RoundEnds for FloorBroke {
-    fn round_end(&self, _next: &mirror::PlannedFile) -> Option<RoundEnd> {
-        Some(RoundEnd::DiskBelowThreshold {
+    fn round_end(
+        &self,
+        _next: &mirror::PlannedFile,
+    ) -> Result<Option<RoundEnd>, mirror::HardFailure> {
+        Ok(Some(RoundEnd::DiskBelowThreshold {
             free_bytes: 0,
             min_free_bytes: 0,
-        })
+        }))
     }
 }
 
@@ -1020,6 +1029,159 @@ fn space_pre_estimate_refuses_before_any_download() {
     assert!(!line.to_lowercase().contains("error"), "{line}");
 }
 
+/// W1072: the C3 pre-estimate refuses fail-closed when the mirror volume
+/// cannot be queried — no byte moves, the refusal is the explicit
+/// checked-and-failed class, and the failure is recorded. The failing
+/// volume is injected through the stop-rule's own free-space probe, so no
+/// platform filesystem quirk is involved: a real unqueryable volume cannot
+/// be built on macOS (any path that defeats `statvfs` also defeats the
+/// `create_dir_all` the round runs first — only Linux accepts a path the
+/// directory creation takes but the query rejects), which is why the
+/// injection rides the seam instead of the disk. The production mapping
+/// itself (a real failed query refuses with this same class) is pinned
+/// cfg-free by
+/// `an_unanswerable_free_space_query_refuses_rather_than_continues`, and
+/// the mid-round propagation by `a_failed_stop_decision_refuses_the_round`.
+struct QueryFailsAtEstimate;
+
+impl RoundEnds for QueryFailsAtEstimate {
+    fn round_end(
+        &self,
+        _next: &mirror::PlannedFile,
+    ) -> Result<Option<RoundEnd>, mirror::HardFailure> {
+        Ok(None)
+    }
+
+    fn free_bytes(&self, _mirror_root: &Path) -> Result<u64, mirror::HardFailure> {
+        // The probe carries its own marker detail so the test can tell the
+        // injected failure apart from any real one; the `why` keeps the
+        // production shape (names the failed query, invents no bytes).
+        Err(mirror::HardFailure {
+            class: mirror::HardClass::DiskQuery,
+            why: "free space on the mirror volume could not be queried; the round wrote nothing \
+                  rather than write toward a possibly full disk"
+                .to_string(),
+            detail: Some("query-fails-at-estimate stopper: no answer".to_string()),
+        })
+    }
+}
+
+#[test]
+fn an_unqueryable_mirror_volume_refuses_before_any_download() {
+    let rig = build_rig(None);
+    let request = SyncRequest {
+        settings: &rig.settings,
+        remote: &rig.remote,
+        data_root: &rig.data_root,
+        state_dir: &rig.state_dir,
+        master_key: &rig.mk,
+        now_unix: 1_800_000_000,
+        min_free_bytes: rig.settings.min_free_bytes(&rig.mirror_root()),
+        round_ends: &QueryFailsAtEstimate,
+    };
+    let err = sync_once(&request)
+        .expect_err("an unqueryable mirror volume must refuse the round, not copy into it");
+    let hard = err
+        .downcast_ref::<mirror::HardFailure>()
+        .expect("the refusal is the checked-and-failed class");
+    assert_eq!(hard.class, mirror::HardClass::DiskQuery);
+    assert!(
+        hard.why.contains("could not be queried"),
+        "the note names the failed query instead of guessing bytes: {}",
+        hard.why
+    );
+    assert!(
+        !hard.why.chars().any(|c| c.is_ascii_digit()),
+        "unknown free space invents no byte counts: {}",
+        hard.why
+    );
+    assert!(
+        hard.detail.is_some(),
+        "the terminal half keeps the raw chain"
+    );
+    assert!(
+        inventory(&rig.mirror_root()).is_empty(),
+        "the refusal moves nothing: no file exists in the mirror"
+    );
+    assert!(matches!(
+        mirrorstate::load(&rig.state_dir),
+        MirrorStateRead::Missing
+    ));
+    match mirror::load_progress(&rig.state_dir) {
+        MirrorProgressRead::Present(progress) => {
+            assert_eq!(progress.outcome, "failed");
+            let note = progress.outcome_note.unwrap_or_default();
+            assert!(note.contains("could not be queried"), "{note}");
+            assert!(
+                !note.contains('/'),
+                "no path reaches the state file: {note}"
+            );
+        }
+        other => panic!("the refusal leaves a failed record saying why, got {other:?}"),
+    }
+}
+
+/// W1072: a stop decision that cannot answer fails the round closed. The
+/// stopper below stands in for the production rule on an unanswerable
+/// volume; the engine must refuse as the checked-and-failed class, write
+/// nothing, and record the failure — never convert the error back into a
+/// pause or a silent continue. No platform probe involved, so this runs
+/// identically on unix and windows with no `#[cfg]` split.
+struct QueryFails;
+
+impl RoundEnds for QueryFails {
+    fn round_end(
+        &self,
+        _next: &mirror::PlannedFile,
+    ) -> Result<Option<RoundEnd>, mirror::HardFailure> {
+        Err(mirror::HardFailure {
+            class: mirror::HardClass::DiskQuery,
+            why: "query-fails stopper: no answer".to_string(),
+            detail: None,
+        })
+    }
+}
+
+#[test]
+fn a_failed_stop_decision_refuses_the_round_without_writing() {
+    let rig = build_rig(None);
+    let request = SyncRequest {
+        settings: &rig.settings,
+        remote: &rig.remote,
+        data_root: &rig.data_root,
+        state_dir: &rig.state_dir,
+        master_key: &rig.mk,
+        now_unix: 1_800_000_000,
+        min_free_bytes: rig.settings.min_free_bytes(&rig.mirror_root()),
+        round_ends: &QueryFails,
+    };
+    let err =
+        sync_once(&request).expect_err("a stopper that cannot answer must fail the round closed");
+    let hard = err
+        .downcast_ref::<mirror::HardFailure>()
+        .expect("the stopper error propagates as the checked-and-failed class");
+    assert_eq!(hard.class, mirror::HardClass::DiskQuery);
+    assert_eq!(hard.why, "query-fails stopper: no answer");
+    assert!(
+        inventory(&rig.mirror_root()).is_empty(),
+        "the refused round writes nothing"
+    );
+    assert!(matches!(
+        mirrorstate::load(&rig.state_dir),
+        MirrorStateRead::Missing
+    ));
+    match mirror::load_progress(&rig.state_dir) {
+        MirrorProgressRead::Present(progress) => {
+            assert_eq!(progress.outcome, "failed");
+            assert_eq!(
+                progress.outcome_note.as_deref(),
+                Some("query-fails stopper: no answer")
+            );
+        }
+        other => panic!("the refusal leaves a failed record saying why, got {other:?}"),
+    }
+}
+
 // ------------------------------------------------------------ swept files
 // A subsequent round with an empty queue re-verifies the existing mirror
 // and rewrites the same closure set — the steady-state contract the hourly
@@ -1205,7 +1367,10 @@ struct DeleteOneRemoteOnFirstAsk {
 }
 
 impl RoundEnds for DeleteOneRemoteOnFirstAsk {
-    fn round_end(&self, _next: &mirror::PlannedFile) -> Option<RoundEnd> {
+    fn round_end(
+        &self,
+        _next: &mirror::PlannedFile,
+    ) -> Result<Option<RoundEnd>, mirror::HardFailure> {
         if !self.fired.swap(true, Ordering::SeqCst) {
             // The remove is the fixture's whole point, so its outcome is
             // asserted rather than dropped: half of the test's premise is
@@ -1215,7 +1380,7 @@ impl RoundEnds for DeleteOneRemoteOnFirstAsk {
                 "the fixture must be able to delete the pack it names"
             );
         }
-        None
+        Ok(None)
     }
 }
 
@@ -2632,6 +2797,10 @@ fn mirror_sync_refuses_usage_when_unconfigured_or_off() {
         "stderr should name the missing section:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert!(
+        !mirror_root_of(sandbox).exists(),
+        "an unconfigured mirror must not create anything on disk (the usage refusal returns before any volume query)"
+    );
 
     // Section present, switch off: usage, again saying what to change.
     write_config(sandbox, "enabled = false\nmirror_of = \"storagebox\"");
@@ -2641,6 +2810,10 @@ fn mirror_sync_refuses_usage_when_unconfigured_or_off() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("enabled is false"));
+    assert!(
+        !mirror_root_of(sandbox).exists(),
+        "a disabled mirror must not create anything on disk (the usage refusal returns before any volume query)"
+    );
 
     // Switch on, name wrong: usage, with the declared list to copy from.
     write_config(sandbox, "enabled = true\nmirror_of = \"nope\"");
@@ -2654,6 +2827,10 @@ fn mirror_sync_refuses_usage_when_unconfigured_or_off() {
     assert!(
         stderr.contains("storagebox"),
         "declared list names the fix: {stderr}"
+    );
+    assert!(
+        !mirror_root_of(sandbox).exists(),
+        "a mirror naming no declared destination must not create anything on disk (the usage refusal returns before any volume query)"
     );
 }
 

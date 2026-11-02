@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// A sorted entry in the index.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SortedEntry {
     /// The ID of the entry.
     id: BlobId,
@@ -32,7 +32,7 @@ pub enum IndexType {
 }
 
 // TODO: add documentation!
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) enum EntriesVariants {
     #[default]
     None,
@@ -57,14 +57,14 @@ pub struct PackIndexes {
     idx: BlobTypeMap<(usize, usize)>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct TypeIndex {
     packs: Vec<PackId>,
     entries: EntriesVariants,
     total_size: u64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Index(BlobTypeMap<TypeIndex>);
 
 impl Index {

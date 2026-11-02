@@ -1747,7 +1747,31 @@ impl<S: IndexedIds> Repository<S> {
         source: &PathList,
         snap: SnapshotFile,
     ) -> RusticResult<SnapshotFile> {
-        commands::backup::backup(self, opts, source, snap)
+        commands::backup::backup(self, opts, source, snap, None)
+    }
+
+    /// Run a backup like [`Self::backup`], but call `before_snapshot` after the
+    /// run's own data, trees and index file are written and strictly before the
+    /// snapshot file is. If it returns an error the backup stops with that error
+    /// and no snapshot is written. It is not called when the snapshot is not
+    /// going to be written (`skip_if_unchanged` found the tree identical to the
+    /// parent's).
+    ///
+    /// chat-stasher pinned-rustic API (W1077): a snapshot that reuses packs no
+    /// index file names must not be published until an index file naming them
+    /// is, or a kill in between leaves a snapshot whose trees no index reaches.
+    ///
+    /// # Errors
+    ///
+    /// * Whatever [`Self::backup`] returns, and whatever `before_snapshot` does.
+    pub fn backup_before_snapshot(
+        &self,
+        opts: &BackupOptions,
+        source: &PathList,
+        snap: SnapshotFile,
+        before_snapshot: &dyn Fn() -> RusticResult<()>,
+    ) -> RusticResult<SnapshotFile> {
+        commands::backup::backup(self, opts, source, snap, Some(before_snapshot))
     }
 
     /// Run a backup of `source` using a `ReadSource`.
@@ -1780,7 +1804,7 @@ impl<S: IndexedIds> Repository<S> {
         <R as ReadSource>::Open: Send,
         <R as ReadSource>::Iter: Send,
     {
-        commands::backup::archive(self, opts, src, snap, backup_paths)
+        commands::backup::archive(self, opts, src, snap, backup_paths, None)
     }
 }
 
