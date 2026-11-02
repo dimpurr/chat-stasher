@@ -13822,6 +13822,10 @@ fn cmd_reclaim_stage(
                 // constant every surface repeats, so the weekly log cannot
                 // grow a second wording for the same hold-back.
                 BlockedKind::NotMirrored => chat_stasher::mirror::HELD_BACK_SENTENCE.to_string(),
+                // W1060: the fail-closed mirror hold, its own settled phrase.
+                BlockedKind::MirrorUnresolved { .. } => {
+                    chat_stasher::mirror::UNRESOLVED_SENTENCE.to_string()
+                }
             };
             // rev2 ⑤: the colon ends the destination's noun phrase, so
             // each kind's word reads as an assertion about it —
@@ -13866,6 +13870,14 @@ fn cmd_reclaim_stage(
                 // The mirror leg's own advice: the block clears itself on
                 // the copy's next completed round — never a re-run alone,
                 // and never a manual delete.
+                BlockedKind::MirrorUnresolved { detail } => {
+                    println!("    reason: {detail}");
+                    println!(
+                        "    fix: declare that destination, or restore its health with a \
+                         successful push, or set `[mirror] enabled = false`; the reclaim \
+                         deletes nothing while the mirror proof cannot be read"
+                    );
+                }
                 BlockedKind::NotMirrored => {
                     println!(
                         "    fix: a completed `chat-stasher mirror sync` round takes the copy \

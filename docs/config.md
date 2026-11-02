@@ -249,6 +249,9 @@ it.
   completed-round record does not hold its proof snapshot closure-complete.
   The mirror rows name how many sessions it is currently holding back, so the count comes from the reclaim's own
   record and never a guess.
+  With the mirror enabled the leg fails closed: a `mirror_of` that is not a
+  declared destination, or is declared but degraded (so not consulted), holds
+  every session as `mirror-unresolved` and deletes nothing.
 - Orphan files — what a deliberate remote cleanup left behind in the
   mirror — are never deleted automatically. `doctor` reports their count
   and the reclaimable bytes; remove the files by hand, or delete the
