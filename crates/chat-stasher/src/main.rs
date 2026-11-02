@@ -10985,6 +10985,10 @@ fn stranded_push_facts(
         None => None,
         Some(o) if o.refused().is_some() => Some((o.report.unindexed_packs(), "not-adopted")),
         Some(o) if o.adopted() => Some((o.report.unindexed_packs(), "adopted")),
+        // Debris is a state, not an action, and it is the one word every
+        // other surface already prints for the same bytes: the packs stay
+        // `torn` — reported, excluded, untouched.
+        Some(o) if !o.torn.is_empty() => Some((o.report.unindexed_packs(), "torn")),
         Some(_) => None,
     }
 }
@@ -11289,17 +11293,51 @@ fn cmd_push(
                 orphans.report.unindexed_bytes(),
             );
         }
-        match (stranded, orphans.refused()) {
-            (0, None) => {}
-            (_, None) => println!(
+        // Torn debris never enters an index file, not even as an exclusion: it
+        // is reported here as what it is, so `stranded` above keeps meaning
+        // "named by no index file" for packs of every kind.
+        if !orphans.torn.is_empty() {
+            let bytes = orphans.torn.iter().map(|pack| pack.bytes).sum::<u64>();
+            println!(
+                "[push] stranded packs : {} torn pack(s) / {bytes} bytes are debris from an interrupted push - never adoptable, never uploaded. {}",
+                orphans.torn.len(),
+                chat_stasher::debris::INTERRUPTED_PUSH_SENTENCE,
+            );
+        }
+        use chat_stasher::orphans::IndexAdoption;
+        match orphans.adoption.as_ref() {
+            // With nothing excluded, the number the count line printed and the
+            // set this backup deduplicated against are one and the same set.
+            Some(IndexAdoption::Adopted) if orphans.torn.is_empty() => println!(
                 "[push] stranded packs : adopted - this backup deduplicated against them and re-uploaded none of their content"
             ),
-            (0, Some(why)) => println!(
+            Some(IndexAdoption::Adopted) => println!(
+                "[push] stranded packs : adopted - this backup deduplicated against the pack(s) that verified and re-uploaded none of their content; the torn debris above was excluded"
+            ),
+            // Debris-only: the torn line above is the whole story — nothing
+            // was adoptable, nothing was refused, nothing was re-uploaded
+            // from debris that holds no content at all.
+            Some(IndexAdoption::Debris) => {}
+            Some(IndexAdoption::Refused { why }) if stranded == 0 => println!(
                 "[push] stranded packs : none unreachable, but the full index could not be built ({why})"
             ),
-            (_, Some(why)) => println!(
+            Some(IndexAdoption::Refused { why }) => println!(
                 "[push] stranded packs : NOT adopted ({why}) - their content was uploaded again"
             ),
+            Some(IndexAdoption::Plain) | None => {}
+        }
+        // What this push wrote about the packs its open verified: the
+        // naming file is what stops the next open from paying the re-read
+        // (W1066), and a skip or a failed write is a state an operator
+        // can act on, not a detail to absorb.
+        match summary.persisted.as_ref() {
+            Some(chat_stasher::orphans::PersistOutcome::Named { packs, .. }) => println!(
+                "[push] stranded packs : persisted - a new index file names the {packs} verified pack(s), so later opens reuse them without re-reading their bytes"
+            ),
+            Some(chat_stasher::orphans::PersistOutcome::NotWritten { why }) => println!(
+                "[push] stranded packs : NOT persisted ({why}) - they stay named by no index file and a later push tries again"
+            ),
+            None => {}
         }
     }
     println!("[push] snapshots      : {}", summary.snapshots_in_repo);
@@ -14334,7 +14372,7 @@ fn cmd_prune_orphans(
         eprintln!("prune-orphans: --apply is refused, and nothing was read or written.");
         eprintln!("prune-orphans: deleting an unindexed pack is not a maintenance detail here:");
         eprintln!(
-            "prune-orphans: \"unindexed\" means no index file names it, not that nothing uses it — a retry can reuse one and write a snapshot that depends on it while it stays unindexed on disk, so a pack can be the only copy of archived content."
+            "prune-orphans: \"unindexed\" means no index file names it, not that nothing uses it — a retry can reuse one and write a snapshot that depends on it, and it stays unindexed on disk until a later push names it in a new index file, so a pack can be the only copy of archived content."
         );
         eprintln!(
             "prune-orphans: a safe delete needs all three of these, and this build has none:"
@@ -14445,6 +14483,9 @@ fn prune_orphans_json(inventory: &chat_stasher::prune_orphans::Inventory) -> ser
     let next_push = match &inventory.next_push {
         NextPush::NothingStranded => serde_json::json!({"kind": "nothing_stranded"}),
         NextPush::WouldAdopt => serde_json::json!({"kind": "would_adopt"}),
+        NextPush::WouldAdoptExcludingTorn { torn } => {
+            serde_json::json!({"kind": "would_adopt_excluding_torn", "torn": torn})
+        }
         NextPush::Refused { why } => serde_json::json!({"kind": "refused", "why": why}),
     };
 
@@ -14582,6 +14623,11 @@ fn print_prune_orphans(inventory: &chat_stasher::prune_orphans::Inventory, dry_r
         NextPush::WouldAdopt => println!(
             "[prune] next push   : would adopt all {} unindexed pack(s); a later push uploads none of their blobs again",
             inventory.candidate_packs()
+        ),
+        NextPush::WouldAdoptExcludingTorn { torn } => println!(
+            "[prune] next push   : would adopt the {} pack(s) that verified and set aside the {} torn debris — debris is never adopted and stays unindexed",
+            inventory.stranded_packs(),
+            torn
         ),
         NextPush::Refused { why } => println!(
             "[prune] next push   : NOT adopted — {why}; a push re-uploads what these packs hold"
