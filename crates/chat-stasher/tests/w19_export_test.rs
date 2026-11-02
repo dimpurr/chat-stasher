@@ -830,7 +830,8 @@ fn no_collapse_reads_the_same_shards_the_default_reads_of_a_whole_content_replay
     let store = store_of(&repo, root, "m-alpha");
     store.push(&stage, &mk).unwrap();
 
-    let (default_body, default_shards) = store.read_session_concat("m-alpha", session, &mk).unwrap();
+    let (default_body, default_shards) =
+        store.read_session_concat("m-alpha", session, &mk).unwrap();
     assert_eq!(
         default_shards.len(),
         2,

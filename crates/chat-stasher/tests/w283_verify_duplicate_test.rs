@@ -238,9 +238,17 @@ fn repair_duplicates_reports_counts_and_never_changes_the_repository() {
         )
     };
     let first = push(&stage_one);
-    assert!(first.status.success(), "push failed: {:?}", first.status.code());
+    assert!(
+        first.status.success(),
+        "push failed: {:?}",
+        first.status.code()
+    );
     let second = push(&stage_two);
-    assert!(second.status.success(), "push failed: {:?}", second.status.code());
+    assert!(
+        second.status.success(),
+        "push failed: {:?}",
+        second.status.code()
+    );
     let snapshots_before = fs::read_dir(repo.join("snapshots")).unwrap().count();
 
     let report = run(

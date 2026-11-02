@@ -228,8 +228,7 @@ fn activity_index_counts_an_identical_stage_repeat_twice_when_no_reseal_evidence
     let row: serde_json::Value =
         serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
     assert_eq!(
-        row["line_count"],
-        4,
+        row["line_count"], 4,
         "an identical shard at a NEXT sequence number is kept content, and \
          every one of its lines counts"
     );

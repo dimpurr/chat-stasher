@@ -11445,7 +11445,8 @@ fn duplicate_repair_report(
             // The reader folds whole runs, not scattered shards, so the
             // inventory names the runs: this is what makes a fold auditable
             // rather than a bare count.
-            for (run_start_shard, run_shards) in store::grouped_shard_runs(&session.folded_shard_indices)
+            for (run_start_shard, run_shards) in
+                store::grouped_shard_runs(&session.folded_shard_indices)
             {
                 let mut run_bytes = 0u64;
                 for index in run_start_shard..run_start_shard + run_shards {
@@ -12583,8 +12584,7 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                     // uses — sequence number first, archive path as the
                     // tiebreak — so the fold rule sees the same shape a
                     // cumulative `read` sees.
-                    let held_indexes: Vec<usize> =
-                        held.values().map(|(idx, _)| *idx).collect();
+                    let held_indexes: Vec<usize> = held.values().map(|(idx, _)| *idx).collect();
                     let shard_bodies: Vec<Vec<u8>> =
                         held.into_values().map(|(_, body)| body).collect();
                     let sequences: Vec<Option<u64>> = held_indexes
@@ -12597,8 +12597,11 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                                 .and_then(store::parse_shard_seq)
                         })
                         .collect();
-                    let selected: Vec<Vec<u8>> =
-                        store::select_shard_bodies_sequenced(shard_bodies, &sequences, fts_shard_policy);
+                    let selected: Vec<Vec<u8>> = store::select_shard_bodies_sequenced(
+                        shard_bodies,
+                        &sequences,
+                        fts_shard_policy,
+                    );
                     // ADR-061: a snapshot-source session is indexed as its
                     // assembled current-state body, so repeated whole-file
                     // copies cannot inflate the text and deleted turns stay
@@ -12784,8 +12787,7 @@ fn index_sources(
         .collect()
 }
 
-const INDEX_SOURCE_FINGERPRINT_DOMAIN: &[u8] =
-    b"chat-stasher-fts-source-v5-reseal-evidence-v1\0";
+const INDEX_SOURCE_FINGERPRINT_DOMAIN: &[u8] = b"chat-stasher-fts-source-v5-reseal-evidence-v1\0";
 const INDEX_DUPLICATE_RULE_VERSION: u32 = 1;
 
 fn index_source_fingerprint(
@@ -14902,7 +14904,11 @@ mod decision_surface_tests {
         let history = "history".to_string();
         // Total-local-loss re-seal: the history shard held at sequence 2 by
         // the first instance, sealed again at sequence 2 by the second.
-        let reseal = vec![(Some(1), row.clone()), (Some(2), history.clone()), (Some(2), history.clone())];
+        let reseal = vec![
+            (Some(1), row.clone()),
+            (Some(2), history.clone()),
+            (Some(2), history.clone()),
+        ];
         assert_eq!(
             store::duplicate_shard_indices_sequenced(&reseal),
             vec![2],
@@ -14911,14 +14917,23 @@ mod decision_surface_tests {
         );
         // The verdict's [A, B, B]: a validated consecutive repeat takes the
         // NEXT sequence number, so no evidence exists and nothing folds.
-        let genuine = vec![(Some(1), row.clone()), (Some(2), history.clone()), (Some(3), history.clone())];
+        let genuine = vec![
+            (Some(1), row.clone()),
+            (Some(2), history.clone()),
+            (Some(3), history.clone()),
+        ];
         assert!(
             store::duplicate_shard_indices_sequenced(&genuine).is_empty(),
             "a repeated turn sealed as the next sequence is genuine content \
              and every reader must keep it"
         );
         // A whole re-seal: sequences number for number, the maximal case.
-        let whole = vec![(Some(1), row.clone()), (Some(2), history.clone()), (Some(1), row.clone()), (Some(2), history.clone())];
+        let whole = vec![
+            (Some(1), row.clone()),
+            (Some(2), history.clone()),
+            (Some(1), row.clone()),
+            (Some(2), history.clone()),
+        ];
         assert_eq!(
             store::duplicate_shard_indices_sequenced(&whole),
             vec![2, 3],
@@ -14927,7 +14942,11 @@ mod decision_surface_tests {
         );
         // No sequence evidence at all (unparseable or ambiguous names):
         // keep the duplicate rather than risk eating user content.
-        let unnumbered = vec![(None, row.clone()), (Some(2), history.clone()), (None, history.clone())];
+        let unnumbered = vec![
+            (None, row.clone()),
+            (Some(2), history.clone()),
+            (None, history.clone()),
+        ];
         assert!(
             store::duplicate_shard_indices_sequenced(&unnumbered).is_empty(),
             "without sequence evidence the copy stays, never folds"

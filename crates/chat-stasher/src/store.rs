@@ -1490,8 +1490,11 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
         .iter()
         .map(|(_, nulled, _, body)| (*nulled, body.clone()))
         .collect();
-    let observed_sequences =
-        crate::provenance::verified_observation_sequences(session_id, &observations, &observed_bodies);
+    let observed_sequences = crate::provenance::verified_observation_sequences(
+        session_id,
+        &observations,
+        &observed_bodies,
+    );
     let raw_pairs: Vec<(Option<u64>, &Vec<u8>)> = shards
         .iter()
         .map(|(raw, _, _, body)| (*raw, body))
@@ -2955,10 +2958,10 @@ pub fn select_shard_bodies_sequenced(
         sequences.len(),
         "shard bodies and sequence numbers must stay aligned"
     );
-    let paired: Vec<(Option<u64>, Vec<u8>)> =
-        sequences.iter().copied().zip(shards).collect();
-    let duplicates: BTreeSet<_> =
-        duplicate_shard_indices_sequenced(&paired).into_iter().collect();
+    let paired: Vec<(Option<u64>, Vec<u8>)> = sequences.iter().copied().zip(shards).collect();
+    let duplicates: BTreeSet<_> = duplicate_shard_indices_sequenced(&paired)
+        .into_iter()
+        .collect();
     paired
         .into_iter()
         .enumerate()
@@ -3902,9 +3905,8 @@ mod tests {
     fn the_fold_needs_same_sequence_evidence_a_repeat_at_a_new_number_stays() {
         let a = b"alpha\n".to_vec();
         let b = b"beta\n".to_vec();
-        let sequenced = |shards: Vec<(Option<u64>, Vec<u8>)>| {
-            duplicate_shard_indices_sequenced(&shards)
-        };
+        let sequenced =
+            |shards: Vec<(Option<u64>, Vec<u8>)>| duplicate_shard_indices_sequenced(&shards);
         // Same sequence number (the second instance re-sealed shard 2):
         // the PASEO-1d finding shape, and it folds.
         assert_eq!(
@@ -4014,8 +4016,12 @@ mod tests {
             vec![a.clone()]
         );
         assert_eq!(
-            select_shard_bodies_sequenced(doubled, &doubled_sequence, DuplicateShardPolicy::KeepAll)
-                .len(),
+            select_shard_bodies_sequenced(
+                doubled,
+                &doubled_sequence,
+                DuplicateShardPolicy::KeepAll
+            )
+            .len(),
             2
         );
 
@@ -4030,7 +4036,12 @@ mod tests {
         ])
         .is_empty());
         assert_eq!(
-            select_shard_bodies_sequenced(repeated, &repeated_sequence, DuplicateShardPolicy::Collapse).len(),
+            select_shard_bodies_sequenced(
+                repeated,
+                &repeated_sequence,
+                DuplicateShardPolicy::Collapse
+            )
+            .len(),
             3,
             "a genuine consecutive repeat stays in every collapse read"
         );
