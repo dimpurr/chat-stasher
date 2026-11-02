@@ -849,11 +849,10 @@ fn an_unreadable_stranded_pack_is_reported_and_never_adopted() {
     // is the concrete way this test can see the torn pack excluded: the
     // naming file holds every stranded pack minus the debris.
     assert!(
-        said.iter()
-            .any(|line| line.contains(&format!(
-                "persisted - a new index file names the {} verified pack(s)",
-                stranded.len() - 1
-            ))),
+        said.iter().any(|line| line.contains(&format!(
+            "persisted - a new index file names the {} verified pack(s)",
+            stranded.len() - 1
+        ))),
         "the retry must name the packs that verified ({} of {}): {stdout}",
         stranded.len() - 1,
         stranded.len()
@@ -879,8 +878,8 @@ fn an_unreadable_stranded_pack_is_reported_and_never_adopted() {
     let stdout = String::from_utf8_lossy(&third.stdout);
     let said = stranded_lines(&stdout);
     assert!(
-        said.iter().any(|line| line.contains("1 pack(s)")
-            && line.contains("named by no index file")),
+        said.iter()
+            .any(|line| line.contains("1 pack(s)") && line.contains("named by no index file")),
         "the torn pack must still be counted as stranded: {stdout}"
     );
     assert!(
@@ -1268,11 +1267,10 @@ fn an_incomplete_pack_in_a_remote_backends_listing_is_not_adopted() {
         "the in-flight pack must be reported as debris, never as a failure: {stdout}"
     );
     assert!(
-        said.iter()
-            .any(|line| line.contains(&format!(
-                "persisted - a new index file names the {} verified pack(s)",
-                stranded.len() - 1
-            ))),
+        said.iter().any(|line| line.contains(&format!(
+            "persisted - a new index file names the {} verified pack(s)",
+            stranded.len() - 1
+        ))),
         "the finished packs beside the in-flight one must be adopted and named: {stdout}"
     );
     assert_eq!(

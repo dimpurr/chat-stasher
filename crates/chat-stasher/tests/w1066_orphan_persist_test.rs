@@ -365,7 +365,10 @@ fn torn_debris_does_not_refuse_the_complete_packs_around_it() {
         .filter(|id| *id != &victim)
         .cloned()
         .collect();
-    assert!(!complete.is_empty(), "the fixture needs at least one survivor");
+    assert!(
+        !complete.is_empty(),
+        "the fixture needs at least one survivor"
+    );
 
     let retry = BackupStore::new(remote.clone(), "machine-a".to_string())
         .push(&stage, &mk)
@@ -545,10 +548,7 @@ impl TwoClientSandbox {
     /// directory the child parks in.
     fn spawn_parked_persist(&self, rendezvous: &Path) -> Child {
         self.command()
-            .env(
-                "CHAT_STASHER_TEST_HOLD_PERSIST_BEFORE_WRITE",
-                rendezvous,
-            )
+            .env("CHAT_STASHER_TEST_HOLD_PERSIST_BEFORE_WRITE", rendezvous)
             .args(self.push_args())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -627,7 +627,15 @@ fn two_pushes_that_both_persist_the_same_packs_stay_mergeable() {
         // The unfixed code does not park, so one child finished without
         // reaching the hold; collect them and fall through to the
         // repository-level assertions, which are the red ones.
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "On the unparked path the children have already run to completion, and reaping their exit without inspecting their output is all this fallback owes them."
+        )]
         let _ = child_a.wait_with_output();
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "As above: the assertions this path cares to make are about the repository, not the children."
+        )]
         let _ = child_b.wait_with_output();
     }
 
