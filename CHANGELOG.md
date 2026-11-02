@@ -15,6 +15,17 @@ under its own heading below.
 
 #### Added
 
+- **A reclaim that finishes under a running collect no longer resets the
+  sessions the pass reaches afterwards (W1057).** `reclaim-stage` and a
+  collect pass take no lock against each other; the pass read the retained
+  manifest once, at its start, so a session reclaimed by a reclaim that
+  finished mid-pass looked unverifiable and was reread whole (the 11-01
+  opencode burst). A pass now re-reads the manifest when its file changed
+  before it gives up on a cursor. Every round that reset a session also appends one row to
+  `reset-causes-v1.jsonl` in the state directory: counts of resets by source
+  and cause, no session text, kept across rounds; the same counts print as a
+  `[collect] reset causes` line.
+
 - **Atomic pack publication on the SFTP and local-directory backends (W1055,
   ADR-063 / ISSUE-006 step C).** A push now writes each pack under a temporary
   name next to its final one (`<id>.tmp-<unix seconds>-<16 random hex>`), reads
