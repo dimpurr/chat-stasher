@@ -4454,9 +4454,18 @@ where
             .map_err(|e| ActivityIndexError::Read(format!("open destination: {e:#}")))?;
         let (repo, _adoption) = chat_stasher::orphans::open_adopting(cfg, &backends, mk)
             .map_err(|e| ActivityIndexError::Read(format!("open destination: {e:#}")))?;
-        let mut snapshots = repo
-            .get_all_snapshots()
-            .map_err(|e| ActivityIndexError::Read(format!("list destination snapshots: {e:#}")))?;
+        let mut snapshots = repo.get_all_snapshots().map_err(|e| {
+            let message = format!("list destination snapshots: {e:#}");
+            let short = chat_stasher::orphans::short_files(&backends);
+            if short.is_empty() {
+                ActivityIndexError::Read(message)
+            } else {
+                ActivityIndexError::Read(format!(
+                    "{message}: {}",
+                    chat_stasher::orphans::short_files_words(&short)
+                ))
+            }
+        })?;
         snapshots.retain(|snapshot| snapshot.hostname == machine);
         snapshots.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.time.clone()));
         if snapshots.is_empty() {
@@ -4606,9 +4615,18 @@ fn list_destination_machine_snapshot_ids(
         chat_stasher::orphans::open_adopting(cfg, &backends, mk).map_err(|e| {
             ActivityIndexError::Read(format!("open destination for snapshot recheck: {e:#}"))
         })?;
-    let snapshots = repo
-        .get_all_snapshots()
-        .map_err(|e| ActivityIndexError::Read(format!("re-list destination snapshots: {e:#}")))?;
+    let snapshots = repo.get_all_snapshots().map_err(|e| {
+        let message = format!("re-list destination snapshots: {e:#}");
+        let short = chat_stasher::orphans::short_files(&backends);
+        if short.is_empty() {
+            ActivityIndexError::Read(message)
+        } else {
+            ActivityIndexError::Read(format!(
+                "{message}: {}",
+                chat_stasher::orphans::short_files_words(&short)
+            ))
+        }
+    })?;
     Ok(snapshots
         .iter()
         .filter(|snapshot| snapshot.hostname == machine)
@@ -5072,7 +5090,8 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
         .context("open repository for overview")?;
     let snaps = repo
         .get_all_snapshots()
-        .context("list snapshots for overview")?;
+        .context("list snapshots for overview")
+        .map_err(|error| chat_stasher::orphans::explain_short_files(&backends, error))?;
     let newest = readback::newest_snapshot_per_host(snaps);
 
     let mut out = OverviewRead {
@@ -12430,7 +12449,10 @@ fn cmd_index(action: IndexAction) -> ExitCode {
             let build_result = (|| -> anyhow::Result<chat_stasher::fts::BuildStats> {
                 let snapshots = repo
                     .get_all_snapshots()
-                    .context("list archive snapshots for FTS")?;
+                    .context("list archive snapshots for FTS")
+                    .map_err(|error| {
+                        chat_stasher::orphans::explain_short_files(&backends, error)
+                    })?;
                 // ADR-046 (draft) Phase 1: the index is a reader cache of the
                 // archive, so it is built from the same folded control policy
                 // every read applies. Hidden identities never enter the index,
@@ -18635,7 +18657,18 @@ fn setup_snapshot_count(config: &Config) -> Result<usize, String> {
         .map_err(|error| format!("{error:#}"))?;
     repo.get_all_snapshots()
         .map(|snapshots| snapshots.len())
-        .map_err(|error| format!("{error:#}"))
+        .map_err(|error| {
+            let message = format!("{error:#}");
+            let short = chat_stasher::orphans::short_files(&backends);
+            if short.is_empty() {
+                message
+            } else {
+                format!(
+                    "{message}: {}",
+                    chat_stasher::orphans::short_files_words(&short)
+                )
+            }
+        })
 }
 
 /// Decide what the two passes did to the repository, from observations only.

@@ -543,7 +543,10 @@ impl BackupStore {
         let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
             .context("open repository for provenance observations")?;
         self.require_sound_packs(&repo)?;
-        let snapshots = snapshots_by_host_newest_first(repo.get_all_snapshots()?);
+        let snapshots = snapshots_by_host_newest_first(
+            repo.get_all_snapshots()
+                .map_err(|error| crate::orphans::explain_short_files(&backends, error.into()))?,
+        );
         let Some((_, host_snaps)) = snapshots.into_iter().find(|(host, _)| host == machine) else {
             anyhow::bail!("no snapshot for machine `{machine}` in this repository");
         };
@@ -578,7 +581,10 @@ impl BackupStore {
             .context("open repository for writer versions")?;
         self.require_sound_packs(&repo)?;
         let mut out = ArchivedWriters::default();
-        for snapshot in newest_snapshot_per_host(repo.get_all_snapshots()?) {
+        for snapshot in newest_snapshot_per_host(
+            repo.get_all_snapshots()
+                .map_err(|error| crate::orphans::explain_short_files(&backends, error.into()))?,
+        ) {
             out.machines.insert(snapshot.hostname.clone());
             let root = repo.node_from_snapshot_and_path(&snapshot, "")?;
             let entries = repo
@@ -628,7 +634,10 @@ impl BackupStore {
             .context("open repository for read-all")?;
         self.require_sound_packs(&repo)?;
 
-        let snaps = repo.get_all_snapshots().context("list snapshots")?;
+        let snaps = repo
+            .get_all_snapshots()
+            .context("list snapshots")
+            .map_err(|error| crate::orphans::explain_short_files(&backends, error))?;
         // `get_all_snapshots` reads every snapshot file under `snapshots/` —
         // that is the (one and only) snapshot read cost of this command.
         let snapshots_in_repo = snaps.len();
@@ -816,7 +825,10 @@ impl BackupStore {
             .context("open repository for read-all")?;
         self.require_sound_packs(&repo)?;
 
-        let snaps = repo.get_all_snapshots().context("list snapshots")?;
+        let snaps = repo
+            .get_all_snapshots()
+            .context("list snapshots")
+            .map_err(|error| crate::orphans::explain_short_files(&backends, error))?;
         let snapshots_in_repo = snaps.len();
 
         let mut report = ReadAllReport::default();
@@ -1139,7 +1151,10 @@ impl BackupStore {
         let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
             .context("open repository for shard restore")?;
         self.require_sound_packs(&repo)?;
-        let snaps = repo.get_all_snapshots().context("list snapshots")?;
+        let snaps = repo
+            .get_all_snapshots()
+            .context("list snapshots")
+            .map_err(|error| crate::orphans::explain_short_files(&backends, error))?;
         for snap in newest_snapshot_per_host(snaps) {
             if snap.hostname != machine {
                 continue;
@@ -1316,7 +1331,10 @@ impl BackupStore {
         let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
             .context("open repository for archived sessions")?;
         self.require_sound_packs(&repo)?;
-        let snaps = repo.get_all_snapshots().context("list snapshots")?;
+        let snaps = repo
+            .get_all_snapshots()
+            .context("list snapshots")
+            .map_err(|error| crate::orphans::explain_short_files(&backends, error))?;
         let snapshots_in_repo = snaps.len();
         // ADR-046 (draft) Phase 1: a single-machine walk still loads the
         // control union from every host's newest snapshot — control records

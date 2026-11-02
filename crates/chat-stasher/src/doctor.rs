@@ -55,6 +55,7 @@ pub const KEYS_CHECK: &str = "key inventory";
 pub const DEST_RECONCILE_CHECK: &str = "D12 destination reconciliation";
 pub const MIRROR_CHECK: &str = "D13 local mirror";
 pub const INBOX_STATUS_CHECK: &str = "remote inbox status";
+pub const SHORT_FILES_CHECK: &str = "short index/snapshot files";
 
 /// Per-check budgets, in seconds. A budget is a *diagnosis* bound, not an
 /// archive bound: every check above is a read of a few files, a bounded walk
@@ -2051,6 +2052,13 @@ pub struct DoctorReport {
     /// read. Filled by the library's own [`run()`] — file reads and one
     /// directory walk only, never a destination connection.
     pub mirror: Option<crate::mirror::MirrorStatus>,
+    /// W1071 — index or snapshot files too short to be complete (W1068
+    /// follow-up). `None` for the same reason as `reclaim`: the repository
+    /// path and key both derive from a config this run could not read.
+    /// `Some(empty)` is the healthy silence: the check ran and found nothing.
+    /// Filled by the library's own [`run()`] — two read-only size listings
+    /// via [`crate::orphans::short_files`], never a snapshot read.
+    pub short_files: Option<Vec<crate::orphans::ShortFile>>,
     /// W1043 — the checks that outlived their own deadline, in the order
     /// they ran. Not empty ⇒ each named check's section is an **unknown**:
     /// its field carries a placeholder (`None`, a `TimedOut` verdict, an
@@ -2807,7 +2815,7 @@ fn activity_index_json(freshness: &ActivityIndexFreshness) -> serde_json::Value 
 /// The checks a run cannot perform without a usable config, in the order
 /// [`print_report`] presents them. [`DoctorReport::not_checked`] returns this
 /// list only for a report whose `config_error` is set.
-const CHECKS_NEEDING_CONFIG: [&str; 12] = [
+const CHECKS_NEEDING_CONFIG: [&str; 13] = [
     "D3 harness scan, footprints and archive gaps",
     "D4 risk summary",
     "D5 repository reclaim",
@@ -2820,6 +2828,7 @@ const CHECKS_NEEDING_CONFIG: [&str; 12] = [
     "D12 destination reconciliation (timers, credentials, last push, reclaim)",
     "D13 local mirror (size, last sync, snapshots behind, orphans)",
     "machine identity",
+    "short index/snapshot files",
 ];
 
 /// The report for a config file that exists and cannot be used.
@@ -2920,6 +2929,9 @@ pub fn config_unreadable(
         // mirror directory under the data root), so an unreadable config
         // means this check did not run.
         mirror: None,
+        // W1071: the repository path and key are config-derived, so an
+        // unreadable config means the short-files listing did not run.
+        short_files: None,
         timed_out: checks.notes().to_vec(),
     }
 }
@@ -3628,6 +3640,16 @@ pub fn run() -> DoctorReport {
         })
     };
 
+    // W1071 — short index/snapshot files, read-only size listings only.
+    let short_files = {
+        let config = config.clone();
+        checks
+            .run(SHORT_FILES_CHECK, BACKED_WALK_BUDGET_SECS, move || {
+                Some(inspect_short_files(&config))
+            })
+            .flatten()
+    };
+
     DoctorReport {
         config_source: config.source,
         config_error: None,
@@ -3658,6 +3680,7 @@ pub fn run() -> DoctorReport {
         keys,
         dest_reconcile,
         mirror,
+        short_files,
         timed_out: checks.notes().to_vec(),
     }
 }
@@ -3872,6 +3895,64 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
         size_repack: s.size_sum().repack,
         append_only,
     }
+}
+
+/// W1071 — list index and snapshot files too short to be complete.
+///
+/// Read-only: two size listings via [`crate::orphans::short_files`], never a
+/// snapshot read. Any failure to open or list (no repository, no key,
+/// unreachable destination) yields an empty vec — the healthy silence — which
+/// keeps this row from crying wolf about a repository it could not see.
+/// A short file found here is named by the print row and `--json` with the
+/// same [`crate::orphans::short_files_words`] recovery wording every
+/// snapshot-listing failure path uses.
+#[must_use]
+pub fn inspect_short_files(config: &Config) -> Vec<crate::orphans::ShortFile> {
+    use std::collections::BTreeMap;
+
+    let data_root = default_data_root();
+    let repo_root = config
+        .rustic_repo
+        .as_deref()
+        .map(expand_tilde)
+        .unwrap_or_else(|| data_root.join("repo"));
+    let is_dir = std::fs::metadata(&repo_root).map(|m| m.is_dir());
+    // reason: a missing or unreadable repository path yields no names — the
+    // row names only files it actually saw, so silence here is "did not see
+    // any", never a measured "there are none".
+    let is_dir = is_dir.unwrap_or(false);
+    if !is_dir {
+        return Vec::new();
+    }
+    let key_file = config
+        .rustic_key_file
+        .as_deref()
+        .map(expand_tilde)
+        .unwrap_or_else(|| data_root.join("masterkey.json"));
+    let cfg = crate::store::StoreConfig {
+        repo_root: repo_root.to_string_lossy().into_owned(),
+        key_file: key_file.clone(),
+        connections: 1,
+        options: BTreeMap::new(),
+        cache_dir: config.rustic_cache_dir.as_deref().map(expand_tilde),
+        // reason: rustic_no_cache unset = rustic's default (cache on); a config
+        // default, not an unknown read result collapsed to false.
+        no_cache: config.rustic_no_cache.unwrap_or(false),
+    };
+    if crate::store::load_key_file(&cfg).is_err() {
+        return Vec::new();
+    }
+    let mut opts = rustic_backend::BackendOptions::default().repository(cfg.repo_root.as_str());
+    if cfg.repo_root.starts_with("opendal:") || cfg.repo_root.starts_with("rest:") {
+        let mut options = BTreeMap::new();
+        options.insert("connections".to_string(), cfg.connections.to_string());
+        opts = opts.options(options);
+    }
+    let backends = match opts.to_backends() {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
+    crate::orphans::short_files(&backends)
 }
 
 // ---------------------------------------------------------------------------
@@ -4967,6 +5048,20 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
             }
             (None, None) => serde_json::json!({"checked": false}),
         },
+        "short_files": match (&r.short_files, r.check_timed_out_after(SHORT_FILES_CHECK)) {
+            (Some(files), _) => serde_json::json!({
+                "checked": true,
+                "files": files.iter().map(|f| serde_json::json!({
+                    "dir": f.dir,
+                    "id": f.id_hex,
+                    "bytes": f.bytes,
+                })).collect::<Vec<_>>(),
+            }),
+            (None, Some(secs)) => {
+                serde_json::json!({"checked": false, "timed_out_after_secs": secs})
+            }
+            (None, None) => serde_json::json!({"checked": false}),
+        },
     })
 }
 
@@ -5766,6 +5861,7 @@ pub fn print_report(r: &DoctorReport) {
                 "the reclaimable garbage is unknown, not zero",
             );
         }
+        print_short_files(&r.short_files, r.check_timed_out_after(SHORT_FILES_CHECK));
         if let Some(cache) = &r.cache {
             eprintln!("D6 · Local metadata cache occupancy");
             print_cache(cache);
@@ -5912,6 +6008,8 @@ pub fn print_report(r: &DoctorReport) {
             "the reclaimable garbage is unknown, not zero",
         );
     }
+
+    print_short_files(&r.short_files, r.check_timed_out_after(SHORT_FILES_CHECK));
 
     // D6 — how much the local metadata cache actually occupies
     if let Some(cache) = &r.cache {
@@ -6724,6 +6822,33 @@ fn print_reclaim(r: &ReclaimCheck) {
     eprintln!();
 }
 
+/// W1071 — one read-only row for short index/snapshot files. Healthy
+/// repositories stay silent (no heading); a repository holding short files
+/// names them with the same recovery wording every snapshot-listing failure
+/// path uses. Never auto-isolates or deletes.
+fn print_short_files(
+    check: &Option<Vec<crate::orphans::ShortFile>>,
+    timed_out_after_secs: Option<u64>,
+) {
+    match (check, timed_out_after_secs) {
+        (Some(files), _) => {
+            if files.is_empty() {
+                return;
+            }
+            eprintln!("Short index/snapshot files (W1071 follow-up to W1068):");
+            eprintln!("  {}", crate::orphans::short_files_words(files));
+            eprintln!();
+        }
+        (None, Some(secs)) => print_timed_out_section(
+            "Short index/snapshot files (W1071 follow-up to W1068):",
+            SHORT_FILES_CHECK,
+            secs,
+            "short index/snapshot files are unknown, not absent",
+        ),
+        (None, None) => {}
+    }
+}
+
 fn print_archive_gaps(gaps: &[scanner::ArchiveGap]) {
     if gaps.is_empty() {
         return;
@@ -7288,6 +7413,7 @@ mod json_tests {
             keys: Some(Vec::new()),
             dest_reconcile: None,
             mirror: None,
+            short_files: Some(Vec::new()),
 
             timed_out: Vec::new(),
         }
@@ -7373,6 +7499,7 @@ mod json_tests {
                 "risks",
                 "scan_failed",
                 "schema_version",
+                "short_files",
                 "stage_duplicate_shards",
                 "timed_out",
             ]
@@ -7811,7 +7938,7 @@ mod report_to_json_shape_tests {
             keys: None,
             dest_reconcile: None,
             mirror: None,
-
+            short_files: None,
             timed_out: Vec::new(),
         }
     }
@@ -7832,6 +7959,7 @@ mod report_to_json_shape_tests {
             "native_host",
             "stage_duplicate_shards",
             "mirror",
+            "short_files",
         ] {
             assert!(
                 v.get(key).is_some(),
@@ -9217,7 +9345,7 @@ mod w1043_deadline_tests {
         // its deadline and the note that a wedged run leaves behind. The
         // labels are the same consts `run()` traces, so a section can never
         // claim a budget a different check waited out.
-        let sections: [(&str, &str); 10] = [
+        let sections: [(&str, &str); 11] = [
             ("desktop_retention", DESKTOP_RETENTION_CHECK),
             ("reclaim", RECLAIM_CHECK),
             ("cache", CACHE_CHECK),
@@ -9228,6 +9356,7 @@ mod w1043_deadline_tests {
             ("destination_reconciliation", DEST_RECONCILE_CHECK),
             ("native_host", NATIVE_HOST_CHECK),
             ("mirror", MIRROR_CHECK),
+            ("short_files", SHORT_FILES_CHECK),
         ];
         for (key, check) in sections {
             let mut report = minimal_w1043_report();
@@ -9323,6 +9452,7 @@ mod w1043_deadline_tests {
             keys: None,
             dest_reconcile: None,
             mirror: None,
+            short_files: None,
             timed_out: Vec::new(),
         }
     }
