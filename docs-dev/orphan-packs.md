@@ -62,7 +62,7 @@ of them.
 **A header is not a pack, so a header read is not a verification.** This project
 reads the header of every pack the index does not name *and every blob that
 header declares* (`crates/chat-stasher/src/packcheck.rs:136`, called from
-`crates/chat-stasher/src/orphans.rs:393`): the header has to decrypt with the
+`crates/chat-stasher/src/orphans.rs:405`): the header has to decrypt with the
 repository key, every blob has to decrypt and decompress to the length its
 header gives, and every blob's plaintext has to hash to the id the header names.
 The pack's bytes must also hash to the id it is stored under. That catches damage
@@ -91,7 +91,7 @@ over a stranded 1 045 700 B repository — a second full copy — while the adop
 retry adds only its snapshot, index and tree pack
 (`crates/chat-stasher/tests/w245_interrupted_push_test.rs:639-650`).
 
-Implementation: `crates/chat-stasher/src/orphans.rs:716`. Every read path reaches
+Implementation: `crates/chat-stasher/src/orphans.rs:744`. Every read path reaches
 it through `crates/chat-stasher/src/store.rs:631`, which is the whole point of
 routing reads through it — after an adopting push, the snapshot's tree and its
 shards exist **only** in packs no index file names, so a read that reads only
@@ -110,7 +110,7 @@ forever — measured live in the k100 fixture, where a complete stranded pack wa
 re-verified 38 times in a row and nothing on disk ever recorded the adoption.
 
 The persist step closes that, on the push connection only: after a push wrote
-its own index file and snapshot, it names the packs its open verified in **one
+its own index file and before it writes its snapshot (W1077, below), it names the packs its open verified in **one
 new index file** (`crates/chat-stasher/src/orphans.rs:persist_verified`, written
 through the pinned-rustic `Repository::append_index_packs`). From then on those
 packs are ordinary indexed content and the survey that fences every open finds
@@ -134,10 +134,11 @@ Why this stays inside the invariants that kept `repair index` out (ADR-001
   directly (`two_pushes_that_both_persist_the_same_packs_stay_mergeable`): the
   two files' entries are identical (the same ids at the same offsets of the
   same pack), and whichever a reader's lookup hits resolves the same bytes.
-* **a write failure never fails the push.** Without the naming file the packs
-  are exactly where the pre-W1066 push left them, which the next push re-derives
-  from scratch; the push reports `NOT persisted (…)`, and the state it names
-  is already the status quo.
+* **a write failure fails the push before its snapshot (W1077).** See the next
+  section: without the naming file a snapshot that reuses the packs must not be
+  published at all. When no snapshot is going to be written (the tree is
+  identical to the parent's) nothing depends on the packs, and a failed write
+  is only reported as `NOT persisted (…)`, the pre-W1066 status quo.
 
 The one re-opened ruling travels with the same change, because the production
 event that motivated all of this was not cost but collateral: an old torn file
@@ -150,6 +151,41 @@ open adopts and the push names the packs that verify; the debris is reported
 with the one interrupted-push sentence and left untouched, because deleting it
 remains the deliberately planned one-off action ADR-016 reserves (it is not a
 code path here, and `prune-orphans` still refuses to delete anything).
+
+## W1077: the naming index file is published before the snapshot
+
+W1066 wrote the naming index file after the snapshot. A snapshot that reuses a
+stranded pack reaches trees and blobs only that pack holds, so a SIGKILL between
+the two publishes left a snapshot whose trees no index file names; a plain index
+read then failed with `Tree ID ... not found in index` until some later push
+happened to name the pack. The kill test that showed it ran against the real
+`push` path.
+
+The order is now fixed: the push's own index file (written by rustic when the
+backup finalizes), then the naming index file, then the snapshot. The pinned
+rustic's `Repository::backup_before_snapshot` calls a gate after the backup's
+data, trees and index are written and strictly before the snapshot file;
+`push_with` runs `persist_verified` in that gate.
+
+* **A failed persist fails the push, with no snapshot.** The alternative, drop
+  the adoption and re-upload, is not available: by the time the snapshot is
+  about to be written the backup has already deduplicated against the adopted
+  packs, so redoing it would mean a second full backup against a plain index.
+  Publishing anyway is the bug. So the push errors out (`no snapshot was
+  written: ...`), the stranded packs stay as they were, and the next push
+  verifies them again and retries. A persistent write failure would equally
+  break the backup's own index write on the same backend, so failing here costs
+  nothing the backend was not already costing.
+* **Success has two shapes.** `Named` (this push wrote the file) and
+  `AlreadyNamed` (another client's index file already names every verified pack
+  at the pre-write survey) both cover the dependency. A verified pack that is
+  neither listed nor named does not: a snapshot cannot depend on it.
+* **A kill between the naming file and the snapshot is harmless.** The leftover
+  is one extra index file naming packs this push verified, byte-for-byte what a
+  later push would have written; no snapshot refers to anything new, and the
+  next push finds the packs named and writes only its snapshot.
+* **Torn debris is still never adopted or named.** The gate only names what the
+  open verified; the W1066 exclusion is unchanged.
 
 ## The safety argument
 
@@ -170,9 +206,9 @@ age gate would have to outlast the slowest concurrent upload (minutes for a larg
 pack) and would then refuse to reuse our own just-killed push's packs, which is
 the entire point of the change. Completeness is also the stronger guard: it is a
 property of the bytes, not a guess about who is writing them.
-`crates/chat-stasher/src/orphans.rs:842-844` is where every non-torn failure to
+`crates/chat-stasher/src/orphans.rs:870-872` is where every non-torn failure to
 validate sends the open back to the plain index, and
-`crates/chat-stasher/src/orphans.rs:854-865` where a pack set that changed under
+`crates/chat-stasher/src/orphans.rs:882-893` where a pack set that changed under
 the open does — the same fallback for both refusers, because neither is a state
 the index should be rebuilt from.
 
@@ -202,9 +238,9 @@ index file, reported with the one interrupted-push sentence, and removed only
 by the deliberately planned one-off action ADR-016 reserves.
 
 **Adoption is fenced by a survey, so a healthy repository is untouched.**
-`crates/chat-stasher/src/orphans.rs:328-366` diffs the backend's pack listing against
+`crates/chat-stasher/src/orphans.rs:340-378` diffs the backend's pack listing against
 the packs the index files name, and
-`crates/chat-stasher/src/orphans.rs:821-835` refuses to adopt when the index names a
+`crates/chat-stasher/src/orphans.rs:849-863` refuses to adopt when the index names a
 pack the backend no longer has. That case matters: adopting from existing index
 files plus only newly verified packs would otherwise drop that entry — and an
 entry for a missing pack is one the local metadata cache can still serve, a documented
@@ -445,7 +481,7 @@ published namespace, so deleting it needs none of the reachability arguments
 above.
 
 **The window is a fixture, not a race.** `CHAT_STASHER_TEST_HOLD_OPEN_AFTER_SURVEY`
-parks an open between those two listings (`crates/chat-stasher/src/orphans.rs:450-479`),
+parks an open between those two listings (`crates/chat-stasher/src/orphans.rs:462-491`),
 which is how the injected-index and injected-pack tests put something there at
 all: without it, a test can only inject on a timer and assert the properties that
 hold whichever phase saw the file. The variable is read on every open and does

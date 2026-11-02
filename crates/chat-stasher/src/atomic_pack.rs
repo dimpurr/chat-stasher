@@ -528,6 +528,11 @@ pub struct AtomicPackBackend {
     /// Whether index and snapshot files are published like packs (the SFTP
     /// family only, W1068).
     metadata: bool,
+    /// Whether listings are served from the writer's own IO instead of the
+    /// inner backend (the SFTP family only, W1079): `rustic_backend`'s
+    /// opendal lister drops a listing error and returns whatever it had
+    /// collected as a complete answer.
+    authoritative_listing: bool,
     /// Tmp files this process created, failed to remove after a failed
     /// attempt (the destination was unreachable even on a fresh connection),
     /// and will try to remove again on the next attempt that gets through.
@@ -585,12 +590,35 @@ impl AtomicPackBackend {
         policy: RetryPolicy,
         metadata: bool,
     ) -> Arc<dyn WriteBackend> {
+        Self::build(inner, factory, policy, metadata, false)
+    }
+
+    /// [`Self::around_covering`] that also answers every listing from the
+    /// writer's own IO, so a listing that fails part-way is an error and never
+    /// a shorter list (W1079). Reads still go to `inner`.
+    pub fn around_listing(
+        inner: Arc<dyn WriteBackend>,
+        factory: IoFactory,
+        policy: RetryPolicy,
+        metadata: bool,
+    ) -> Arc<dyn WriteBackend> {
+        Self::build(inner, factory, policy, metadata, true)
+    }
+
+    fn build(
+        inner: Arc<dyn WriteBackend>,
+        factory: IoFactory,
+        policy: RetryPolicy,
+        metadata: bool,
+        authoritative_listing: bool,
+    ) -> Arc<dyn WriteBackend> {
         Arc::new(Self {
             inner,
             factory,
             io: Mutex::new(None),
             policy,
             metadata,
+            authoritative_listing,
             pending: Mutex::new(Vec::new()),
         })
     }
@@ -605,7 +633,8 @@ impl AtomicPackBackend {
         let Some((scheme, options)) = cfg.pack_publication_target() else {
             return inner;
         };
-        Self::around_covering(
+        let authoritative_listing = scheme == "sftp";
+        Self::build(
             inner,
             Box::new(move || {
                 let io: Arc<dyn PackIo> = Arc::new(OperatorIo::open(&scheme, options.clone())?);
@@ -613,6 +642,7 @@ impl AtomicPackBackend {
             }),
             RetryPolicy::default(),
             cfg.publishes_metadata_atomically(),
+            authoritative_listing,
         )
     }
 
@@ -737,13 +767,49 @@ fn backend_error(text: String) -> Box<RusticError> {
     RusticError::new(ErrorKind::Backend, text)
 }
 
+impl AtomicPackBackend {
+    /// Every file of `tpe`, from the writer's own IO. Any listing failure is an
+    /// error: a list that stops part-way is never returned as a complete one,
+    /// because every caller reads "not listed" as "not there" (W1079). Names
+    /// that are not ids (tmp debris, strays) are skipped, as the inner lister
+    /// does.
+    fn list_authoritatively(&self, tpe: FileType) -> RusticResult<Vec<(Id, u32)>> {
+        let dir = format!("{}/", tpe.dirname());
+        let io = self
+            .io()
+            .map_err(|e| backend_error(format!("could not list {dir}: {e}")))?;
+        let files = io.list_files(&dir).map_err(|e| {
+            backend_error(format!(
+                "listing {dir} did not finish, so what it holds is unknown: {e}"
+            ))
+        })?;
+        let mut out = Vec::with_capacity(files.len());
+        for file in files {
+            let name = file.path.rsplit('/').next().unwrap_or(&file.path);
+            let Some(id) = Id::parse_some(name, tpe) else {
+                continue;
+            };
+            let size = u32::try_from(file.bytes).map_err(|_| {
+                backend_error(format!(
+                    "a file in {dir} is larger than the repository format allows"
+                ))
+            })?;
+            out.push((id, size));
+        }
+        Ok(out)
+    }
+}
+
 impl ReadBackend for AtomicPackBackend {
     fn location(&self) -> String {
         self.inner.location()
     }
 
     fn list_with_size(&self, tpe: FileType) -> RusticResult<Vec<(Id, u32)>> {
-        self.inner.list_with_size(tpe)
+        if !self.authoritative_listing || tpe == FileType::Config {
+            return self.inner.list_with_size(tpe);
+        }
+        self.list_authoritatively(tpe)
     }
 
     fn read_full(&self, tpe: FileType, id: &Id) -> RusticResult<Bytes> {
