@@ -464,6 +464,87 @@ pub fn index_adopting<S: Open>(
     backends: &RepositoryBackends,
     mk: &MasterKey,
 ) -> anyhow::Result<(Repository<IndexedFullStatus>, OrphanOutcome)> {
+    index_adopting_unexplained(repo, backends, mk)
+        .map_err(|error| explain_short_files(backends, error))
+}
+
+/// The smallest a stored (encrypted) repository file can be: a 16-byte IV and
+/// a 16-byte MAC around an empty body. Anything shorter is not a file rustic
+/// ever wrote whole.
+pub const MIN_ENCRYPTED_FILE: u32 = 32;
+
+/// An index or snapshot file too short to be a complete one (W1068).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortFile {
+    /// `index` or `snapshots`.
+    pub dir: &'static str,
+    pub id_hex: String,
+    pub bytes: u32,
+}
+
+/// Index and snapshot files under their final names that are shorter than any
+/// complete file can be. Read-only: one listing per directory, sizes only.
+/// A listing that fails is skipped (this only ever runs to explain a failure
+/// that already happened).
+#[must_use]
+pub fn short_files(backends: &RepositoryBackends) -> Vec<ShortFile> {
+    let mut out = Vec::new();
+    for (tpe, dir) in [
+        (FileType::Index, "index"),
+        (FileType::Snapshot, "snapshots"),
+    ] {
+        if let Ok(listed) = backends.repository().list_with_size(tpe) {
+            for (id, bytes) in listed {
+                if bytes < MIN_ENCRYPTED_FILE {
+                    out.push(ShortFile {
+                        dir,
+                        id_hex: id.to_hex().to_string(),
+                        bytes,
+                    });
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| (a.dir, &a.id_hex).cmp(&(b.dir, &b.id_hex)));
+    out
+}
+
+/// The plain words for a repository that holds short index or snapshot files.
+#[must_use]
+pub fn short_files_words(files: &[ShortFile]) -> String {
+    let names = files
+        .iter()
+        .map(|f| format!("`{}/{}` ({} bytes)", f.dir, f.id_hex, f.bytes))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "the repository holds {} file(s) too short to be complete: {names}. A file this short \
+         is what a push cut off while writing it leaves behind (index and snapshot files were \
+         written straight to their final name before this version); it never held anything \
+         readable, and the packs of that push are still in the repository (packs no index \
+         names are re-adopted by the next open). Nothing was changed. To recover: move exactly the file(s) named above out of the \
+         repository directory on the destination (move, do not delete; keep them aside), then \
+         run the command again",
+        files.len()
+    )
+}
+
+/// Turn an open/index/snapshot-listing failure into one that names the short
+/// file when there is one; otherwise hand the error back unchanged. Only ever
+/// called after a failure, so a healthy repository pays nothing.
+pub fn explain_short_files(backends: &RepositoryBackends, error: anyhow::Error) -> anyhow::Error {
+    let files = short_files(backends);
+    if files.is_empty() {
+        return error;
+    }
+    error.context(short_files_words(&files))
+}
+
+fn index_adopting_unexplained<S: Open>(
+    repo: Repository<S>,
+    backends: &RepositoryBackends,
+    mk: &MasterKey,
+) -> anyhow::Result<(Repository<IndexedFullStatus>, OrphanOutcome)> {
     let initial = survey_inventory(&repo, backends)?;
     let report = initial.report;
     if report.unindexed.is_empty() {

@@ -5,14 +5,14 @@
 |---|---|
 | Id | `crush` |
 | Surface | cli |
-| Status | supported |
+| Status | not supported |
 | Last verified end to end | not yet verified end to end |
 
 | OS | Session path template | Format | Confidence | Status |
 |---|---|---|---|---|
-| macOS | `$CWD/.crush/crush.db` | sqlite | source-confirmed | supported |
-| Linux | `$CWD/.crush/crush.db` | sqlite | source-confirmed | supported |
-| Windows | `$CWD/.crush/crush.db` | sqlite | source-confirmed | supported |
+| macOS | `$CWD/.crush/crush.db` | sqlite | unascertained | not supported |
+| Linux | `$CWD/.crush/crush.db` | sqlite | unascertained | not supported |
+| Windows | `$CWD/.crush/crush.db` | sqlite | unascertained | not supported |
 <!-- END GENERATED -->
 
 ## What it is

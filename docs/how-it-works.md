@@ -58,6 +58,35 @@ A destination is **a place a copy lives**, never a share of one archive. Each ha
 - **There is no default destination.** Once any is declared, a command that touches an archive must name one, so you never act on the wrong copy by accident.
 - **A copy you cannot read is not an empty copy.** If a destination cannot be reached, `dest-init` reports its difference as incomplete. It never assumes that destination had nothing extra.
 
+### Local mirror
+
+The optional mirror copies one named destination into
+`<data root>/mirror/<destination>/` (normally
+`~/.local/share/chat-stasher/mirror/<destination>/`). Its repository layout
+contains `config`, `keys/`, `index/`, `snapshots/` and `data/<prefix>/`;
+`locks/` is not copied. The files are copied as repository bytes, without
+decrypting conversation content. See [Privacy and security](privacy-security.md#where-your-conversations-go)
+and [mirror configuration](config.md#mirror).
+
+One sync round lists those file types at the destination, compares the listing
+with the local copy, downloads missing or mismatched files, and checks
+content-addressed files against their names. The `config`
+file is compared by bytes because it has no content address. A scheduled
+`run-once` gives the mirror the time left in its pass budget; a stopped round
+can resume on a later pass. `chat-stasher mirror sync` runs a round on demand.
+
+With the mirror enabled, `read`, `search`, `export`, `index build` and the `ui`
+dashboard read the local copy first and ask the destination only for files the
+copy lacks. `read`, `export` and `verify` also take `--offline`, which never
+contacts the destination at all and answers only from the copy, the body cache
+and the local metadata cache; the output says `served from mirror`. Offline,
+anything the copy does not hold ends the run with exit `3`, "did not finish".
+That is unknown, not proof of absence: the copy may be behind, and the
+destination was not asked. `verify --offline` certifies the copy, not the
+destination; online `verify` never reads the copy. Details:
+[`read`](cli.md#read), [`mirror`](cli.md#mirror) and
+[mirror configuration](config.md#mirror).
+
 ## Two tiers: metadata and content
 
 Reading an archive has two very different costs, and chat-stasher keeps them apart.
@@ -119,7 +148,7 @@ The extension also works before the CLI is installed, or without it (next releas
 
 ## What the stage keeps, and when it shrinks
 
-Collection retains previously sealed shards, including when a source is rewritten, truncated or removed. The stage shrinks only when `reclaim-stage --apply` removes a session's shard body after **every** declared destination proves, by the archive's own digest (shard count, bytes and SHA-256), that it holds exactly those bytes. The digest summary and shard sequence counter remain in the stage. One unreachable destination blocks the whole run; nothing is deleted on a guess. See [schedule.md → The weekly stage clean-up](schedule.md#the-weekly-stage-clean-up-optional).
+Collection retains previously sealed shards, including when a source is rewritten, truncated or removed. The stage shrinks only when `reclaim-stage --apply` removes a session's shard body after every destination the run must consult proves, by the archive's own digest (shard count, bytes and SHA-256), that it holds exactly those bytes. Healthy and unknown destinations must prove; lagging and never-pushed destinations are not consulted, and at least one destination must prove. An unreachable must-prove destination blocks the run. If an enabled mirror copies a consulted destination, the copy must also exist and its completed-round record must mark the proof snapshot closure-complete; otherwise the session is reported as `not-mirrored` and reclaim is blocked. The digest summary and shard sequence counter remain in the stage. See [schedule.md → The weekly stage clean-up](schedule.md#the-weekly-stage-clean-up-optional).
 
 ## Why "unknown" is never "0"
 

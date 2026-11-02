@@ -217,6 +217,86 @@ pub struct Inventory {
     pub missing: Vec<String>,
     /// What the next push would do about the candidates.
     pub next_push: NextPush,
+    /// ADR-063 ruling 6: the second debris line, tmp files an interrupted
+    /// push left beside the packs. Never part of `candidates`.
+    pub tmp: TmpDebris,
+}
+
+/// Tmp debris at a destination (ADR-063 D3 / ruling 6): the leftovers of a
+/// publication that was cut off before its rename, in the three spellings
+/// `atomic_pack` names. Reported beside the historical final-named torn
+/// packs as the same class on its own line. Read-only: only a push deletes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TmpDebris {
+    /// The destination family writes packs atomically already (S3/R2) or is
+    /// not one this build wraps: there is nothing to inventory.
+    NotCovered,
+    /// The destination was listed (possibly with some directories unlisted).
+    Measured(crate::atomic_pack::TmpSurvey),
+    /// The destination could not be inspected: unknown, never a zero.
+    Unknown {
+        /// What failed, with paths and hosts redacted.
+        why: String,
+    },
+}
+
+impl TmpDebris {
+    /// Survey `cfg`'s destination for tmp debris, read-only.
+    #[must_use]
+    pub fn survey(cfg: &StoreConfig) -> Self {
+        match crate::atomic_pack::survey_for_config(cfg) {
+            Ok(None) => Self::NotCovered,
+            Ok(Some(survey)) => Self::Measured(survey),
+            Err(error) => Self::Unknown {
+                why: redact(&error),
+            },
+        }
+    }
+
+    /// The one sentence both `doctor` and `prune-orphans` print for this
+    /// line, or `None` when there is nothing to say: a healthy repository is
+    /// silent. `bytes` formats a byte count for the calling surface.
+    #[must_use]
+    pub fn line(&self, now: u64, bytes: impl Fn(u64) -> String) -> Option<String> {
+        match self {
+            Self::NotCovered => None,
+            Self::Unknown { why } => Some(format!("UNKNOWN — {why}")),
+            Self::Measured(survey) if !survey.has_anything_to_say() => None,
+            Self::Measured(survey) => {
+                let mut text = format!(
+                    "{} leftover tmp file(s) ({}) from interrupted pushes — never part of any \
+                     backup and safe to ignore; {} older than 7 days will be removed by the next \
+                     push",
+                    survey.files(),
+                    bytes(survey.bytes()),
+                    survey.due(now)
+                );
+                if survey.unlisted > 0 {
+                    text.push_str(&format!(
+                        "; {} director(ies) could not be listed, so this is a lower bound",
+                        survey.unlisted
+                    ));
+                }
+                Some(text)
+            }
+        }
+    }
+
+    /// The `--json` shape of this line.
+    #[must_use]
+    pub fn json(&self, now: u64) -> serde_json::Value {
+        match self {
+            Self::NotCovered => serde_json::json!({"kind": "not_covered"}),
+            Self::Unknown { why } => serde_json::json!({"kind": "unknown", "why": why}),
+            Self::Measured(survey) => serde_json::json!({
+                "kind": "measured",
+                "files": survey.files(),
+                "bytes": survey.bytes(),
+                "due_for_removal": survey.due(now),
+                "unlisted_directories": survey.unlisted,
+            }),
+        }
+    }
 }
 
 impl Inventory {
@@ -378,6 +458,7 @@ pub fn survey(
         candidates,
         missing: report.missing,
         next_push,
+        tmp: TmpDebris::survey(cfg),
     })
 }
 
@@ -507,6 +588,7 @@ mod tests {
                 .collect(),
             missing: Vec::new(),
             next_push: NextPush::WouldAdopt,
+            tmp: super::TmpDebris::NotCovered,
         }
     }
 

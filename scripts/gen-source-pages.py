@@ -140,6 +140,9 @@ NOT_VERIFIED = "not yet verified end to end"
 
 # The noun every import page's header ends with, read from the Rust side.
 PARSER_SHIPPED = "shipped in this build (`chat-stasher import {id} <export> --inbox <dir> --stage <dir>` parses it)"
+# A wired parser whose observation half is held (`ObservationPlan::RawOnly`):
+# the run archives the export byte-exact and writes no conversation bundles.
+PARSER_RAW_ONLY = "shipped in this build, raw export only (`chat-stasher import {id} <export> --inbox <dir> --stage <dir> --machine <name>` archives the export byte-exact and writes no conversation bundles)"
 PARSER_WRITTEN = "parser written, not yet offered by the command"
 PARSER_NONE = "no parser in this build"
 
@@ -319,13 +322,38 @@ def parse_import_platforms(root: str) -> list[dict[str, Any]]:
                 )
         return wired
 
+    def raw_only_arms() -> set[str]:
+        """Variants `observation_plan()` holds at `ObservationPlan::RawOnly`."""
+        held: set[str] = set()
+        fn_start = next(
+            (i for i, ln in enumerate(lines) if "pub fn observation_plan(" in ln), None
+        )
+        if fn_start is None:
+            return held
+        # An arm names its variants on the line(s) before `=>`, then its plan
+        # on the arrow line; collect variants until a plan is named.
+        pending: list[str] = []
+        for raw in lines[fn_start + 1 :]:
+            if raw.startswith("    }") or raw.startswith("}"):
+                break
+            pending += re.findall(r"Self::([A-Za-z0-9]+)", raw.split("=>")[0])
+            if "=>" in raw:
+                if "ObservationPlan::RawOnly" in raw:
+                    held.update(pending)
+                if "ObservationPlan::" in raw:
+                    pending = []
+        return held
+
     slugs = slug_arms()
     wired = parser_arms()
+    raw_only = raw_only_arms()
     out: list[dict[str, Any]] = []
     for variant in variants:
         ident = slugs[variant]
         module_path = os.path.join(root, IMPORT_MODULE_REL, f"{ident}.rs")
-        if wired[variant]:
+        if wired[variant] and variant in raw_only:
+            parser = PARSER_RAW_ONLY.format(id=ident)
+        elif wired[variant]:
             parser = PARSER_SHIPPED.format(id=ident)
         elif os.path.isfile(module_path):
             parser = PARSER_WRITTEN

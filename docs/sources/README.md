@@ -20,7 +20,7 @@ One page per source chat-stasher can archive: what it is, what we collect from i
 | [Grok (xAI CLI)](grok.md) | cli | verified end-to-end (2026-10-03) | 2026-10-03 (macOS) |
 | [GitHub Copilot CLI](github-copilot-cli.md) | cli | verified end-to-end (2026-10-06) | 2026-10-06 (macOS) |
 | [aider](aider.md) | cli | supported | not yet verified end to end |
-| [crush](crush.md) | cli | supported | not yet verified end to end |
+| [crush](crush.md) | cli | not supported | not yet verified end to end |
 | [Zed](zed.md) | ide | verified end-to-end (2026-10-03) | 2026-10-03 (macOS) |
 | [Continue](continue.md) | ide extension | supported | not yet verified end to end |
 | [Kimi Code](kimi-code.md) | cli | verified end-to-end (2026-10-03) | 2026-10-03 (macOS) |
@@ -52,7 +52,7 @@ These are the platforms the browser extension captures; the row for each is read
 | [Claude (official export)](import-claude.md) | export | shipped in this build (`chat-stasher import claude <export> --inbox <dir> --stage <dir>` parses it) | not yet verified end to end |
 | [DeepSeek (official export)](import-deepseek.md) | export | parser written, not yet offered by the command | not yet verified end to end |
 | [ChatGPT (official export)](import-chatgpt.md) | export | parser written, not yet offered by the command | not yet verified end to end |
-| [Grok (official export)](import-grok.md) | export | shipped in this build (`chat-stasher import grok <export> --inbox <dir> --stage <dir>` parses it) | not yet verified end to end |
+| [Grok (official export)](import-grok.md) | export | shipped in this build, raw export only (`chat-stasher import grok <export> --inbox <dir> --stage <dir> --machine <name>` archives the export byte-exact and writes no conversation bundles) | not yet verified end to end |
 | [Gemini (official export)](import-gemini.md) | export | parser written, not yet offered by the command | not yet verified end to end |
 
 An official export (a takeout you request from the platform) is the platform's own statement of what an account holds. The Parser column is read from the import seam itself: `shipped` means `chat-stasher import <id> <export> --inbox <dir> --stage <dir>` parses the export in this build, and no row claims a scan or capture. No official export has a recorded end-to-end run yet, so each page says so rather than carrying a date.

@@ -127,12 +127,12 @@ stays in the count. See [Codex](sources/codex.md).
 | GitHub Copilot CLI | macOS | `~/.copilot/` | sqlite + jsonl | source-confirmed | verified end-to-end (2026-10-06) | https://raw.githubusercontent.com/github/copilot-cli/main/README.md |
 | GitHub Copilot CLI | Linux | `~/.copilot/` | sqlite + jsonl | source-confirmed | supported | https://raw.githubusercontent.com/github/copilot-cli/main/README.md |
 | GitHub Copilot CLI | Windows | `%USERPROFILE%\.copilot\` | sqlite + jsonl | source-confirmed | supported | https://raw.githubusercontent.com/github/copilot-cli/main/README.md |
-| aider | macOS | `$CWD/.aider.chat.history.md` | markdown / txt / jsonl | source-confirmed | supported | https://raw.githubusercontent.com/Aider-AI/aider/main/aider/args.py |
-| aider | Linux | `$CWD/.aider.chat.history.md` | markdown / txt / jsonl | source-confirmed | supported | https://raw.githubusercontent.com/Aider-AI/aider/main/aider/args.py |
-| aider | Windows | `$CWD/.aider.chat.history.md` | markdown / txt / jsonl | source-confirmed | supported | https://raw.githubusercontent.com/Aider-AI/aider/main/aider/args.py |
-| crush | macOS | `$CWD/.crush/crush.db` | sqlite | source-confirmed | supported | https://raw.githubusercontent.com/charmbracelet/crush/main/internal/db/connect.go |
-| crush | Linux | `$CWD/.crush/crush.db` | sqlite | source-confirmed | supported | https://raw.githubusercontent.com/charmbracelet/crush/main/internal/db/connect.go |
-| crush | Windows | `$CWD/.crush/crush.db` | sqlite | source-confirmed | supported | https://raw.githubusercontent.com/charmbracelet/crush/main/internal/db/connect.go |
+| aider | macOS | `$CWD/.aider.chat.history.md` | md / markdown | source-confirmed | supported | https://raw.githubusercontent.com/Aider-AI/aider/main/aider/args.py |
+| aider | Linux | `$CWD/.aider.chat.history.md` | md / markdown | source-confirmed | supported | https://raw.githubusercontent.com/Aider-AI/aider/main/aider/args.py |
+| aider | Windows | `$CWD/.aider.chat.history.md` | md / markdown | source-confirmed | supported | https://raw.githubusercontent.com/Aider-AI/aider/main/aider/args.py |
+| crush | macOS | `$CWD/.crush/crush.db` | sqlite | unascertained | not supported | https://raw.githubusercontent.com/charmbracelet/crush/main/internal/db/connect.go |
+| crush | Linux | `$CWD/.crush/crush.db` | sqlite | unascertained | not supported | https://raw.githubusercontent.com/charmbracelet/crush/main/internal/db/connect.go |
+| crush | Windows | `$CWD/.crush/crush.db` | sqlite | unascertained | not supported | https://raw.githubusercontent.com/charmbracelet/crush/main/internal/db/connect.go |
 | Zed | macOS | `~/Library/Application Support/Zed/threads/threads.db` | sqlite | measured-locally | verified end-to-end (2026-10-03) | https://raw.githubusercontent.com/zed-industries/zed/main/crates/agent/src/db.rs |
 | Zed | Linux | `$XDG_DATA_HOME/zed/threads/threads.db` | sqlite | source-confirmed | supported | https://raw.githubusercontent.com/zed-industries/zed/main/crates/agent/src/db.rs |
 | Zed | Windows | `%LOCALAPPDATA%\Zed\threads\threads.db` | sqlite | source-confirmed | supported | https://raw.githubusercontent.com/zed-industries/zed/main/crates/agent/src/db.rs |
@@ -189,7 +189,7 @@ stays in the count. See [Codex](sources/codex.md).
 | Local | Grok (xAI CLI) | 2026-10-03 | low | the session_docs row preserves plain text and title but not speaker roles, turn boundaries, or per-message timestamps; the reader labels the speaker unknown and uses the session update time |
 | Local | GitHub Copilot CLI | 2026-10-06 | low | reader exports session-store.db (sessions+turns) per session; the reader has not been exercised against a real store (its schema comes from the v1.0.80 build artifacts, and the 2026-10-06 end-to-end run predates it), so conversation time is not claimed, and the per-session events.jsonl below session-state/ (turn-level cwd, event timestamps) is not read because its on-disk layout is unmeasured |
 | Local | aider | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
-| Local | crush | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
+| Local | crush | - | low | not collected: crush.db is a WAL-mode SQLite database and this build has no reader for its schema, so a raw file copy would not be a consistent snapshot (W1064) |
 | Local | Zed | 2026-10-03 | low | image payloads, tool result contents, compaction summaries, per-message timestamps, and unrecognized content remain available in the raw archive and are not rendered |
 | Local | Continue | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | Kimi Code | 2026-10-03 | normal | Activity bounds are inferred and partial when unrecognised wire operation types occur. |

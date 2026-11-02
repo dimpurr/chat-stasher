@@ -542,6 +542,14 @@ impl BackupStore {
             opts = opts.options(self.cfg.backend_options());
         }
         let backends = opts.to_backends().context("build backend options")?;
+        // ADR-063 D1: on the SFTP and local-directory families a pack upload
+        // is written under a tmp name, verified and renamed. The wrapper is
+        // lazy (no second connection until the first pack write) and sits
+        // below every read seam, so reads are untouched.
+        let backends = RepositoryBackends::new(
+            crate::atomic_pack::AtomicPackBackend::wrap(backends.repository(), &self.cfg),
+            backends.repo_hot(),
+        );
         // The read seam, outermost first: ADR-062 D3's mirror-first reads
         // (LM-3) hold the body cache inside them when a mirror is attached,
         // because ruling 7 keys on provenance — a cache wrapped *around* a
@@ -784,14 +792,21 @@ impl BackupStore {
             );
         let snap = r
             .backup(&build_opts, &source, snap)
-            .context("run rustic backup")?;
+            .context("run rustic backup")
+            .map_err(|error| self.explain_short_files(error))?;
 
-        let snaps = r.get_all_snapshots().context("list snapshots")?;
+        let snaps = r
+            .get_all_snapshots()
+            .context("list snapshots")
+            .map_err(|error| self.explain_short_files(error))?;
         // A skipped snapshot is never written, so it keeps the id `to_snapshot`
         // gave it and appears in no listing. Asking the listing whether it
         // holds the snapshot we were handed is a read of the repository's own
         // answer, not a flag this function sets from its own intent.
         let snapshot_written = snaps.iter().any(|stored| stored.id == snap.id);
+        // ADR-063 D3 / ruling 2: this push connection is the only place
+        // tmp debris is ever deleted.
+        self.sweep_tmp_debris();
         let summary = snap
             .summary
             .as_ref()
@@ -3786,6 +3801,12 @@ mod tests {
 }
 
 impl StoreConfig {
+    /// Fill in the `opendal:fs` staging directory. Index and snapshot files
+    /// still depend on it: ADR-063's tmp/verify/rename covers packs only, so
+    /// keeping this default is what stops a torn index or snapshot from
+    /// sitting under its final name (ruling 3 as amended 2026-11-01). Packs
+    /// go through the wrapper's own writer, built from the root alone; a value
+    /// the user set themselves is never overwritten.
     fn with_atomic_fs_writes(
         &self,
         mut options: BTreeMap<String, String>,
@@ -3793,9 +3814,8 @@ impl StoreConfig {
         // OpenDAL fs otherwise exposes the final object before its bytes are written.
         // Stage under the repository root so publication uses a same-filesystem rename.
         // Building the operator creates this directory, even for read-only opens:
-        // the root must be writable unless staging already exists. Users can set
-        // atomic_write_dir explicitly on the same filesystem. Crash debris stays
-        // there; this code does not inspect or remove another writer's temp files.
+        // the root must be writable unless staging already exists. Crash debris stays
+        // there until a push's by-name sweep removes what is over seven days old.
         if self.repo_root == "opendal:fs" {
             if let Some(root) = options.get("root") {
                 let staging = Path::new(root).join(".chat-stasher-tmp");
@@ -3806,6 +3826,76 @@ impl StoreConfig {
         }
         options
     }
+
+    /// Whether index and snapshot files are published atomically as well as
+    /// packs (W1068): the SFTP family only. The local-directory family already
+    /// writes them atomically (rustic's local `-tmp-` rename; `opendal:fs`
+    /// staging), and S3/R2 are atomic at the object.
+    pub(crate) fn publishes_metadata_atomically(&self) -> bool {
+        self.repo_root == "opendal:sftp"
+    }
+
+    /// The `(scheme, options)` an [`crate::atomic_pack`] writer opens for this
+    /// destination, or `None` for a family ADR-063 leaves alone (S3/R2 are
+    /// atomic at the object, D2; `rest:` is not covered).
+    pub(crate) fn pack_publication_target(&self) -> Option<(String, BTreeMap<String, String>)> {
+        let fs_root = |root: &str| {
+            let absolute = std::path::absolute(root).ok()?;
+            let mut options = BTreeMap::new();
+            options.insert("root".to_string(), absolute.to_str()?.to_string());
+            Some(("fs".to_string(), options))
+        };
+        if repository_routes_local_backend(self) {
+            let root = self
+                .repo_root
+                .strip_prefix("local:")
+                .unwrap_or(&self.repo_root);
+            return fs_root(root);
+        }
+        match self.repo_root.as_str() {
+            "opendal:fs" => fs_root(self.options.get("root")?),
+            "opendal:sftp" => Some(("sftp".to_string(), self.backend_options())),
+            _ => None,
+        }
+    }
+}
+
+impl BackupStore {
+    /// W1068: after a failed push step, name any index or snapshot file too
+    /// short to be complete (one read-only listing; never on a healthy path).
+    fn explain_short_files(&self, error: anyhow::Error) -> anyhow::Error {
+        match self.backends() {
+            Ok(backends) => crate::orphans::explain_short_files(&backends, error),
+            Err(_) => error,
+        }
+    }
+
+    /// Delete tmp debris older than seven days on this push connection
+    /// (ADR-063 D3). Best effort: a sweep that cannot run is worded and never
+    /// fails the push, because the debris it would have removed is inert.
+    fn sweep_tmp_debris(&self) {
+        match crate::atomic_pack::sweep_for_config(&self.cfg) {
+            Ok(Some(report)) => {
+                if report.removed > 0 {
+                    eprintln!(
+                        "[push] tmp debris : removed {} leftover file(s) ({} B) older than 7 days",
+                        report.removed, report.removed_bytes
+                    );
+                }
+                if report.failed > 0 || report.unlisted > 0 {
+                    eprintln!(
+                        "[push] tmp debris : the sweep could not finish ({} delete(s) failed, {} \
+                         director(ies) not listed); nothing was lost and the next push tries again",
+                        report.failed, report.unlisted
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!(
+                "[push] tmp debris : the sweep could not run ({error:#}); the next push tries again"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3813,7 +3903,10 @@ mod atomic_fs_tests {
     use super::*;
 
     #[test]
-    fn opendal_fs_publishes_objects_atomically() {
+    fn opendal_fs_keeps_its_staging_default_for_index_and_snapshot_files() {
+        // ADR-063 ruling 3, amended: packs go through the wrapper, but index
+        // and snapshot files still need the staged write, so the default
+        // stays and a user-set value still wins.
         let mut cfg = StoreConfig {
             repo_root: "opendal:fs".into(),
             options: BTreeMap::from([("root".into(), "synthetic-repo".into())]),
@@ -3839,5 +3932,30 @@ mod atomic_fs_tests {
         cfg.repo_root = "opendal:s3".into();
         cfg.options.remove("atomic_write_dir");
         assert!(!cfg.backend_options().contains_key("atomic_write_dir"));
+    }
+
+    #[test]
+    fn only_the_sftp_and_local_directory_families_publish_through_the_wrapper() {
+        let cfg = |root: &str, options: &[(&str, &str)]| StoreConfig {
+            repo_root: root.into(),
+            options: options
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            ..StoreConfig::default()
+        };
+        let scheme = |c: &StoreConfig| c.pack_publication_target().map(|(s, _)| s);
+        assert_eq!(scheme(&cfg("/abs/repo", &[])), Some("fs".to_string()));
+        assert_eq!(scheme(&cfg("local:/abs/repo", &[])), Some("fs".to_string()));
+        assert_eq!(
+            scheme(&cfg("opendal:fs", &[("root", "/abs/repo")])),
+            Some("fs".to_string())
+        );
+        assert_eq!(scheme(&cfg("opendal:sftp", &[])), Some("sftp".to_string()));
+        // D2: S3/R2 are atomic at the object; rest: is not covered.
+        assert_eq!(scheme(&cfg("opendal:s3", &[])), None);
+        assert_eq!(scheme(&cfg("rest:https://example.invalid/", &[])), None);
+        // opendal:fs without a root has nowhere to publish: not covered.
+        assert_eq!(scheme(&cfg("opendal:fs", &[])), None);
     }
 }

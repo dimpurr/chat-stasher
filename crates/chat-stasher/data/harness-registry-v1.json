@@ -763,21 +763,27 @@
       "paths": {
         "macos": {
           "template": "$CWD/.aider.chat.history.md",
-          "format": "markdown / txt / jsonl",
+          "format": "md / markdown",
+          "session_pattern": ".aider.chat.history.md",
+          "id_from_parent_dir": true,
           "confidence": "source-confirmed",
           "source": "aider/args.py:271-276; aider/io.py:1117-1136",
           "notes": "Sidecar files: .input.history and .llm.history."
         },
         "linux": {
           "template": "$CWD/.aider.chat.history.md",
-          "format": "markdown / txt / jsonl",
+          "format": "md / markdown",
+          "session_pattern": ".aider.chat.history.md",
+          "id_from_parent_dir": true,
           "confidence": "source-confirmed",
           "source": "same as above + aider/main.py:370,1185",
           "notes": "Sidecar files: .input.history and .llm.history. Config directory: ~/.aider/."
         },
         "windows": {
           "template": "$CWD/.aider.chat.history.md",
-          "format": "markdown / txt / jsonl",
+          "format": "md / markdown",
+          "session_pattern": ".aider.chat.history.md",
+          "id_from_parent_dir": true,
           "confidence": "source-confirmed",
           "source": "same as above(platform-independent CWD-relative)",
           "notes": "Sidecar files: .input.history and .llm.history. Config directory: %USERPROFILE%\\.aider\\."
@@ -800,30 +806,30 @@
       "id": "crush",
       "display_name": "crush",
       "dev_priority": "low",
-      "known_issue": "no reader extractor yet: archived sessions render as raw view only (git 41db2bf)",
+      "known_issue": "not collected: crush.db is a WAL-mode SQLite database and this build has no reader for its schema, so a raw file copy would not be a consistent snapshot (W1064)",
       "paths": {
         "macos": {
           "template": "$CWD/.crush/crush.db",
           "format": "sqlite",
-          "confidence": "source-confirmed",
+          "confidence": "unascertained",
           "source": "internal/db/connect.go:93 + internal/config/load.go:559-562"
         },
         "linux": {
           "template": "$CWD/.crush/crush.db",
           "format": "sqlite",
-          "confidence": "source-confirmed",
+          "confidence": "unascertained",
           "source": "same as above + internal/config/load.go:1181-1258",
           "notes": "Project-level store. Global directories hold only config, not chat history: config ~/.config/crush/, data ~/.local/share/crush/."
         },
         "windows": {
           "template": "$CWD/.crush/crush.db",
           "format": "sqlite",
-          "confidence": "source-confirmed",
+          "confidence": "unascertained",
           "source": "same as above",
           "notes": "Project-level store. Global directories hold only config, not chat history: config %APPDATA%\\crush\\, data %LOCALAPPDATA%\\crush\\."
         }
       },
-      "notes": "project-level SQLite (data_directory defaults to .crush, follows the project). global directory only holds config, not chat history.",
+      "notes": "Path is source-confirmed (see source), but the cell is held at unascertained so it is not scanned until a SQLite session reader exists. Project-level SQLite (data_directory defaults to .crush, follows the project). global directory only holds config, not chat history.",
       "seal_policy": "no-rename",
       "seal_source": "(single-file SQLite store, no active jsonl; and fd semantics unconfirmed => no-rename)",
       "reference": {
@@ -900,18 +906,21 @@
         "macos": {
           "template": "~/.continue/sessions/<id>.json + sessions.json",
           "format": "json",
+          "session_pattern": "*-*-*-*-*.json",
           "confidence": "source-confirmed",
           "source": "core/util/paths.ts:27-35,79-112(os.homedir is platform-independent)"
         },
         "linux": {
           "template": "~/.continue/sessions/<id>.json + sessions.json",
           "format": "json",
+          "session_pattern": "*-*-*-*-*.json",
           "confidence": "source-confirmed",
           "source": "same as above + core/util/history.ts:26-30"
         },
         "windows": {
           "template": "%USERPROFILE%\\.continue\\sessions\\<id>.json + sessions.json",
           "format": "json",
+          "session_pattern": "*-*-*-*-*.json",
           "confidence": "source-confirmed",
           "source": "same as above(os.homedir -> %USERPROFILE%, no %APPDATA%/XDG unless CONTINUE_GLOBAL_DIR overrides)"
         }

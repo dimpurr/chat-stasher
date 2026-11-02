@@ -279,7 +279,7 @@ keeps the original data in place.
 
 ### `reclaim-stage`
 
-Removes staged copies, but only for sessions that **every** declared destination proves it holds, byte for byte. An unreachable destination blocks it. On a machine whose `[mirror]` is enabled it is also hold-back gated by the copy: a session is refused — `not-mirrored` — until the mirror's completed-round record holds the proof's snapshot closure-complete, so a completed `mirror sync` round is what frees it (the mirror rows name the count it holds back).
+Removes staged copies, but only for sessions that **every** declared destination proves it holds, byte for byte. An unreachable destination blocks it. On a machine whose `[mirror]` is enabled it is also hold-back gated by the copy: a session is refused — `not-mirrored` — until the mirror's completed-round record holds the proof's snapshot closure-complete, so a completed `mirror sync` round is what frees it (the mirror rows name the count it holds back). If `mirror_of` is not a declared destination, or names a degraded destination that this run does not consult, the mirror proof cannot be read, so every session is held back as `mirror-unresolved` and nothing is deleted (fix: declare the destination, restore its health, or set `[mirror] enabled = false`).
 
 | Flag | Meaning |
 |---|---|
@@ -384,8 +384,8 @@ the switch refuse before anything is read, exit `3`.
 
 One run is one bounded round: a large first fill spans several rounds, each
 resuming where the previous stopped, and `status` reports the progress as
-progress — a round that stops early is not a failure. Before a first fill
-starts, the command estimates whether the remaining download plus the
+progress — a round that stops early is not a failure. Before each round
+copies files, the command estimates whether the remaining download plus the
 free-disk floor fits the free space, and refuses with both numbers when it
 does not. A mirror file that is present but unreadable is never quietly
 re-fetched mid-read: a command reading over it stops with the file's name

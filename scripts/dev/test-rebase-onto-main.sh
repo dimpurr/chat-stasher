@@ -291,8 +291,7 @@ echo "=============================================================="
 FIX="$TMP/regen-driver"
 seed_regen "$FIX"
 cp "$ROOT/.gitattributes" "$FIX/.gitattributes"
-cp "$ROOT/scripts/dev/setup-merge-drivers.sh" "$ROOT/scripts/dev/regenerate-merge-drivers.py" "$FIX/scripts/dev/"
-chmod +x "$FIX/scripts/dev/regenerate-merge-drivers.py"
+cp "$ROOT/scripts/dev/setup-merge-drivers.sh" "$FIX/scripts/dev/"
 (cd "$FIX" && bash scripts/dev/setup-merge-drivers.sh) >/dev/null 2>&1
 fork_inventory "$FIX"
 (cd "$FIX" && bash scripts/dev/rebase-onto-main.sh --onto onto) >"$TMP/regen4.log" 2>&1
