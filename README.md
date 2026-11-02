@@ -17,7 +17,7 @@
 
 The coding agents and web AI chats you already use, in one archive ([status per platform](#support-at-a-glance)):
 
-- **Coding agents:** Claude Code, Codex CLI, opencode, Gemini CLI, Cursor, Grok CLI, Kimi Code, Copilot CLI, aider, crush, Continue, Zed
+- **Coding agents:** Claude Code, Codex CLI, opencode, Gemini CLI, Cursor, Grok CLI, Kimi Code, Copilot CLI, aider, Continue, Zed
 - **Web chats:** ChatGPT, Claude, Gemini, Grok, DeepSeek, Perplexity, Kimi
 
 ## Quick start
@@ -177,7 +177,7 @@ These tables are generated from the registry that ships inside the CLI and from 
 | Local | Grok (xAI CLI) | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | GitHub Copilot CLI | verified end-to-end (2026-10-06) | 2026-10-06 |
 | Local | aider | supported | - |
-| Local | crush | supported | - |
+| Local | crush | not supported | - |
 | Local | Zed | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | Continue | supported | - |
 | Local | Kimi Code | verified end-to-end (2026-10-03) | 2026-10-03 |

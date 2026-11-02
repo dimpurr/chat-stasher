@@ -602,6 +602,13 @@ pub struct RegistryCell {
     /// generic JSON roots where settings/state/config files share the suffix.
     #[serde(default)]
     pub session_pattern: Option<String>,
+    /// True when the session file's own name is a constant (aider writes
+    /// `.aider.chat.history.md` into every project), so the file name cannot
+    /// identify the session. The native id is then a digest of the file's
+    /// absolute parent directory: two projects stay two archive slots, and the
+    /// directory name itself is not written into the id.
+    #[serde(default)]
+    pub id_from_parent_dir: bool,
     #[serde(default)]
     pub confidence: String,
     #[serde(default)]
@@ -3035,6 +3042,7 @@ fn probe_harness_single(
             &cell.format,
             cell.session_pattern.as_deref(),
             cell.session_dir.as_ref(),
+            cell.id_from_parent_dir,
         );
         // One archive slot addresses one session id, so the recognized count
         // is the **distinct** ids this scan produced — the same quantity the
@@ -5544,6 +5552,7 @@ fn collect_records(
     format: &str,
     session_pattern: Option<&str>,
     session_dir: Option<&SessionDirRule>,
+    id_from_parent_dir: bool,
 ) -> DirectoryScan {
     // Kimi Code keeps a one-line-per-session index at
     // `<home>/session_index.jsonl` (`sessionId`, `sessionDir`,
@@ -5609,6 +5618,7 @@ fn collect_records(
                 session_pattern,
                 &scope,
                 session_dir,
+                id_from_parent_dir,
                 &session_index,
             ) {
                 RecordBuild::Record(record) => records.push(record),
@@ -5823,6 +5833,7 @@ fn build_record(
     session_pattern: Option<&str>,
     scope: &SessionScope,
     session_dir: Option<&SessionDirRule>,
+    id_from_parent_dir: bool,
     session_index: &BTreeMap<String, String>,
 ) -> RecordBuild {
     let Some(name) = path.file_name().map(|name| name.to_string_lossy()) else {
@@ -5907,6 +5918,18 @@ fn build_record(
             None,
             None,
         ),
+        // A constant file name (aider's `.aider.chat.history.md`): the
+        // directory it sits in is the only thing telling two sessions apart.
+        (None, _) if id_from_parent_dir => {
+            let Some(parent) = absolutize(path).parent().map(Path::to_path_buf) else {
+                return RecordBuild::NotSession;
+            };
+            (
+                crate::id::dir_scoped_native_id(&parent.to_string_lossy()),
+                None,
+                None,
+            )
+        }
         (None, _) => (stem, None, None),
     };
 
@@ -6799,6 +6822,7 @@ mod tests {
                 id_components: Vec::new(),
                 extra_files: Vec::new(),
             }),
+            false,
         );
         assert_eq!(scan.records.len(), 1);
         assert!(scan.records[0].id.ends_with(".session-uuid"));
@@ -7686,6 +7710,7 @@ mod tests {
                 id_components: Vec::new(),
                 extra_files: Vec::new(),
             }),
+            false,
         );
         assert_eq!(
             scan.records.len(),

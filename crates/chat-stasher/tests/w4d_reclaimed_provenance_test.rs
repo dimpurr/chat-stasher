@@ -17,6 +17,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// Reclaim a body synchronously in a fixture: the delete may take every
+/// shard present, the set a synchronous survey of the same directory would
+/// enumerate.
+fn reclaim_body_sync(stage: &Path, machine: &str, session: &str) -> usize {
+    let proven = chat_stasher::stagereclaim::present_shard_seqs(stage, machine, session).unwrap();
+    chat_stasher::stagereclaim::reclaim_session_body(stage, machine, session, &proven).unwrap()
+}
+
 const MACHINE: &str = "fixture-machine";
 
 #[path = "../src/test_support.rs"]
@@ -338,10 +346,7 @@ fn cross_root_reclaimed_resume(full_replay: bool) {
     // body is removed, then call the same deletion helper the command uses.
     let baseline = manifest::generate_manifest(&stage, MACHINE).unwrap();
     manifest::write_manifest(&stage, MACHINE, &baseline).unwrap();
-    assert_eq!(
-        chat_stasher::stagereclaim::reclaim_session_body(&stage, MACHINE, &session_id).unwrap(),
-        1
-    );
+    assert_eq!(reclaim_body_sync(&stage, MACHINE, &session_id), 1);
 
     // APP may contribute only the new record or replay the full session from a
     // second root. Both must leave the archive with the same logical session.
@@ -478,10 +483,7 @@ fn cross_root_reclaimed_resume(full_replay: bool) {
     // complete source bytes are preserved as sequence 3.
     let baseline = manifest::generate_manifest(&stage, MACHINE).unwrap();
     manifest::write_manifest(&stage, MACHINE, &baseline).unwrap();
-    assert_eq!(
-        chat_stasher::stagereclaim::reclaim_session_body(&stage, MACHINE, &session_id).unwrap(),
-        1
-    );
+    assert_eq!(reclaim_body_sync(&stage, MACHINE, &session_id), 1);
     write_transcript(&third_root, session, &extended_body);
     let third_scan = scan(&registry);
     assert_eq!(third_scan.records.len(), 3);
@@ -553,10 +555,7 @@ fn cross_root_reclaimed_resume(full_replay: bool) {
 
     let baseline = manifest::generate_manifest(&stage, MACHINE).unwrap();
     manifest::write_manifest(&stage, MACHINE, &baseline).unwrap();
-    assert_eq!(
-        chat_stasher::stagereclaim::reclaim_session_body(&stage, MACHINE, &session_id).unwrap(),
-        1
-    );
+    assert_eq!(reclaim_body_sync(&stage, MACHINE, &session_id), 1);
 
     // A subsequent scan of all unchanged CLI, APP, and third-root inputs is a
     // no-op: archive reconciliation must not duplicate rows or rewrite debt.
@@ -760,10 +759,7 @@ fn same_source_appends_identical_turn_and_default_readers_keep_both() {
     archive.push(&stage, &mk).unwrap();
     let manifest = manifest::generate_manifest(&stage, MACHINE).unwrap();
     manifest::write_manifest(&stage, MACHINE, &manifest).unwrap();
-    assert_eq!(
-        chat_stasher::stagereclaim::reclaim_session_body(&stage, MACHINE, &session_id).unwrap(),
-        1
-    );
+    assert_eq!(reclaim_body_sync(&stage, MACHINE, &session_id), 1);
 
     use std::io::Write;
     fs::OpenOptions::new()
@@ -907,10 +903,7 @@ fn assert_identical_turn_resume(session: &str, replay: &[u8]) {
     archive.push(&stage, &mk).unwrap();
     let manifest = manifest::generate_manifest(&stage, MACHINE).unwrap();
     manifest::write_manifest(&stage, MACHINE, &manifest).unwrap();
-    assert_eq!(
-        chat_stasher::stagereclaim::reclaim_session_body(&stage, MACHINE, &session_id).unwrap(),
-        1
-    );
+    assert_eq!(reclaim_body_sync(&stage, MACHINE, &session_id), 1);
 
     write_transcript(&app_root, session, replay);
     let resumed_scan = scan(&registry);
@@ -1041,10 +1034,7 @@ fn same_source_suffix_after_reclaim_keeps_both_surfaces_in_archive_only_rebuild(
     archive.push(&stage, &mk).unwrap();
     let baseline = manifest::generate_manifest(&stage, MACHINE).unwrap();
     manifest::write_manifest(&stage, MACHINE, &baseline).unwrap();
-    assert_eq!(
-        chat_stasher::stagereclaim::reclaim_session_body(&stage, MACHINE, &session_id).unwrap(),
-        1
-    );
+    assert_eq!(reclaim_body_sync(&stage, MACHINE, &session_id), 1);
 
     // Resume the same JSONL input by appending one complete record. Antigravity
     // scanner provenance is changed in the supplied report to simulate the

@@ -24,6 +24,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// Reclaim a body synchronously in a fixture: the delete may take every
+/// shard present, the set a synchronous survey of the same directory would
+/// enumerate.
+fn reclaim_body_sync(stage: &Path, machine: &str, session: &str) -> usize {
+    let proven = chat_stasher::stagereclaim::present_shard_seqs(stage, machine, session).unwrap();
+    chat_stasher::stagereclaim::reclaim_session_body(stage, machine, session, &proven).unwrap()
+}
+
 #[path = "../src/test_support.rs"]
 mod test_support;
 
@@ -274,7 +282,7 @@ fn a_lost_machines_index_rebuilds_from_the_archive_and_leaves_the_destination_al
     // has proved it holds it, and the next push therefore carries only the
     // session directory and its `shard-seq` counter. `reclaimed`'s bytes stay
     // in the FIRST snapshot; the newest snapshot holds no shard for it at all.
-    chat_stasher::stagereclaim::reclaim_session_body(&stage, lost, reclaimed).unwrap();
+    reclaim_body_sync(&stage, lost, reclaimed);
     BackupStore::new(cfg.clone(), lost.to_string())
         .push(&stage, &mk)
         .unwrap();
@@ -394,7 +402,7 @@ fn archive_only_rebuild_restores_resumed_multishard_surfaces_only_for_bound_bodi
     // Model append-only capture over two pushes: reclamation removes the
     // first body from the local stage, while its old snapshot and provenance
     // observation remain available for an archive-only cumulative rebuild.
-    chat_stasher::stagereclaim::reclaim_session_body(&stage, machine, session).unwrap();
+    reclaim_body_sync(&stage, machine, session);
     fs::create_dir_all(&session_dir).unwrap();
     fs::write(session_dir.join("000002.jsonl"), shard_two).unwrap();
 

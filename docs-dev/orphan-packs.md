@@ -92,7 +92,7 @@ retry adds only its snapshot, index and tree pack
 (`crates/chat-stasher/tests/w245_interrupted_push_test.rs:637-648`).
 
 Implementation: `crates/chat-stasher/src/orphans.rs:462`. Every read path reaches
-it through `crates/chat-stasher/src/store.rs:617`, which is the whole point of
+it through `crates/chat-stasher/src/store.rs:625`, which is the whole point of
 routing reads through it — after an adopting push, the snapshot's tree and its
 shards exist **only** in packs no index file names, so a read that reads only
 index files fails with "cannot ls tree" and exit 3.
@@ -120,7 +120,7 @@ age gate would have to outlast the slowest concurrent upload (minutes for a larg
 pack) and would then refuse to reuse our own just-killed push's packs, which is
 the entire point of the change. Completeness is also the stronger guard: it is a
 property of the bytes, not a guess about who is writing them.
-`crates/chat-stasher/src/orphans.rs:503-506` is where every failure to validate sends
+`crates/chat-stasher/src/orphans.rs:584-587` is where every failure to validate sends
 the open back to the plain index — the same fallback whether the refuser was a
 pack this open could not verify or a pack set that changed under it.
 
@@ -139,7 +139,7 @@ again and the archive is complete either way.
 **Adoption is fenced by a survey, so a healthy repository is untouched.**
 `crates/chat-stasher/src/orphans.rs:271-309` diffs the backend's pack listing against
 the packs the index files name, and
-`crates/chat-stasher/src/orphans.rs:484-498` refuses to adopt when the index names a
+`crates/chat-stasher/src/orphans.rs:565-579` refuses to adopt when the index names a
 pack the backend no longer has. That case matters: adopting from existing index
 files plus only newly verified packs would otherwise drop that entry — and an
 entry for a missing pack is one the local metadata cache can still serve, a documented
@@ -334,17 +334,31 @@ behaviour above), because the mirror — not the adopting open — is the reader
 that skips debris; the open only classifies when it verifies, and a pack that
 cannot be verified is still not adopted.
 
-**The backend family a destination actually uses.** The tests above run on
-`rustic_backend`'s `LocalBackend`, which writes a pack to `data/<xx>/<id>-tmp-`
-and renames it into place, so its listings never show a pack that is not
-finished. The OpenDAL services — `sftp`, which this project ships, and S3 — write
-to the final path, so there a listing *can* show one. Four tests run the same
-scenarios on `opendal:fs`, which shares that write path: one strands a pack and
-truncates it (the push must fall back, report, and leave the in-flight file
-alone); one injects a pack file into the survey-to-adoption window; and two put
-an index file beside stranded packs — one present for the whole open, one
-injected into that same window — where nothing may be adopted a second time and
-no content may be uploaded again.
+**The backend family a destination actually uses.** Before ADR-063, the tests
+above ran on `rustic_backend`'s `LocalBackend`, which writes a pack to
+`data/<xx>/<id>-tmp-` and renames it into place, while the OpenDAL services —
+`sftp`, which this project ships, and S3 — wrote to the final path, so there a
+listing *could* show a torn pack. **After ADR-063 (ISSUE-006 step C), on the
+SFTP and local-directory families no listing can show a torn pack under a final
+name:** the wrapper in `Store::backends()` (`src/atomic_pack.rs`) writes every
+pack to `data/<xx>/<id>.tmp-<unix seconds>-<16 hex>`, reads it back from the
+backend and hashes it to the id, and only then renames it into place. S3/R2 keep
+their single atomic object upload. The truncated-pack and injected-pack
+scenarios on `opendal:fs` therefore change shape, not meaning: the tests now
+plant their torn bytes under a final name by hand (the state a pre-C push left),
+because the product no longer produces it. One strands a pack and truncates it
+(the push must fall back, report, and leave the in-flight file alone); one
+injects a pack file into the survey-to-adoption window; and two put an index
+file beside stranded packs — one present for the whole open, one injected into
+that same window — where nothing may be adopted a second time and no content may
+be uploaded again. The real SFTP server is not exercised in the gate (the
+kill-100 fixture drives the same publication code through an IO with SFTP v3
+rename semantics); one real storage-box run is the release blocker.
+
+Tmp debris (a publication cut off before its rename) is deleted by name after
+seven days, on a push connection only — see ADR-063 D3. It is never part of the
+published namespace, so deleting it needs none of the reachability arguments
+above.
 
 **The window is a fixture, not a race.** `CHAT_STASHER_TEST_HOLD_OPEN_AFTER_SURVEY`
 parks an open between those two listings (`crates/chat-stasher/src/orphans.rs:362-391`),

@@ -2218,6 +2218,40 @@ fn the_mirror_rows_carry_the_reclaim_hold_back_count_from_the_record() {
     );
 }
 
+/// W1060: the fail-closed hold (`mirror-unresolved`) rides the mirror rows
+/// with its count and a fix, so `status`, `doctor` and the menu bar surface
+/// it, yellow and never red.
+#[test]
+fn the_mirror_rows_surface_the_unresolved_mirror_hold() {
+    let rig = build_rig(None);
+    run_round(&rig, &NeverStops);
+    let config = mirror_config("enabled = true\nmirror_of = \"storagebox\"");
+    write_reclaim_record(
+        &rig.state_dir,
+        &reclaim_attempt_blocked(vec![chat_stasher::reclaimstate::ReclaimBlock {
+            destination: "storagebox".to_string(),
+            kind: mirror::UNRESOLVED_KIND.to_string(),
+            error_kind: None,
+            sessions: 3,
+            bytes: 4_096,
+        }]),
+    );
+    let status = mirror_status(&config, &rig.data_root, &rig.state_dir, 1_800_000_000);
+    let row = status
+        .rows
+        .iter()
+        .find(|r| r.sentence.contains("reclaim holds 3 session(s) back"))
+        .unwrap_or_else(|| panic!("no unresolved row: {status:?}"));
+    assert_eq!(row.severity, mirror::MirrorRowSeverity::Yellow);
+    assert!(row.sentence.contains("deletes nothing"), "{}", row.sentence);
+    assert!(
+        row.sentence.contains(mirror::UNRESOLVED_SENTENCE),
+        "{}",
+        row.sentence
+    );
+    assert!(row.sentence.contains("enabled = false"), "{}", row.sentence);
+}
+
 /// rev0 ⑤: a record whose halves disagree — more closures verified than
 /// the listing they were measured against held — words behindness
 /// unknown, never a clamped zero that reads "caught up".
