@@ -4,7 +4,7 @@
 
 use chat_stasher::store::{self, BackupStore, StoreConfig};
 use chat_stasher::verify;
-use rustic_core::repofile::MasterKey;
+use rustic_core::repofile::{BlobType, MasterKey};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,11 +55,11 @@ struct DataBlobTarget {
     length: usize,
 }
 
-/// Query rustic's index to locate every Data blob's exact offset and length
-/// within its pack file on disk. This is 100% deterministic and does not rely
-/// on guesswork about pack file layout or blob order.
-fn locate_data_blobs(cfg: &StoreConfig, mk: &MasterKey) -> Vec<DataBlobTarget> {
-    use rustic_core::repofile::{BlobType, IndexFile, IndexId};
+/// Query rustic's index to locate every blob of the given type with its exact
+/// offset and length within its pack file on disk. This is 100% deterministic
+/// and does not rely on guesswork about pack file layout or blob order.
+fn locate_blobs(cfg: &StoreConfig, mk: &MasterKey, tpe: BlobType) -> Vec<DataBlobTarget> {
+    use rustic_core::repofile::{IndexFile, IndexId};
 
     let bs = BackupStore::new(cfg.clone(), "m-verify".to_string());
     let (repo, _) = bs.open_or_init(mk).expect("open repo to inspect index");
@@ -79,7 +79,7 @@ fn locate_data_blobs(cfg: &StoreConfig, mk: &MasterKey) -> Vec<DataBlobTarget> {
                 .unwrap_or_else(|| panic!("pack file {pack_name} not found in data/"));
 
             for blob in pack.blobs {
-                if blob.tpe == BlobType::Data {
+                if blob.tpe == tpe {
                     targets.push(DataBlobTarget {
                         pack_path: pack_path.clone(),
                         offset: blob.location.offset as usize,
@@ -90,6 +90,11 @@ fn locate_data_blobs(cfg: &StoreConfig, mk: &MasterKey) -> Vec<DataBlobTarget> {
         }
     }
     targets
+}
+
+/// Every Data blob on disk, per the index. See [`locate_blobs`].
+fn locate_data_blobs(cfg: &StoreConfig, mk: &MasterKey) -> Vec<DataBlobTarget> {
+    locate_blobs(cfg, mk, BlobType::Data)
 }
 
 #[test]
@@ -184,6 +189,68 @@ fn l1_catches_a_missing_pack() {
     let l1 = bs.check_repo(&mk, false).unwrap();
     assert!(l1.errors >= 1, "L1 missed a deleted pack: {:?}", l1.details);
     assert!(!l1.ok());
+    drop(dir);
+}
+
+/// W1078: when the tree walk itself fails, L2 must neither crash the reader on
+/// the still-shared index nor read pack data in silence — the level reports
+/// the tree failure plus one Warn line saying the pack data was not read.
+/// L1 reports the same failure without that line, because it never reads pack
+/// data in the first place.
+#[test]
+fn l2_with_a_broken_tree_reports_the_failure_and_skips_pack_data() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let (cfg, mk, _stage) = build_repo(dir.path(), 4);
+    let bs = BackupStore::new(cfg.clone(), "m-verify".to_string());
+
+    // Same-length damage strictly inside a tree blob's ciphertext: the
+    // truncated-pack refusal in require_sound_packs only reacts to shortened
+    // packs, so the damaged tree read reaches the check's own tree walk.
+    let tree_blobs = locate_blobs(&cfg, &mk, BlobType::Tree);
+    assert!(!tree_blobs.is_empty(), "expected at least one tree blob");
+    let target = &tree_blobs[0];
+    let mut bytes = fs::read(&target.pack_path).unwrap();
+    let flip_idx = target.offset + (target.length / 2);
+    bytes[flip_idx] ^= 0x01;
+    fs::write(&target.pack_path, &bytes).unwrap();
+    // Drop the cache the push populated: a cached tree blob could answer a
+    // read from its intact copy and hide the flipped byte.
+    let cache_dir = dir.path().join("cache");
+    if cache_dir.exists() {
+        fs::remove_dir_all(&cache_dir).expect("wipe the test's own cache directory");
+    }
+
+    let l1 = bs.check_repo(&mk, false).unwrap();
+    assert!(!l1.ok(), "L1 must fail on a broken tree: {:?}", l1.details);
+    assert!(
+        l1.details.iter().any(|d| d.contains("checking trees")),
+        "L1 must name the tree check failure: {:?}",
+        l1.details
+    );
+    assert!(
+        !l1.details.iter().any(|d| d.contains("pack data not read")),
+        "L1 never reads pack data, so it must not claim a skip: {:?}",
+        l1.details
+    );
+
+    let l2 = bs.check_repo(&mk, true).unwrap();
+    assert!(
+        !l2.ok(),
+        "L2 must fail on the broken tree: {:?}",
+        l2.details
+    );
+    assert!(
+        l2.details.iter().any(|d| d.contains("checking trees")),
+        "L2 must still report the tree check failure: {:?}",
+        l2.details
+    );
+    assert!(
+        l2.details
+            .iter()
+            .any(|d| d == "[Warn] pack data not read because the tree check failed"),
+        "L2 must state in one line that pack data was not read: {:?}",
+        l2.details
+    );
     drop(dir);
 }
 
