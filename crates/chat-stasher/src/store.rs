@@ -799,8 +799,50 @@ impl BackupStore {
                     .ignore_inode(true)
                     .skip_if_unchanged(skip_if_unchanged),
             );
+        // W1077: the index file naming the adopted packs is published BEFORE
+        // the snapshot. A snapshot that reuses a stranded pack reaches trees
+        // only that pack holds, so a kill after the snapshot and before the
+        // naming file left a snapshot no index could resolve. The gate runs
+        // after the backup's own data, trees and index are written and
+        // strictly before the snapshot file is, and a pack set it cannot name
+        // fails the push with no snapshot written. The push cannot drop the
+        // adoption and re-upload instead: the backup has already deduplicated
+        // against the adopted packs, so the next push re-verifies and retries.
+        // The write is a pure append gated by a pre-write survey (see
+        // `orphans::persist_verified`).
+        let verified: &[rustic_core::repofile::IndexPack] = orphans
+            .as_ref()
+            .map_or(&[], |outcome| outcome.verified.as_slice());
+        let gate_outcome: std::cell::RefCell<Option<crate::orphans::PersistOutcome>> =
+            std::cell::RefCell::new(None);
+        let gate = || -> rustic_core::RusticResult<()> {
+            // Only an open that verified packs has anything to name: a
+            // refusal, a plain index or an all-debris survey names nothing.
+            if verified.is_empty() {
+                return Ok(());
+            }
+            let outcome = crate::orphans::persist_verified(&r, &backends, verified);
+            let covered = outcome.covers_dependency();
+            let reason = match &outcome {
+                crate::orphans::PersistOutcome::NotWritten { why } => why.clone(),
+                crate::orphans::PersistOutcome::Named { .. }
+                | crate::orphans::PersistOutcome::AlreadyNamed { .. } => String::new(),
+            };
+            gate_outcome.replace(Some(outcome));
+            if covered {
+                Ok(())
+            } else {
+                Err(rustic_core::RusticError::new(
+                    rustic_core::ErrorKind::Repository,
+                    "no snapshot was written: the stranded packs this push reused could not be \
+                     named in an index file first ({why}); the next push verifies them again \
+                     and retries",
+                )
+                .attach_context("why", reason))
+            }
+        };
         let snap = r
-            .backup(&build_opts, &source, snap)
+            .backup_before_snapshot(&build_opts, &source, snap, &gate)
             .context("run rustic backup")
             .map_err(|error| self.explain_short_files(error))?;
 
@@ -813,21 +855,15 @@ impl BackupStore {
         // holds the snapshot we were handed is a read of the repository's own
         // answer, not a flag this function sets from its own intent.
         let snapshot_written = snaps.iter().any(|stored| stored.id == snap.id);
-        // W1066: the push connection is also the only connection that names
-        // in a new index file the packs this open verified from the index-less
-        // set. The write is a pure append gated by a pre-write survey (see
-        // `orphans::persist_verified`); a failure to write is reported and
-        // leaves the push to succeed, because un-named packs are exactly the
-        // state pushes left behind before this change.
-        let persisted = orphans
-            .as_ref()
-            .filter(|outcome| {
-                // Only an open that verified packs has anything to persist: a
-                // refusal, a plain index or an all-debris survey names nothing,
-                // and a push that reports one of those states already said why.
-                !outcome.verified.is_empty()
-            })
-            .map(|outcome| crate::orphans::persist_verified(&r, &backends, &outcome.verified));
+        // The gate did not run when no snapshot was going to be written (the
+        // tree was identical to the parent's), so nothing depends on the
+        // adopted packs; naming them is then the W1066 housekeeping that stops
+        // the next open from re-reading them, and a failure to write it only
+        // leaves them unindexed on disk, as every earlier push did.
+        let persisted = gate_outcome.take().or_else(|| {
+            (!verified.is_empty())
+                .then(|| crate::orphans::persist_verified(&r, &backends, verified))
+        });
         // ADR-063 D3 / ruling 2: this push connection is the only place
         // tmp debris is ever deleted.
         self.sweep_tmp_debris();

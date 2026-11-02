@@ -62,7 +62,7 @@ of them.
 **A header is not a pack, so a header read is not a verification.** This project
 reads the header of every pack the index does not name *and every blob that
 header declares* (`crates/chat-stasher/src/packcheck.rs:136`, called from
-`crates/chat-stasher/src/orphans.rs:393`): the header has to decrypt with the
+`crates/chat-stasher/src/orphans.rs:405`): the header has to decrypt with the
 repository key, every blob has to decrypt and decompress to the length its
 header gives, and every blob's plaintext has to hash to the id the header names.
 The pack's bytes must also hash to the id it is stored under. That catches damage
@@ -91,7 +91,7 @@ over a stranded 1 045 700 B repository — a second full copy — while the adop
 retry adds only its snapshot, index and tree pack
 (`crates/chat-stasher/tests/w245_interrupted_push_test.rs:639-650`).
 
-Implementation: `crates/chat-stasher/src/orphans.rs:716`. Every read path reaches
+Implementation: `crates/chat-stasher/src/orphans.rs:744`. Every read path reaches
 it through `crates/chat-stasher/src/store.rs:631`, which is the whole point of
 routing reads through it — after an adopting push, the snapshot's tree and its
 shards exist **only** in packs no index file names, so a read that reads only
@@ -100,6 +100,92 @@ index files fails with "cannot ls tree" and exit 3.
 The dedup entry point is rustic's file archiver, whose test is a plain
 `index.has_data` on the blob id — it never consults a parent snapshot, which is
 why an in-memory index entry is enough to stop the upload without one.
+
+## W1066: the adoption survives the push that made it
+
+Adoption as described above is per-open: it re-reads every stranded pack on
+every later open. A killed push that leaves one complete stranded pack makes
+every subsequent `push`, `read`, `mirror` and `doctor` pay for the re-read,
+forever — measured live in the k100 fixture, where a complete stranded pack was
+re-verified 38 times in a row and nothing on disk ever recorded the adoption.
+
+The persist step closes that, on the push connection only: after a push wrote
+its own index file and before it writes its snapshot (W1077, below), it names the packs its open verified in **one
+new index file** (`crates/chat-stasher/src/orphans.rs:persist_verified`, written
+through the pinned-rustic `Repository::append_index_packs`). From then on those
+packs are ordinary indexed content and the survey that fences every open finds
+nothing to adopt.
+
+Why this stays inside the invariants that kept `repair index` out (ADR-001
+`append_only:true`, ADR-016 "we never prune"):
+
+* **append-only.** The write adds one file and touches no existing index file;
+  `repair index` is out of reach because it *rewrites* (removes) them. Verify's
+  usual "pack not referenced in index" warnings disappear for these packs
+  because they are now genuinely referenced.
+* **push-connection only.** The persist runs in `push_with`, beside the tmp
+  debris sweep — the two places a push connection may already write. Read
+  paths, `mirror` and `prune-orphans` still write nothing.
+* **idempotent by re-survey, not by lock.** The survey runs once more
+  immediately before the write, and any pack that some index file already names
+  — this push's own indexer, or another machine that persisted the same
+  adoption — is skipped. Two clients that survey before either writes still
+  both write; that is the interleaving no lock can prevent, so it is tested
+  directly (`two_pushes_that_both_persist_the_same_packs_stay_mergeable`): the
+  two files' entries are identical (the same ids at the same offsets of the
+  same pack), and whichever a reader's lookup hits resolves the same bytes.
+* **a write failure fails the push before its snapshot (W1077).** See the next
+  section: without the naming file a snapshot that reuses the packs must not be
+  published at all. When no snapshot is going to be written (the tree is
+  identical to the parent's) nothing depends on the packs, and a failed write
+  is only reported as `NOT persisted (…)`, the pre-W1066 status quo.
+
+The one re-opened ruling travels with the same change, because the production
+event that motivated all of this was not cost but collateral: an old torn file
+under a final name (a pre-ADR-063 half-written pack) refused every later
+adoption — one unreadable header vetoing every complete pack, indefinitely. A
+torn pack's bytes can never become content — no header means no verified blob
+entries, and `crate::debris` already classifies exactly this shape — so
+excluding it from the refusal adds no reliance on a partial verification. The
+open adopts and the push names the packs that verify; the debris is reported
+with the one interrupted-push sentence and left untouched, because deleting it
+remains the deliberately planned one-off action ADR-016 reserves (it is not a
+code path here, and `prune-orphans` still refuses to delete anything).
+
+## W1077: the naming index file is published before the snapshot
+
+W1066 wrote the naming index file after the snapshot. A snapshot that reuses a
+stranded pack reaches trees and blobs only that pack holds, so a SIGKILL between
+the two publishes left a snapshot whose trees no index file names; a plain index
+read then failed with `Tree ID ... not found in index` until some later push
+happened to name the pack. The kill test that showed it ran against the real
+`push` path.
+
+The order is now fixed: the push's own index file (written by rustic when the
+backup finalizes), then the naming index file, then the snapshot. The pinned
+rustic's `Repository::backup_before_snapshot` calls a gate after the backup's
+data, trees and index are written and strictly before the snapshot file;
+`push_with` runs `persist_verified` in that gate.
+
+* **A failed persist fails the push, with no snapshot.** The alternative, drop
+  the adoption and re-upload, is not available: by the time the snapshot is
+  about to be written the backup has already deduplicated against the adopted
+  packs, so redoing it would mean a second full backup against a plain index.
+  Publishing anyway is the bug. So the push errors out (`no snapshot was
+  written: ...`), the stranded packs stay as they were, and the next push
+  verifies them again and retries. A persistent write failure would equally
+  break the backup's own index write on the same backend, so failing here costs
+  nothing the backend was not already costing.
+* **Success has two shapes.** `Named` (this push wrote the file) and
+  `AlreadyNamed` (another client's index file already names every verified pack
+  at the pre-write survey) both cover the dependency. A verified pack that is
+  neither listed nor named does not: a snapshot cannot depend on it.
+* **A kill between the naming file and the snapshot is harmless.** The leftover
+  is one extra index file naming packs this push verified, byte-for-byte what a
+  later push would have written; no snapshot refers to anything new, and the
+  next push finds the packs named and writes only its snapshot.
+* **Torn debris is still never adopted or named.** The gate only names what the
+  open verified; the W1066 exclusion is unchanged.
 
 ## The safety argument
 
@@ -120,28 +206,41 @@ age gate would have to outlast the slowest concurrent upload (minutes for a larg
 pack) and would then refuse to reuse our own just-killed push's packs, which is
 the entire point of the change. Completeness is also the stronger guard: it is a
 property of the bytes, not a guess about who is writing them.
-`crates/chat-stasher/src/orphans.rs:876-878` is where every non-torn failure to
+`crates/chat-stasher/src/orphans.rs:904-906` is where every non-torn failure to
 validate sends the open back to the plain index, and
-`crates/chat-stasher/src/orphans.rs:888-899` where a pack set that changed under
+`crates/chat-stasher/src/orphans.rs:916-927` where a pack set that changed under
 the open does — the same fallback for both refusers, because neither is a state
 the index should be rebuilt from.
 
-**A refusal costs the reuse, not the archive — and the cost is the whole set.**
-One pack that cannot be verified refuses the adoption, so no pack on that open is
-adopted, including the ones that verified. That granularity is deliberate and is
-the behavior the tests already pinned (`an_unreadable_stranded_pack_…` asserts
-that no pack is reported as adopted when one is unreadable); excluding only the
-bad pack would make the dedup index depend on a partial verification result. The cost is real and is worth naming: a damaged pack is permanent on this path, because
+**A refusal costs the reuse, not the archive — and over content, the cost is
+still the whole set.** Among packs that read as packs, the granularity is
+unchanged: one pack that does not verify refuses the adoption, so no pack on
+that open is adopted, including the ones that verified. Excluding only the bad
+pack would make the dedup index depend on a partial verification result. The
+cost is real and is worth naming: a damaged pack is permanent on this path, because
 nothing here deletes or rewrites it and `append_only:true` blocks the command
 that would — so the reuse those packs offered is gone until a deliberately
 planned repair (`repair index`, single-writer, with `append_only` off, ADR-016)
 re-indexes them. What is never at stake is the bytes: the content is uploaded
 again and the archive is complete either way.
 
+**Torn debris does not get a vote (W1066).** The one exclusion from the whole-set
+refusal is the candidate that cannot be read as a pack at all: its length field
+declares a header the file cannot hold, or its header will not decrypt — the
+shape an interrupted push leaves and the shape `crate::debris` classifies as
+torn. Its bytes can never become content, so excluding it imports no partial
+verification: the adoption set is exactly the packs that fully verified.
+Before W1066, one such file under a final name refused every later adoption
+indefinitely — the production case was a five-week-old torn pack vetoing a
+complete 15 MiB pack beside it, whose content was then re-uploaded in full. The
+debris itself is left exactly as found: never adopted, never named by any
+index file, reported with the one interrupted-push sentence, and removed only
+by the deliberately planned one-off action ADR-016 reserves.
+
 **Adoption is fenced by a survey, so a healthy repository is untouched.**
-`crates/chat-stasher/src/orphans.rs:328-366` diffs the backend's pack listing against
+`crates/chat-stasher/src/orphans.rs:340-378` diffs the backend's pack listing against
 the packs the index files name, and
-`crates/chat-stasher/src/orphans.rs:855-869` refuses to adopt when the index names a
+`crates/chat-stasher/src/orphans.rs:883-897` refuses to adopt when the index names a
 pack the backend no longer has. That case matters: adopting from existing index
 files plus only newly verified packs would otherwise drop that entry — and an
 entry for a missing pack is one the local metadata cache can still serve, a documented
@@ -160,26 +259,27 @@ which is what the tool did before this change).
 
 ## What it costs, and what the operator sees
 
-* The stranded packs stay unindexed **on disk** for good: adoption is per-open,
-  so every later open re-derives it, and `verify --level l1` keeps reporting them
-  as `pack {id} not referenced in index` warnings (rustic's own wording, which
-  already says "can be a parallel backup job"). The alternative is `repair index`,
-  which needs `append_only` off — a deliberate single-writer action, not a
-  scheduled one.
+* The stranded packs stay unindexed **on disk** only until the next push
+  survives its adoption: that push names them in one new index file (W1066),
+  so every later open skips the survey-to-adoption work for them and `verify
+  --level l1` stops reporting them as `pack {id} not referenced in index`
+  (rustic's own wording, which already says "can be a parallel backup job").
+  A repository with no push left — read-only use only — keeps paying per open,
+  which is the pre-W1066 behaviour exactly.
 * Every open pays one survey: a pack listing plus one pass over the index files.
   With rustic's local metadata cache on (the default) that pass is served
   locally.
-* When the survey finds packs no index file names, that open also verifies
-  all of them — and a verification reads every byte, once, to decrypt each
-  blob — before it may adopt anything, and lists the index files once more on
-  each side of the adopting pass. A healthy repository pays nothing: a
-  repository whose index names every pack in its backend skips the
-  verification entirely, because no pack is a candidate. Torn debris stops it
-  own probe closer than that: the verifier refuses those bytes at the header
-  (the length field or the decrypt check), so it never reads the rest of a
-  half-written pack. An archive that keeps stranded packs pays the full read
-  on every open, on the read paths as well as on `push`, which is the price
-  of never reusing a pack whose bytes were not read.
+* When the survey finds packs no index file names, that open verifies all of
+  them — a verification reads every byte, once, to decrypt each blob — before
+  it may adopt anything, and lists the index files once more on each side of
+  the adopting pass. A healthy repository pays nothing: a repository whose
+  index names every pack in its backend skips the verification entirely,
+  because no pack is a candidate. Torn debris stops its own probe closer than
+  that: the verifier refuses those bytes at the header (the length field or
+  the decrypt check), so it never reads the rest of a half-written pack. An
+  archive that never pushes keeps paying the full read on every open for its
+  complete stranded packs — with a push, the one adoption plus naming closes
+  the account permanently.
 * A push whose adoption is refused because the pack set changed while it ran says
   so in the same place and the same shape: `NOT adopted (the packs no index file
   names changed while this open ran)`. It is the same state for the operator —
@@ -190,7 +290,11 @@ which is what the tool did before this change).
   something to report; a healthy run prints the line it always printed. Silence
   means the survey found nothing — a measurement, not a gap. A refusal is
   reported as `NOT adopted` with its reason, because "we could not reuse this"
-  and "there was nothing to reuse" are different states.
+  and "there was nothing to reuse" are different states. Torn debris rides its
+  own count with the one interrupted-push sentence. What the push *named* rides
+  a third line — `persisted - a new index file names the N verified pack(s)` —
+  or, when nothing was written, `NOT persisted (…)` with the reason, because
+  "named for good" and "still un-named" are different states too.
 * Read paths print nothing about it. They do not need to: when a snapshot needs a
   pack it cannot reach, the existing machinery already answers PARTIAL / exit 3
   with "cannot ls tree" — the same answer it gave before this change, and one
@@ -201,10 +305,11 @@ which is what the tool did before this change).
 
 ## Seeing the stranded set: `prune-orphans`
 
-Adoption reclaims the bytes, but it does not make them *visible*: the packs stay
-unindexed on disk for good, so an operator asking "how much is stranded here, and
-could any of it be deleted" has no answer from `push` or `verify`. `prune-orphans`
-answers it and nothing else:
+Adoption reclaims the bytes; W1066 makes the reclaim visible too, because the
+push that adopts also names the packs in a new index file. What stays invisible
+is the debris: torn candidates are never named by any index file, so an operator
+asking "how much is stranded here, and could any of it be deleted" gets the
+whole story from `prune-orphans` and nothing else:
 
 ```sh
 chat-stasher prune-orphans --destination <name> [--dry-run | --apply] [--json]
@@ -308,6 +413,18 @@ case, the two index-appears cases, and the Windows separator regression), and ar
 kept so that a fix for the cost can never be mistaken for a licence to weaken
 them.
 
+`crates/chat-stasher/tests/w1066_orphan_persist_test.rs` carries the W1066 pins.
+Four fail against the code before that change — a push that names what it
+adopted in one new index file, a rerun that names nothing new, torn debris that
+does not refuse the complete packs around it, and the two-client double-write —
+and one holds before and after on purpose (`a_damaged_complete_pack_still_
+refuses_the_whole_adoption`), so that the debris exclusion can never quietly
+become a relaxation of the check on packs that could be content. The two w245
+torn fixtures (`an_unreadable_stranded_pack_…`,
+`an_incomplete_pack_in_a_remote_backends_listing_…`) now assert the
+debris-exclusion outcome directly: debris reported and untouched, survivors
+adopted and named.
+
 `crates/chat-stasher/tests/w250_prune_orphans_test.rs` carries the read-only
 report's tests: an empty repository, a healthy one, stranded packs reported
 stranded and adoptable, a torn candidate reported as debris (not unknown, not
@@ -326,15 +443,16 @@ unreferenced torn pack in the repository, `mirror sync`, `status`, `doctor`,
 `verify`, `read` and `export` all exit `0`, the torn pack never enters the
 mirror (no copy, no torn-write temp), `status` counts exactly it as torn, no
 user-facing string about the archive calls it corrupt, and `prune-orphans`
+phrase for `prune-orphans`
 carries torn and stranded as separate counts with byte totals and an honest
 unknown earliest-seen time. Two controls pin the boundary: the same bad bytes
 under a name an index file lists still fail `mirror sync` with exit `1`, and
 a complete unindexed pack still counts as stranded, adoptable, never torn.
-The adopting open's own refusal granularity is deliberately unchanged by
-step A: a torn candidate still refuses the whole set (the all-or-nothing
-behaviour above), because the mirror — not the adopting open — is the reader
-that skips debris; the open only classifies when it verifies, and a pack that
-cannot be verified is still not adopted.
+W1066 changed one sentence of that fixture set and it is the one the tests
+follow: the adopting open no longer refuses the whole set over a torn
+candidate — it classifies the debris (the mirror was already the reader that
+skips it) and adopts the packs that verify around it, while a pack that reads
+as a pack but cannot be verified is still not adopted, by anybody, ever.
 
 **The backend family a destination actually uses.** Before ADR-063, the tests
 above ran on `rustic_backend`'s `LocalBackend`, which writes a pack to
@@ -363,7 +481,7 @@ published namespace, so deleting it needs none of the reachability arguments
 above.
 
 **The window is a fixture, not a race.** `CHAT_STASHER_TEST_HOLD_OPEN_AFTER_SURVEY`
-parks an open between those two listings (`crates/chat-stasher/src/orphans.rs:450-479`),
+parks an open between those two listings (`crates/chat-stasher/src/orphans.rs:462-491`),
 which is how the injected-index and injected-pack tests put something there at
 all: without it, a test can only inject on a timer and assert the properties that
 hold whichever phase saw the file. The variable is read on every open and does

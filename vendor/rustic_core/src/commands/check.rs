@@ -281,9 +281,23 @@ pub(crate) fn check_repository<S: Open>(
 
     let index_be = GlobalIndex::new_from_index(index_collector.into_index());
 
-    let packs = check_trees(repo, be, &index_be, trees, &collector)
-        .map_err(|err| collector.add_error(CheckError::ErrorCheckingTrees { source: err }))
-        .unwrap_or_default();
+    let packs = match check_trees(repo, be, &index_be, trees, &collector) {
+        Ok(packs) => packs,
+        Err(err) => {
+            collector.add_error(CheckError::ErrorCheckingTrees { source: err });
+            if opts.read_data {
+                // A failed tree check leaves the set of packs to read
+                // incomplete: reading pack data now would silently verify only
+                // a subset, and the conversion below hits an index whose
+                // loader threads on a slow backend can still hold a clone —
+                // which used to panic the whole check instead of reporting
+                // the findings. So pack data is not read, and the results say
+                // so.
+                collector.add_warn(CheckError::PackDataNotReadTreeCheckFailed);
+            }
+            return Ok(collector.into_check_results());
+        }
+    };
 
     if opts.read_data {
         let packs = index_be
@@ -938,6 +952,8 @@ pub enum CheckError {
         blob_id: BlobId,
         comp_id: BlobId,
     },
+    /// pack data not read because the tree check failed
+    PackDataNotReadTreeCheckFailed,
 }
 
 #[derive(Debug, PartialEq, Eq)]
