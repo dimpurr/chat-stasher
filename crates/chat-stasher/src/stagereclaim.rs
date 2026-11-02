@@ -680,6 +680,8 @@ pub fn reclaim_stage(
             .with_context(|| format!("generate manifest for machine {machine}"))?;
         refresh_manifest(stage, machine, &fresh)?;
         for cand in cands {
+            #[cfg(test)]
+            tests_support::before_session_delete(machine, &cand.session_id);
             let removed = reclaim_session_body(stage, &cand.machine, &cand.session_id)
                 .with_context(|| {
                     format!(
@@ -876,6 +878,38 @@ pub fn reclaim_session_body(
     }
     Ok(entries.len())
 }
+
+/// W1062: a deterministic seam for the reclaim/collect race fixtures: a
+/// hook that runs on the reclaim's own thread just before one proven
+/// session's body delete — after the manifest write, inside the apply
+/// phase — so a test can let a concurrent pass seal a shard exactly there,
+/// in the window between the reclaim's proof and its delete.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnMut(&str, &str)>;
+
+    thread_local! {
+        static BEFORE_SESSION_DELETE: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn set_before_session_delete(hook: Option<Hook>) {
+        BEFORE_SESSION_DELETE.with(|slot| *slot.borrow_mut() = hook);
+    }
+
+    pub(super) fn before_session_delete(machine: &str, session_id: &str) {
+        BEFORE_SESSION_DELETE.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().as_mut() {
+                hook(machine, session_id);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+#[path = "stagereclaim_narrow_delete_tests.rs"]
+mod narrow_delete_tests;
 
 #[cfg(test)]
 mod tests {
