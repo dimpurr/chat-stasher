@@ -15501,6 +15501,8 @@ mod decision_surface_tests {
                 "uninstall_schedule",
                 "masterkey_saved_elsewhere",
                 "json",
+                "sources",
+                "all_detected",
                 "remote",
                 "remote_endpoint",
                 "remote_user",
@@ -17615,6 +17617,18 @@ fn cmd_setup(
                 // declared — reporting that one as `false` would tell a caller to
                 // copy and declare a key it is done with.
                 let declarations = chat_stasher::keydecl::load(&state_dir);
+                // ADR-065: this bootstrap may run the destination step, and
+                // `dest-init` collects, so the answer given on this command
+                // line has to be on record before it does. This path already
+                // writes (the repository and its key); the other refusals
+                // above write nothing and record nothing.
+                if let Some(answers) = &source_answers {
+                    let edits = chat_stasher::sources::edits_for_choice(&consent, answers);
+                    if let Err(error) = Config::set_source_states(&edits) {
+                        eprintln!("setup: could not record the source choice: {error:#}");
+                        return ExitCode::from(1);
+                    }
+                }
                 match setup_create_repo_and_key(&config) {
                     Ok(path) => {
                         let local_declared = chat_stasher::keydecl::declared_for(
@@ -22202,9 +22216,9 @@ fn status_json(
         Ok(report) => scanner::scan_report_json(report),
         Err(ref why) => serde_json::json!({ "kind": "failed", "why": why }),
     };
-    // ADR-065 D10: each harness row says whether it is collected, so a found
-    // store that is `off` or `pending` is never read as one that was archived,
-    // and never counted as a gap.
+    // ADR-065 D10: the top-level `sources` object says which sources are
+    // collected, so a found store that is `off` or `pending` is never read as
+    // one that was archived. The `scanner` object stays what the scan measured.
     let sources_value = match (consent, &scan) {
         (Some(consent), Ok(report)) => chat_stasher::sources::consent_json(
             consent,
@@ -22216,22 +22230,6 @@ fn status_json(
             "why": "the harness registry could not be read, so no source state was evaluated",
         }),
     };
-    if let (Some(consent), Some(harnesses)) = (
-        consent,
-        scanner_value
-            .get_mut("harnesses")
-            .and_then(|value| value.as_array_mut()),
-    ) {
-        for harness in harnesses {
-            let state = harness
-                .get("harness")
-                .and_then(|id| id.as_str())
-                .map(|id| consent.state_of(id).word());
-            if let (Some(state), Some(object)) = (state, harness.as_object_mut()) {
-                object.insert("source_state".to_string(), serde_json::json!(state));
-            }
-        }
-    }
     let writer_version_status = match (writer_versions, writer_version_error) {
         (Some(versions), _) => serde_json::json!({"kind":"known", "machines":versions}),
         (None, Some(error)) => serde_json::json!({"kind":"failed", "why":error}),

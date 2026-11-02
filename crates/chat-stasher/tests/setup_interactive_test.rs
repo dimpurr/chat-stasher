@@ -239,6 +239,7 @@ impl Sandbox {
         let stage = self.stage();
         let mut args = vec![
             "setup",
+            "--all-detected",
             "--stage",
             stage.to_str().expect("a utf-8 stage path"),
         ];

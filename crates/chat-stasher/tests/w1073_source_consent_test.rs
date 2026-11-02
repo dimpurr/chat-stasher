@@ -303,18 +303,6 @@ fn status_keeps_off_pending_and_not_found_apart() {
     // Not found is a different word from off and pending: a tool that is not
     // installed is pending-but-absent, never listed as present.
     assert!(!pending_present.contains(&"cursor".to_string()));
-    let harness = |id: &str| {
-        value["scanner"]["harnesses"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|h| h["harness"] == id)
-            .cloned()
-            .unwrap()
-    };
-    assert_eq!(harness("codex")["source_state"], "off");
-    assert_eq!(harness("gemini-cli")["source_state"], "pending");
-
     // The human form says the same, and calls neither a gap.
     let human = sb.run(&["status"]);
     let human = text(&human);

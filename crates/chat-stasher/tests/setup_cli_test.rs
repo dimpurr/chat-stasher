@@ -2480,9 +2480,9 @@ fn a_declared_destination_without_a_repo_is_reported_rather_than_exiting() {
     // A half-written block is the user's: the wizard adopts it as it stands and
     // never rewrites it.
     assert_eq!(value["destination"]["config"]["kind"], "already_declared");
-    assert_eq!(
-        sandbox.read_config(),
-        before,
+    // The source answer is the one thing this run adds, after the user's bytes.
+    assert!(
+        sandbox.read_config().starts_with(&before),
         "the adopted block must be left exactly as it was found"
     );
     // The reason has to name what is missing, or a wrapper knows only that
