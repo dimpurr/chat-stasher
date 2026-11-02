@@ -351,3 +351,217 @@ impl PullReport {
         }
     }
 }
+
+/// Coordinates of an S3-compatible inbox (Cloudflare R2). Secrets are never
+/// printed: `Debug` redacts them and every error from this module is a fixed
+/// phrase.
+#[derive(Clone)]
+pub struct S3InboxConfig {
+    pub bucket: String,
+    pub endpoint: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    /// Object-key prefix dedicated to this inbox. Required and never the
+    /// bucket root, so one inbox cannot list or retire another's objects.
+    pub prefix: String,
+}
+impl std::fmt::Debug for S3InboxConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3InboxConfig")
+            .field("bucket", &self.bucket)
+            .field("prefix", &self.prefix)
+            .field("credentials", &"<redacted>")
+            .finish()
+    }
+}
+impl RemoteInbox {
+    /// Open an S3-compatible bucket prefix as an inbox. As with [`Self::new`]
+    /// the caller must hold a Tokio runtime context (`runtime.enter()`) while
+    /// calling this. Nothing is sent to the network until the first use.
+    pub fn open_s3(config: &S3InboxConfig, max_object_bytes: usize) -> anyhow::Result<Self> {
+        let prefix = config.prefix.trim_matches('/');
+        anyhow::ensure!(
+            !config.bucket.is_empty()
+                && !config.endpoint.is_empty()
+                && !config.access_key_id.is_empty()
+                && !config.secret_access_key.is_empty(),
+            "inbox backend configuration incomplete"
+        );
+        anyhow::ensure!(
+            !prefix.is_empty()
+                && prefix
+                    .split('/')
+                    .all(|s| !s.is_empty() && s != "." && s != ".."),
+            "inbox prefix must be a dedicated non-root path"
+        );
+        let builder = opendal::services::S3::default()
+            .bucket(&config.bucket)
+            .endpoint(&config.endpoint)
+            .region("auto")
+            .access_key_id(&config.access_key_id)
+            .secret_access_key(&config.secret_access_key)
+            .disable_config_load()
+            .disable_ec2_metadata()
+            .root(&format!("/{prefix}"));
+        let operator = opendal::Operator::new(builder)
+            .map_err(|_| anyhow::anyhow!("inbox backend unavailable"))?
+            .finish();
+        let operator = opendal::blocking::Operator::new(operator)
+            .map_err(|_| anyhow::anyhow!("inbox backend unavailable"))?;
+        Ok(Self::new(operator, max_object_bytes))
+    }
+    /// Delete every object directly under this inbox's operator root. Meant
+    /// for tests that own a unique prefix; returns how many were deleted.
+    pub fn purge_flat(&self) -> anyhow::Result<usize> {
+        let mut n = 0;
+        for entry in self
+            .operator
+            .list("/")
+            .map_err(|_| anyhow::anyhow!("inbox listing unavailable"))?
+        {
+            if entry.metadata().is_dir() {
+                continue;
+            }
+            self.operator
+                .delete(entry.path())
+                .map_err(|_| anyhow::anyhow!("inbox purge unavailable"))?;
+            n += 1;
+        }
+        Ok(n)
+    }
+}
+
+/// Environment variables that carry the S3 inbox endpoint and credentials.
+/// The locator (`s3://<bucket>/<prefix>`) never holds them, and no value is
+/// ever printed. The puller needs a read/delete grant and a producer only a
+/// write grant on the dedicated prefix; supply each side its own pair.
+pub const S3_ENDPOINT_ENV: &str = "CHAT_STASHER_INBOX_S3_ENDPOINT";
+pub const S3_ACCESS_KEY_ID_ENV: &str = "CHAT_STASHER_INBOX_S3_ACCESS_KEY_ID";
+pub const S3_SECRET_ACCESS_KEY_ENV: &str = "CHAT_STASHER_INBOX_S3_SECRET_ACCESS_KEY";
+
+/// Split `s3://<bucket>/<prefix>` into its parts. A dedicated, non-root prefix
+/// is mandatory; query strings, userinfo and fragments cannot be expressed.
+pub fn parse_s3_locator(locator: &str) -> anyhow::Result<(String, String)> {
+    let rest = locator
+        .strip_prefix("s3://")
+        .ok_or_else(|| anyhow::anyhow!("invalid s3 inbox locator"))?;
+    let (bucket, prefix) = rest
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid s3 inbox locator: s3://<bucket>/<prefix>"))?;
+    let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
+    anyhow::ensure!(
+        !bucket.is_empty()
+            && !bucket.contains(['\\', ':'])
+            && !prefix.is_empty()
+            && prefix
+                .split('/')
+                .all(|s| !s.is_empty() && s != "." && s != ".."),
+        "invalid s3 inbox locator: s3://<bucket>/<prefix>"
+    );
+    Ok((bucket.into(), prefix.into()))
+}
+
+/// True only for `http://` to a literal loopback host. The authority (text up
+/// to the first `/`, `?` or `#`) is parsed exactly: userinfo (`@`), backslashes
+/// and whitespace are refused, the port must be all digits, and the host must
+/// be `localhost`, `127.0.0.1` or `[::1]` as a whole.
+fn loopback_http(endpoint: &str) -> bool {
+    let Some(rest) = endpoint.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty()
+        || authority.contains(['@', '\\'])
+        || authority
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return false;
+    }
+    // `port` is None when the authority has no port, Some(text) after a colon.
+    let (host, port): (String, Option<&str>) = if let Some(after) = authority.strip_prefix('[') {
+        match after.split_once(']') {
+            Some((inner, "")) => (format!("[{inner}]"), None),
+            Some((inner, tail)) => match tail.strip_prefix(':') {
+                Some(p) => (format!("[{inner}]"), Some(p)),
+                None => return false,
+            },
+            None => return false,
+        }
+    } else {
+        match authority.split_once(':') {
+            Some((h, p)) => (h.to_owned(), Some(p)),
+            None => (authority.to_owned(), None),
+        }
+    };
+    let port_ok = port.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    port_ok && matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+}
+
+impl S3InboxConfig {
+    /// Resolve a declared locator plus the credential environment. `get`
+    /// reads one variable (`std::env::var` in the CLI). Missing or empty
+    /// values are one fixed, value-free error; plain http is accepted only to
+    /// a loopback host.
+    pub fn from_locator(
+        locator: &str,
+        get: impl Fn(&str) -> Option<String>,
+    ) -> anyhow::Result<Self> {
+        let (bucket, prefix) = parse_s3_locator(locator)?;
+        let var = |name: &str| get(name).filter(|v| !v.is_empty());
+        let (Some(endpoint), Some(access_key_id), Some(secret_access_key)) = (
+            var(S3_ENDPOINT_ENV),
+            var(S3_ACCESS_KEY_ID_ENV),
+            var(S3_SECRET_ACCESS_KEY_ENV),
+        ) else {
+            anyhow::bail!(
+                "s3 inbox credentials unavailable: set CHAT_STASHER_INBOX_S3_ENDPOINT, \
+                 CHAT_STASHER_INBOX_S3_ACCESS_KEY_ID and CHAT_STASHER_INBOX_S3_SECRET_ACCESS_KEY"
+            );
+        };
+        anyhow::ensure!(
+            endpoint.starts_with("https://") || loopback_http(&endpoint),
+            "s3 inbox endpoint must be https"
+        );
+        Ok(Self {
+            bucket,
+            endpoint,
+            access_key_id,
+            secret_access_key,
+            prefix,
+        })
+    }
+}
+
+impl RemoteInbox {
+    /// Count the objects waiting directly under the inbox and the age in
+    /// seconds of the oldest. The age is `None` when any object lacks a
+    /// modification time, so a partial answer is never presented as complete.
+    /// A listing failure is an error; every page is read before answering.
+    pub fn observe(&self, now: u64) -> anyhow::Result<(usize, Option<u64>)> {
+        let entries = self
+            .operator
+            .list("/")
+            .map_err(|_| anyhow::anyhow!("inbox listing unavailable: waiting count unknown"))?;
+        let mut count = 0;
+        let mut oldest: Option<u64> = None;
+        let mut age_unknown = false;
+        for entry in entries {
+            if entry.metadata().is_dir() {
+                continue;
+            }
+            count += 1;
+            let age = entry
+                .metadata()
+                .last_modified()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t.to_string()).ok())
+                .and_then(|t| u64::try_from(t.timestamp()).ok())
+                .and_then(|t| now.checked_sub(t));
+            match age {
+                Some(age) => oldest = Some(oldest.map_or(age, |p| p.max(age))),
+                None => age_unknown = true,
+            }
+        }
+        Ok((count, if age_unknown { None } else { oldest }))
+    }
+}

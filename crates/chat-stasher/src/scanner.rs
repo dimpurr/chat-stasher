@@ -805,6 +805,14 @@ fn validate_registry(registry: &HarnessRegistry, source: &str) -> io::Result<()>
                     cells.push((format!("{}/:{}/{platform}", harness.id, root.id), cell));
                 }
             }
+            // Index cells get the same structural checks as body cells: a
+            // `session_dir` rule that names no/both targets or a `**` glob parses
+            // but cannot be honoured (ADR-056 D1).
+            for index in &harness.session_indexes {
+                if let Some(cell) = index.paths.cell_for(platform) {
+                    cells.push((format!("{}/#{}/{platform}", harness.id, index.id), cell));
+                }
+            }
         }
         for (where_, cell) in cells {
             if let Some(rule) = cell.session_dir.as_ref() {
