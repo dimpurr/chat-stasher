@@ -62,7 +62,7 @@ of them.
 **A header is not a pack, so a header read is not a verification.** This project
 reads the header of every pack the index does not name *and every blob that
 header declares* (`crates/chat-stasher/src/packcheck.rs:136`, called from
-`crates/chat-stasher/src/orphans.rs:393`): the header has to decrypt with the
+`crates/chat-stasher/src/orphans.rs:405`): the header has to decrypt with the
 repository key, every blob has to decrypt and decompress to the length its
 header gives, and every blob's plaintext has to hash to the id the header names.
 The pack's bytes must also hash to the id it is stored under. That catches damage
@@ -91,7 +91,7 @@ over a stranded 1 045 700 B repository — a second full copy — while the adop
 retry adds only its snapshot, index and tree pack
 (`crates/chat-stasher/tests/w245_interrupted_push_test.rs:639-650`).
 
-Implementation: `crates/chat-stasher/src/orphans.rs:716`. Every read path reaches
+Implementation: `crates/chat-stasher/src/orphans.rs:744`. Every read path reaches
 it through `crates/chat-stasher/src/store.rs:631`, which is the whole point of
 routing reads through it — after an adopting push, the snapshot's tree and its
 shards exist **only** in packs no index file names, so a read that reads only
@@ -206,9 +206,9 @@ age gate would have to outlast the slowest concurrent upload (minutes for a larg
 pack) and would then refuse to reuse our own just-killed push's packs, which is
 the entire point of the change. Completeness is also the stronger guard: it is a
 property of the bytes, not a guess about who is writing them.
-`crates/chat-stasher/src/orphans.rs:842-844` is where every non-torn failure to
+`crates/chat-stasher/src/orphans.rs:870-872` is where every non-torn failure to
 validate sends the open back to the plain index, and
-`crates/chat-stasher/src/orphans.rs:854-865` where a pack set that changed under
+`crates/chat-stasher/src/orphans.rs:882-893` where a pack set that changed under
 the open does — the same fallback for both refusers, because neither is a state
 the index should be rebuilt from.
 
@@ -238,9 +238,9 @@ index file, reported with the one interrupted-push sentence, and removed only
 by the deliberately planned one-off action ADR-016 reserves.
 
 **Adoption is fenced by a survey, so a healthy repository is untouched.**
-`crates/chat-stasher/src/orphans.rs:328-366` diffs the backend's pack listing against
+`crates/chat-stasher/src/orphans.rs:340-378` diffs the backend's pack listing against
 the packs the index files name, and
-`crates/chat-stasher/src/orphans.rs:821-835` refuses to adopt when the index names a
+`crates/chat-stasher/src/orphans.rs:849-863` refuses to adopt when the index names a
 pack the backend no longer has. That case matters: adopting from existing index
 files plus only newly verified packs would otherwise drop that entry — and an
 entry for a missing pack is one the local metadata cache can still serve, a documented
@@ -481,7 +481,7 @@ published namespace, so deleting it needs none of the reachability arguments
 above.
 
 **The window is a fixture, not a race.** `CHAT_STASHER_TEST_HOLD_OPEN_AFTER_SURVEY`
-parks an open between those two listings (`crates/chat-stasher/src/orphans.rs:450-479`),
+parks an open between those two listings (`crates/chat-stasher/src/orphans.rs:462-491`),
 which is how the injected-index and injected-pack tests put something there at
 all: without it, a test can only inject on a timer and assert the properties that
 hold whichever phase saw the file. The variable is read on every open and does
