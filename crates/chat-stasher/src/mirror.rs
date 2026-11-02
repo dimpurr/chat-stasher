@@ -443,7 +443,8 @@ pub enum RoundEnd {
 /// The hard-failure classes the copy loop cannot pause out of. A hard
 /// failure is a *checked and failed* fact (invariant 2, `CLAUDE.md`): the
 /// source no longer holds the bytes its own listing claims, the local write
-/// refused, or the listing names a file over the whole-file bound. It is
+/// refused, the listing names a file over the whole-file bound, or the
+/// mirror volume's free space could not be queried at all. It is
 /// the caller's exit `1` family, never "did not finish" (exit `3`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HardClass {
@@ -459,6 +460,13 @@ pub enum HardClass {
     /// after the read when the bytes are (the constant's doc states what
     /// each half can and cannot bound).
     OversizeListing,
+    /// The mirror volume's free space could not be queried, so the round
+    /// refused to write rather than risk filling a disk it cannot measure
+    /// (W1072): unknown free space is neither "plenty" (fail-open) nor
+    /// "none" — it is unanswered, and an unanswered safety check stops the
+    /// round. The one class whose note names no byte counts: there are no
+    /// honest numbers when the query itself failed.
+    DiskQuery,
 }
 
 impl HardClass {
@@ -470,6 +478,7 @@ impl HardClass {
             Self::SourceCorrupt => "the source proved corrupt",
             Self::LocalWrite => "a local write failed",
             Self::OversizeListing => "the listing named a file over the whole-file bound",
+            Self::DiskQuery => "free space on the mirror volume could not be queried",
         }
     }
 }
@@ -527,11 +536,31 @@ impl std::error::Error for MirrorUsageError {}
 ///
 /// `Sync` because the two copy workers share one stopper across scoped
 /// threads — every stop rule is a read-only predicate.
+///
+/// The `Err` half is fail-closed (W1072): a stopper that cannot answer —
+/// the production rule when its free-space query fails — stops the round
+/// with a [`HardFailure`] instead of letting the copy proceed on an
+/// unknown. Unknown free space is never "safe to write".
 pub trait RoundEnds: Sync {
     /// Whether this round should end now, before starting `next_file`. The
     /// answer is asked *before* each file, so a budget that is already spent
-    /// stops before it moves data it cannot finish.
-    fn round_end(&self, next_file: &PlannedFile) -> Option<RoundEnd>;
+    /// stops before it moves data it cannot finish. A stopper that cannot
+    /// answer its own question (an unanswerable free-space query) returns
+    /// the [`HardFailure`] that refuses the round, never a silent continue.
+    fn round_end(&self, next_file: &PlannedFile) -> Result<Option<RoundEnd>, HardFailure>;
+
+    /// Free bytes a non-privileged write can still allocate on the volume
+    /// holding `mirror_root`. Asked once per round before the first byte
+    /// moves (the C3 pre-estimate) and before every file mid-copy, so both
+    /// sites share one answer. The default queries the real volume and maps
+    /// a failed query to the fail-closed [`HardFailure`] (W1072); tests
+    /// override it to inject a failed query without racing real disks.
+    /// `mirror_root` rides as a parameter because the injected stoppers of
+    /// tests own no volume.
+    fn free_bytes(&self, mirror_root: &Path) -> Result<u64, HardFailure> {
+        available_bytes(mirror_root)
+            .map_err(|e| hard_disk_query(format!("mirror volume {}: {e:#}", mirror_root.display())))
+    }
 }
 
 /// The production stop-rule: this round's deadline (None = unlimited, an
@@ -557,30 +586,28 @@ impl DeadlineAndDisk {
 }
 
 impl RoundEnds for DeadlineAndDisk {
-    fn round_end(&self, next_file: &PlannedFile) -> Option<RoundEnd> {
+    fn round_end(&self, next_file: &PlannedFile) -> Result<Option<RoundEnd>, HardFailure> {
         if let Some(deadline) = self.deadline {
             if Instant::now() >= deadline {
-                return Some(RoundEnd::BudgetSpent);
+                return Ok(Some(RoundEnd::BudgetSpent));
             }
         }
         // A file that alone would breach the floor ends the round before it
         // starts: the check is a threshold on what would remain after the
         // write, not on what the disk holds now.
-        if let Ok(free) = available_bytes(&self.mirror_root) {
-            if free.saturating_sub(next_file.size) < self.min_free_bytes {
-                return Some(RoundEnd::DiskBelowThreshold {
-                    free_bytes: free,
-                    min_free_bytes: self.min_free_bytes,
-                });
-            }
+        //
+        // Fail closed (W1072): a query that cannot be answered is neither
+        // "plenty" nor "none", so the round refuses rather than proceed on
+        // an unknown — the old `if let Ok` fallthrough read "unknown" as
+        // "safe" and kept writing toward a possibly full disk.
+        let free = self.free_bytes(&self.mirror_root)?;
+        if free.saturating_sub(next_file.size) < self.min_free_bytes {
+            return Ok(Some(RoundEnd::DiskBelowThreshold {
+                free_bytes: free,
+                min_free_bytes: self.min_free_bytes,
+            }));
         }
-        // A failed free-space query leaves the honest answer to the caller:
-        // the round proceeds rather than pausing forever on a platform
-        // quirk, because an unknown amount of free space is not proof of
-        // danger any more than it is proof of safety — the write attempt's
-        // own error is the next signal (unreachable on unix and windows
-        // today; see the cfg triple in this module).
-        None
+        Ok(None)
     }
 }
 
@@ -723,7 +750,9 @@ pub struct SyncRequest<'a> {
 ///   Nothing was done; the CLI's exit `2`.
 /// * `HardFailure` — a checked-and-failed fact: the source no longer holds
 ///   the bytes its own listing claims (a re-read cannot heal it), a local
-///   write refused, or the listing named a file over the whole-file bound.
+///   write refused, the listing named a file over the whole-file bound, or
+///   the mirror volume's free space could not be queried (an unanswered
+///   safety check stops the round rather than risk the disk).
 ///   The CLI's exit `1`, with the class's own sentence.
 /// * Everything else — a read that did not finish (ADR-023's family) —
 ///   propagates as an ordinary error; the CLI's exit `3`, a pause the next
@@ -886,8 +915,35 @@ pub fn sync_once(req: &SyncRequest) -> anyhow::Result<(SyncReport, SyncOutcome)>
     // pre-estimate are one floor — not two the round could disagree with
     // itself over (rev2's finding).
     let min_free_bytes = req.min_free_bytes;
-    let free_now =
-        available_bytes(&mirror_root).context("query free space on the mirror volume")?;
+    // Fail closed (W1072): an unanswerable free-space query is neither
+    // "plenty" nor "none", so the round refuses before the first byte
+    // moves rather than write toward a possibly full disk. The refusal is
+    // the checked-and-failed class (exit 1), not a usage error: the
+    // declaration resolved fine — the volume simply would not answer.
+    // `why` stays path-free for the state file (the privacy rule every
+    // hard failure keeps); the volume path and the raw chain ride the
+    // terminal-only `detail`.
+    let free_now = match req.round_ends.free_bytes(&mirror_root) {
+        Ok(free) => free,
+        Err(failure) => {
+            let report = SyncReport {
+                mirror_of: req.settings.mirror_of.clone(),
+                remote_files: planned.len() as u64,
+                remote_total_bytes,
+                present_files,
+                present_bytes,
+                missing_bytes_remaining: missing_bytes,
+                snapshots_remote: snapshot_ids.len() as u64,
+                orphan_files,
+                orphan_bytes,
+                downloaded_bytes_on_disk: downloaded_at_refusal.map(|(_, bytes)| bytes),
+                downloaded_files_on_disk: downloaded_at_refusal.map(|(files, _)| files),
+                ..SyncReport::default()
+            };
+            write_progress(req, &report, Err(failure.why.clone()))?;
+            return Err(anyhow::Error::new(failure));
+        }
+    };
     let needed_bytes = missing_bytes.saturating_add(min_free_bytes);
     if free_now < needed_bytes {
         let report = SyncReport {
@@ -1436,6 +1492,23 @@ fn mirror_indexed_pack_names(
 
 /// The hard failure a pack that is not debris ends the round with: today's
 /// `SourceCorrupt` class and wording, word for word.
+/// Fail-closed refusal for an unanswerable free-space query (W1072): the
+/// round writes nothing rather than risk filling a disk it cannot measure.
+/// `why` is state-file-safe by construction — it names the failed query and
+/// no byte counts (there are no honest numbers when the query itself
+/// failed), and no paths — while `detail` carries the mirror volume's path
+/// and the raw chain for the terminal only, the same split every
+/// [`HardFailure`] keeps.
+fn hard_disk_query(detail: String) -> HardFailure {
+    HardFailure {
+        class: HardClass::DiskQuery,
+        why: "free space on the mirror volume could not be queried; the round wrote nothing \
+              rather than write toward a possibly full disk"
+            .to_string(),
+        detail: Some(detail),
+    }
+}
+
 fn hard_source_corrupt(file: &PlannedFile) -> HardFailure {
     let short = file.hex.get(..12).unwrap_or(&file.hex);
     HardFailure {
@@ -1539,10 +1612,22 @@ fn worker(
             counters.next.fetch_sub(1, Ordering::SeqCst);
             return;
         }
-        if let Some(end) = round_ends.round_end(file) {
-            counters.next.fetch_sub(1, Ordering::SeqCst);
-            set_stop_once(stop, StopCause::Pause(end));
-            return;
+        match round_ends.round_end(file) {
+            Ok(Some(end)) => {
+                counters.next.fetch_sub(1, Ordering::SeqCst);
+                set_stop_once(stop, StopCause::Pause(end));
+                return;
+            }
+            Ok(None) => {}
+            Err(failure) => {
+                // Fail-closed stopper (W1072): a stop decision that cannot
+                // be answered refuses the round outright — the error is
+                // already the checked-and-failed class, so it rides the
+                // hard path (record + `Err`), never a pause.
+                counters.next.fetch_sub(1, Ordering::SeqCst);
+                set_stop_once(stop, StopCause::Hard(failure));
+                return;
+            }
         }
         match copy_one(mirror_root, be, file, classifier) {
             Ok(Copied::Wrote(bytes)) => {
@@ -3236,6 +3321,61 @@ mod tests {
         assert!(capacity > 0, "a temp dir volume has capacity");
         assert!(available <= capacity);
         assert!(available_bytes(Path::new("/no/such/path/anywhere")).is_err());
+    }
+
+    /// W1072: a free-space query that cannot be answered stops the round
+    /// instead of letting it write on an unknown — the old `if let Ok`
+    /// fallthrough read "unknown" as "safe" and kept writing. A path that
+    /// exists nowhere fails the query on every platform, so this one test
+    /// pins unix and windows with no `#[cfg]` split and no skipped
+    /// coverage. The note names the failed query and invents no byte
+    /// counts (there are no honest numbers when the query itself failed),
+    /// and it stays path-free for the state file — the terminal half
+    /// carries the volume path instead.
+    #[test]
+    fn an_unanswerable_free_space_query_refuses_rather_than_continues() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-volume");
+        assert!(!missing.exists());
+        let rule = DeadlineAndDisk::new(None, 0, missing);
+        let probe = PlannedFile {
+            kind: FileKind::Pack,
+            id: Id::random(),
+            hex: "ab".repeat(32),
+            size: 1,
+        };
+        let failure = rule
+            .round_end(&probe)
+            .expect_err("a failed free-space query must refuse the round, not continue it");
+        assert_eq!(failure.class, HardClass::DiskQuery);
+        assert_eq!(
+            failure.class.sentence(),
+            "free space on the mirror volume could not be queried"
+        );
+        assert!(
+            failure.why.contains("could not be queried"),
+            "the note names the failed query: {}",
+            failure.why
+        );
+        assert!(
+            !failure.why.chars().any(|c| c.is_ascii_digit()),
+            "unknown free space invents no byte counts: {}",
+            failure.why
+        );
+        assert!(
+            !failure.why.contains("no-such-volume"),
+            "no path reaches the state-file half: {}",
+            failure.why
+        );
+        assert!(
+            failure
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no-such-volume"),
+            "the terminal half names the volume: {:?}",
+            failure.detail
+        );
     }
 
     /// The default floor is max(10 GiB, min(5% of capacity, 20 GiB)) —
