@@ -110,7 +110,7 @@ forever — measured live in the k100 fixture, where a complete stranded pack wa
 re-verified 38 times in a row and nothing on disk ever recorded the adoption.
 
 The persist step closes that, on the push connection only: after a push wrote
-its own index file and snapshot, it names the packs its open verified in **one
+its own index file and before it writes its snapshot (W1077, below), it names the packs its open verified in **one
 new index file** (`crates/chat-stasher/src/orphans.rs:persist_verified`, written
 through the pinned-rustic `Repository::append_index_packs`). From then on those
 packs are ordinary indexed content and the survey that fences every open finds
@@ -134,10 +134,11 @@ Why this stays inside the invariants that kept `repair index` out (ADR-001
   directly (`two_pushes_that_both_persist_the_same_packs_stay_mergeable`): the
   two files' entries are identical (the same ids at the same offsets of the
   same pack), and whichever a reader's lookup hits resolves the same bytes.
-* **a write failure never fails the push.** Without the naming file the packs
-  are exactly where the pre-W1066 push left them, which the next push re-derives
-  from scratch; the push reports `NOT persisted (…)`, and the state it names
-  is already the status quo.
+* **a write failure fails the push before its snapshot (W1077).** See the next
+  section: without the naming file a snapshot that reuses the packs must not be
+  published at all. When no snapshot is going to be written (the tree is
+  identical to the parent's) nothing depends on the packs, and a failed write
+  is only reported as `NOT persisted (…)`, the pre-W1066 status quo.
 
 The one re-opened ruling travels with the same change, because the production
 event that motivated all of this was not cost but collateral: an old torn file
@@ -150,6 +151,41 @@ open adopts and the push names the packs that verify; the debris is reported
 with the one interrupted-push sentence and left untouched, because deleting it
 remains the deliberately planned one-off action ADR-016 reserves (it is not a
 code path here, and `prune-orphans` still refuses to delete anything).
+
+## W1077: the naming index file is published before the snapshot
+
+W1066 wrote the naming index file after the snapshot. A snapshot that reuses a
+stranded pack reaches trees and blobs only that pack holds, so a SIGKILL between
+the two publishes left a snapshot whose trees no index file names; a plain index
+read then failed with `Tree ID ... not found in index` until some later push
+happened to name the pack. The kill test that showed it ran against the real
+`push` path.
+
+The order is now fixed: the push's own index file (written by rustic when the
+backup finalizes), then the naming index file, then the snapshot. The pinned
+rustic's `Repository::backup_before_snapshot` calls a gate after the backup's
+data, trees and index are written and strictly before the snapshot file;
+`push_with` runs `persist_verified` in that gate.
+
+* **A failed persist fails the push, with no snapshot.** The alternative, drop
+  the adoption and re-upload, is not available: by the time the snapshot is
+  about to be written the backup has already deduplicated against the adopted
+  packs, so redoing it would mean a second full backup against a plain index.
+  Publishing anyway is the bug. So the push errors out (`no snapshot was
+  written: ...`), the stranded packs stay as they were, and the next push
+  verifies them again and retries. A persistent write failure would equally
+  break the backup's own index write on the same backend, so failing here costs
+  nothing the backend was not already costing.
+* **Success has two shapes.** `Named` (this push wrote the file) and
+  `AlreadyNamed` (another client's index file already names every verified pack
+  at the pre-write survey) both cover the dependency. A verified pack that is
+  neither listed nor named does not: a snapshot cannot depend on it.
+* **A kill between the naming file and the snapshot is harmless.** The leftover
+  is one extra index file naming packs this push verified, byte-for-byte what a
+  later push would have written; no snapshot refers to anything new, and the
+  next push finds the packs named and writes only its snapshot.
+* **Torn debris is still never adopted or named.** The gate only names what the
+  open verified; the W1066 exclusion is unchanged.
 
 ## The safety argument
 

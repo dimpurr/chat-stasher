@@ -11346,6 +11346,9 @@ fn cmd_push(
             Some(chat_stasher::orphans::PersistOutcome::Named { packs, .. }) => println!(
                 "[push] stranded packs : persisted - a new index file names the {packs} verified pack(s), so later opens reuse them without re-reading their bytes"
             ),
+            Some(chat_stasher::orphans::PersistOutcome::AlreadyNamed { packs }) => println!(
+                "[push] stranded packs : already named - another client's index file names the {packs} verified pack(s), so nothing was written"
+            ),
             Some(chat_stasher::orphans::PersistOutcome::NotWritten { why }) => println!(
                 "[push] stranded packs : NOT persisted ({why}) - they stay named by no index file and a later push tries again"
             ),

@@ -132,6 +132,7 @@ impl<'a, BE: DecryptFullBackend, I: ReadGlobalIndex> Archiver<'a, BE, I> {
         skip_identical_parent: bool,
         no_scan: bool,
         p: &Progress,
+        before_snapshot: Option<&dyn Fn() -> RusticResult<()>>,
     ) -> RusticResult<SnapshotFile>
     where
         R: ReadSource + 'static,
@@ -221,6 +222,15 @@ impl<'a, BE: DecryptFullBackend, I: ReadGlobalIndex> Archiver<'a, BE, I> {
         self.snap.summary = Some(summary);
 
         if !skip_identical_parent || Some(self.snap.tree) != self.parent.tree_id() {
+            // chat-stasher pinned-rustic change (W1077): the snapshot is the one
+            // file whose publication makes every blob it reaches load-bearing, so
+            // a caller that has to make something durable first (an index file
+            // naming packs this run reused) runs it here, after this run's own
+            // index is written and strictly before the snapshot is. An error
+            // aborts the backup without a snapshot.
+            if let Some(gate) = before_snapshot {
+                gate()?;
+            }
             let id = self.be.save_file(&self.snap)?;
             self.snap.id = id.into();
         }
