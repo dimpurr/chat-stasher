@@ -71,8 +71,11 @@ const MIRROR_OF: &str = "storagebox";
 
 struct NeverStops;
 impl RoundEnds for NeverStops {
-    fn round_end(&self, _next: &mirror::PlannedFile) -> Option<RoundEnd> {
-        None
+    fn round_end(
+        &self,
+        _next: &mirror::PlannedFile,
+    ) -> Result<Option<RoundEnd>, mirror::HardFailure> {
+        Ok(None)
     }
 }
 

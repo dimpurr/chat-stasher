@@ -99,8 +99,11 @@ fn write_session(stage: &Path, machine: &str, session: &str, nshards: u64) {
 
 struct NeverStops;
 impl mirror::RoundEnds for NeverStops {
-    fn round_end(&self, _next: &mirror::PlannedFile) -> Option<mirror::RoundEnd> {
-        None
+    fn round_end(
+        &self,
+        _next: &mirror::PlannedFile,
+    ) -> Result<Option<mirror::RoundEnd>, mirror::HardFailure> {
+        Ok(None)
     }
 }
 
