@@ -557,9 +557,10 @@ enum Command {
         /// Print full session ids in per-session rows (default: privacy-safe short ids).
         #[arg(long)]
         full_ids: bool,
-        /// Show every stored shard. Default reads collapse legacy whole-content
-        /// replays while retaining verified sequence-bound captures, including
-        /// identical captured bodies. Nothing is deleted by either policy.
+        /// Show every stored shard. Default reads collapse replay runs — a
+        /// whole-sequence re-seal included — while retaining verified
+        /// sequence-bound captures, including identical captured bodies.
+        /// Nothing is deleted by either policy.
         #[arg(long)]
         no_collapse: bool,
         /// ADR-061: also emit the records the source deleted, at their
@@ -907,9 +908,10 @@ enum Command {
         #[arg(long)]
         force: bool,
         /// Write every stored shard. By default a run that byte-for-byte
-        /// replays the session's complete preceding shard sequence is collapsed
-        /// to its first copy, because that is what a re-seal leaves. The archive
-        /// is never modified either way.
+        /// replays the tail of the session's preceding shard sequence — a
+        /// complete replay included — is collapsed to its first copy, because
+        /// that is what a re-seal leaves. The archive is never modified
+        /// either way.
         #[arg(long)]
         no_collapse: bool,
         /// Print the plan and stop: no directory is created and no file is
@@ -3277,7 +3279,10 @@ struct ActivityIndexState {
 
 /// Format of [`ActivityIndexState`]. A file that names a different format is
 /// a different contract's, and is discarded rather than parsed leniently.
-const ACTIVITY_INDEX_STATE_FORMAT: u32 = 1;
+/// W1065 raised it to 2: the collapse rule it was built on changed (a tail
+/// replay now collapses too), so every row of a 1-format state must re-derive
+/// rather than carry forward.
+const ACTIVITY_INDEX_STATE_FORMAT: u32 = 2;
 
 /// Name of the incremental state file inside `meta/<machine>/`.
 const ACTIVITY_INDEX_STATE_FILE: &str = ".activity-index-state-v1.json";
@@ -11349,8 +11354,8 @@ struct DuplicateRepairMachine {
 /// The inventory lists every run so a collapse is auditable: each names the
 /// session, where in its shard sequence the run begins, how many shards it
 /// spans, and the bytes they hold. Nothing here is removed — the run exists
-/// only because a whole-content replay is what a re-seal leaves, and the
-/// operator can see exactly what was dropped on read.
+/// only because a replay run, whole-sequence or trailing-partial, is what a
+/// re-seal leaves, and the operator can see exactly what was dropped on read.
 #[derive(serde::Serialize)]
 struct DuplicateRepairRun {
     machine: String,
@@ -11374,7 +11379,7 @@ struct DuplicateRepairReport {
     dry_run: bool,
     machines: Vec<DuplicateRepairMachine>,
     /// Every contiguous run a collapsing read drops, in machine then session
-    /// order. Empty when the destination holds no complete replay.
+    /// order. Empty when the destination holds no replay run.
     collapsed_runs: Vec<DuplicateRepairRun>,
     warnings: Vec<String>,
     physical_removal: &'static str,
@@ -12730,7 +12735,7 @@ fn index_sources(
 }
 
 const INDEX_SOURCE_FINGERPRINT_DOMAIN: &[u8] =
-    b"chat-stasher-fts-source-v3-shard-sequence-replay-v1\0";
+    b"chat-stasher-fts-source-v4-sequence-tail-replay-v1\0";
 const INDEX_DUPLICATE_RULE_VERSION: u32 = 1;
 
 fn index_source_fingerprint(
@@ -14805,6 +14810,7 @@ mod decision_surface_tests {
         for previous_domain in [
             b"chat-stasher-fts-source-v1\0".as_slice(),
             b"chat-stasher-fts-source-v2-prefix-reseal-collapse-v1\0".as_slice(),
+            b"chat-stasher-fts-source-v3-shard-sequence-replay-v1\0".as_slice(),
         ] {
             assert_ne!(
                 index_source_fingerprint_with_domain(
@@ -14832,6 +14838,28 @@ mod decision_surface_tests {
         assert_eq!(store::duplicate_shard_indices(&resealed_prefix), vec![2, 3]);
         let concatenated_prefix = vec!["a".to_string(), "b".to_string(), "ab".to_string()];
         assert!(store::duplicate_shard_indices(&concatenated_prefix).is_empty());
+    }
+
+    /// W1065: a re-collect after total local loss re-seals only part of a
+    /// session's sources, leaving a replay of the kept sequence's tail. The
+    /// detection eats that tail replay; a re-seal that grew while the machine
+    /// was lost differs from the tail and must survive as new content.
+    #[test]
+    fn shard_replay_detection_eats_a_tail_reseal_but_keeps_grown_content() {
+        let row = "row".to_string();
+        let history = "history".to_string();
+        let resealed_tail = vec![row.clone(), history.clone(), history.clone()];
+        assert_eq!(
+            store::duplicate_shard_indices(&resealed_tail),
+            vec![2],
+            "the re-sealed history shard is a tail replay and collapses"
+        );
+        let grown = "history with a new turn".to_string();
+        let grown_reseal = vec![row, history, grown];
+        assert!(
+            store::duplicate_shard_indices(&grown_reseal).is_empty(),
+            "a re-seal whose bytes grew is genuinely new content"
+        );
     }
 
     /// A file node with `size` bytes and the given content ids. `None` for

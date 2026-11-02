@@ -2501,7 +2501,7 @@ pub fn find_duplicate_shard_in_dir(dir: &Path, raw: &[u8]) -> anyhow::Result<Opt
 
 /// Environment variable the **index builders** read: set it to a non-empty value
 /// other than `0`, `false`, `no` or `off` and an activity or full-text index
-/// keeps every sealed shard instead of collapsing a whole-content replay.
+/// keeps every sealed shard instead of collapsing a replay run.
 ///
 /// The CLI has its own explicit `--no-collapse` flag on `read` and `export`;
 /// this variable is the same opt-out for the index paths, which have no flag of
@@ -2510,14 +2510,20 @@ pub const KEEP_ALL_SHARDS_ENV: &str = "CHAT_STASHER_NO_COLLAPSE";
 
 /// How a reader joins a session's sealed shards into its body.
 ///
-/// The default is [`Self::Collapse`]: a run of shards that byte-for-byte replays
-/// the session's complete preceding shard sequence is dropped to its first copy,
-/// because that shape is exactly what a re-seal leaves and no reader can tell it
-/// from new content that happens to repeat the whole session. The stored shards
-/// are never touched either way — this decides only what the reader returns.
+/// The default is [`Self::Collapse`]: a run of shards that byte-for-byte
+/// replays the tail of the session's preceding shard sequence — a complete
+/// replay of that sequence included — is dropped to its first copy, because
+/// those shapes are exactly what re-seals leave and no reader can tell them
+/// from new content that happens to repeat stored shards. A whole re-seal
+/// replays the complete sequence; a re-collect after a total local loss
+/// re-seals only the sources whose held shard it cannot establish and replays
+/// a trailing partial run, so the reader eats that partial tail too. The
+/// stored shards are never touched either way — this decides only what the
+/// reader returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DuplicateShardPolicy {
-    /// Collapse a complete-prefix replay run to its first copy.
+    /// Collapse a tail-replay run — complete or trailing partial — to its
+    /// first copy.
     #[default]
     Collapse,
     /// Keep every shard, replays included. The opt-out.
@@ -2554,31 +2560,46 @@ impl DuplicateShardPolicy {
         }
     }
 
-    /// Whether a reader following this policy drops whole-content replays.
+    /// Whether a reader following this policy drops replay runs.
     pub fn collapses(self) -> bool {
         matches!(self, Self::Collapse)
     }
 }
 
-/// Indices in a later run that replay the complete preceding shard sequence.
+/// Indices in later runs that replay the tail of the preceding shard sequence.
 ///
-/// Sequence order is the caller's order. Each replay shard must equal its
-/// corresponding preceding shard; concatenated byte ranges are never compared.
-/// A repeated individual shard that is not a complete replay remains present.
+/// Sequence order is the caller's order. Each dropped replay shard must equal
+/// its corresponding predecessor shard, never merely a concatenated byte range:
+/// a run collapses when it replays any trailing part of the kept sequence —
+/// the complete sequence included (a whole re-seal) or a trailing partial run
+/// (the re-collect-after-total-local-loss shape, where only some of a
+/// session's sources are re-sealed, as with a Grok session that has both a
+/// `session_docs` row and a `chat_history.jsonl`). A repeated shard that does
+/// not continue matching the kept sequence's tail remains present: `A,B,A`
+/// never collapses, and neither does a later shard whose bytes merely extend
+/// or repeat bytes earlier in the body, so genuine new content cannot be
+/// swallowed by a prefix or substring match.
 pub fn duplicate_shard_indices<T: Eq>(shards: &[T]) -> Vec<usize> {
     let mut duplicates = Vec::new();
     let mut preceding = Vec::new();
     let mut index = 0;
     while index < shards.len() {
-        if !preceding.is_empty()
-            && index + preceding.len() <= shards.len()
-            && preceding
-                .iter()
-                .enumerate()
-                .all(|(offset, previous)| shards[index + offset] == shards[*previous])
-        {
-            duplicates.extend(index..index + preceding.len());
-            index += preceding.len();
+        // The longest run starting here that reproduces a tail of the kept
+        // sequence, shard by shard. The complete sequence is the maximal
+        // tail, so a whole-sequence replay collapses exactly as before.
+        let mut replay = 0;
+        let bounded = preceding.len().min(shards.len() - index);
+        for len in (1..=bounded).rev() {
+            let tail = preceding.len() - len;
+            if (0..len).all(|offset| shards[index + offset] == shards[preceding[tail + offset]])
+            {
+                replay = len;
+                break;
+            }
+        }
+        if replay > 0 {
+            duplicates.extend(index..index + replay);
+            index += replay;
             continue;
         }
         preceding.push(index);
@@ -2587,15 +2608,15 @@ pub fn duplicate_shard_indices<T: Eq>(shards: &[T]) -> Vec<usize> {
     duplicates
 }
 
-/// Keep the first sequence and later content unless a full shard-by-shard
-/// replay of that sequence follows it.
+/// Keep the first sequence and later content unless a shard-by-shard replay of
+/// its tail — the complete sequence or a trailing partial run — follows it.
 pub fn unique_shard_bodies(shards: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
     select_shard_bodies(shards, DuplicateShardPolicy::Collapse)
 }
 
 /// Apply a [`DuplicateShardPolicy`] to a session's shards: drop the copies a
-/// whole-content replay repeats under [`DuplicateShardPolicy::Collapse`], or
-/// return every shard unchanged under [`DuplicateShardPolicy::KeepAll`].
+/// tail replay repeats under [`DuplicateShardPolicy::Collapse`], or return
+/// every shard unchanged under [`DuplicateShardPolicy::KeepAll`].
 pub fn select_shard_bodies(shards: Vec<Vec<u8>>, policy: DuplicateShardPolicy) -> Vec<Vec<u8>> {
     if !policy.collapses() {
         return shards;
@@ -3474,16 +3495,66 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_shard_detection_requires_a_shard_by_shard_complete_replay() {
+    fn duplicate_shard_detection_requires_a_shard_by_shard_tail_replay() {
         let a = b"alpha\n".to_vec();
         let b = b"beta\n".to_vec();
         let ab = [a.as_slice(), b.as_slice()].concat();
+        // A complete replay is the maximal tail replay and still collapses.
         assert_eq!(
             duplicate_shard_indices(&[a.clone(), b.clone(), a.clone(), b.clone()]),
             vec![2, 3]
         );
+        // A repeated shard that does not continue the kept tail is new
+        // content: matches against an earlier, non-tail position stay.
         assert!(duplicate_shard_indices(&[a.clone(), b.clone(), a.clone()]).is_empty());
-        assert!(duplicate_shard_indices(&[a, b, ab]).is_empty());
+        // Byte ranges are never compared: a shard that concatenates earlier
+        // shards but equals none of them is genuinely new content.
+        assert!(duplicate_shard_indices(&[a.clone(), b.clone(), ab]).is_empty());
+        // The PASEO-1d finding shape: a re-collect after total local loss
+        // re-seals only part of a session's sources (here the history shard
+        // `b`, while the row's `a` is held). The re-sealed shard equals the
+        // kept tail and collapses (W1065).
+        assert_eq!(
+            duplicate_shard_indices(&[a.clone(), b.clone(), b.clone()]),
+            vec![2]
+        );
+        // More than one re-collect cycle re-seals that tail again, and each
+        // cycle is eaten, not just the first.
+        assert_eq!(
+            duplicate_shard_indices(&[a.clone(), b.clone(), b.clone(), b.clone()]),
+            vec![2, 3]
+        );
+        // A longer trailing run: the session's last two shards re-sealed.
+        let c = b"gamma\n".to_vec();
+        assert_eq!(
+            duplicate_shard_indices(&[a.clone(), b.clone(), c.clone(), b.clone(), c.clone()]),
+            vec![3, 4]
+        );
+        // A repeat against a non-tail window is still kept, even when a later
+        // tail replay would have matched: A,B,C,B,A,B,C keeps its trailing B,C
+        // because the kept sequence's tail is B,A.
+        assert!(duplicate_shard_indices(&[
+            a.clone(),
+            b.clone(),
+            c.clone(),
+            b.clone(),
+            a.clone(),
+            b.clone(),
+            c.clone(),
+        ],)
+        .is_empty());
+    }
+
+    /// The negative the PASEO-1d ruling pins (W1065): a re-seal that GREW is
+    /// genuine new content. Its bytes differ from the tail's, so no prefix,
+    /// substring or tail reasoning may swallow it — not even reading it as a
+    /// replay of the bytes it starts with.
+    #[test]
+    fn a_reseal_that_grew_is_new_content_and_stays() {
+        let row = b"row\n".to_vec();
+        let history = b"history\n".to_vec();
+        let grown = [history.as_slice(), b"new turn\n"].concat();
+        assert!(duplicate_shard_indices(&[row, history, grown]).is_empty());
     }
 
     #[test]

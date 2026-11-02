@@ -1228,7 +1228,7 @@ impl BackupStore {
         // The index paths have no flag of their own, so their opt-out is the
         // environment: [`crate::store::KEEP_ALL_SHARDS_ENV`] set to a truthy
         // value keeps every stored shard in the indexed text instead of
-        // collapsing a whole-content replay.
+        // collapsing a replay run.
         self.for_each_archived_session_with_policy(
             mk,
             machine,

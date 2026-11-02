@@ -104,10 +104,11 @@ chat-stasher repair-duplicates --destination <name>
 ```
 
 The duplicate session, shard and byte counts describe byte-identical shard-by-
-shard replays of a session's complete preceding sequence—the pattern readers
+shard replays of the tail of a session's preceding sequence—a complete replay
+of the whole sequence included—the pattern readers
 collapse. `collapsed-run` entries show where each such replay occurs. Separate
-`suspicious_kept_*` counts are individual repeated shards that do not form a
-complete replay; readers keep them because repetition alone does not prove a
+`suspicious_kept_*` counts are individual repeated shards that do not form such
+a tail replay; readers keep them because repetition alone does not prove a
 duplicate session.
 Zero duplicate and suspicious shard counts do not clear an L3 warning caused by
 a final shard that repeats the concatenation of earlier shards.

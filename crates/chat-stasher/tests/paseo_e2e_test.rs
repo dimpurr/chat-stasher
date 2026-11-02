@@ -797,14 +797,13 @@ fn codex_and_grok_survive_source_and_stage_removal_without_duplicates() {
         "re-collecting minted a session the archive did not hold before"
     );
     // The sessions whose body comes from ONE source file replay whole and the
-    // reader collapses the replay: same bytes, same digest. (`shards=` counts
-    // raw shard entries across snapshots and is allowed to grow; the body is
-    // what must not.) The Grok session with two source files is the finding
-    // pinned by the ignored test below.
+    // reader collapses the replay; the two-source Grok session re-seals only
+    // its history shard (the row's shard is held), so the re-sealed shard is a
+    // replay of the sequence's tail and collapses the same way (W1065). Same
+    // bytes, same digest, for every session. (`shards=` counts raw shard
+    // entries across snapshots and is allowed to grow; the body is what must
+    // not.)
     for id in expected_ids() {
-        if id == grok_id(GROK_BOTH) {
-            continue;
-        }
         assert_eq!(
             after[&id].bytes, rows[&id].bytes,
             "{id}: body changed on re-collect"
@@ -814,36 +813,19 @@ fn codex_and_grok_survive_source_and_stage_removal_without_duplicates() {
             "{id}: body changed on re-collect"
         );
     }
-    assert_bodies_match_the_freeze_except_two_source_grok(&after, &freeze);
+    assert_bodies_match_the_freeze(&after, &freeze, "post-re-collect read");
 }
 
-fn assert_bodies_match_the_freeze_except_two_source_grok(
-    rows: &BTreeMap<String, ReadRow>,
-    freeze: &Freeze,
-) {
-    for (id, bytes) in [
-        (codex_id(CODEX_ACTIVE_STEM), &freeze.codex_active),
-        (codex_id(CODEX_ARCHIVED_STEM), &freeze.codex_archived_plain),
-        (grok_id(GROK_NATIVE_ONLY), &freeze.grok_native_history),
-    ] {
-        assert_eq!(
-            rows[&id].sha256,
-            sha256_hex(bytes),
-            "{id} is not the source bytes"
-        );
-    }
-}
-
-/// FINDING (PASEO-1d), reproduced and left red on purpose rather than
-/// loosened: after the stage and the collector state are lost, re-collecting
-/// UNCHANGED sources replays only part of a Grok session that has both a
-/// `session_docs` row and a `chat_history.jsonl` (the row's shard is
-/// recognised as held, the history's is sealed again). The reader's collapse
-/// only drops a replay of the *complete* preceding sequence, so `read`
-/// returns the native transcript twice. Single-source sessions (both Codex
-/// shapes, native-only Grok) are unaffected. Run with `--ignored` to see it.
+/// W1065 acceptance. After the stage and the collector state are lost,
+/// re-collecting UNCHANGED sources replays only part of a Grok session that
+/// has both a `session_docs` row and a `chat_history.jsonl`: the row's shard
+/// is recognised as held, the history's is sealed again. A re-sealed shard
+/// that matches the tail of the session's preceding shard sequence is a
+/// partial replay and the reader must eat it, so the body after the
+/// re-collect equals the body before it — including the digest of the joined
+/// shards. Duplicates a pre-W1065 build already archived read the same way,
+/// because this is a read decision; nothing is re-collected or deleted.
 #[test]
-#[ignore = "PASEO-1d finding: re-collect after total local loss doubles the history of a two-source Grok session; see PASEO-1d-OUT.md"]
 fn recollect_after_total_local_loss_does_not_duplicate_a_two_source_grok_session() {
     let freeze = Freeze::new();
     let archive = Archive::new();
@@ -862,6 +844,73 @@ fn recollect_after_total_local_loss_does_not_duplicate_a_two_source_grok_session
         (after[&id].bytes, &after[&id].sha256),
         (before[&id].bytes, &before[&id].sha256),
         "the two-source grok body changed on a re-collect of unchanged sources"
+    );
+}
+
+/// The W1065 negative: genuine new content must not be swallowed. The machine
+/// loses its stage and state; while it is lost the session's history GROWS;
+/// the re-collect re-seals that grown history whole. Its bytes differ from the
+/// tail shard the archive already holds, so it is new content, not a replay —
+/// the read body must carry it. A collapse rule that compared prefixes or
+/// concatenated byte ranges would swallow exactly this record; the tail rule
+/// keeps it.
+#[test]
+fn recollect_after_total_local_loss_keeps_genuinely_new_history_content() {
+    const TOKEN_GROK_NEW: &str = "qzgroknewcontentepsilon";
+    let freeze = Freeze::new();
+    let mut grown = Freeze::new();
+    grown.grok_both_history = {
+        let mut bytes = freeze.grok_both_history.clone();
+        bytes.extend_from_slice(
+            format!(r#"{{"type":"user","content":[{{"type":"text","text":"synthetic turn added while lost {TOKEN_GROK_NEW}"}}]}}"#).as_bytes(),
+        );
+        bytes.push(b'\n');
+        bytes
+    };
+    let id = grok_id(GROK_BOTH);
+
+    let archive = Archive::new();
+    let first = World::new();
+    freeze.plant(&first.home());
+    run_once(&first, &archive);
+    let before = read_all(&first, &archive);
+    drop(first);
+
+    let again = World::new();
+    grown.plant(&again.home());
+    run_once(&again, &archive);
+    let after = read_all(&again, &archive);
+    assert!(
+        after[&id].bytes > before[&id].bytes,
+        "the grown history was swallowed: {} bytes before, {} after",
+        before[&id].bytes,
+        after[&id].bytes
+    );
+    assert_ne!(
+        after[&id].sha256, before[&id].sha256,
+        "new content changed no bytes"
+    );
+
+    // What read kept, the export must write: the new turn reaches the user.
+    let out_grown = again.path().join("export-grown");
+    let exported = export_all(&again, &archive, &out_grown);
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export of the grown session failed:\n{}",
+        text(&exported)
+    );
+    let exported_text: String = files_under(&out_grown)
+        .iter()
+        .map(|p| fs::read_to_string(p).unwrap_or_default())
+        .collect();
+    assert!(
+        exported_text.contains(TOKEN_GROK_NEW),
+        "the genuinely new turn is missing from the export"
+    );
+    assert!(
+        exported_text.contains(TOKEN_GROK_BOTH),
+        "the original turn must stay"
     );
 }
 

@@ -185,8 +185,10 @@ under its own heading below.
   `dest-init`, or added a new destination on `v0.2.0` through `v0.5.0-rc.2`
   may see duplicated turns in those older builds. In `read`, `export`, FTS
   builds, activity indexes, and the repair inventory, a later run is dropped
-  only when it is a byte-identical, shard-by-shard replay of that session's
-  complete preceding shard sequence; other individual-shard repeats and
+  when it is a byte-identical, shard-by-shard replay of the tail of that
+  session's preceding shard sequence — a replay of the complete sequence
+  included, and (W1065) a trailing partial replay too; other individual-shard
+  repeats and
   matches against concatenated shard bytes are kept. The inventory reports
   those other individual repeats as suspicious and kept, and it **lists every
   collapsed run** — the session, where in its shard sequence the run starts, how
@@ -456,9 +458,31 @@ under its own heading below.
   of its own. If the harness rewrites or truncates the file, the next pass
   re-reads the current snapshot as a new generation and records why, while every
   generation already sealed stays in the archive, byte-identical and still
-  extractable; a stage whose only new content is a machine-log generation
+  extractable; a   stage whose only new content is a machine-log generation
   pushes instead of being refused as empty. The read-side "user prompts only"
   view is the next phase, not this one.
+
+- **A two-source session that doubled after total local loss reads repaired
+  (W1065).** When a machine's stage and collector state are gone and unchanged
+  sources are collected again, a Grok session with both a `session_docs` row
+  and a `chat_history.jsonl` re-seals only the history shard: the row's shard
+  is held while the history's is sealed anew. The reader's collapse used to
+  eat only a replay of the *complete* preceding shard sequence, so that
+  partial re-seal was returned as new content and the body doubled on every
+  re-collect cycle. In `read`, `export`, FTS builds, activity indexes, and
+  the repair inventory, a later run now also collapses when it byte-identically
+  replays, shard by shard, the **tail** of the session's preceding shard
+  sequence — a complete replay is the maximal case. Duplicates a pre-W1065
+  build already archived stay stored exactly as they are and already read
+  repaired, because the collapse is a read decision; `read --no-collapse`,
+  `export --no-collapse` and `CHAT_STASHER_NO_COLLAPSE` still return every
+  stored shard and nothing is ever deleted. Genuine new content is not
+  swallowed: a re-seal whose bytes differ from the tail survives (a history
+  that grew while the machine was lost keeps its new turns), and a repeat
+  against an earlier non-tail position — `A,B,A` — is still kept, exactly as
+  before. A shard whose bytes merely concatenate or extend earlier shards was
+  never a replay and remains content. Full-text and activity indexes detect
+  the rule change and rebuild their rows once.
 
 #### Changed
 
