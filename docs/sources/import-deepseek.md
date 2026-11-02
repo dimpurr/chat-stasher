@@ -16,7 +16,7 @@ This page is about DeepSeek's official export: the takeout whose conversation fi
 
 ## What we collect
 
-In this build, nothing: the import command names the platform (its spelling on the command line is `deep-seek`) but refuses it. On 2026-11-01 a run of `chat-stasher import deep-seek <file> --inbox <dir> --stage <dir>` on a synthetic file exited 2 with "this build has no deepseek export parser", saying the export was not importable and that nothing was sealed. The cause is in `crates/chat-stasher/src/import.rs`: `crates/chat-stasher/src/import.rs` has no parser wired for it. The generated header above says the same (`parser written, not yet offered by the command`).
+In this build, nothing: the import command names the platform (its spelling on the command line is `deep-seek`) but refuses it. On 2026-11-01 a run of `chat-stasher import deep-seek <file> --inbox <dir> --stage <dir>` on a synthetic file exited 2 with "this build has no deepseek export parser", saying the export was not importable and that nothing was sealed. The cause is in `crates/chat-stasher/src/import.rs`: it has no parser wired for it there. The generated header above says the same (`parser written, not yet offered by the command`).
 
 A parser exists in the source (`crates/chat-stasher/src/import/deepseek.rs`). Its notes describe a pure function from the export's bytes to conversation-level records, with no disk, network or archive writes. The shape it reads was measured on one export dated 2026-07-01 (13,074,881 bytes):
 
