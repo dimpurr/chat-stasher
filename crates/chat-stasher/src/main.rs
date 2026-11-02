@@ -9811,6 +9811,13 @@ fn mirror_step_after_push(
                         "each round retries the write and completes once the local \
                          cause is fixed"
                     }
+                    chat_stasher::mirror::HardClass::DiskQuery => {
+                        // The volume would not answer, so the round wrote
+                        // nothing: the next round re-checks before writing
+                        // and completes once the query answers again.
+                        "the mirror re-checks free space every round before writing, \
+                         and completes once the volume answers again"
+                    }
                 };
                 eprintln!(
                     "[run-once] mirror-sync warning: {}: {hard}; {}",
