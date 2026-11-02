@@ -69,7 +69,7 @@ fn say_to(out: &mut dyn std::io::Write, args: std::fmt::Arguments<'_>) {
 
 fn cmd_inbox_init(name: &str, locator: &str) -> ExitCode {
     use chat_stasher::inbox_config;
-    if let Err(error) = inbox_config::validate(name, locator) {
+    if let Err(error) = inbox_config::validate_new(name, locator) {
         eprintln!("{error}");
         return ExitCode::from(2);
     }
@@ -244,7 +244,7 @@ enum Command {
     InboxInit {
         /// Local name for this inbox.
         name: String,
-        /// Credential-free backend locator; credentials are configured separately.
+        /// Credential-free locator: fs:///abs/dir or s3://<bucket>/<prefix> (keys: CHAT_STASHER_INBOX_S3_*).
         #[arg(long)]
         locator: String,
     },
@@ -253,9 +253,9 @@ enum Command {
     /// No backend permissions are probed; supply a provider-scoped write credential.
     SendKey(SendKeyArgs),
     /// Encrypt and post an explicit file using an environment posting key.
-    /// Creates no archive key or machine identity. Currently opens fs:// inboxes.
+    /// Creates no archive key or machine identity. Opens fs:// and s3:// inboxes.
     Send(SendArgs),
-    /// Pull a declared fs:// inbox into sealed stage; `run-once` never pulls
+    /// Pull a declared fs:// or s3:// inbox into sealed stage; `run-once` never pulls
     /// a remote inbox (a declared `[pull.letta]` producer is the pass's own
     /// separate pull step, not this command).
     /// Archive proof is not wired yet: sealed objects remain queued, exit 3.
@@ -10997,6 +10997,10 @@ fn stranded_push_facts(
         None => None,
         Some(o) if o.refused().is_some() => Some((o.report.unindexed_packs(), "not-adopted")),
         Some(o) if o.adopted() => Some((o.report.unindexed_packs(), "adopted")),
+        // Debris is a state, not an action, and it is the one word every
+        // other surface already prints for the same bytes: the packs stay
+        // `torn` — reported, excluded, untouched.
+        Some(o) if !o.torn.is_empty() => Some((o.report.unindexed_packs(), "torn")),
         Some(_) => None,
     }
 }
@@ -11301,17 +11305,51 @@ fn cmd_push(
                 orphans.report.unindexed_bytes(),
             );
         }
-        match (stranded, orphans.refused()) {
-            (0, None) => {}
-            (_, None) => println!(
+        // Torn debris never enters an index file, not even as an exclusion: it
+        // is reported here as what it is, so `stranded` above keeps meaning
+        // "named by no index file" for packs of every kind.
+        if !orphans.torn.is_empty() {
+            let bytes = orphans.torn.iter().map(|pack| pack.bytes).sum::<u64>();
+            println!(
+                "[push] stranded packs : {} torn pack(s) / {bytes} bytes are debris from an interrupted push - never adoptable, never uploaded. {}",
+                orphans.torn.len(),
+                chat_stasher::debris::INTERRUPTED_PUSH_SENTENCE,
+            );
+        }
+        use chat_stasher::orphans::IndexAdoption;
+        match orphans.adoption.as_ref() {
+            // With nothing excluded, the number the count line printed and the
+            // set this backup deduplicated against are one and the same set.
+            Some(IndexAdoption::Adopted) if orphans.torn.is_empty() => println!(
                 "[push] stranded packs : adopted - this backup deduplicated against them and re-uploaded none of their content"
             ),
-            (0, Some(why)) => println!(
+            Some(IndexAdoption::Adopted) => println!(
+                "[push] stranded packs : adopted - this backup deduplicated against the pack(s) that verified and re-uploaded none of their content; the torn debris above was excluded"
+            ),
+            // Debris-only: the torn line above is the whole story — nothing
+            // was adoptable, nothing was refused, nothing was re-uploaded
+            // from debris that holds no content at all.
+            Some(IndexAdoption::Debris) => {}
+            Some(IndexAdoption::Refused { why }) if stranded == 0 => println!(
                 "[push] stranded packs : none unreachable, but the full index could not be built ({why})"
             ),
-            (_, Some(why)) => println!(
+            Some(IndexAdoption::Refused { why }) => println!(
                 "[push] stranded packs : NOT adopted ({why}) - their content was uploaded again"
             ),
+            Some(IndexAdoption::Plain) | None => {}
+        }
+        // What this push wrote about the packs its open verified: the
+        // naming file is what stops the next open from paying the re-read
+        // (W1066), and a skip or a failed write is a state an operator
+        // can act on, not a detail to absorb.
+        match summary.persisted.as_ref() {
+            Some(chat_stasher::orphans::PersistOutcome::Named { packs, .. }) => println!(
+                "[push] stranded packs : persisted - a new index file names the {packs} verified pack(s), so later opens reuse them without re-reading their bytes"
+            ),
+            Some(chat_stasher::orphans::PersistOutcome::NotWritten { why }) => println!(
+                "[push] stranded packs : NOT persisted ({why}) - they stay named by no index file and a later push tries again"
+            ),
+            None => {}
         }
     }
     println!("[push] snapshots      : {}", summary.snapshots_in_repo);
@@ -14384,7 +14422,7 @@ fn cmd_prune_orphans(
         eprintln!("prune-orphans: --apply is refused, and nothing was read or written.");
         eprintln!("prune-orphans: deleting an unindexed pack is not a maintenance detail here:");
         eprintln!(
-            "prune-orphans: \"unindexed\" means no index file names it, not that nothing uses it — a retry can reuse one and write a snapshot that depends on it while it stays unindexed on disk, so a pack can be the only copy of archived content."
+            "prune-orphans: \"unindexed\" means no index file names it, not that nothing uses it — a retry can reuse one and write a snapshot that depends on it, and it stays unindexed on disk until a later push names it in a new index file, so a pack can be the only copy of archived content."
         );
         eprintln!(
             "prune-orphans: a safe delete needs all three of these, and this build has none:"
@@ -14495,6 +14533,9 @@ fn prune_orphans_json(inventory: &chat_stasher::prune_orphans::Inventory) -> ser
     let next_push = match &inventory.next_push {
         NextPush::NothingStranded => serde_json::json!({"kind": "nothing_stranded"}),
         NextPush::WouldAdopt => serde_json::json!({"kind": "would_adopt"}),
+        NextPush::WouldAdoptExcludingTorn { torn } => {
+            serde_json::json!({"kind": "would_adopt_excluding_torn", "torn": torn})
+        }
         NextPush::Refused { why } => serde_json::json!({"kind": "refused", "why": why}),
     };
 
@@ -14632,6 +14673,11 @@ fn print_prune_orphans(inventory: &chat_stasher::prune_orphans::Inventory, dry_r
         NextPush::WouldAdopt => println!(
             "[prune] next push   : would adopt all {} unindexed pack(s); a later push uploads none of their blobs again",
             inventory.candidate_packs()
+        ),
+        NextPush::WouldAdoptExcludingTorn { torn } => println!(
+            "[prune] next push   : would adopt the {} pack(s) that verified and set aside the {} torn debris — debris is never adopted and stays unindexed",
+            inventory.stranded_packs(),
+            torn
         ),
         NextPush::Refused { why } => println!(
             "[prune] next push   : NOT adopted — {why}; a push re-uploads what these packs hold"
@@ -16657,6 +16703,15 @@ mod decision_surface_tests {
         )
     }
 
+    /// Reclaim a body synchronously in a fixture: the set of shards the
+    /// delete may take is everything present — a synchronous survey of the
+    /// same directory the reclaim's own survey would enumerate.
+    fn reclaim_fixture_body(stage: &Path, machine: &str, session: &str) -> usize {
+        let proven =
+            chat_stasher::stagereclaim::present_shard_seqs(stage, machine, session).unwrap();
+        chat_stasher::stagereclaim::reclaim_session_body(stage, machine, session, &proven).unwrap()
+    }
+
     /// Write one sealed shard for `session` under `machine` (bucketed layout).
     fn write_shard(stage: &Path, machine: &str, session: &str, lines: &[String]) {
         let dir = stage
@@ -16757,8 +16812,7 @@ mod decision_surface_tests {
         // that skipped it would be testing a reclaim that cannot happen.
         let fresh = chat_stasher::manifest::generate_manifest(&stage, machine).unwrap();
         chat_stasher::manifest::write_manifest(&stage, machine, &fresh).unwrap();
-        let removed = chat_stasher::stagereclaim::reclaim_session_body(&stage, machine, session)
-            .expect("reclaim the body");
+        let removed = reclaim_fixture_body(&stage, machine, session);
         assert_eq!(removed, 1, "the shard body goes, the session dir stays");
 
         rebuild_activity_index(&stage, machine, false).expect("second rebuild");
@@ -16788,7 +16842,7 @@ mod decision_surface_tests {
         // index row was ever written.
         let manifest = chat_stasher::manifest::generate_manifest(&stage, machine).unwrap();
         chat_stasher::manifest::write_manifest(&stage, machine, &manifest).unwrap();
-        chat_stasher::stagereclaim::reclaim_session_body(&stage, machine, session).unwrap();
+        reclaim_fixture_body(&stage, machine, session);
 
         rebuild_activity_index(&stage, machine, false).expect("rebuild");
         let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
@@ -16839,7 +16893,7 @@ mod decision_surface_tests {
         write_shard(&stage, machine, session, &[cc_line("2025-06-01T00:00:00Z")]);
         let fresh = chat_stasher::manifest::generate_manifest(&stage, machine).unwrap();
         chat_stasher::manifest::write_manifest(&stage, machine, &fresh).unwrap();
-        chat_stasher::stagereclaim::reclaim_session_body(&stage, machine, session).unwrap();
+        reclaim_fixture_body(&stage, machine, session);
 
         rebuild_activity_index(&stage, machine, false).expect("second rebuild");
         let after = fs::read_to_string(&index).unwrap();
@@ -16889,7 +16943,7 @@ mod decision_surface_tests {
 
         let fresh = chat_stasher::manifest::generate_manifest(&stage, machine).unwrap();
         chat_stasher::manifest::write_manifest(&stage, machine, &fresh).unwrap();
-        chat_stasher::stagereclaim::reclaim_session_body(&stage, machine, session).unwrap();
+        reclaim_fixture_body(&stage, machine, session);
 
         rebuild_activity_index(&stage, machine, false).expect("rebuild");
         let after = fs::read_to_string(&index).unwrap();
@@ -22608,24 +22662,47 @@ fn cmd_inbox_pull_observed(
             return ExitCode::from(3);
         }
     };
-    let Some(backend) = inbox
-        .locator
-        .strip_prefix("fs://")
-        .map(Path::new)
-        .filter(|p| p.is_absolute())
-    else {
-        eprintln!("inbox-pull refused: only absolute fs:// inbox locators are wired");
-        return ExitCode::from(1);
-    };
-    // OpenDAL's filesystem builder can create a missing root. A pull must
-    // observe the existing inbox instead of manufacturing an empty answer.
-    match std::fs::symlink_metadata(backend) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        _ => {
-            eprintln!("inbox-pull incomplete: backend unavailable; waiting count unknown");
-            return ExitCode::from(3);
+    // An s3 inbox takes its endpoint and credentials from the environment,
+    // never from the declaration; nothing about them is printed.
+    let s3_config = if inbox.locator.starts_with("s3://") {
+        match remote_inbox::S3InboxConfig::from_locator(&inbox.locator, |name| {
+            std::env::var(name).ok()
+        }) {
+            Ok(config) => Some(config),
+            Err(_) => {
+                eprintln!(
+                    "inbox-pull incomplete: s3 inbox locator or credential environment invalid; \
+                     see docs/inboxes.md"
+                );
+                return ExitCode::from(3);
+            }
         }
-    }
+    } else {
+        None
+    };
+    let backend = if s3_config.is_some() {
+        None
+    } else {
+        let Some(backend) = inbox
+            .locator
+            .strip_prefix("fs://")
+            .map(Path::new)
+            .filter(|p| p.is_absolute())
+        else {
+            eprintln!("inbox-pull refused: only absolute fs:// and s3:// inbox locators are wired");
+            return ExitCode::from(1);
+        };
+        // OpenDAL's filesystem builder can create a missing root. A pull must
+        // observe the existing inbox instead of manufacturing an empty answer.
+        match std::fs::symlink_metadata(backend) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            _ => {
+                eprintln!("inbox-pull incomplete: backend unavailable; waiting count unknown");
+                return ExitCode::from(3);
+            }
+        }
+        Some(backend)
+    };
     let now = match u64::try_from(chrono::Utc::now().timestamp()) {
         Ok(now) => now,
         Err(_) => {
@@ -22672,14 +22749,25 @@ fn cmd_inbox_pull_observed(
     let result = (|| -> anyhow::Result<remote_inbox::PullReport> {
         let runtime = tokio::runtime::Runtime::new()?;
         let entered = runtime.enter();
-        let backend = backend
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("invalid inbox locator"))?;
-        let operator =
-            opendal::Operator::new(opendal::services::Fs::default().root(backend))?.finish();
-        let operator = opendal::blocking::Operator::new(operator)?;
-        drop(entered);
-        let transport = remote_inbox::RemoteInbox::new(operator, 10 * 1024 * 1024);
+        let transport = match (&s3_config, backend) {
+            (Some(config), _) => {
+                let transport = remote_inbox::RemoteInbox::open_s3(config, 10 * 1024 * 1024)?;
+                drop(entered);
+                transport
+            }
+            (None, Some(backend)) => {
+                let backend = backend
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("invalid inbox locator"))?;
+                let operator =
+                    opendal::Operator::new(opendal::services::Fs::default().root(backend))?
+                        .finish();
+                let operator = opendal::blocking::Operator::new(operator)?;
+                drop(entered);
+                remote_inbox::RemoteInbox::new(operator, 10 * 1024 * 1024)
+            }
+            (None, None) => anyhow::bail!("invalid inbox locator"),
+        };
         remote_inbox::pull(
             &transport,
             &inbox.identity,

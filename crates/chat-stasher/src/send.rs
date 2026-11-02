@@ -201,12 +201,17 @@ pub fn send_explicit_identified(
     let missing_account = identity
         .and_then(|capture| capture.account.as_ref())
         .is_none();
+    let s3 = key.locator.starts_with("s3://");
     let root = key
         .locator
         .strip_prefix("fs://")
         .map(std::path::Path::new)
-        .filter(|root| root.is_absolute())
-        .ok_or_else(|| SendFailure::refused("only absolute fs:// inbox locators are wired"))?;
+        .filter(|root| root.is_absolute());
+    if root.is_none() && !s3 {
+        return Err(SendFailure::refused(
+            "only absolute fs:// and s3:// inbox locators are wired",
+        ));
+    }
     let bundle = explicit_bundle(
         path,
         session,
@@ -251,30 +256,60 @@ pub fn send_explicit_identified(
             observed_identity.push(account);
         }
     }
-    crate::test_identity_guard::refuse_fixture_write(&observed_identity, root)
-        .map_err(|_| SendFailure::refused("fixture inbox write refused"))?;
+    // An s3 inbox has no local path for the fixture guard to judge.
+    if let Some(root) = root {
+        crate::test_identity_guard::refuse_fixture_write(&observed_identity, root)
+            .map_err(|_| SendFailure::refused("fixture inbox write refused"))?;
+    }
+    // Resolve credentials before any runtime or network use. Names only; the
+    // values never appear in a diagnostic.
+    let s3_config = if s3 {
+        Some(
+            crate::remote_inbox::S3InboxConfig::from_locator(&key.locator, |name| {
+                std::env::var(name).ok()
+            })
+            .map_err(|_| {
+                SendFailure::refused(
+                    "s3 inbox locator or credential environment invalid; see docs/inboxes.md",
+                )
+            })?,
+        )
+    } else {
+        None
+    };
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|_| SendFailure::incomplete("backend runtime unavailable"))?;
     let entered = runtime.enter();
-    let staging = root.join(".chat-stasher-tmp");
-    let root_text = root
-        .to_str()
-        .ok_or_else(|| SendFailure::refused("invalid filesystem locator"))?;
-    let staging_text = staging
-        .to_str()
-        .ok_or_else(|| SendFailure::refused("invalid filesystem locator"))?;
-    // Same-filesystem rename keeps concurrent pullers from seeing partial objects.
-    let operator = opendal::Operator::new(
-        opendal::services::Fs::default()
-            .root(root_text)
-            .atomic_write_dir(staging_text),
-    )
-    .map_err(|_| SendFailure::incomplete("inbox backend unavailable"))?
-    .finish();
-    let operator = opendal::blocking::Operator::new(operator)
-        .map_err(|_| SendFailure::incomplete("inbox backend unavailable"))?;
-    drop(entered);
-    let inbox = crate::remote_inbox::RemoteInbox::new(operator, 10 * 1024 * 1024);
+    let inbox = match (&s3_config, root) {
+        (Some(config), _) => {
+            let inbox = crate::remote_inbox::RemoteInbox::open_s3(config, 10 * 1024 * 1024)
+                .map_err(|_| SendFailure::refused("s3 inbox configuration invalid"))?;
+            drop(entered);
+            inbox
+        }
+        (None, Some(root)) => {
+            let staging = root.join(".chat-stasher-tmp");
+            let root_text = root
+                .to_str()
+                .ok_or_else(|| SendFailure::refused("invalid filesystem locator"))?;
+            let staging_text = staging
+                .to_str()
+                .ok_or_else(|| SendFailure::refused("invalid filesystem locator"))?;
+            // Same-filesystem rename keeps concurrent pullers from seeing partial objects.
+            let operator = opendal::Operator::new(
+                opendal::services::Fs::default()
+                    .root(root_text)
+                    .atomic_write_dir(staging_text),
+            )
+            .map_err(|_| SendFailure::incomplete("inbox backend unavailable"))?
+            .finish();
+            let operator = opendal::blocking::Operator::new(operator)
+                .map_err(|_| SendFailure::incomplete("inbox backend unavailable"))?;
+            drop(entered);
+            crate::remote_inbox::RemoteInbox::new(operator, 10 * 1024 * 1024)
+        }
+        (None, None) => return Err(SendFailure::refused("inbox locator invalid")),
+    };
     send_bundle(&inbox, &bundle, &key.key_id, &key.recipient, &key.signing)
         .map_err(|_| SendFailure::incomplete("inbox upload unavailable"))?;
     // Only a completed upload can advance the local best-effort receipt.

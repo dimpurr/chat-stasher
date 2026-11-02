@@ -15,10 +15,12 @@
 //!
 //! "Unindexed" means *no index file names this pack*. It does not mean unused:
 //! a retry can adopt a pack into an in-memory index and write a snapshot that
-//! depends on it while the pack stays unindexed **on disk**, which is exactly
-//! what [`crate::orphans`] does on purpose. So an unindexed pack may be the only
-//! copy of a blob a snapshot already references, and deleting it would take
-//! archived content with it.
+//! depends on it, and a push that survives its own adoption names the pack in
+//! a new index file ([`crate::orphans::persist_verified`]) — but until that
+//! push happens the pack sits unindexed **on disk**, and even a pack an index
+//! names can still hold the only copy of one of the blobs a snapshot
+//! references. So an unindexed pack may well be the only copy of archived
+//! content, and deleting it would take that content with it.
 //!
 //! Closing that gap needs three capabilities this build does not have, and one
 //! of them missing is enough to refuse:
@@ -175,9 +177,13 @@ pub fn id_prefix(id: &str) -> &str {
 /// What the next open would do about the unindexed packs, by
 /// [`crate::orphans::index_adopting`]'s rules.
 ///
-/// Adoption is all-or-nothing: one pack that fails verification, or one index
-/// entry the backend cannot satisfy, refuses the whole set — so a report that
-/// listed only the packs that verified would overstate what a retry will reuse.
+/// Adoption keeps its all-or-nothing shape over the packs that can be
+/// content — one pack whose header reads but whose bytes do not verify, or one
+/// index entry the backend cannot satisfy, refuses the set — with the one W1066
+/// exclusion: torn debris, whose bytes can never become content, is set aside
+/// rather than refusing the packs that verified. So a report that listed only
+/// the packs that verified would still overstate what a retry reuses when
+/// debris is present, and the debris is named here instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NextPush {
     /// The index names every pack the backend lists. There is nothing to adopt
@@ -186,6 +192,15 @@ pub enum NextPush {
     /// Every unindexed pack verified, so the next open adopts all of them and a
     /// later push uploads none of their blobs again.
     WouldAdopt,
+    /// Every pack that can be content verified; `torn` of the candidates are
+    /// debris an interrupted push left behind, which the next open sets aside:
+    /// never adopted, never named by an index file, left exactly as found. The
+    /// verified packs are adopted — and a push names them in a new index file,
+    /// so the re-read stops being per-open from then on.
+    WouldAdoptExcludingTorn {
+        /// How many of the candidates are torn debris.
+        torn: usize,
+    },
     /// The next open adopts none of them. `why` names the fence that stopped it:
     /// an index entry the backend cannot satisfy, or a pack that did not verify.
     Refused {
@@ -429,9 +444,10 @@ pub fn survey(
     // The fences are checked in the order the adopting open checks them
     // (`index_adopting`): a missing entry refuses before verification is even
     // attempted, so a report says the same thing the next push would do. A
-    // torn pack refuses too — the adopting open still refuses the whole set
-    // over any pack that does not verify, torn debris included — but the
-    // refusal's reason is the torn one, not an unknown one.
+    // pack whose header reads but whose bytes do not verify refuses the whole
+    // set, exactly as it does on the push. Torn debris is the one exclusion
+    // (W1066): it can never become content, so the next open sets it aside
+    // and adopts the verified remainder rather than re-uploading it.
     let next_push = if candidates.is_empty() {
         NextPush::NothingStranded
     } else if !report.missing.is_empty() {
@@ -443,11 +459,17 @@ pub fn survey(
         }
     } else if let Some(why) = candidates.iter().find_map(|pack| match &pack.verdict {
         Verdict::Stranded => None,
-        Verdict::Torn { reason } | Verdict::Unverified { reason } => Some(reason.clone()),
+        Verdict::Torn { .. } => None,
+        Verdict::Unverified { reason } => Some(reason.clone()),
     }) {
         NextPush::Refused { why }
     } else {
-        NextPush::WouldAdopt
+        let torn = candidates.iter().filter(|pack| pack.torn()).count();
+        if torn == 0 {
+            NextPush::WouldAdopt
+        } else {
+            NextPush::WouldAdoptExcludingTorn { torn }
+        }
     };
 
     Ok(Inventory {

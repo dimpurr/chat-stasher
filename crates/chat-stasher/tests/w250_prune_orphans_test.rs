@@ -417,6 +417,64 @@ fn a_damaged_orphan_is_reported_unknown_and_makes_the_survey_incomplete() {
     );
 }
 
+/// Torn debris beside complete packs: the verified remainder is what the next
+/// push adopts, and the debris is set aside — never adopted, never named,
+/// never a refusal. Red before W1066: the debris vetoed the whole set, so the
+/// next push read `NOT adopted` over packs that fully verified.
+#[test]
+fn torn_debris_beside_complete_packs_no_longer_refuses_them() {
+    let sb = Sandbox::new(2, 200_000);
+    let push = sb.push();
+    assert!(push.status.success(), "{}", stderr(&push));
+    let stranded = strand_packs(&sb);
+    assert!(
+        stranded.len() >= 2,
+        "the fixture needs a survivor beside the victim"
+    );
+
+    // Half of the last pack: torn debris — the length field of the truncated
+    // file no longer names a header that fits, so the shared classification
+    // reads it as debris from an interrupted push.
+    let victim = stranded.last().unwrap().clone();
+    let full = fs::read(&victim).unwrap();
+    fs::write(&victim, &full[..full.len() / 2]).unwrap();
+
+    let out = sb.prune(&[]);
+    let text = stdout(&out);
+
+    assert!(
+        out.status.success(),
+        "torn debris is a known state, not an incomplete survey: {text}{}",
+        stderr(&out)
+    );
+    assert!(
+        text.contains("1 torn ("),
+        "the debris is counted apart from the stranded content: {text}"
+    );
+    assert!(
+        text.contains(&format!("{} stranded (", stranded.len() - 1)),
+        "the complete packs are counted as stranded, never as debris: {text}"
+    );
+    assert!(
+        text.contains("set aside the 1 torn debris"),
+        "the next push adopts the verified remainder and sets the debris aside: {text}"
+    );
+    assert!(
+        !text.contains("next push   : NOT adopted"),
+        "debris must not refuse the packs that verified: {text}"
+    );
+
+    // The same fact in `--json`: a distinct kind, with the debris count.
+    let out = sb.prune(&["--json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let value: serde_json::Value = serde_json::from_str(stdout(&out).trim()).unwrap();
+    assert_eq!(
+        value["next_push"]["kind"],
+        serde_json::json!("would_adopt_excluding_torn")
+    );
+    assert_eq!(value["next_push"]["torn"], serde_json::json!(1));
+}
+
 /// `--apply` is refused, in as many words, and it is refused **before** the
 /// repository is opened — proved by pointing it at a path that does not exist,
 /// where an open would have failed with a different message.

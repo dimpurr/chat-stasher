@@ -161,9 +161,10 @@ push's data packs are still in the repository, so nothing is lost.
 
 Move exactly the file(s) the error names out of the repository's `index/` or
 `snapshots/` directory on the destination — move, do not delete — and run the
-command again. The next open picks the stranded packs up again. chat-stasher
-does not move or delete anything itself. A new push no longer produces such a
-file on SFTP.
+command again. The next open picks the stranded packs up again. A push that
+adopts them also names them in a new index file, so the re-read the adoption
+cost happens once, not on every open. chat-stasher does not move or delete
+anything itself. A new push no longer produces such a file on SFTP.
 
 ## Web chats and the browser extension
 

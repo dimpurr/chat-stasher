@@ -555,12 +555,32 @@ fn count_torn_debris<S: Open>(
     Ok((torn_packs, torn_bytes))
 }
 
-/// Build the L3 expected manifest from the sealed staging tree:
-/// `sessions/<machine>/<session-id>/<bucket>/{NNNNNN}.jsonl` (plus the legacy
-/// unbucketed layout). Each session contributes its shard count, concatenated
-/// byte length and concatenated sha256 — the three properties `read
-/// --all-machines` later reports for the archive.
-pub fn expected_manifest(stage: &Path) -> anyhow::Result<Vec<SessionExpectation>> {
+/// One session the stage survey ([`expected_manifest_surveyed`]) walked:
+/// the session's L3 expectation beside the sealed-shard sequence numbers the
+/// expectation's bytes were hashed from, captured in the same directory
+/// enumeration — one walk, not two.
+///
+/// The sequence set is what makes "delete only what was proven" sayable
+/// (W1062): because the digest triple and the sequence set describe the
+/// same enumeration, a shard sealed into the directory after the survey is
+/// in neither — unknown to the proof this expectation records, and
+/// distinguishable from every shard the proof does cover.
+#[derive(Debug, Clone)]
+pub struct SurveyedSession {
+    /// The derived L3 expectation for this session.
+    pub expectation: SessionExpectation,
+    /// Sequences of the sealed shards whose bytes the expectation's
+    /// digest triple was hashed over.
+    pub shard_sequences: BTreeSet<u64>,
+}
+
+/// The stage survey: walk every session directory once, deriving each
+/// session's L3 expectation and, in the same enumeration, the sealed-shard
+/// sequence numbers that expectation's bytes were hashed from (W1062). A
+/// shard that arrives between an enumeration and a hash therefore cannot
+/// appear in one and not the other; the reader that later deletes exactly
+/// the enumerated sequences provably deletes only proven bytes.
+pub fn expected_manifest_surveyed(stage: &Path) -> anyhow::Result<Vec<SurveyedSession>> {
     let sessions_root = stage.join(SESSIONS_DIR);
     let mut out = Vec::new();
     if !sessions_root.is_dir() {
@@ -578,21 +598,53 @@ pub fn expected_manifest(stage: &Path) -> anyhow::Result<Vec<SessionExpectation>
                 continue;
             }
             let session_id = s_entry.file_name().to_string_lossy().into_owned();
-            let shard_count = count_shards(&s_entry.path())?;
-            let concat = crate::store::concat_shards(stage, &machine, &session_id)?;
-            out.push(SessionExpectation {
-                machine: machine.clone(),
-                session_id,
-                shard_count,
-                concat_bytes: concat.len() as u64,
-                sha256: hex_digest(&Sha256::digest(&concat)),
-                basis: ExpectationBasis::DerivedFromStageBody,
-                unverifiable_reason: None,
+            let mut entries = crate::store::sealed_shard_entries(&s_entry.path())?;
+            entries.sort_by_key(|(seq, _)| *seq);
+            let shard_count = entries.len();
+            let mut shard_sequences = BTreeSet::new();
+            let mut concat = Vec::new();
+            for (seq, path) in &entries {
+                // Same read semantics as `store::concat_shards_in_dir`
+                // (which this replaces for the survey): sorted by global
+                // sequence, raw bytes extended in order.
+                concat.extend_from_slice(&fs::read(path)?);
+                shard_sequences.insert(*seq);
+            }
+            out.push(SurveyedSession {
+                expectation: SessionExpectation {
+                    machine: machine.clone(),
+                    session_id: session_id.clone(),
+                    shard_count,
+                    concat_bytes: concat.len() as u64,
+                    sha256: hex_digest(&Sha256::digest(&concat)),
+                    basis: ExpectationBasis::DerivedFromStageBody,
+                    unverifiable_reason: None,
+                },
+                shard_sequences,
             });
         }
     }
-    out.sort_by(|a, b| (&a.machine, &a.session_id).cmp(&(&b.machine, &b.session_id)));
+    out.sort_by(|a, b| {
+        (&a.expectation.machine, &a.expectation.session_id)
+            .cmp(&(&b.expectation.machine, &b.expectation.session_id))
+    });
     Ok(out)
+}
+
+/// Build the L3 expected manifest from the sealed staging tree:
+/// `sessions/<machine>/<session-id>/<bucket>/{NNNNNN}.jsonl` (plus the legacy
+/// unbucketed layout). Each session contributes its shard count, concatenated
+/// byte length and concatenated sha256 — the three properties `read
+/// --all-machines` later reports for the archive.
+///
+/// Derived from the same single walk [`expected_manifest_surveyed`] makes,
+/// so the expectation here and the shard sequence set the survey hands a
+/// caller can never disagree about what the proof covered.
+pub fn expected_manifest(stage: &Path) -> anyhow::Result<Vec<SessionExpectation>> {
+    Ok(expected_manifest_surveyed(stage)?
+        .into_iter()
+        .map(|surveyed| surveyed.expectation)
+        .collect())
 }
 
 /// Resolve the L3 expected manifest, preferring the strongest available
@@ -807,6 +859,56 @@ mod tests {
     fn expected_manifest_is_empty_without_stage() {
         let dir = TempDir::new().unwrap();
         assert!(expected_manifest(dir.path()).unwrap().is_empty());
+        drop(dir);
+    }
+
+    /// W1062: the survey records, beside each expectation, the sequence
+    /// numbers of the exact shards that expectation was hashed over — the
+    /// set a reclaim delete is narrowed to. The set must name every sealed
+    /// shard the scan walked and nothing else, because it is the whole
+    /// authority for what may be deleted as proven.
+    #[test]
+    fn expected_manifest_surveyed_carries_the_sequences_it_hashed() {
+        let dir = TempDir::new().unwrap();
+        let stage = dir.path();
+        let machine = "m-test";
+        crate::store::write_sealed_shard(
+            crate::store::StageWriter::Collect,
+            stage,
+            machine,
+            "s-1",
+            &[r#"{"seq":1,"i":0}"#.to_string()],
+        )
+        .unwrap();
+        crate::store::write_sealed_shard(
+            crate::store::StageWriter::Collect,
+            stage,
+            machine,
+            "s-1",
+            &[r#"{"seq":2,"i":1}"#.to_string()],
+        )
+        .unwrap();
+        // A session directory with no body contributes an expectation of a
+        // reclaimed session — with no sequence set.
+        std::fs::create_dir_all(stage.join(SESSIONS_DIR).join(machine).join("s-empty")).unwrap();
+
+        let surveyed = expected_manifest_surveyed(stage).unwrap();
+        assert_eq!(surveyed.len(), 2, "both directories were walked");
+        assert_eq!(surveyed[0].expectation.session_id, "s-1");
+        assert_eq!(
+            surveyed[0].shard_sequences,
+            BTreeSet::from([1u64, 2]),
+            "the sequences come from the same walk that hashed them"
+        );
+        assert_eq!(surveyed[1].expectation.session_id, "s-empty");
+        assert_eq!(
+            surveyed[1].expectation.shard_count, 0,
+            "the empty directory still contributes the expectation row"
+        );
+        assert!(
+            surveyed[1].shard_sequences.is_empty(),
+            "no body means no proven sequences"
+        );
         drop(dir);
     }
 

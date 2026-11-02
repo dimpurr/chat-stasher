@@ -43,7 +43,12 @@
 //! baseline lands before the body goes — then removes every proven
 //! session's shard body while keeping the session's persistent `shard-seq`
 //! counter, which is what stops the next sequence from falling back onto
-//! archived shard names. Deletion is per session, resumable and idempotent.
+//! archived shard names. Deletion is per session, resumable and idempotent,
+//! and narrowed to the proof (W1062): the delete removes only the sealed
+//! shards the survey enumerated — the same bytes the proof's digest triple
+//! was computed over — so a shard a concurrent collect pass seals after the
+//! survey stays on the stage, unpushed and unharmed, until a later pass
+//! pushes it and a later run proves it.
 
 use anyhow::Context;
 use rustic_core::repofile::MasterKey;
@@ -308,12 +313,22 @@ pub fn reclaim_stage(
 
     // Candidates: every session with a body in the stage. A session directory
     // that holds only `shard-seq` (already reclaimed) has no body and is not a
-    // candidate.
-    for exp in crate::verify::expected_manifest(stage)? {
+    // candidate. The survey runs before any destination is consulted, and
+    // remembers — beside each candidate — the sealed-shard sequence numbers it
+    // enumerated, the exact set the proof's digest triple is computed over
+    // (W1062): the delete below may remove a shard only from this set, so a
+    // shard a concurrent pass seals later is provably outside the deletion.
+    let mut proven_seqs: BTreeMap<(String, String), BTreeSet<u64>> = BTreeMap::new();
+    for surveyed in crate::verify::expected_manifest_surveyed(stage)? {
+        let exp = surveyed.expectation;
         if exp.shard_count == 0 {
             continue;
         }
         report.candidate_bytes = report.candidate_bytes.saturating_add(exp.concat_bytes);
+        proven_seqs.insert(
+            (exp.machine.clone(), exp.session_id.clone()),
+            surveyed.shard_sequences,
+        );
         report.candidates.push(Candidate {
             machine: exp.machine,
             session_id: exp.session_id,
@@ -680,7 +695,21 @@ pub fn reclaim_stage(
             .with_context(|| format!("generate manifest for machine {machine}"))?;
         refresh_manifest(stage, machine, &fresh)?;
         for cand in cands {
-            let removed = reclaim_session_body(stage, &cand.machine, &cand.session_id)
+            #[cfg(test)]
+            tests_support::before_session_delete(machine, &cand.session_id);
+            let key = (cand.machine.clone(), cand.session_id.clone());
+            let Some(proven) = proven_seqs.get(&key) else {
+                // Unreachable by construction — candidates and their proof
+                // sets come from one survey — but an absent entry is never
+                // read as "nothing may be deleted" or "everything may": the
+                // whole run stops with nothing deleted.
+                anyhow::bail!(
+                    "surveyed shard set is missing for session `{}` on machine `{}`",
+                    cand.session_id,
+                    cand.machine
+                );
+            };
+            let removed = reclaim_session_body(stage, &cand.machine, &cand.session_id, proven)
                 .with_context(|| {
                     format!(
                         "reclaim session `{}` on machine `{}`",
@@ -825,21 +854,62 @@ fn refresh_manifest(
     manifest::write_manifest(stage, machine, &rows)
 }
 
-/// Delete one session's sealed shard body, leaving the session directory and
-/// its persistent `shard-seq` counter in place so the next sequence number
-/// never falls back onto archived shard names. Returns how many shard files
-/// were removed. Idempotent: a session whose body is already gone removes
-/// nothing.
+/// Delete one session's *proven* sealed shard body, leaving the session
+/// directory and its persistent `shard-seq` counter in place so the next
+/// sequence number never falls back onto archived shard names (W1062).
+///
+/// `proven` is the set of sealed-shard sequence numbers the proof's digest
+/// triple was computed over — the enumeration the survey made before any
+/// destination was consulted. Only those sequences are removed: a shard
+/// sealed after the survey — a concurrent collect pass writing an unpushed
+/// increment while this reclaim runs — is not in the set, was never proven,
+/// and survives, to be pushed by a later pass and proved and reclaimed by a
+/// later run. The set is not a filter on freshness; it is the deletion's
+/// whole authority: a file not enumerated when the proof was made does not
+/// leave the stage in this call, whatever its sequence is.
+///
+/// The body-tier sidecars (ADR-054 D5/D9) leave with the body only when no
+/// sealed shard survives: with a surviving shard the session still holds a
+/// body, so the `extra-*` raw sidecars sealed beside it — including any
+/// sealed after the survey — and the `shard-facts` digest record stay too,
+/// and leave with whatever the run that proves the survivor deletes.
+///
+/// Idempotent: a sequence in the set whose file is already gone removes
+/// nothing, and a session whose body is gone as a whole is a no-op. Returns
+/// how many shard files this call removed.
 pub fn reclaim_session_body(
     stage: &Path,
     machine: &str,
     session_id: &str,
+    proven: &BTreeSet<u64>,
 ) -> anyhow::Result<usize> {
     let dir = store::session_shard_dir(stage, machine, session_id);
     let entries = store::sealed_shard_entries(&dir)?;
-    for (_, path) in &entries {
-        fs::remove_file(path)
-            .with_context(|| format!("remove reclaimed shard {}", path.display()))?;
+    let mut removed = 0_usize;
+    let mut survivors = 0_usize;
+    for (seq, path) in &entries {
+        if !proven.contains(seq) {
+            // Sealed after the survey (or outside it another way): never
+            // proven, never deleted by the reclaim.
+            survivors += 1;
+            continue;
+        }
+        match fs::remove_file(path) {
+            Ok(()) => removed += 1,
+            // reason: a proven shard that vanished between the survey and
+            // this delete was removed by someone else (a concurrent reclaim
+            // or repair), which is the idempotent re-run shape — reported
+            // as not removed by this call rather than counted.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("remove reclaimed shard {}", path.display()))
+            }
+        }
+    }
+    if survivors > 0 {
+        // The session still holds an unproven body; its sidecars and its
+        // bucket directories belong to that body now and are left alone.
+        return Ok(removed);
     }
     // Remove the sealed raw sidecar files too (ADR-054 D5/D9): they are
     // body-tier content — `chat-meta.json`'s `firstPrompt` is a truncated
@@ -849,7 +919,7 @@ pub fn reclaim_session_body(
     // `captured-start`) is not prefixed `extra-`.
     let rd = match fs::read_dir(&dir) {
         Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(entries.len()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(removed),
         Err(e) => return Err(e).with_context(|| format!("read session dir {}", dir.display())),
     };
     for entry in rd {
@@ -874,8 +944,60 @@ pub fn reclaim_session_body(
                 .with_context(|| format!("remove reclaimed sidecar {}", entry.path().display()))?;
         }
     }
-    Ok(entries.len())
+    Ok(removed)
 }
+
+/// The sequence numbers of every sealed shard currently in a session's
+/// directory — the "prove everything present" set for callers that survey
+/// and delete synchronously, where no other writer can race them (tests,
+/// repair flows). The reclaim proper captures its set at survey time,
+/// before the proof; a caller that wants the reclaim's guarantee under a
+/// live writer must capture the set the same way, not with this helper,
+/// which reads the directory at deletion time.
+pub fn present_shard_seqs(
+    stage: &Path,
+    machine: &str,
+    session_id: &str,
+) -> anyhow::Result<BTreeSet<u64>> {
+    Ok(
+        store::sealed_shard_entries(&store::session_shard_dir(stage, machine, session_id))?
+            .into_iter()
+            .map(|(seq, _)| seq)
+            .collect(),
+    )
+}
+
+/// W1062: a deterministic seam for the reclaim/collect race fixtures: a
+/// hook that runs on the reclaim's own thread just before one proven
+/// session's body delete — after the manifest write, inside the apply
+/// phase — so a test can let a concurrent pass seal a shard exactly there,
+/// in the window between the reclaim's proof and its delete.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnMut(&str, &str)>;
+
+    thread_local! {
+        static BEFORE_SESSION_DELETE: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn set_before_session_delete(hook: Option<Hook>) {
+        BEFORE_SESSION_DELETE.with(|slot| *slot.borrow_mut() = hook);
+    }
+
+    pub(super) fn before_session_delete(machine: &str, session_id: &str) {
+        BEFORE_SESSION_DELETE.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().as_mut() {
+                hook(machine, session_id);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+#[path = "stagereclaim_narrow_delete_tests.rs"]
+mod narrow_delete_tests;
 
 #[cfg(test)]
 mod tests {
@@ -902,6 +1024,12 @@ mod tests {
         }
     }
 
+    /// The set of every sealed shard present right now — how a synchronous
+    /// test fixture states "the survey saw all of them".
+    fn present(stage: &Path, machine: &str, session: &str) -> BTreeSet<u64> {
+        present_shard_seqs(stage, machine, session).unwrap()
+    }
+
     /// Reclaim keeps the session directory and its `shard-seq` counter.
     #[test]
     fn reclaim_session_body_removes_shards_but_keeps_counter() {
@@ -914,7 +1042,9 @@ mod tests {
         let seq_file = store::shard_seq_file(stage, machine, session);
         assert!(seq_file.is_file(), "counter must exist before the reclaim");
 
-        let removed = reclaim_session_body(stage, machine, session).unwrap();
+        let removed =
+            reclaim_session_body(stage, machine, session, &present(stage, machine, session))
+                .unwrap();
         assert_eq!(removed, 3);
         assert_eq!(shard_count(stage, machine, session), 0, "body gone");
         assert!(seq_file.is_file(), "counter must survive the reclaim");
@@ -939,8 +1069,14 @@ mod tests {
         let machine = "m-unit";
         let session = "s-unit";
         write_session(stage, machine, session, 2);
-        assert_eq!(reclaim_session_body(stage, machine, session).unwrap(), 2);
-        assert_eq!(reclaim_session_body(stage, machine, session).unwrap(), 0);
+        let removed =
+            reclaim_session_body(stage, machine, session, &present(stage, machine, session))
+                .unwrap();
+        assert_eq!(removed, 2);
+        let removed_again =
+            reclaim_session_body(stage, machine, session, &present(stage, machine, session))
+                .unwrap();
+        assert_eq!(removed_again, 0);
         drop(dir);
     }
 
@@ -954,9 +1090,77 @@ mod tests {
         let session = "s-unit";
         write_session(stage, machine, session, 1);
         // Drop the body directly; the counter remains.
-        reclaim_session_body(stage, machine, session).unwrap();
+        reclaim_session_body(stage, machine, session, &present(stage, machine, session)).unwrap();
         let report = reclaim_stage(stage, &[], false, None).unwrap();
         assert!(report.candidates.is_empty());
+        drop(dir);
+    }
+
+    /// W1062: the delete touches only the shards the proof enumerated. A
+    /// shard sealed after the survey survives it, and so do the body-tier
+    /// sidecars of the session that still holds a body; the run that proves
+    /// the survivor then takes it and the sidecars too.
+    #[test]
+    fn reclaim_session_body_deletes_only_the_proven_sequences() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path();
+        let machine = "m-unit";
+        let session = "s-unit";
+        // The survey state: two shards, sealed and counted.
+        write_session(stage, machine, session, 2);
+        let proven = present(stage, machine, session);
+        assert_eq!(
+            proven.iter().copied().collect::<Vec<u64>>(),
+            vec![1, 2],
+            "fixture: the survey enumerated the first two shards"
+        );
+        // A raw sidecar is body-tier content and must leave with the body:
+        // seed one so the test sees it, not only assume it exists.
+        let sidecar_dir = session_dir(stage, machine, session);
+        fs::write(sidecar_dir.join("extra-meta.000000000001"), b"raw fixture").unwrap();
+
+        // The concurrent writer: one more shard after the survey.
+        write_session(stage, machine, session, 3);
+
+        let removed = reclaim_session_body(stage, machine, session, &proven).unwrap();
+        assert_eq!(removed, 2, "only the proven pair was removed");
+        let left: Vec<u64> = {
+            let mut seqs: Vec<u64> = store::sealed_shard_entries(&sidecar_dir)
+                .unwrap()
+                .into_iter()
+                .map(|(seq, _)| seq)
+                .collect();
+            seqs.sort_unstable();
+            seqs
+        };
+        assert_eq!(left, vec![3], "the post-survey shard must survive");
+        assert!(
+            store::shard_seq_file(stage, machine, session).is_file(),
+            "the counter must survive"
+        );
+        assert!(
+            sidecar_dir.join(crate::shard_facts::FILE_NAME).is_file(),
+            "the digest record stays while its body is on stage"
+        );
+        assert!(
+            sidecar_dir.join("extra-meta.000000000001").is_file(),
+            "a raw sidecar stays while its session holds a body"
+        );
+
+        // The next run proves the survivor by its own survey, and with it
+        // the sidecars leave — the full-body delete is unchanged.
+        let survivor = present(stage, machine, session);
+        let removed = reclaim_session_body(stage, machine, session, &survivor).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(shard_count(stage, machine, session), 0, "body gone");
+        assert!(
+            !sidecar_dir.join(crate::shard_facts::FILE_NAME).is_file(),
+            "the digest record leaves with the last shard"
+        );
+        assert!(
+            !sidecar_dir.join("extra-meta.000000000001").is_file(),
+            "the raw sidecar leaves with the last shard"
+        );
         drop(dir);
     }
 
@@ -972,7 +1176,7 @@ mod tests {
         write_session(stage, machine, "s-a", 1);
         // Session B: was already reclaimed; store its original summary.
         write_session(stage, machine, "s-b", 2);
-        reclaim_session_body(stage, machine, "s-b").unwrap();
+        reclaim_session_body(stage, machine, "s-b", &present(stage, machine, "s-b")).unwrap();
         let stored = manifest::generate_manifest(stage, machine).unwrap();
         assert_eq!(stored.len(), 1, "only s-a still has a body");
         let original_b = manifest::SessionManifest {

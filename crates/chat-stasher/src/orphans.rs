@@ -62,8 +62,31 @@
 //! archive. `crate::packcheck` holds the format and crypto reading, and the
 //! reason it does not call rustic's own `check_pack`.
 //!
+//! One exclusion, deliberately narrow (W1066): a pack whose header cannot be
+//! read as a pack at all — torn debris from an interrupted push, the one shape
+//! [`crate::debris`]'s shared classification recognizes — does not veto the
+//! packs that verify. Its bytes can never become content (no header, no
+//! verified blob entries), so excluding it adds no reliance on a partial
+//! verification; it is reported as debris, never adopted, and never named by
+//! any index file. Everything else keeps the all-or-nothing shape: one pack
+//! that reads as a pack but does not verify refuses the whole adoption.
+//!
+//! Adoption stops being per-open the moment a push survives it: after a push
+//! wrote its own index file and snapshot, it names the packs this open verified
+//! in **one new index file** ([`persist_verified`]). That is a pure append —
+//! no existing index file is read for rewriting, removed or replaced, which is
+//! what keeps it inside ADR-001/ADR-016 while `repair index` (which rewrites)
+//! stays out of reach. Only a push connection writes it; read paths, `mirror`
+//! and `prune-orphans` never do. Before writing, the survey runs once more and
+//! any pack another client has named in the meantime is skipped, so the worst
+//! two concurrent pushers can produce is two index files whose entries are
+//! identical (the same ids at the same offsets of the same pack) — whichever a
+//! reader's lookup hits resolves the same bytes. A failure to write is
+//! reported and costs nothing: the packs stay unindexed on disk, which is the
+//! state the next push re-derives.
+//!
 //! The adoption path compares the unindexed set before and after verification,
-//! then passes the verified `IndexPack`s to a small pinned-rustic API that reads
+//! then passes the verified `IndexPacks` to a small pinned-rustic API that reads
 //! index files and adds only those entries. No second pack listing occurs, so a
 //! pack appearing at that point cannot enter the in-memory index.
 //!
@@ -156,14 +179,20 @@ pub enum IndexAdoption {
     /// The index files agreed with the backend, so the plain index was used —
     /// the open every read path made before this module existed.
     Plain,
-    /// The index could not reach every pack in the backend, and the adopting
-    /// index was built: those packs' blobs are visible to this open.
+    /// At least one pack verified, and the index this open built reaches every
+    /// pack that verified. Torn debris among the unindexed candidates is set
+    /// aside in [`OrphanOutcome::torn`] and is neither named here nor
+    /// anywhere else.
     Adopted,
+    /// Every unindexed candidate was torn debris: nothing was adoptable, and
+    /// nothing was refused either. The open took the plain index; the debris
+    /// is carried in [`OrphanOutcome::torn`], stays unnamed forever and is
+    /// reported as what it is.
+    Debris,
     /// The adopting index was *not* built, so packs no index file names stay
     /// unreachable. `why` says which of the three fences stopped it: a pack that
     /// does not read back as the bytes it is stored under, an index that names a
-    /// pack the backend does not have, or verification failing on a pack
-    /// whose header it could not use.
+    /// pack the backend does not have, or a pack set that changed under the open.
     Refused {
         /// Human-readable reason, naming the pack when one pack refused the
         /// open, and carrying the verifier's reason when a pack failed.
@@ -177,7 +206,7 @@ impl IndexAdoption {
     pub fn refused(&self) -> Option<&str> {
         match self {
             Self::Refused { why } => Some(why),
-            Self::Plain | Self::Adopted => None,
+            Self::Plain | Self::Adopted | Self::Debris => None,
         }
     }
 
@@ -188,15 +217,43 @@ impl IndexAdoption {
     }
 }
 
+/// One pack the open set aside as torn debris instead of verifying it into the
+/// adoption set: an unindexed candidate whose header cannot be read as a pack
+/// at all ([`crate::debris::PackClass::Torn`]), so its bytes can never become
+/// content. It is never adopted, never named by any index file and never
+/// touched; it is carried out so the caller can report it as debris, and it
+/// stays in the repository until a deliberately planned one-off action clears
+/// it (ADR-016), which is not a code path here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExcludedTorn {
+    /// The pack's id, hex.
+    pub id: String,
+    /// The size the backend listed for it.
+    pub bytes: u64,
+    /// The probe's own reason the pack cannot be read as a pack.
+    pub why: String,
+}
+
 /// An index over the repository, plus what one open found and did about packs
 /// the index files do not name.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// `verified` and `torn` carry this open's own classifications, so this type
+/// no longer derives `PartialEq`/`Eq` (`IndexPack` does not carry them);
+/// callers compare states through `report` and `adoption`, not whole opens.
+#[derive(Debug, Clone, Default)]
 pub struct OrphanOutcome {
     /// What the backend held when this open started.
     pub report: OrphanReport,
     /// What the index this open built can reach. `None` only for a repository
     /// this process created, which had no packs to survey.
     pub adoption: Option<IndexAdoption>,
+    /// The `IndexPack` entries this open verified from the unindexed
+    /// candidates (empty unless the adoption reached them). The push
+    /// connection persists exactly these; every other caller must not write.
+    pub verified: Vec<IndexPack>,
+    /// The unindexed candidates excluded as torn debris, id-sorted, with the
+    /// probe's own reason each. Empty unless the open found debris.
+    pub torn: Vec<ExcludedTorn>,
 }
 
 impl OrphanOutcome {
@@ -309,38 +366,69 @@ fn survey_inventory<S: Open>(
     })
 }
 
-/// Read every pack the index does not name — its header and every blob that
-/// header declares — and refuse the first one that does not check out.
+/// Verify each pack the index does not name for adoption, setting torn
+/// debris aside.
 ///
-/// `crate::packcheck::verify_pack` holds the three checks and the citations they
-/// mirror; what this adds is the granularity: one pack's failure refuses the
-/// whole adoption, and the reason names the pack (by the first 12 hex characters
-/// of its id) so the operator can find it.
+/// This is the adopting open's form of [`verify_candidates`]: every pack that
+/// reads as a pack is verified in full — its header, every blob that header
+/// declares, and its own bytes against its own id — and one pack that reads as
+/// a pack but does not verify refuses the whole adoption, which keeps the dedup
+/// index free of any reliance on a partial verification. The one exclusion is
+/// the pack that cannot be read as a pack at all: torn debris from an
+/// interrupted push, which is classified by the one shared function every
+/// scanning reader uses ([`crate::debris::classify_pack`] on exactly the two
+/// facts held here: the survey established no index file names it, and the
+/// verifier could not read its header). Its bytes can never become content,
+/// so it neither enters the adoption set nor vetoes the packs that verified;
+/// it is carried out to be reported as debris. A refusal is returned as
+/// [`crate::packcheck::PackError`] so the caller can keep its current
+/// wording; the torn exclusions are not an error.
 ///
 /// # Errors
 ///
 /// A reason naming the pack when it does not read back as the bytes it is
-/// stored under, when its header does not decrypt or does not add up to the
-/// file, or when any blob in it does not decrypt to the content of the id its
-/// header gives: a pack still being written, a damaged one, or one the backend
-/// cannot read at all.
-fn verify_unindexed(
+/// stored under, when its header reads but any blob it declares does not, or
+/// when the backend would not serve its bytes — every non-torn refusal, which
+/// refuses the whole adoption exactly as before W1066.
+fn verify_for_adoption(
     backends: &RepositoryBackends,
     unindexed: &[(String, u64)],
     mk: &MasterKey,
-) -> Result<Vec<IndexPack>, crate::packcheck::PackError> {
-    verify_candidates(backends, unindexed, mk)
-        .into_iter()
-        .collect()
+) -> Result<(Vec<IndexPack>, Vec<ExcludedTorn>), crate::packcheck::PackError> {
+    let be = backends.repository();
+    let mut verified = Vec::new();
+    let mut torn = Vec::new();
+    for (hex, listed) in unindexed {
+        match crate::packcheck::verify_pack(&be, hex, *listed, mk) {
+            Ok(pack) => verified.push(pack),
+            Err(err) => {
+                let check = Err::<(), _>(&err);
+                match crate::debris::classify_pack(Some(false), &check) {
+                    // Torn debris: excluded, reported, never a refusal. The
+                    // survey already established that no index file names
+                    // this pack, which is the other input the classification
+                    // needs.
+                    crate::debris::PackClass::Torn { why } => torn.push(ExcludedTorn {
+                        id: hex.clone(),
+                        bytes: *listed,
+                        why,
+                    }),
+                    _ => return Err(err),
+                }
+            }
+        }
+    }
+    Ok((verified, torn))
 }
 
 /// Verify each pack the index does not name, keeping the verdict on **every**
 /// one of them instead of stopping at the first failure.
 ///
-/// [`verify_unindexed`] is the adopting open's all-or-nothing form: one failure
-/// refuses the whole adoption, so it stops there. A read-only report needs the
-/// other granularity — which packs verified, which did not, and the reason for
-/// each — so `prune-orphans` calls this. The checks are the same either way;
+/// [`verify_for_adoption`] is the adopting open's form: one non-torn failure
+/// refuses the whole adoption, so it stops there, and torn debris is excluded
+/// rather than refused. A read-only report needs the other granularity — which
+/// packs verified, which did not, and the reason for each — so `prune-orphans`
+/// calls this. The checks are the same either way;
 /// `crate::packcheck::verify_pack` holds them. The error is
 /// [`crate::packcheck::PackError`] so the caller can tell the two shapes of
 /// refusal apart: a pack whose header cannot be read at all (unindexed ⇒
@@ -414,6 +502,170 @@ fn hold_after_verification() {
     }
 }
 
+/// Test-only rendezvous at the point where a push is about to persist the
+/// packs this open verified: after the pre-write survey, immediately before
+/// the new index file is written.
+///
+/// Set `CHAT_STASHER_TEST_HOLD_PERSIST_BEFORE_WRITE` to a directory and the
+/// persist step creates `reached` inside it and waits for `go`, so a test can
+/// hold two pushes right at the window where both have surveyed but neither
+/// has written — the two-client double-write — or inject an index file that
+/// names the packs while the writer is parked. The wait is bounded like the
+/// other holds; unset — every run that is not that test — this creates
+/// nothing, reads nothing, and costs one environment lookup.
+fn hold_persist_before_write() {
+    let Ok(dir) = std::env::var("CHAT_STASHER_TEST_HOLD_PERSIST_BEFORE_WRITE") else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "A test rendezvous that cannot be staged leaves the test to time out, which is the failure it should report."
+    )]
+    let _ = std::fs::create_dir_all(dir);
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "As above: the test that did not observe `reached` is the report."
+    )]
+    let _ = std::fs::write(dir.join("reached"), b"");
+    let go = dir.join("go");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !go.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// What the push connection's persist step did with the packs its open
+/// verified. Never a failure of the push: a pack that is not named stays
+/// unindexed **on disk**, which is the state every earlier push left behind
+/// too, so the next push re-derives it and tries again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersistOutcome {
+    /// One new index file now names every pack this open verified, so later
+    /// opens find them named and skip the re-read their adoption used to
+    /// cost. `index` is the new file's id, hex.
+    Named {
+        /// How many packs the new index file names.
+        packs: usize,
+        /// The id of the index file that was written.
+        index: String,
+    },
+    /// Nothing was written, and `why` says which of the three states that was:
+    /// every pack was already named by an index file that arrived in the
+    /// meantime (another client persisted them first), a listing the backend
+    /// would not serve, or a write that failed. The packs are no worse off
+    /// than before this push ran.
+    NotWritten {
+        /// What happened, worded for the push report.
+        why: String,
+    },
+}
+
+impl PersistOutcome {
+    /// Whether the packs this open verified are now named in an index file.
+    #[must_use]
+    pub fn named(&self) -> bool {
+        matches!(self, Self::Named { .. })
+    }
+}
+
+/// Persist the packs this open verified as one new index file, appended to the
+/// repository's index files. Push-connection only: this must never be called
+/// from a read path, `mirror` or `prune-orphans`, every one of which must stay
+/// write-free; the push that adopts the packs is the connection whose data was
+/// proven to itself, which is the one place writing costs nothing to trust.
+///
+/// Idempotency is by re-survey, not by lock: the survey runs once more
+/// immediately before the write, and any pack that is already named by an
+/// index file — this push's own, or a concurrent client's — is skipped. A
+/// healthy repository therefore pays one extra index pass per push that
+/// adopted. Two clients that still name the same pack write two index files
+/// whose entries are identical (the same ids at the same offsets of the same
+/// pack), so whichever a reader's lookup hits resolves the same bytes; an
+/// unreferenced pack is never one of them, because only verified packs reach
+/// this function. Nothing is ever deleted or rewritten, per ADR-001/ADR-016.
+///
+/// This cannot fail the push. Every failure lands in
+/// [`PersistOutcome::NotWritten`] and is reported; the packs stay unindexed on
+/// disk, which is exactly the state before this change, and the next push
+/// tries again.
+#[must_use]
+pub fn persist_verified(
+    repo: &Repository<IndexedFullStatus>,
+    backends: &RepositoryBackends,
+    verified: &[IndexPack],
+) -> PersistOutcome {
+    if verified.is_empty() {
+        return PersistOutcome::NotWritten {
+            why: "this open verified no pack, so there was nothing to name".to_string(),
+        };
+    }
+    let fresh = match survey_inventory(repo, backends) {
+        Ok(fresh) => fresh,
+        Err(why) => {
+            return PersistOutcome::NotWritten {
+                why: format!(
+                    "the pre-write survey over the repository failed, so nothing was named: {}",
+                    crate::prune_orphans::redact(&why)
+                ),
+            };
+        }
+    };
+    // Three facts decide each pack: still listed by the backend, and named by
+    // no index file the pre-write survey read. A pack that vanished from the
+    // listing cannot be named honestly (an append-only backend never drops
+    // one, so this is the unheard-of case, and skipping it is the fail-safe);
+    // a pack that got named in the meantime is done — someone else persisted
+    // it, or this push's own index file covered it, and re-naming it would
+    // only duplicate what a reader already merges.
+    let mut survivors = Vec::with_capacity(verified.len());
+    for pack in verified {
+        let hex = pack.id.to_hex().to_string();
+        if fresh.indexed.contains(&hex) {
+            continue;
+        }
+        if !fresh.listed.contains_key(&hex) {
+            continue;
+        }
+        survivors.push(pack.clone());
+    }
+    let skipped = verified.len() - survivors.len();
+    if survivors.is_empty() {
+        if skipped == verified.len() {
+            return PersistOutcome::NotWritten {
+                why: format!(
+                    "{} pack(s) this push verified were already named by an index file when \
+                     the write was about to happen, so nothing was written",
+                    skipped
+                ),
+            };
+        }
+        return PersistOutcome::NotWritten {
+            why: "nothing this push verified was still both listed and unnamed, so nothing \
+                  was written"
+                .to_string(),
+        };
+    }
+    hold_persist_before_write();
+    match repo.append_index_packs(survivors.clone()) {
+        Ok(Some(index)) => PersistOutcome::Named {
+            packs: survivors.len(),
+            index: index.to_hex().to_string(),
+        },
+        Ok(None) => PersistOutcome::NotWritten {
+            why: "the naming index file ended up with no pack entries, so nothing was \
+                  written"
+                .to_string(),
+        },
+        Err(why) => PersistOutcome::NotWritten {
+            why: format!(
+                "writing the new index file failed, so the pack(s) stay unnamed on disk: {}",
+                crate::prune_orphans::redact(&anyhow::Error::from(why))
+            ),
+        },
+    }
+}
+
 /// Open an existing repository and build its index, reaching the packs no index
 /// file names. One call for every read path.
 ///
@@ -449,6 +701,8 @@ fn refused<S: Open>(
         OrphanOutcome {
             report,
             adoption: Some(IndexAdoption::Refused { why }),
+            verified: Vec::new(),
+            torn: Vec::new(),
         },
     ))
 }
@@ -557,6 +811,8 @@ fn index_adopting_unexplained<S: Open>(
             OrphanOutcome {
                 report,
                 adoption: Some(IndexAdoption::Plain),
+                verified: Vec::new(),
+                torn: Vec::new(),
             },
         ));
     }
@@ -577,11 +833,13 @@ fn index_adopting_unexplained<S: Open>(
         );
     }
 
-    // Verify every header and blob, and keep the exact IndexPacks produced by
-    // that verification. Rustic receives these entries directly; it must not
-    // list packs again after verification, because a pack appearing in that
-    // second listing would otherwise enter the dedup index unread.
-    let verified = match verify_unindexed(backends, &report.unindexed, mk) {
+    // Verify every header and blob of every candidate, keeping the exact
+    // IndexPacks that verification produced and setting torn debris aside
+    // (W1066: debris cannot veto the packs that verify). Rustic receives
+    // these entries directly; it must not list packs again after
+    // verification, because a pack appearing in that second listing would
+    // otherwise enter the dedup index unread.
+    let (verified, torn) = match verify_for_adoption(backends, &report.unindexed, mk) {
         Ok(verified) => verified,
         Err(why) => return refused(repo, report, why.to_string()),
     };
@@ -607,13 +865,24 @@ fn index_adopting_unexplained<S: Open>(
     }
     hold_after_verification();
     let repo = repo
-        .to_indexed_with_packs(initial.indexed_packs, verified)
+        .to_indexed_with_packs(initial.indexed_packs, verified.clone())
         .context("index repository with verified unindexed packs")?;
+    // Nothing verified means every candidate was torn debris: the plain index
+    // serves everything the index files name, and the debris is reported as
+    // debris — a state apart from both adoption and refusal, because neither
+    // happened and neither is due.
+    let adoption = if verified.is_empty() {
+        IndexAdoption::Debris
+    } else {
+        IndexAdoption::Adopted
+    };
     Ok((
         repo,
         OrphanOutcome {
             report,
-            adoption: Some(IndexAdoption::Adopted),
+            adoption: Some(adoption),
+            verified,
+            torn,
         },
     ))
 }

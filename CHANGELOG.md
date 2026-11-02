@@ -15,6 +15,14 @@ under its own heading below.
 
 #### Added
 
+- **S3/R2 remote inboxes (RI-5).** `inbox-init`, `inbox-pull` and `send`
+  accept an `s3://<bucket>/<prefix>` locator beside `fs://`. The endpoint and
+  keys come from `CHAT_STASHER_INBOX_S3_*` in the environment, never from the
+  declaration, a send key or any output; a missing credential stops before any
+  network call and is reported as unknown, not as an empty inbox. Listing reads
+  every page of a large prefix, and `status` and `doctor` show an s3 inbox's
+  waiting count and oldest age live (`backend=s3`). Filesystem inboxes are
+  unchanged. See [`docs/inboxes.md`](docs/inboxes.md).
 - **A reclaim that finishes under a running collect no longer resets the
   sessions the pass reaches afterwards (W1057).** `reclaim-stage` and a
   collect pass take no lock against each other; the pass read the retained
@@ -615,6 +623,25 @@ under its own heading below.
   canonical shape — one archive id on two machines — printed "2 conversation(s)"
   and listed the same short id twice, which is the per-machine double count the
   change exists to remove, restated in the sentence that names it.
+- **A push that adopts stranded packs now names them in a new index file, and
+  torn debris no longer refuses the packs that verify around it (W1066).**
+  Two consequences of adopt-on-open met in production: adoption was per-open
+  (a killed push left a complete pack that every later open re-read and
+  re-verified, forever), and one torn file — the pre-atomic-publication shape
+  an interrupted push leaves under a final name — refused the whole adoption,
+  so a complete 15 MiB pack beside a five-week-old torn fragment was
+  re-uploaded wholesale. The push connection now persists what it verified
+  after its own snapshot: one new index file, a pure append (no existing
+  index file is touched, per the append-only invariant), gated by a
+  re-survey that skips anything already named — so a second machine to
+  persist the same adoption writes an identical-entry file and every reader
+  merges them — and a write failure is reported as `NOT persisted (...)`
+  without failing the push. A pack that cannot be read as a pack at all is
+  excluded from adoption as the debris it is (still never adopted, never
+  named, never touched, reported with the interrupted-push sentence), while
+  complete packs whose bytes do not verify still refuse the whole adoption
+  exactly as before. `prune-orphans`' "next push" prediction words the same
+  split.
 
 #### Fixed
 
