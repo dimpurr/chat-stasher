@@ -2562,7 +2562,10 @@ fn binary_command(sandbox: &Path) -> std::process::Command {
             test_support::RUSTIC_CACHE_DIR_ENV,
             test_support::rustic_cache_root(&home),
         )
-        .env("XDG_CONFIG_HOME", test_support::consent_config_home(sandbox.join("config"), &[]))
+        .env(
+            "XDG_CONFIG_HOME",
+            test_support::consent_config_home(sandbox.join("config"), &[]),
+        )
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
         .env("XDG_CACHE_HOME", sandbox.join("cache"))

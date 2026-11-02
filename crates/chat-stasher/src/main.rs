@@ -329,7 +329,12 @@ enum Command {
         /// is recorded as off. Without a TTY, naming sources here or passing
         /// `--all-detected` is how consent is given: a run with neither, on a
         /// machine with nothing recorded, refuses with exit code 4.
-        #[arg(long, value_delimiter = ',', value_name = "ID,ID", conflicts_with = "all_detected")]
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_name = "ID,ID",
+            conflicts_with = "all_detected"
+        )]
         sources: Vec<String>,
         /// Collect every source found on this machine, verified or not.
         #[arg(long)]
@@ -18456,7 +18461,10 @@ fn setup_choose_sources_from_flags(
         let Some(row) = rows.iter().find(|row| row.id == id) else {
             return Err(SetupSourceRefusal::Bad(
                 "--sources",
-                format!("`{id}` is not a registry source id; valid ids: {}", known.join(", ")),
+                format!(
+                    "`{id}` is not a registry source id; valid ids: {}",
+                    known.join(", ")
+                ),
             ));
         };
         match row.kind {
@@ -18530,8 +18538,13 @@ fn setup_choose_sources_interactive(
     }
     let defaults: Vec<bool> = selectable.iter().map(|row| row.preselected()).collect();
     println!("Sources found on this machine. Nothing is collected until you choose.");
-    println!("[x] = marked because the registry records a dated verification, or you chose it before.");
-    print!("{}", chat_stasher::sources::render_rows(rows, true, &defaults));
+    println!(
+        "[x] = marked because the registry records a dated verification, or you chose it before."
+    );
+    print!(
+        "{}",
+        chat_stasher::sources::render_rows(rows, true, &defaults)
+    );
     loop {
         let mut input = String::new();
         if let Err(error) = prompt_setup_value(
@@ -18679,7 +18692,8 @@ fn cmd_sources(stage: Option<PathBuf>, json: bool, action: Option<SourcesAction>
                 write.unchanged.len()
             );
             for (id, choice) in &answers {
-                if *choice == config::SourceChoice::Off && consent.state_of(id) == sources::SourceState::On
+                if *choice == config::SourceChoice::Off
+                    && consent.state_of(id) == sources::SourceState::On
                 {
                     println!("sources: {}", sources::disable_notice(id));
                 }
@@ -22220,10 +22234,9 @@ fn status_json(
     // collected, so a found store that is `off` or `pending` is never read as
     // one that was archived. The `scanner` object stays what the scan measured.
     let sources_value = match (consent, &scan) {
-        (Some(consent), Ok(report)) => chat_stasher::sources::consent_json(
-            consent,
-            &pending_found_in_scan(report, consent),
-        ),
+        (Some(consent), Ok(report)) => {
+            chat_stasher::sources::consent_json(consent, &pending_found_in_scan(report, consent))
+        }
         (Some(consent), Err(_)) => chat_stasher::sources::consent_json(consent, &[]),
         (None, _) => serde_json::json!({
             "kind": "failed",

@@ -252,7 +252,11 @@ fn run_once_refuses_an_invalid_declaration_naming_the_key() {
         );
         let config_dir = sandbox.join("config").join("chat-stasher");
         fs::create_dir_all(&config_dir).unwrap();
-        fs::write(config_dir.join("config.toml"), format!("[sources]\n\n{bad}")).unwrap();
+        fs::write(
+            config_dir.join("config.toml"),
+            format!("[sources]\n\n{bad}"),
+        )
+        .unwrap();
         let out = run(
             sandbox,
             &[

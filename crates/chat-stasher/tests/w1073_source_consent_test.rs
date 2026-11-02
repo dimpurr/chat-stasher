@@ -98,11 +98,23 @@ impl Sandbox {
     }
     fn collect(&self) -> Output {
         let stage = self.stage();
-        self.run(&["collect", "--stage", stage.to_str().unwrap(), "--machine", "w1073"])
+        self.run(&[
+            "collect",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            "w1073",
+        ])
     }
     fn run_once(&self) -> Output {
         let stage = self.stage();
-        self.run(&["run-once", "--stage", stage.to_str().unwrap(), "--machine", "w1073"])
+        self.run(&[
+            "run-once",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            "w1073",
+        ])
     }
 }
 
@@ -168,7 +180,10 @@ fn an_unchosen_source_leaves_zero_bytes_in_stage_and_archive() {
     let out = sb.run_once();
     assert!(out.status.success(), "run-once failed: {}", text(&out));
 
-    assert_eq!(staged_harnesses(&sb.stage()), vec!["claude-code".to_string()]);
+    assert_eq!(
+        staged_harnesses(&sb.stage()),
+        vec!["claude-code".to_string()]
+    );
     assert!(
         !tree_contains(&sb.stage(), UNCHOSEN),
         "canary of the unchosen source reached the stage"
@@ -226,7 +241,10 @@ fn the_upgrade_rule_keeps_what_the_stage_already_holds() {
         "the upgrade notice is missing: {combined}"
     );
     assert!(!tree_contains(&sb.stage(), UNCHOSEN));
-    assert_eq!(staged_harnesses(&sb.stage()), vec!["claude-code".to_string()]);
+    assert_eq!(
+        staged_harnesses(&sb.stage()),
+        vec!["claude-code".to_string()]
+    );
 }
 
 /// A root the user declared is a statement (on); an explicit off beats it.
@@ -243,7 +261,10 @@ fn off_beats_a_declared_root_and_a_declared_root_alone_is_on() {
     ));
     let out = sb.collect();
     assert!(out.status.success(), "{}", text(&out));
-    assert!(!tree_contains(&sb.stage(), UNCHOSEN), "off must beat a declared root");
+    assert!(
+        !tree_contains(&sb.stage(), UNCHOSEN),
+        "off must beat a declared root"
+    );
 
     sb.write_config(&format!(
         "[sources]\nclaude-code = \"on\"\n[harness_roots]\ncodex = \"{root}\"\n"
@@ -307,7 +328,10 @@ fn status_keeps_off_pending_and_not_found_apart() {
     let human = sb.run(&["status"]);
     let human = text(&human);
     assert!(human.contains("off, by your choice: codex"), "{human}");
-    assert!(human.contains("pending, not collected until you decide: gemini-cli"), "{human}");
+    assert!(
+        human.contains("pending, not collected until you decide: gemini-cli"),
+        "{human}"
+    );
     assert!(human.contains("codex 1 (off)"), "{human}");
 }
 
@@ -337,9 +361,15 @@ fn setup_sources_collects_only_the_named_source_and_records_the_rest_off() {
     let out = sb.setup(&["--sources", "claude-code"]);
     let combined = text(&out);
     let config = sb.config_text();
-    assert!(config.contains("claude-code = \"on\""), "{config}\n{combined}");
+    assert!(
+        config.contains("claude-code = \"on\""),
+        "{config}\n{combined}"
+    );
     assert!(config.contains("codex = \"off\""), "{config}");
-    assert_eq!(staged_harnesses(&sb.stage()), vec!["claude-code".to_string()]);
+    assert_eq!(
+        staged_harnesses(&sb.stage()),
+        vec!["claude-code".to_string()]
+    );
     assert!(!tree_contains(&sb.stage(), UNCHOSEN));
 }
 
@@ -370,8 +400,14 @@ fn setup_with_no_tty_and_no_choice_refuses_and_writes_nothing() {
     assert_eq!(value["exit_code"], 4);
     assert_eq!(value["refusal"]["kind"], "no_source_consent");
     let next = value["refusal"]["next"].as_str().unwrap();
-    assert!(next.contains("--all-detected") && next.contains("--stage"), "{next}");
-    assert!(!sb.config_path().exists(), "the refusal must not write a config");
+    assert!(
+        next.contains("--all-detected") && next.contains("--stage"),
+        "{next}"
+    );
+    assert!(
+        !sb.config_path().exists(),
+        "the refusal must not write a config"
+    );
     assert!(!stage.exists(), "the refusal must not create the stage");
     assert!(!sb.root.path().join("xdg-data/chat-stasher/repo").exists());
 }
@@ -463,13 +499,19 @@ fn the_sources_listing_keeps_off_and_not_found_apart() {
             .to_string()
     };
     assert!(line("codex").trim_start().starts_with("off"), "{listing}");
-    assert!(line("claude-code").trim_start().starts_with("on"), "{listing}");
+    assert!(
+        line("claude-code").trim_start().starts_with("on"),
+        "{listing}"
+    );
     let not_found = listing
         .lines()
         .find(|l| l.contains("Not found on this machine"))
         .unwrap_or_default();
     assert!(not_found.contains("gemini-cli"), "{listing}");
-    assert!(!not_found.contains("codex"), "off is not not-found: {listing}");
+    assert!(
+        !not_found.contains("codex"),
+        "off is not not-found: {listing}"
+    );
     assert!(!listing.contains(UNCHOSEN) && !listing.contains(WANTED));
 }
 

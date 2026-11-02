@@ -1816,7 +1816,8 @@ pub fn collect(
         .into_iter()
         .map(str::to_string)
         .collect();
-    let scan = scanner::scan_counted(config, &narrowed, machine).context("scan harness sessions")?;
+    let scan =
+        scanner::scan_counted(config, &narrowed, machine).context("scan harness sessions")?;
     let scan_ms = scan_started.elapsed().as_millis() as u64;
     let collect_started = std::time::Instant::now();
     // W1049: the fresh-identity rescan a vanished source triggers. Lazy on

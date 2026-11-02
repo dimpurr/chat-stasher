@@ -565,8 +565,9 @@ fn missing_masterkey_declaration_alone_bootstraps_the_key_and_stops() {
     // no archive snapshot (no run-once pass), no config remote, no scheduler.
     assert!(sandbox.repository().exists(), "the repository must exist");
     assert!(sandbox.masterkey().exists(), "the masterkey must exist");
+    // The source answer on this command line is recorded (ADR-065); no remote is.
     assert!(
-        !sandbox.config_file().exists(),
+        !sandbox.read_config().contains("[destinations"),
         "a bootstrap keys the local archive only; it must not write a destination block"
     );
     let state_run_marker = sandbox

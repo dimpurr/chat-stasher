@@ -96,7 +96,10 @@ fn isolated_command(sandbox: &Path, args: &[&str], registry: &Path) -> Command {
             test_support::rustic_cache_root(&home),
         )
         .env("USERPROFILE", &home)
-        .env("XDG_CONFIG_HOME", test_support::consent_config_home(sandbox.join("xdg-config"), &["claude-code", "cursor", "opencode"]))
+        .env(
+            "XDG_CONFIG_HOME",
+            test_support::consent_for_registry(sandbox.join("xdg-config"), registry.as_ref()),
+        )
         .env("XDG_DATA_HOME", sandbox.join("xdg-data"))
         .env("XDG_STATE_HOME", sandbox.join("xdg-state"))
         .env("XDG_CACHE_HOME", sandbox.join("xdg-cache"))

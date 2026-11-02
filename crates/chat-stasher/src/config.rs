@@ -4351,7 +4351,10 @@ mod sources_edit_tests {
             "# top\n[sources]\n# why codex\ncodex = \"off\" # trailing\nzed = \"off\"\ncursor = \"on\"\n\n# after\n[harness_roots]\ncursor = \"/c\"\n"
         );
         assert_eq!(write.unchanged, vec!["zed".to_string()]);
-        assert_eq!(write.changed[0], ("codex".to_string(), Some(SourceChoice::On)));
+        assert_eq!(
+            write.changed[0],
+            ("codex".to_string(), Some(SourceChoice::On))
+        );
     }
 
     #[test]
@@ -4366,9 +4369,15 @@ mod sources_edit_tests {
     fn crlf_files_stay_crlf() {
         let raw = "# c\r\n[sources]\r\ncodex = \"on\"\r\n";
         let (out, _) = edit(raw, &[("zed", SourceChoice::Off)]);
-        assert_eq!(out, "# c\r\n[sources]\r\ncodex = \"on\"\r\nzed = \"off\"\r\n");
+        assert_eq!(
+            out,
+            "# c\r\n[sources]\r\ncodex = \"on\"\r\nzed = \"off\"\r\n"
+        );
         let (out, _) = edit("# c\r\n", &[("zed", SourceChoice::Off)]);
-        assert!(!out.replace("\r\n", "").contains('\n'), "no bare LF: {out:?}");
+        assert!(
+            !out.replace("\r\n", "").contains('\n'),
+            "no bare LF: {out:?}"
+        );
     }
 
     #[test]

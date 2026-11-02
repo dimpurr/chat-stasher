@@ -94,7 +94,10 @@ fn command(root: &Path, registry: &Path) -> Command {
             test_support::RUSTIC_CACHE_DIR_ENV,
             test_support::rustic_cache_root(&home),
         )
-        .env("XDG_CONFIG_HOME", test_support::consent_config_home(root.join("config"), &["codex", "opencode"]))
+        .env(
+            "XDG_CONFIG_HOME",
+            test_support::consent_config_home(root.join("config"), &["codex", "opencode"]),
+        )
         .env("XDG_DATA_HOME", root.join("data"))
         .env("XDG_STATE_HOME", root.join("state"))
         .env("XDG_CACHE_HOME", root.join("cache"))

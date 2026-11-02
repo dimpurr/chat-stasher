@@ -438,8 +438,9 @@ pub fn pending_notice(pending_present: &[String]) -> Option<String> {
 /// neither is "not found" or "could not be read". None of them is a gap.
 pub fn summary_line(consent: &Consent, pending_present: &[String]) -> String {
     if !consent.consent_recorded() {
-        let mut line =
-            String::from("[sources] no source has been chosen on this machine, so nothing is collected");
+        let mut line = String::from(
+            "[sources] no source has been chosen on this machine, so nothing is collected",
+        );
         if !pending_present.is_empty() {
             line.push_str(&format!(
                 " (detected, waiting for your decision: {})",
@@ -729,7 +730,10 @@ pub fn render_rows(rows: &[SourceRow], numbered: bool, marks: &[bool]) -> String
     }
     let missing = list(|k| matches!(k, RowKind::NotFound));
     if !missing.is_empty() {
-        out.push_str(&format!("  Not found on this machine: {}\n", missing.join(", ")));
+        out.push_str(&format!(
+            "  Not found on this machine: {}\n",
+            missing.join(", ")
+        ));
     }
     out
 }
