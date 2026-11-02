@@ -69,7 +69,7 @@ fn say_to(out: &mut dyn std::io::Write, args: std::fmt::Arguments<'_>) {
 
 fn cmd_inbox_init(name: &str, locator: &str) -> ExitCode {
     use chat_stasher::inbox_config;
-    if let Err(error) = inbox_config::validate(name, locator) {
+    if let Err(error) = inbox_config::validate_new(name, locator) {
         eprintln!("{error}");
         return ExitCode::from(2);
     }
@@ -244,7 +244,7 @@ enum Command {
     InboxInit {
         /// Local name for this inbox.
         name: String,
-        /// Credential-free backend locator; credentials are configured separately.
+        /// Credential-free locator: fs:///abs/dir or s3://<bucket>/<prefix> (keys: CHAT_STASHER_INBOX_S3_*).
         #[arg(long)]
         locator: String,
     },
@@ -253,9 +253,9 @@ enum Command {
     /// No backend permissions are probed; supply a provider-scoped write credential.
     SendKey(SendKeyArgs),
     /// Encrypt and post an explicit file using an environment posting key.
-    /// Creates no archive key or machine identity. Currently opens fs:// inboxes.
+    /// Creates no archive key or machine identity. Opens fs:// and s3:// inboxes.
     Send(SendArgs),
-    /// Pull a declared fs:// inbox into sealed stage; `run-once` never pulls
+    /// Pull a declared fs:// or s3:// inbox into sealed stage; `run-once` never pulls
     /// a remote inbox (a declared `[pull.letta]` producer is the pass's own
     /// separate pull step, not this command).
     /// Archive proof is not wired yet: sealed objects remain queued, exit 3.
@@ -22465,24 +22465,47 @@ fn cmd_inbox_pull_observed(
             return ExitCode::from(3);
         }
     };
-    let Some(backend) = inbox
-        .locator
-        .strip_prefix("fs://")
-        .map(Path::new)
-        .filter(|p| p.is_absolute())
-    else {
-        eprintln!("inbox-pull refused: only absolute fs:// inbox locators are wired");
-        return ExitCode::from(1);
-    };
-    // OpenDAL's filesystem builder can create a missing root. A pull must
-    // observe the existing inbox instead of manufacturing an empty answer.
-    match std::fs::symlink_metadata(backend) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        _ => {
-            eprintln!("inbox-pull incomplete: backend unavailable; waiting count unknown");
-            return ExitCode::from(3);
+    // An s3 inbox takes its endpoint and credentials from the environment,
+    // never from the declaration; nothing about them is printed.
+    let s3_config = if inbox.locator.starts_with("s3://") {
+        match remote_inbox::S3InboxConfig::from_locator(&inbox.locator, |name| {
+            std::env::var(name).ok()
+        }) {
+            Ok(config) => Some(config),
+            Err(_) => {
+                eprintln!(
+                    "inbox-pull incomplete: s3 inbox locator or credential environment invalid; \
+                     see docs/inboxes.md"
+                );
+                return ExitCode::from(3);
+            }
         }
-    }
+    } else {
+        None
+    };
+    let backend = if s3_config.is_some() {
+        None
+    } else {
+        let Some(backend) = inbox
+            .locator
+            .strip_prefix("fs://")
+            .map(Path::new)
+            .filter(|p| p.is_absolute())
+        else {
+            eprintln!("inbox-pull refused: only absolute fs:// and s3:// inbox locators are wired");
+            return ExitCode::from(1);
+        };
+        // OpenDAL's filesystem builder can create a missing root. A pull must
+        // observe the existing inbox instead of manufacturing an empty answer.
+        match std::fs::symlink_metadata(backend) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            _ => {
+                eprintln!("inbox-pull incomplete: backend unavailable; waiting count unknown");
+                return ExitCode::from(3);
+            }
+        }
+        Some(backend)
+    };
     let now = match u64::try_from(chrono::Utc::now().timestamp()) {
         Ok(now) => now,
         Err(_) => {
@@ -22529,14 +22552,25 @@ fn cmd_inbox_pull_observed(
     let result = (|| -> anyhow::Result<remote_inbox::PullReport> {
         let runtime = tokio::runtime::Runtime::new()?;
         let entered = runtime.enter();
-        let backend = backend
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("invalid inbox locator"))?;
-        let operator =
-            opendal::Operator::new(opendal::services::Fs::default().root(backend))?.finish();
-        let operator = opendal::blocking::Operator::new(operator)?;
-        drop(entered);
-        let transport = remote_inbox::RemoteInbox::new(operator, 10 * 1024 * 1024);
+        let transport = match (&s3_config, backend) {
+            (Some(config), _) => {
+                let transport = remote_inbox::RemoteInbox::open_s3(config, 10 * 1024 * 1024)?;
+                drop(entered);
+                transport
+            }
+            (None, Some(backend)) => {
+                let backend = backend
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("invalid inbox locator"))?;
+                let operator =
+                    opendal::Operator::new(opendal::services::Fs::default().root(backend))?
+                        .finish();
+                let operator = opendal::blocking::Operator::new(operator)?;
+                drop(entered);
+                remote_inbox::RemoteInbox::new(operator, 10 * 1024 * 1024)
+            }
+            (None, None) => anyhow::bail!("invalid inbox locator"),
+        };
         remote_inbox::pull(
             &transport,
             &inbox.identity,
