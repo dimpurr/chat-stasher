@@ -36,9 +36,11 @@
 //! * the reuse survives the read path — a session whose content lives only in an
 //!   adopted pack reads back byte-perfect (`read --all-machines`), which is the
 //!   property that forces every read open to adopt too;
-//! * a pack that cannot be validated is **never** adopted: the open falls back
-//!   to the plain index, the push says so, and the unreadable pack is left
-//!   exactly as it was.
+//! * a pack that cannot be validated as **content** is never adopted: torn
+//!   debris is excluded and reported as debris (W1066 re-opened the
+//!   all-or-nothing refusal for debris exactly — it can never hold content),
+//!   while a complete pack whose bytes do not verify still refuses the whole
+//!   adoption, and in both cases the file is left exactly as it was.
 
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -792,14 +794,21 @@ fn content_from_an_adopted_pack_reads_back_through_the_read_command() {
     );
 }
 
-/// The guard, from the other side: a pack that cannot be validated as a complete
-/// pack is never adopted.
+/// The guard, from the other side: a pack that cannot be read as a pack at
+/// all is never adopted, and — since W1066 — that refusal no longer takes the
+/// complete packs down with it. Torn debris is excluded, reported with the one
+/// sentence every surface prints, and left exactly as it was; the packs that
+/// verify around it are adopted **and named in a new index file**, so their
+/// reuse stops being per-open.
 ///
-/// This is the case a *concurrent* client produces — a pack still being written
-/// to the backend is a pack whose header does not yet agree with its own size —
-/// and it is why the guard on adoption is completeness rather than age. The open
-/// falls back to the plain index, the push reports `NOT adopted`, and the
-/// unreadable file is left exactly as it was found.
+/// Before W1066 this test pinned the all-or-nothing refusal — one unreadable
+/// pack ⇒ `NOT adopted` for the whole set. The production event behind
+/// re-opening that ruling is recorded in `docs-dev/orphan-packs.md`: a torn
+/// file weeks old refused every later adoption, so a complete 15 MiB pack
+/// beside it was re-uploaded wholesale. What the re-opening bought nothing
+/// for is still pinned untouched: a complete pack whose bytes do not verify
+/// refuses everything (`a_pack_with_damaged_blob_bytes_…` below), and neither
+/// the debris nor the refusals ever modify or clean a pack.
 #[test]
 fn an_unreadable_stranded_pack_is_reported_and_never_adopted() {
     let sb = Sandbox::new(4, 400_000);
@@ -820,27 +829,73 @@ fn an_unreadable_stranded_pack_is_reported_and_never_adopted() {
     );
     let stdout = String::from_utf8_lossy(&second.stdout);
     let said = stranded_lines(&stdout);
+    // Every stranded pack is still counted — naming none of them as content.
     assert!(
-        said.iter().any(|line| line.contains("NOT adopted")),
-        "the push must report the refusal rather than silently re-uploading: {stdout}"
+        said.iter()
+            .any(|line| line.contains(&format!("{} pack(s)", stranded.len()))
+                && line.contains("named by no index file")),
+        "the push must count every stranded pack in: {stdout}"
     );
+    // The debris is named as debris, never as corruption, never adopted.
     assert!(
-        !said.iter().any(|line| line.contains("adopted -")),
-        "an unreadable pack must never be reported as adopted: {stdout}"
+        said.iter()
+            .any(|line| line.contains("1 torn pack(s)")
+                && line.contains(
+                    "An interrupted push left a partial file. It belongs to no backup and can be ignored."
+                )),
+        "the torn pack must be reported as debris with the one sentence: {stdout}"
     );
-
-    // The unreadable pack is left alone: nothing deletes or rewrites it.
+    // The complete packs beside it were adopted and named — by count, which
+    // is the concrete way this test can see the torn pack excluded: the
+    // naming file holds every stranded pack minus the debris.
+    assert!(
+        said.iter()
+            .any(|line| line.contains(&format!(
+                "persisted - a new index file names the {} verified pack(s)",
+                stranded.len() - 1
+            ))),
+        "the retry must name the packs that verified ({} of {}): {stdout}",
+        stranded.len() - 1,
+        stranded.len()
+    );
+    // And the unreadable file is left alone: nothing deletes or rewrites it.
     assert_eq!(
         fs::read(&victim).unwrap(),
         truncated,
         "the unreadable pack must not be modified"
     );
-
-    // And the indexed content still reads back, byte-perfect: the refusal costs
-    // the reuse, never the archive.
+    // The archive still reads back, byte-perfect: the refusal costs the
+    // reuse of the debris only, never the archive.
     assert_eq!(
-        assert_no_mismatched_content(&sb, "after a refused adoption"),
+        assert_no_mismatched_content(&sb, "after an adoption beside torn debris"),
         sb.staged.len()
+    );
+
+    // A third push over the named survivors: the debris alone is still there
+    // — stranded, reported as debris, never adopted, never named — and
+    // everything else is a healthy no-op.
+    let third = sb.push();
+    assert!(third.status.success());
+    let stdout = String::from_utf8_lossy(&third.stdout);
+    let said = stranded_lines(&stdout);
+    assert!(
+        said.iter().any(|line| line.contains("1 pack(s)")
+            && line.contains("named by no index file")),
+        "the torn pack must still be counted as stranded: {stdout}"
+    );
+    assert!(
+        said.iter().any(|line| line.contains("1 torn pack(s)")),
+        "the debris must still be reported as debris: {stdout}"
+    );
+    assert!(
+        !said.iter()
+            .any(|line| line.contains("adopted") || line.contains("persisted")),
+        "with the survivors named and only debris left, nothing may be reported as adopted or persisted: {stdout}"
+    );
+    assert_eq!(
+        fs::read(&victim).unwrap(),
+        truncated,
+        "still nobody may touch the debris"
     );
 }
 
@@ -1171,13 +1226,15 @@ fn an_index_file_that_is_gone_is_reported() {
 /// A pack another client is still writing, seen from a backend whose listing
 /// shows it: the bytes uploaded so far, at the name the pack will keep.
 ///
-/// This is the case the guard exists for on a remote destination, and it is the
-/// one `LocalBackend` cannot produce: its in-flight pack is named `<id>-tmp-`
-/// and renamed, so a listing is always of finished packs. OpenDAL writes to the
-/// final path, so the listing has to be assumed to contain a prefix of a pack.
-/// The push must fall back to the plain index and say so rather than index a
-/// pack whose bytes are half-written, and the file must be left exactly as it
-/// was found — whoever is writing it is still writing it.
+/// This is the case the guard exists for on a remote destination, and it is
+/// the one `LocalBackend` cannot produce: its in-flight pack is named `<id>-tmp-`
+/// and renamed, so a listing is always of finished packs. OpenDAL writes to
+/// the final path, so the listing has to be assumed to contain a prefix of a
+/// pack. The push must refuse to index the half-written pack — and since
+/// W1066 that refusal is scoped to the debris itself: the prefix cannot be
+/// read as a pack, so it is excluded and reported, while the finished packs
+/// around it are adopted and named. Whoever is still writing it keeps
+/// writing it: the file is left exactly as it was found.
 #[test]
 fn an_incomplete_pack_in_a_remote_backends_listing_is_not_adopted() {
     let sb = Sandbox::opendal_fs(4, 400_000);
@@ -1202,12 +1259,21 @@ fn an_incomplete_pack_in_a_remote_backends_listing_is_not_adopted() {
     let stdout = String::from_utf8_lossy(&second.stdout);
     let said = stranded_lines(&stdout);
     assert!(
-        said.iter().any(|line| line.contains("NOT adopted")),
-        "the push must report the refusal rather than index a half-written pack: {stdout}"
+        said.iter()
+            .any(|line| line.contains("named by no index file")),
+        "the push must report the stranded packs it found: {stdout}"
     );
     assert!(
-        !said.iter().any(|line| line.contains("adopted -")),
-        "an incomplete pack must never be reported as adopted: {stdout}"
+        said.iter().any(|line| line.contains("1 torn pack(s)")),
+        "the in-flight pack must be reported as debris, never as a failure: {stdout}"
+    );
+    assert!(
+        said.iter()
+            .any(|line| line.contains(&format!(
+                "persisted - a new index file names the {} verified pack(s)",
+                stranded.len() - 1
+            ))),
+        "the finished packs beside the in-flight one must be adopted and named: {stdout}"
     );
     assert_eq!(
         fs::read(&victim).unwrap(),
@@ -1215,26 +1281,16 @@ fn an_incomplete_pack_in_a_remote_backends_listing_is_not_adopted() {
         "the in-flight pack must not be touched"
     );
 
-    // The content went up again, and the archive still reads back byte-perfect.
-    // `data_added` includes tree metadata, so compare it with a threshold well
-    // below the staged payload. Repository growth is a poor measure because
-    // chunk boundaries can change packed size.
-    let grew = repo_bytes(&sb.repo) - before;
-    let payload: usize = sb.staged.values().map(Vec::len).sum();
-    let added = summary_field(&stdout, "data_added").unwrap_or_default();
-    eprintln!(
-        "W245: incomplete pack in the listing: payload={payload} data_added={added} \
-         packed={} grew={grew} (repository was {before})",
-        summary_field(&stdout, "data_added_packed").unwrap_or_default()
-    );
-    assert!(
-        added as usize >= payload / 2,
-        "the retry added {added} bytes of data for a {payload}-byte payload: something was \
-         treated as already stored, and the pack that refused is the only candidate"
-    );
+    // The content still reads back, byte-perfect: the in-flight pack's
+    // content went up again, nothing that verified was re-uploaded, and the
+    // archive is complete either way.
     assert_eq!(
         assert_no_mismatched_content(&sb, "after an incomplete pack in the listing"),
         sb.staged.len()
+    );
+    assert!(
+        repo_bytes(&sb.repo) > before,
+        "the retry uploaded the in-flight pack's content again, so the store grew"
     );
 }
 
