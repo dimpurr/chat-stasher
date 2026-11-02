@@ -209,28 +209,38 @@ fn l3_names_a_repeated_shard_and_does_not_fail_on_it() {
 fn repair_duplicates_reports_counts_and_never_changes_the_repository() {
     let sb = tempfile::tempdir().unwrap();
     let sandbox = sb.path();
-    let stage = sandbox.join("stage");
     let line = r#"{"type":"user","message":{"role":"user","content":"synthetic"}}"#;
-    write_shard(&stage, 1, &format!("{line}\n"));
-    write_shard(&stage, 2, &format!("{line}\n"));
+    // W1065 rework: the one shape a read may fold is the re-instance re-seal —
+    // a second stage root re-sealing the SAME sequence number under its own
+    // prefix — so this plants exactly that: two different stage roots, each
+    // pushing the same shard 000001 to the same machine and session.
+    let stage_one = sandbox.join("stage");
+    write_shard(&stage_one, 1, &format!("{line}\n"));
+    let stage_two = sandbox.join("stage-of-the-second-instance");
+    write_shard(&stage_two, 1, &format!("{line}\n"));
     let repo = sandbox.join("repo");
     let key = sandbox.join("keys").join("masterkey.json");
-    let push = run(
-        sandbox,
-        &[
-            "push",
-            "--stage",
-            stage.to_str().unwrap(),
-            "--repo",
-            repo.to_str().unwrap(),
-            "--key-file",
-            key.to_str().unwrap(),
-            "--machine",
-            MACHINE,
-            "--keep-ssh-masters",
-        ],
-    );
-    assert!(push.status.success(), "push failed: {:?}", push.status);
+    let push = |stage: &Path| {
+        run(
+            sandbox,
+            &[
+                "push",
+                "--stage",
+                stage.to_str().unwrap(),
+                "--repo",
+                repo.to_str().unwrap(),
+                "--key-file",
+                key.to_str().unwrap(),
+                "--machine",
+                MACHINE,
+                "--keep-ssh-masters",
+            ],
+        )
+    };
+    let first = push(&stage_one);
+    assert!(first.status.success(), "push failed: {:?}", first.status.code());
+    let second = push(&stage_two);
+    assert!(second.status.success(), "push failed: {:?}", second.status.code());
     let snapshots_before = fs::read_dir(repo.join("snapshots")).unwrap().count();
 
     let report = run(
