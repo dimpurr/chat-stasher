@@ -792,9 +792,13 @@ impl BackupStore {
             );
         let snap = r
             .backup(&build_opts, &source, snap)
-            .context("run rustic backup")?;
+            .context("run rustic backup")
+            .map_err(|error| self.explain_short_files(error))?;
 
-        let snaps = r.get_all_snapshots().context("list snapshots")?;
+        let snaps = r
+            .get_all_snapshots()
+            .context("list snapshots")
+            .map_err(|error| self.explain_short_files(error))?;
         // A skipped snapshot is never written, so it keeps the id `to_snapshot`
         // gave it and appears in no listing. Asking the listing whether it
         // holds the snapshot we were handed is a read of the repository's own
@@ -3823,6 +3827,14 @@ impl StoreConfig {
         options
     }
 
+    /// Whether index and snapshot files are published atomically as well as
+    /// packs (W1068): the SFTP family only. The local-directory family already
+    /// writes them atomically (rustic's local `-tmp-` rename; `opendal:fs`
+    /// staging), and S3/R2 are atomic at the object.
+    pub(crate) fn publishes_metadata_atomically(&self) -> bool {
+        self.repo_root == "opendal:sftp"
+    }
+
     /// The `(scheme, options)` an [`crate::atomic_pack`] writer opens for this
     /// destination, or `None` for a family ADR-063 leaves alone (S3/R2 are
     /// atomic at the object, D2; `rest:` is not covered).
@@ -3849,6 +3861,15 @@ impl StoreConfig {
 }
 
 impl BackupStore {
+    /// W1068: after a failed push step, name any index or snapshot file too
+    /// short to be complete (one read-only listing; never on a healthy path).
+    fn explain_short_files(&self, error: anyhow::Error) -> anyhow::Error {
+        match self.backends() {
+            Ok(backends) => crate::orphans::explain_short_files(&backends, error),
+            Err(_) => error,
+        }
+    }
+
     /// Delete tmp debris older than seven days on this push connection
     /// (ADR-063 D3). Best effort: a sweep that cannot run is worded and never
     /// fails the push, because the debris it would have removed is inert.
