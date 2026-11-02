@@ -16,7 +16,7 @@ This page is about Gemini's data from Google Takeout. It is not a set of convers
 
 ## What we collect
 
-In this build, nothing: the import command names the platform (its spelling on the command line is `gemini`) but refuses it. On 2026-11-01 a run of `chat-stasher import gemini <file> --inbox <dir> --stage <dir>` on a synthetic file exited 2 with "this build has no gemini export parser", saying the export was not importable and that nothing was sealed. The cause is in `crates/chat-stasher/src/import.rs`: `crates/chat-stasher/src/import.rs` has no parser wired for it. The generated header above says the same (`parser written, not yet offered by the command`).
+In this build, nothing: the import command names the platform (its spelling on the command line is `gemini`) but refuses it. On 2026-11-01 a run of `chat-stasher import gemini <file> --inbox <dir> --stage <dir>` on a synthetic file exited 2 with "this build has no gemini export parser", saying the export was not importable and that nothing was sealed. The cause is in `crates/chat-stasher/src/import.rs`: it has no parser wired for it there. The generated header above says the same (`parser written, not yet offered by the command`).
 
 A parser exists in the source (`crates/chat-stasher/src/import/gemini.rs`). It returns observations, not conversations, and builds no bundle. The shape it reads was measured on the 2026-09-24 Takeout payload (26,508,335 bytes):
 
