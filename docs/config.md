@@ -226,7 +226,7 @@ it.
 |---|---|---|
 | `enabled` | `false` | The switch. A machine that declares no section, or sets this false, mirrors nothing and reads only the remote — the read behaviour above is the switch's, not a separate one. |
 | `mirror_of` | (required) | The declared destination to mirror, by name. One mirror per machine: repointing this key is safe — the old record is expired rather than inherited (the state file names the destination it was built for, and coverage answers only for that name). |
-| `min_free_gib` | `max(10, min(5% of the volume's capacity, 20))` | The free-space floor for the mirror's volume, in GiB (0 or more; a negative value is a usage error, exit 2). Before each round copies files, the remaining download plus this floor must fit in the free space, or the round refuses; while copying, the floor is checked before each file, counting that file's size. If the volume's capacity cannot be measured, the default floor is 10 GiB. The 20 GiB cap keeps the percentage term of the default from demanding ever more headroom on a large disk; setting this key always wins over the default. |
+| `min_free_gib` | `max(10, min(5% of the volume's capacity, 20))` | The free-space floor for the mirror's volume, in GiB (0 or more; a negative value is a usage error, exit 2). Before each round copies files, the remaining download plus this floor must fit in the free space, or the round refuses; while copying, the floor is checked before each file, counting that file's size. If the volume's capacity cannot be measured, the default floor is 10 GiB. The 20 GiB cap keeps the percentage term of the default from demanding ever more headroom on a large disk; setting this key always wins over the default. If free space cannot be read while copying, that file's floor check is skipped and the round proceeds — the write's own error is the next signal. |
 
 - The scheduled pass runs the copy after its push, inside the round's
   leftover budget; `mirror sync` runs the same round on demand. A first
@@ -235,22 +235,24 @@ it.
   readability) is a pause, not a failure, and the next round resumes.
 - What the copy keeps is visible without running anything: `status`
   prints one `[mirror]` line and `doctor` a whole `D13` section — the
-  copy's size on disk, when the last sync completed (with its age), how
-  many snapshots the last completed round's record does not hold
-  closure-complete, and how many orphan files the mirror still carries.
+   copy's size on disk, when the last sync completed (with its age), how
+   many snapshots the last completed round has not yet fully copied (a
+   reclaim proof cannot rely on them yet), and how many orphan files the mirror still carries.
   These are the settled four: the same sentence family, with one
   wording, appears in `status`, in `doctor` and in the menu bar app. A
   first sync reads as exactly that (`first sync … in progress:
   downloaded A of X (a%), of which B (b%) hash-verified` — the two
   numbers a fill has: everything of the listing already on disk, and
   the subset a hash has vouched for, downloaded ≥ verified always),
-  never as a red, while `reclaim` holds the
-  sessions it would cover — and that hold-back is a code gate, not a
-  promise: `reclaim-stage` reports `not-mirrored` for a proven session when the
-  enabled mirror copies a destination consulted by that run and the copy's
-  completed-round record does not hold its proof snapshot closure-complete.
-  The mirror rows name how many sessions it is currently holding back, so the count comes from the reclaim's own
-  record and never a guess.
+   never as a red, while `reclaim` holds back sessions until the copy
+   catches up — and that hold-back is a code gate, not a
+   promise: `reclaim-stage` reports `not-mirrored` for a proven session when the
+   enabled mirror copies a destination consulted by that run and the mirror
+   has not yet finished copying everything that session's proof depends on.
+   One held-back session blocks the whole run: dry-run and apply delete
+   nothing while any session is held back.
+   The mirror rows name how many sessions it is currently holding back, so the count comes from the reclaim's own
+   record and never a guess.
   With the mirror enabled the leg fails closed: a `mirror_of` that is not a
   declared destination, or is declared but degraded (so not consulted), holds
   every session as `mirror-unresolved` and deletes nothing.
