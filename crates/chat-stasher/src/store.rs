@@ -2591,8 +2591,7 @@ pub fn duplicate_shard_indices<T: Eq>(shards: &[T]) -> Vec<usize> {
         let bounded = preceding.len().min(shards.len() - index);
         for len in (1..=bounded).rev() {
             let tail = preceding.len() - len;
-            if (0..len).all(|offset| shards[index + offset] == shards[preceding[tail + offset]])
-            {
+            if (0..len).all(|offset| shards[index + offset] == shards[preceding[tail + offset]]) {
                 replay = len;
                 break;
             }
