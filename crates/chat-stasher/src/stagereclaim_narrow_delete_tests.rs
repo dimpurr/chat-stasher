@@ -162,10 +162,7 @@ fn store_config(dir: &Path) -> StoreConfig {
 /// the race's hook can run it inside the reclaim without borrowing anything.
 fn collect_once(db: &Path, stage: &Path, state: &Path) -> CollectReport {
     let mut roots = BTreeMap::new();
-    roots.insert(
-        "opencode".to_string(),
-        db.to_string_lossy().into_owned(),
-    );
+    roots.insert("opencode".to_string(), db.to_string_lossy().into_owned());
     let config = Config {
         harness_roots: roots,
         ..Config::default()
@@ -224,11 +221,7 @@ fn reclaim_with(stage: &Path, cfg: &StoreConfig) -> ReclaimReport {
         health: DestinationHealth::Healthy,
     }];
     let report = stagereclaim::reclaim_stage(stage, &dests, true, None).unwrap();
-    assert!(
-        !report.blocked(),
-        "reclaim blocked: {:?}",
-        report.blocked
-    );
+    assert!(!report.blocked(), "reclaim blocked: {:?}", report.blocked);
     report
 }
 
@@ -410,4 +403,3 @@ fn the_apply_delete_keeps_a_shard_sealed_by_a_concurrent_pass_after_the_proof() 
     );
     assert_eq!(fx.manifest_row("ses_a").shard_count, 1);
 }
-

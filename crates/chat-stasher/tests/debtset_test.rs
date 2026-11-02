@@ -21,6 +21,14 @@ use std::path::Path;
 
 const MACHINE: &str = "fixture-machine";
 
+/// Reclaim a body synchronously in a fixture: the delete may take every
+/// shard present, the set a synchronous survey of the same directory would
+/// enumerate.
+fn reclaim_body_sync(stage: &Path, machine: &str, session: &str) -> usize {
+    let proven = chat_stasher::stagereclaim::present_shard_seqs(stage, machine, session).unwrap();
+    chat_stasher::stagereclaim::reclaim_session_body(stage, machine, session, &proven).unwrap()
+}
+
 fn registry() -> HarnessRegistry {
     let cell = json!({
         "template": "~/.claude/projects",
@@ -443,8 +451,7 @@ fn reclaimed_session_with_manifest_is_not_restaged() {
     // Reclaim: manifest is written, sealed shards are removed from stage.
     let fresh = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
     chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
-    let removed =
-        chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session).unwrap();
+    let removed = reclaim_body_sync(&fx.stage, MACHINE, &session);
     assert_eq!(removed, 1);
 
     // Destination archive is unreachable (offline). Manifest must discharge the debt locally.
@@ -487,8 +494,7 @@ fn reclaimed_session_growth_stages_only_delta_not_old_content() {
     // Reclaim: manifest written, shard body removed.
     let fresh = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
     chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
-    let removed =
-        chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session).unwrap();
+    let removed = reclaim_body_sync(&fx.stage, MACHINE, &session);
     assert_eq!(removed, 1);
 
     // Source file grows with 2 new lines.
@@ -538,7 +544,7 @@ fn manifest_missing_or_corrupt_falls_back_to_unverifiable() {
     // Reclaim: write valid manifest and remove body.
     let fresh = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
     chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
-    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session).unwrap();
+    reclaim_body_sync(&fx.stage, MACHINE, &session);
 
     // Baseline: with intact manifest, unreachable destination does not cause reset.
     let intact = fx.collect(&unreachable("dest-a"));
@@ -568,7 +574,7 @@ fn manifest_missing_or_corrupt_falls_back_to_unverifiable() {
     // Case B: manifest missing (e.g. deleted)
     fs::remove_file(&manifest_file).unwrap();
     // Clear out shards written by the reset above
-    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session).unwrap();
+    reclaim_body_sync(&fx.stage, MACHINE, &session);
 
     let report_missing = fx.collect(&unreachable("dest-a"));
     assert_eq!(
@@ -652,10 +658,10 @@ fn remote_query_scopes_to_only_needed_sessions() {
     // Reclaim session A: write manifest, delete shard body.
     let manifest = chat_stasher::manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
     chat_stasher::manifest::write_manifest(&fx.stage, MACHINE, &manifest).unwrap();
-    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &id_a).unwrap();
+    reclaim_body_sync(&fx.stage, MACHINE, &id_a);
 
     // Reclaim session B: delete shard body, manifest retains B's initial fact.
-    chat_stasher::stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &id_b).unwrap();
+    reclaim_body_sync(&fx.stage, MACHINE, &id_b);
 
     // Session B grows: stage has incremental shard only (e.g. shard 2), so stage does not cover
     // the whole prefix, and shard dir is not empty (skipping manifest check).

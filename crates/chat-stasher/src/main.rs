@@ -16530,6 +16530,15 @@ mod decision_surface_tests {
         )
     }
 
+    /// Reclaim a body synchronously in a fixture: the set of shards the
+    /// delete may take is everything present — a synchronous survey of the
+    /// same directory the reclaim's own survey would enumerate.
+    fn reclaim_fixture_body(stage: &Path, machine: &str, session: &str) -> usize {
+        let proven =
+            chat_stasher::stagereclaim::present_shard_seqs(stage, machine, session).unwrap();
+        chat_stasher::stagereclaim::reclaim_session_body(stage, machine, session, &proven).unwrap()
+    }
+
     /// Write one sealed shard for `session` under `machine` (bucketed layout).
     fn write_shard(stage: &Path, machine: &str, session: &str, lines: &[String]) {
         let dir = stage
@@ -16630,8 +16639,7 @@ mod decision_surface_tests {
         // that skipped it would be testing a reclaim that cannot happen.
         let fresh = chat_stasher::manifest::generate_manifest(&stage, machine).unwrap();
         chat_stasher::manifest::write_manifest(&stage, machine, &fresh).unwrap();
-        let removed = chat_stasher::stagereclaim::reclaim_session_body(&stage, machine, session)
-            .expect("reclaim the body");
+        let removed = reclaim_fixture_body(&stage, machine, session);
         assert_eq!(removed, 1, "the shard body goes, the session dir stays");
 
         rebuild_activity_index(&stage, machine, false).expect("second rebuild");
@@ -16661,7 +16669,7 @@ mod decision_surface_tests {
         // index row was ever written.
         let manifest = chat_stasher::manifest::generate_manifest(&stage, machine).unwrap();
         chat_stasher::manifest::write_manifest(&stage, machine, &manifest).unwrap();
-        chat_stasher::stagereclaim::reclaim_session_body(&stage, machine, session).unwrap();
+        reclaim_fixture_body(&stage, machine, session);
 
         rebuild_activity_index(&stage, machine, false).expect("rebuild");
         let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
@@ -16712,7 +16720,7 @@ mod decision_surface_tests {
         write_shard(&stage, machine, session, &[cc_line("2025-06-01T00:00:00Z")]);
         let fresh = chat_stasher::manifest::generate_manifest(&stage, machine).unwrap();
         chat_stasher::manifest::write_manifest(&stage, machine, &fresh).unwrap();
-        chat_stasher::stagereclaim::reclaim_session_body(&stage, machine, session).unwrap();
+        reclaim_fixture_body(&stage, machine, session);
 
         rebuild_activity_index(&stage, machine, false).expect("second rebuild");
         let after = fs::read_to_string(&index).unwrap();
@@ -16762,7 +16770,7 @@ mod decision_surface_tests {
 
         let fresh = chat_stasher::manifest::generate_manifest(&stage, machine).unwrap();
         chat_stasher::manifest::write_manifest(&stage, machine, &fresh).unwrap();
-        chat_stasher::stagereclaim::reclaim_session_body(&stage, machine, session).unwrap();
+        reclaim_fixture_body(&stage, machine, session);
 
         rebuild_activity_index(&stage, machine, false).expect("rebuild");
         let after = fs::read_to_string(&index).unwrap();

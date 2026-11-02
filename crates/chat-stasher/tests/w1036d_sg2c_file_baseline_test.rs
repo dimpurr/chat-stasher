@@ -37,6 +37,14 @@ use test_support::Sandbox;
 
 const MACHINE: &str = "fixture-machine";
 
+/// Reclaim a body synchronously in a fixture: the delete may take every
+/// shard present, the set a synchronous survey of the same directory would
+/// enumerate.
+fn reclaim_body_sync(stage: &Path, machine: &str, session: &str) -> usize {
+    let proven = stagereclaim::present_shard_seqs(stage, machine, session).unwrap();
+    stagereclaim::reclaim_session_body(stage, machine, session, &proven).unwrap()
+}
+
 fn store_config(dir: &Path, repo_name: &str) -> StoreConfig {
     StoreConfig {
         repo_root: dir.join(repo_name).to_string_lossy().into_owned(),
@@ -192,9 +200,9 @@ fn sg2c_post_reclaim_unchanged_exports_zero_and_changed_writes_increment_only() 
     // Reclaim: generate manifest summary and delete shard bodies from stage
     let fresh = manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
     manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
-    let removed_u = stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &unchanged_id).unwrap();
+    let removed_u = reclaim_body_sync(&fx.stage, MACHINE, &unchanged_id);
     assert_eq!(removed_u, 1);
-    let removed_g = stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &growing_id).unwrap();
+    let removed_g = reclaim_body_sync(&fx.stage, MACHINE, &growing_id);
     assert_eq!(removed_g, 1);
 
     assert_eq!(fx.shard_count(&unchanged_id), 0);
@@ -303,7 +311,7 @@ fn self_attack_changed_session_treated_as_unchanged_must_fail() {
     // Reclaim
     let fresh = manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
     manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
-    stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session_id).unwrap();
+    reclaim_body_sync(&fx.stage, MACHINE, &session_id);
 
     // Mutate source: file gains a line
     let mut f = fs::OpenOptions::new().append(true).open(&file).unwrap();
@@ -350,7 +358,7 @@ fn self_attack_unchanged_session_fully_rewritten_must_fail() {
     // Reclaim
     let fresh = manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
     manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
-    stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session_id).unwrap();
+    reclaim_body_sync(&fx.stage, MACHINE, &session_id);
 
     // Do NOT touch file; collect again
     let report = fx.collect();
@@ -426,8 +434,8 @@ fn sg2c_post_reclaim_with_fresh_destination_exports_full_body_for_never_pushed_d
     // Reclaim: write manifest and remove bodies
     let fresh = manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
     manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
-    stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &unchanged_id).unwrap();
-    stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &growing_id).unwrap();
+    reclaim_body_sync(&fx.stage, MACHINE, &unchanged_id);
+    reclaim_body_sync(&fx.stage, MACHINE, &growing_id);
     assert_eq!(fx.shard_count(&unchanged_id), 0);
     assert_eq!(fx.shard_count(&growing_id), 0);
 
@@ -523,7 +531,7 @@ fn sg2c_post_reclaim_compressed_codex_unchanged_exports_zero() {
     // Reclaim
     let fresh = manifest::generate_manifest(&fx.stage, MACHINE).unwrap();
     manifest::write_manifest(&fx.stage, MACHINE, &fresh).unwrap();
-    stagereclaim::reclaim_session_body(&fx.stage, MACHINE, &session_id).unwrap();
+    reclaim_body_sync(&fx.stage, MACHINE, &session_id);
     assert_eq!(fx.shard_count(&session_id), 0);
 
     // Collect 2: post-reclaim pass over unchanged compressed file
@@ -620,7 +628,7 @@ fn sg2c_post_reclaim_claude_code_and_grok_unchanged_export_zero() {
     // Reclaim
     let fresh = manifest::generate_manifest(&stage, MACHINE).unwrap();
     manifest::write_manifest(&stage, MACHINE, &fresh).unwrap();
-    stagereclaim::reclaim_session_body(&stage, MACHINE, &session_id).unwrap();
+    reclaim_body_sync(&stage, MACHINE, &session_id);
 
     let dir = store::session_shard_dir(&stage, MACHINE, &session_id);
     assert_eq!(store::sealed_shard_entries(&dir).unwrap().len(), 0);
@@ -713,7 +721,7 @@ fn sg2c_post_reclaim_whole_file_unchanged_exports_zero() {
     // Reclaim
     let fresh = manifest::generate_manifest(&stage, MACHINE).unwrap();
     manifest::write_manifest(&stage, MACHINE, &fresh).unwrap();
-    stagereclaim::reclaim_session_body(&stage, MACHINE, &session_id).unwrap();
+    reclaim_body_sync(&stage, MACHINE, &session_id);
 
     let dir = store::session_shard_dir(&stage, MACHINE, &session_id);
     assert_eq!(store::sealed_shard_entries(&dir).unwrap().len(), 0);
