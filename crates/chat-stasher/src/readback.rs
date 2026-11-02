@@ -97,13 +97,14 @@ pub struct SessionBackedUp {
     /// later single shard. `end` is exclusive and is the index of that later
     /// shard; only indices and digests leave readback, never payload bytes.
     pub shard_run_duplicates: Vec<(usize, usize)>,
-    /// Positions this read folded out under
-    /// [`crate::store::DuplicateShardPolicy::Collapse`] — re-seal copies the
-    /// archive's sequence evidence proved, minus any a provenance observation
-    /// rescued. The repair inventory reads this list instead of re-deriving
-    /// the fold, so the report names exactly the copies the read dropped.
-    /// Empty under [`crate::store::DuplicateShardPolicy::KeepAll`] and on
-    /// reports that never fold.
+    /// Positions a [`crate::store::DuplicateShardPolicy::Collapse`] read of
+    /// this archive folds out — re-seal copies the archive's sequence
+    /// evidence proved, minus any a provenance observation rescued. The list
+    /// rides out under every policy: a KeepAll read (the raw inventory
+    /// `repair-duplicates` reads) still names each foldable copy while
+    /// keeping every shard in its own body, so the repair inventory reports
+    /// exactly what a default read drops rather than re-deriving it. Empty
+    /// when nothing folds and on reports that never accumulate snapshots.
     pub folded_shard_indices: Vec<usize>,
 }
 
@@ -1025,13 +1026,15 @@ impl BackupStore {
                     // [`crate::store::duplicate_shard_indices_sequenced`].
                     shard_bodies.push((*sequence, buf));
                 }
-                let duplicate_indices: BTreeSet<_> = if shard_policy.collapses() {
+                // The fold ledger is policy-independent bookkeeping: it says
+                // what a Collapse read of this archive folds, so a KeepAll
+                // read (the raw inventory repair-duplicates asks for) still
+                // reports each foldable copy while keeping every shard in its
+                // own body. Only the body decision below honours the policy.
+                let would_fold: BTreeSet<usize> =
                     crate::store::duplicate_shard_indices_sequenced(&shard_bodies)
                         .into_iter()
-                        .collect()
-                } else {
-                    BTreeSet::new()
-                };
+                        .collect();
                 let observed_bodies: Vec<_> = shard_bodies
                     .iter()
                     .map(|(sequence, body)| {
@@ -1057,9 +1060,11 @@ impl BackupStore {
                     });
                     let provenance_bound = published_sequence
                         .is_some_and(|sequence| observed_sequences.contains(&sequence));
-                    if duplicate_indices.contains(&index) && !provenance_bound {
+                    if would_fold.contains(&index) && !provenance_bound {
                         folded_shard_indices.push(index);
-                        continue;
+                        if shard_policy.collapses() {
+                            continue;
+                        }
                     }
                     let digest: [u8; 32] = Sha256::digest(&buf).into();
                     let current_index = shard_sha256.len();
