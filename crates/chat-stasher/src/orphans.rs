@@ -482,31 +482,65 @@ pub struct ShortFile {
     pub bytes: u32,
 }
 
-/// Index and snapshot files under their final names that are shorter than any
-/// complete file can be. Read-only: one listing per directory, sizes only.
-/// A listing that fails is skipped (this only ever runs to explain a failure
-/// that already happened).
+/// Why one directory's size listing could not be taken, for
+/// [`short_files_checked`]: the directory (`index` or `snapshots`) and the
+/// error the backend answered with (W1071 review H1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortFileListingError {
+    /// `index` or `snapshots`.
+    pub dir: &'static str,
+    /// The listing error, flattened.
+    pub error: String,
+}
+
+/// The fallible shape of [`short_files`]: every short file the two size
+/// listings named, and every listing that could not be taken (W1071 review
+/// H1). A failed listing never hides what the other directory found —
+/// both halves travel out together, so the doctor row that asks this
+/// question can word a failure as unknown (never as a measured empty)
+/// while the explain path keeps whatever the answered listing saw.
 #[must_use]
-pub fn short_files(backends: &RepositoryBackends) -> Vec<ShortFile> {
-    let mut out = Vec::new();
+pub fn short_files_checked(
+    backends: &RepositoryBackends,
+) -> (Vec<ShortFile>, Vec<ShortFileListingError>) {
+    let mut files = Vec::new();
+    let mut failures = Vec::new();
     for (tpe, dir) in [
         (FileType::Index, "index"),
         (FileType::Snapshot, "snapshots"),
     ] {
-        if let Ok(listed) = backends.repository().list_with_size(tpe) {
-            for (id, bytes) in listed {
-                if bytes < MIN_ENCRYPTED_FILE {
-                    out.push(ShortFile {
-                        dir,
-                        id_hex: id.to_hex().to_string(),
-                        bytes,
-                    });
+        match backends.repository().list_with_size(tpe) {
+            Ok(listed) => {
+                for (id, bytes) in listed {
+                    if bytes < MIN_ENCRYPTED_FILE {
+                        files.push(ShortFile {
+                            dir,
+                            id_hex: id.to_hex().to_string(),
+                            bytes,
+                        });
+                    }
                 }
             }
+            Err(error) => failures.push(ShortFileListingError {
+                dir,
+                error: format!("{error:#}"),
+            }),
         }
     }
-    out.sort_by(|a, b| (a.dir, &a.id_hex).cmp(&(b.dir, &b.id_hex)));
-    out
+    files.sort_by(|a, b| (a.dir, &a.id_hex).cmp(&(b.dir, &b.id_hex)));
+    (files, failures)
+}
+
+/// Index and snapshot files under their final names that are shorter than any
+/// complete file can be. Read-only: one listing per directory, sizes only.
+/// A listing that fails is skipped here — this only ever runs to explain a
+/// failure that already happened, so it names files it actually saw and
+/// passes the original error through unchanged when it saw none; the doctor
+/// row asks the same question through [`short_files_checked`] and words a
+/// failed listing as unknown instead (W1071 review H1).
+#[must_use]
+pub fn short_files(backends: &RepositoryBackends) -> Vec<ShortFile> {
+    short_files_checked(backends).0
 }
 
 /// The plain words for a repository that holds short index or snapshot files.

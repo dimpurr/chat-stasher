@@ -317,6 +317,108 @@ fn w1071_doctor_short_files_row_is_silent_when_healthy_and_names_when_short() {
         "a healthy doctor prints no short-files row: {stderr}"
     );
 
+    // W1071 review fix (H1): the size listing that could not be taken.
+    // Before the fix every failure collapsed to the healthy silence —
+    // `{"checked": true, "files": []}` and no terminal row — which words a
+    // listing the run could not take as a checked-and-clean one. Each leg
+    // breaks one precondition of the listing, and every assertion is on
+    // what the shipped CLI prints, because the two surfaces a user parses
+    // are the whole point. (The repository-directory-is-a-file leg needs
+    // no spawned CLI; doctor.rs pins it as an exact-equality unit test.)
+    let config_path = sandbox
+        .dir
+        .path()
+        .join("config")
+        .join("chat-stasher")
+        .join("config.toml");
+    let run_doctor = |config_text: String, what: &str| -> (serde_json::Value, String) {
+        fs::write(&config_path, config_text).unwrap();
+        let out = sandbox
+            .command()
+            .arg("doctor")
+            .arg("--json")
+            .output()
+            .unwrap_or_else(|e| panic!("{what}: run isolated doctor --json ({e})"));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|e| panic!("{what}: doctor --json must emit JSON ({e}): {stdout}"));
+        let out = sandbox
+            .command()
+            .arg("doctor")
+            .output()
+            .unwrap_or_else(|e| panic!("{what}: run isolated doctor ({e})"));
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        (value, stderr)
+    };
+
+    // (1) No repository directory at the configured path.
+    let (value, stderr) = run_doctor(
+        format!(
+            "rustic_repo = '{}'\nrustic_key_file = '{}'\nno_cache = true\n",
+            sandbox.dir.path().join("no-such-repo").display(),
+            key.display()
+        ),
+        "no repository directory",
+    );
+    let short = &value["short_files"];
+    assert_eq!(
+        short["checked"],
+        serde_json::json!(false),
+        "a repository directory that is not there is a did-not-check, never a clean listing: {short}"
+    );
+    assert!(
+        short["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "the section carries why it could not check: {short}"
+    );
+    assert!(
+        stderr.contains("Short index/snapshot files") && stderr.contains("no repository directory"),
+        "the human table keeps its row and says why, instead of dropping it: {stderr}"
+    );
+
+    // (2) Repository directory present, but the masterkey cannot be read.
+    let (value, stderr) = run_doctor(
+        format!(
+            "rustic_repo = '{}'\nrustic_key_file = '{}'\nno_cache = true\n",
+            repo.display(),
+            sandbox.dir.path().join("no-such.key").display()
+        ),
+        "no key",
+    );
+    let short = &value["short_files"];
+    assert_eq!(
+        short["checked"],
+        serde_json::json!(false),
+        "a repository that cannot be opened is a did-not-check: {short}"
+    );
+    let reason = short["reason"].as_str().unwrap_or_default().to_string();
+    assert!(
+        reason.contains("masterkey"),
+        "the reason names the leg that broke: {short}"
+    );
+    assert!(
+        stderr.contains("UNKNOWN") && stderr.contains("unknown, not absent"),
+        "the human row words the hole the same way the timed-out family does: {stderr}"
+    );
+
+    // A repository path that exists as a file cannot be listed at all; the
+    // leg where the CLI cannot reach it is pinned unit-side in doctor.rs
+    // (the local backend normalizes even that directory shape away). The
+    // third state a size listing cannot fake here — checked-and-clean —
+    // is the healthy leg at the end of this test.
+
+    // Back to the real repository for the short-file leg.
+    fs::write(
+        &config_path,
+        format!(
+            "rustic_repo = '{}'\nrustic_key_file = '{}'\nno_cache = true\n",
+            repo.display(),
+            key.display()
+        ),
+    )
+    .unwrap();
+
     // Short: the same row names the file in both outputs.
     let id = plant_short_snapshot(&repo);
     let out = sandbox
@@ -358,5 +460,77 @@ fn w1071_doctor_short_files_row_is_silent_when_healthy_and_names_when_short() {
     assert!(
         stderr.contains("move exactly"),
         "doctor text gives the manual step: {stderr}"
+    );
+}
+
+/// W1071 review fix (M1): the raw-export readback names a short snapshot
+/// with the same recovery words every other list path uses — the `main`-
+/// adjacent path the pre-fix test set never drove, which the review called
+/// out: no test exercised `read_archived_export` against a short file.
+#[test]
+fn w1071_raw_export_readback_names_the_short_file() {
+    let sandbox = sandbox_with_repository();
+    let repo = sandbox.repo();
+    let id = plant_short_snapshot(&repo);
+    let store = BackupStore::new(store_config(&repo, &sandbox.key()), "machine-a".to_string());
+    // The address format is validated before the listing, so a syntactically
+    // valid address the archive does not hold still reaches the snapshot
+    // listing — which is the leg the short file breaks.
+    let address = "ab".repeat(32);
+    let error = chat_stasher::raw_export::read_archived_export(
+        &store,
+        &sandbox.mk,
+        "machine-a",
+        "deepseek",
+        &address,
+        &mut std::io::sink(),
+    )
+    .expect_err("the export readback listing must fail with a short snapshot present");
+    assert_names_short(error, &id, "read_archived_export");
+}
+
+/// W1071 review fix (M1): `index build` — the FTS leg of `main`'s listing
+/// paths — exits 3 (an unfinished read, not a failed-with-index build) and
+/// names the short snapshot with the recovery words. Driven through the
+/// CLI because the build closure is not separately callable.
+#[test]
+fn w1071_index_build_names_the_short_file_and_exits_unfinished() {
+    let sandbox = sandbox_with_repository();
+    let repo = sandbox.repo();
+    let config_dir = sandbox.dir.path().join("config").join("chat-stasher");
+    fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "[destinations.storagebox]\nrepo = '{}'\nkey_file = '{}'\nno_cache = true\n",
+            repo.display(),
+            sandbox.key().display()
+        ),
+    )
+    .unwrap();
+    let id = plant_short_snapshot(&repo);
+    let out = sandbox
+        .command()
+        .args([
+            "index",
+            "build",
+            "--destination",
+            "storagebox",
+            "--keep-ssh-masters",
+        ])
+        .output()
+        .expect("run isolated index build");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a build that could not list the archive is an unfinished read, never an index over a repository it could not see: {stderr}"
+    );
+    assert!(
+        stderr.contains(&id),
+        "index build names the short file {id}: {stderr}"
+    );
+    assert!(
+        stderr.contains("move exactly"),
+        "index build gives the manual step: {stderr}"
     );
 }
