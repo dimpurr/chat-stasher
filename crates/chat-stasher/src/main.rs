@@ -2179,6 +2179,10 @@ fn main() -> ExitCode {
 }
 
 fn run() -> ExitCode {
+    // Snapshot the live ssh masters before any remote operation so the
+    // end-of-run reap only shuts down masters this process created (reap.rs).
+    // One `ps` fork; silent.
+    reap::record_startup_snapshot();
     // Before clap, not after: a browser starts this binary with no subcommand
     // and with arguments (an origin, or a manifest path and an add-on id) that
     // clap would reject as unknown. `nativehost-protocol.md` §3 makes this
