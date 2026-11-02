@@ -242,6 +242,12 @@ pub struct PushSummary {
     /// open did about them. `None` means the repository was created by this
     /// push (a fresh repository has no packs at all).
     pub orphans: Option<crate::orphans::OrphanOutcome>,
+    /// What this push did about naming the packs its open verified in a new
+    /// index file. `None` when there was nothing to name — no adoption
+    /// happened, or the repository was created by this push — so the healthy
+    /// and the refused case both stay silent where the earlier behaviour was
+    /// silent. Named/NotWritten say what the push connection wrote (W1066).
+    pub persisted: Option<crate::orphans::PersistOutcome>,
 }
 
 /// BackupStore: owns repository open/init, push, and read-back.
@@ -608,7 +614,7 @@ impl BackupStore {
         mk: &MasterKey,
     ) -> anyhow::Result<(Repository<IndexedFullStatus>, bool)> {
         self.open_or_init_with_progress(mk, NoProgressBars {})
-            .map(|(r, init, _)| (r, init))
+            .map(|(r, init, _, _)| (r, init))
     }
 
     /// Open an existing repository and build its index, reaching the packs no
@@ -637,7 +643,9 @@ impl BackupStore {
     ///
     /// The third element is what the open found out about packs the index files
     /// do not name, and what it did about them; a repository this call creates
-    /// has none, and reports `None`.
+    /// has none, and reports `None`. The fourth is the backend handles the
+    /// open built and is what a push re-uses for its own post-backup writes
+    /// (the persist step) instead of dialing the destination a second time.
     fn open_or_init_with_progress<P: ProgressBars>(
         &self,
         mk: &MasterKey,
@@ -646,6 +654,7 @@ impl BackupStore {
         Repository<IndexedFullStatus>,
         bool,
         Option<crate::orphans::OrphanOutcome>,
+        RepositoryBackends,
     )> {
         let backends = self.backends()?;
         let repo = Repository::new_with_progress(&self.cfg.repository_options(), &backends, pb)?;
@@ -653,7 +662,7 @@ impl BackupStore {
         if self.repo_exists(&backends)? {
             let opened = repo.open(&creds).context("open existing repository")?;
             let (r, outcome) = crate::orphans::index_adopting(opened, &backends, mk)?;
-            Ok((r, false, Some(outcome)))
+            Ok((r, false, Some(outcome), backends))
         } else {
             let config_opts = ConfigOptions::default().set_append_only(true);
             let r = repo
@@ -661,7 +670,7 @@ impl BackupStore {
                 .context("init new repository")?
                 .to_indexed()
                 .context("index new repository")?;
-            Ok((r, true, None))
+            Ok((r, true, None, backends))
         }
     }
 
@@ -747,7 +756,7 @@ impl BackupStore {
         // is already counted above and gives the `shards=N/total` scale.
         let push_progress =
             std::sync::Arc::new(crate::push_progress::PushProgress::new(stage_shards as u64));
-        let (r, init, orphans) = self.open_or_init_with_progress(
+        let (r, init, orphans, backends) = self.open_or_init_with_progress(
             mk,
             crate::push_progress::PushProgressBars::new(push_progress),
         )?;
@@ -804,6 +813,21 @@ impl BackupStore {
         // holds the snapshot we were handed is a read of the repository's own
         // answer, not a flag this function sets from its own intent.
         let snapshot_written = snaps.iter().any(|stored| stored.id == snap.id);
+        // W1066: the push connection is also the only connection that names
+        // in a new index file the packs this open verified from the index-less
+        // set. The write is a pure append gated by a pre-write survey (see
+        // `orphans::persist_verified`); a failure to write is reported and
+        // leaves the push to succeed, because un-named packs are exactly the
+        // state pushes left behind before this change.
+        let persisted = orphans
+            .as_ref()
+            .filter(|outcome| {
+                // Only an open that verified packs has anything to persist: a
+                // refusal, a plain index or an all-debris survey names nothing,
+                // and a push that reports one of those states already said why.
+                !outcome.verified.is_empty()
+            })
+            .map(|outcome| crate::orphans::persist_verified(&r, &backends, &outcome.verified));
         // ADR-063 D3 / ruling 2: this push connection is the only place
         // tmp debris is ever deleted.
         self.sweep_tmp_debris();
@@ -824,6 +848,7 @@ impl BackupStore {
             snapshot_host: snap.hostname.clone(),
             repo_was_init: init,
             orphans,
+            persisted,
         })
     }
 
@@ -1121,7 +1146,18 @@ impl BackupStore {
             repo.dump(&node, &mut buf).context("dump shard")?;
             bodies.push(buf);
         }
-        let duplicates: BTreeSet<_> = duplicate_shard_indices(&bodies).into_iter().collect();
+        // Newest-snapshot read of one stage root: two entries cannot share a
+        // sequence number here (one stage holds one file per number), so the
+        // re-seal rule has no evidence and nothing folds — a genuine
+        // consecutive repeat sealed as the next sequence stays in the body.
+        let paired: Vec<(Option<u64>, &Vec<u8>)> = entries
+            .iter()
+            .zip(bodies.iter())
+            .map(|((seq, _path, _node), body)| (Some(*seq), body))
+            .collect();
+        let duplicates: BTreeSet<_> = duplicate_shard_indices_sequenced(&paired)
+            .into_iter()
+            .collect();
         for ((seq, _path, _node), (index, buf)) in entries.iter().zip(bodies.iter().enumerate()) {
             if duplicates.contains(&index) {
                 continue;
@@ -1473,30 +1509,42 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
         body_cache,
         held.values().map(|(_, _, node)| node.meta.size).sum(),
     );
+    // (raw sequence, ambiguity-nulled sequence, shard name, body): the raw
+    // number is the re-seal evidence [`duplicate_shard_indices_sequenced`]
+    // decides on; the nulled one is what a provenance observation can safely
+    // bind to (an ambiguous number cannot name one shard).
     let mut shards = Vec::with_capacity(held.len());
     for (_, (sequence, name, node)) in held {
         let mut body = Vec::new();
         repo.dump(&node, &mut body)
             .with_context(|| format!("dump shard {name}"))?;
-        let sequence = sequence.filter(|sequence| !ambiguous.contains(sequence));
-        shards.push((sequence, name, body));
+        let nulled = sequence.filter(|sequence| !ambiguous.contains(sequence));
+        shards.push((sequence, nulled, name, body));
     }
-    let shard_bodies: Vec<_> = shards
+    let observed_bodies: Vec<_> = shards
         .iter()
-        .map(|(seq, _, body)| (*seq, body.clone()))
+        .map(|(_, nulled, _, body)| (*nulled, body.clone()))
         .collect();
-    let observed_sequences =
-        crate::provenance::verified_observation_sequences(session_id, &observations, &shard_bodies);
-    let body_only: Vec<_> = shards.iter().map(|(_, _, body)| body.clone()).collect();
+    let observed_sequences = crate::provenance::verified_observation_sequences(
+        session_id,
+        &observations,
+        &observed_bodies,
+    );
+    let raw_pairs: Vec<(Option<u64>, &Vec<u8>)> = shards
+        .iter()
+        .map(|(raw, _, _, body)| (*raw, body))
+        .collect();
     let duplicates: BTreeSet<_> = if policy.collapses() {
-        duplicate_shard_indices(&body_only).into_iter().collect()
+        duplicate_shard_indices_sequenced(&raw_pairs)
+            .into_iter()
+            .collect()
     } else {
         BTreeSet::new()
     };
     let mut concat = Vec::new();
     let mut hashes = Vec::new();
     let mut selected_bodies: Vec<Vec<u8>> = Vec::new();
-    for (index, (sequence, name, body)) in shards.into_iter().enumerate() {
+    for (index, (_raw, sequence, name, body)) in shards.into_iter().enumerate() {
         if duplicates.contains(&index)
             && !sequence.is_some_and(|sequence| observed_sequences.contains(&sequence))
         {
@@ -2752,7 +2800,7 @@ pub fn find_duplicate_shard_in_dir(dir: &Path, raw: &[u8]) -> anyhow::Result<Opt
 
 /// Environment variable the **index builders** read: set it to a non-empty value
 /// other than `0`, `false`, `no` or `off` and an activity or full-text index
-/// keeps every sealed shard instead of collapsing a whole-content replay.
+/// keeps every sealed shard instead of folding proven re-seal copies.
 ///
 /// The CLI has its own explicit `--no-collapse` flag on `read` and `export`;
 /// this variable is the same opt-out for the index paths, which have no flag of
@@ -2761,17 +2809,26 @@ pub const KEEP_ALL_SHARDS_ENV: &str = "CHAT_STASHER_NO_COLLAPSE";
 
 /// How a reader joins a session's sealed shards into its body.
 ///
-/// The default is [`Self::Collapse`]: a run of shards that byte-for-byte replays
-/// the session's complete preceding shard sequence is dropped to its first copy,
-/// because that shape is exactly what a re-seal leaves and no reader can tell it
-/// from new content that happens to repeat the whole session. The stored shards
-/// are never touched either way — this decides only what the reader returns.
+/// The default is [`Self::Collapse`]: copies that a **re-seal** leaves behind
+/// are folded to the kept original, and nothing else ever is. The re-seal
+/// evidence is the shard's own archived sequence number — a copy is folded
+/// only when the kept shard it byte-replays carries the same sequence number
+/// (see [`duplicate_shard_indices_sequenced`]), which is what a second
+/// machine instance re-collecting after a total local loss produces: the
+/// fresh stage re-seals the same sequence files under a different stage root,
+/// a whole re-seal included. A shard whose bytes merely repeat an earlier
+/// turn stays in the read — a genuine consecutive repeat is new content the
+/// collector deliberately admitted, and no reader may drop it on content
+/// alone. The stored shards are never touched either way — this decides only
+/// what the reader returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DuplicateShardPolicy {
-    /// Collapse a complete-prefix replay run to its first copy.
+    /// Fold a proven re-seal copy — the kept shard it replays shares its
+    /// sequence number ([`duplicate_shard_indices_sequenced`]) — and keep
+    /// every other shard.
     #[default]
     Collapse,
-    /// Keep every shard, replays included. The opt-out.
+    /// Keep every shard, re-seal copies included. The opt-out.
     KeepAll,
 }
 
@@ -2805,31 +2862,54 @@ impl DuplicateShardPolicy {
         }
     }
 
-    /// Whether a reader following this policy drops whole-content replays.
+    /// Whether a reader following this policy folds proven re-seal copies.
     pub fn collapses(self) -> bool {
         matches!(self, Self::Collapse)
     }
 }
 
-/// Indices in a later run that replay the complete preceding shard sequence.
+/// Tail-replay candidates: each later shard (or run of shards) that
+/// byte-replays part of the kept sequence, paired with the kept shard it
+/// replays shard-by-shard.
 ///
-/// Sequence order is the caller's order. Each replay shard must equal its
-/// corresponding preceding shard; concatenated byte ranges are never compared.
-/// A repeated individual shard that is not a complete replay remains present.
-pub fn duplicate_shard_indices<T: Eq>(shards: &[T]) -> Vec<usize> {
+/// Sequence order is the caller's order. A replay shard must equal its
+/// corresponding kept shard, never merely a concatenated byte range: a run
+/// matches when it reproduces any trailing part of the kept sequence — the
+/// complete sequence included (a whole re-seal) or a trailing partial run (a
+/// re-collect after a total local loss re-seals only what it cannot prove
+/// held, so a source that was archived as several shards replays its own
+/// tail). A repeated shard that does not continue matching the kept
+/// sequence's tail is not a candidate: `A,B,A` never matches, and neither does
+/// a later shard whose bytes merely extend or repeat bytes earlier in the
+/// body, so a prefix or substring cannot turn new content into a replay.
+///
+/// Matching bytes is only the *candidate* half; see
+/// [`duplicate_shard_indices_sequenced`] for the rule a collapse read applies
+/// to these candidates and why.
+fn tail_replay_partners<T: Eq>(shards: &[T]) -> Vec<(usize, usize)> {
     let mut duplicates = Vec::new();
     let mut preceding = Vec::new();
     let mut index = 0;
     while index < shards.len() {
-        if !preceding.is_empty()
-            && index + preceding.len() <= shards.len()
-            && preceding
-                .iter()
-                .enumerate()
-                .all(|(offset, previous)| shards[index + offset] == shards[*previous])
-        {
-            duplicates.extend(index..index + preceding.len());
-            index += preceding.len();
+        // The longest run starting here that reproduces a tail of the kept
+        // sequence, shard by shard. The complete sequence is the maximal
+        // tail, so a whole-sequence replay matches exactly as before.
+        let mut replay = 0;
+        let mut replay_tail = preceding.len();
+        let bounded = preceding.len().min(shards.len() - index);
+        for len in (1..=bounded).rev() {
+            let tail = preceding.len() - len;
+            if (0..len).all(|offset| shards[index + offset] == shards[preceding[tail + offset]]) {
+                replay = len;
+                replay_tail = tail;
+                break;
+            }
+        }
+        if replay > 0 {
+            for offset in 0..replay {
+                duplicates.push((index + offset, preceding[replay_tail + offset]));
+            }
+            index += replay;
             continue;
         }
         preceding.push(index);
@@ -2838,47 +2918,105 @@ pub fn duplicate_shard_indices<T: Eq>(shards: &[T]) -> Vec<usize> {
     duplicates
 }
 
-/// Keep the first sequence and later content unless a full shard-by-shard
-/// replay of that sequence follows it.
-pub fn unique_shard_bodies(shards: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
-    select_shard_bodies(shards, DuplicateShardPolicy::Collapse)
-}
-
-/// Apply a [`DuplicateShardPolicy`] to a session's shards: drop the copies a
-/// whole-content replay repeats under [`DuplicateShardPolicy::Collapse`], or
-/// return every shard unchanged under [`DuplicateShardPolicy::KeepAll`].
-pub fn select_shard_bodies(shards: Vec<Vec<u8>>, policy: DuplicateShardPolicy) -> Vec<Vec<u8>> {
-    if !policy.collapses() {
-        return shards;
-    }
-    let duplicates: BTreeSet<_> = duplicate_shard_indices(&shards).into_iter().collect();
-    shards
+/// Indices in later runs that replay the tail of the preceding shard
+/// sequence — the pure content detector over shard bodies alone.
+///
+/// This answers "which later shards byte-replay the kept tail", nothing more.
+/// It is not a folding rule and no production reader drops shards on this
+/// answer alone anymore (W1065 rework): without the sealed shards' sequence
+/// evidence it cannot tell a machine's re-seal from a genuine repeated turn,
+/// and a wrong guess eats a user message.
+pub fn duplicate_shard_indices<T: Eq>(shards: &[T]) -> Vec<usize> {
+    tail_replay_partners(shards)
         .into_iter()
-        .enumerate()
-        .filter_map(|(index, shard)| (!duplicates.contains(&index)).then_some(shard))
+        .map(|(index, _)| index)
         .collect()
 }
 
-/// The contiguous runs of a session's shard sequence that a
-/// [`DuplicateShardPolicy::Collapse`] read drops, each as
+/// Which tail-replay candidates a [`DuplicateShardPolicy::Collapse`] read may
+/// fold out, as indices into the same order the caller passes.
+///
+/// This is the folding rule (W1065 rework, verdict H1). The re-seal evidence is
+/// the shard's own archived sequence number: a candidate is folded only when
+/// it carries the **same sequence number** as the kept shard it byte-replays.
+/// One stage directory holds one file per sequence number, so two entries for
+/// the same number cannot come from one stage — they are two *instances* of
+/// the machine, two stage roots, and the second collector re-sealed the
+/// sequence file the first instance had already sealed: the total-local-loss
+/// re-collect shape. A whole re-seal replays the complete sequence number for
+/// number and folds the same way.
+///
+/// A candidate whose sequence number differs from the shard it replays is a
+/// **genuine consecutive repeat**: validated incremental collection
+/// (`base_offset > 0`) deliberately lets a real turn whose bytes equal an
+/// earlier turn into the archive (`allow_exact_repeat`), and those shards take
+/// the *next* sequence number. Folding one would silently drop a user
+/// message from every reader, so it stays.
+///
+/// A missing or ambiguous sequence (`None`) carries no evidence, and no
+/// evidence keeps the shard: when the archive cannot prove a re-seal, the
+/// duplicate stays in the read rather than risk user content. The vault stays
+/// honest in the other direction too — a proven re-seal that a
+/// provenance observation binds as distinct content is still rescued by the
+/// observation gate that sits over this rule (see
+/// [`crate::provenance::verified_observation_sequences`]).
+pub fn duplicate_shard_indices_sequenced<T: Eq>(shards: &[(Option<u64>, T)]) -> Vec<usize> {
+    let bodies: Vec<&T> = shards.iter().map(|(_, body)| body).collect();
+    tail_replay_partners(&bodies)
+        .into_iter()
+        .filter(|(index, partner)| {
+            matches!((shards[*index].0, shards[*partner].0), (Some(dup), Some(kept)) if dup == kept)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Apply a [`DuplicateShardPolicy`] to a session's sealed shards: drop the
+/// copies a re-seal leaves behind under [`DuplicateShardPolicy::Collapse`] —
+/// and only those, per [`duplicate_shard_indices_sequenced`] — or return
+/// every shard unchanged under [`DuplicateShardPolicy::KeepAll`].
+///
+/// `sequences` carries each shard's parsed sequence number in the same order
+/// as `shards`; it is the re-seal evidence the collapse rule needs, so a
+/// caller that has no sequence numbers (and therefore no evidence) folds
+/// nothing under the collapse policy either.
+pub fn select_shard_bodies_sequenced(
+    shards: Vec<Vec<u8>>,
+    sequences: &[Option<u64>],
+    policy: DuplicateShardPolicy,
+) -> Vec<Vec<u8>> {
+    if !policy.collapses() {
+        return shards;
+    }
+    assert_eq!(
+        shards.len(),
+        sequences.len(),
+        "shard bodies and sequence numbers must stay aligned"
+    );
+    let paired: Vec<(Option<u64>, Vec<u8>)> = sequences.iter().copied().zip(shards).collect();
+    let duplicates: BTreeSet<_> = duplicate_shard_indices_sequenced(&paired)
+        .into_iter()
+        .collect();
+    paired
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (_, body))| (!duplicates.contains(&index)).then_some(body))
+        .collect()
+}
+
+/// The contiguous runs in a list of folded shard indices, each as
 /// `(first_index, shard_count)` in sequence order.
 ///
-/// [`duplicate_shard_indices`] is the single source of which shards are dropped;
-/// this only groups its ascending indices so the repair inventory can name each
-/// collapsed run rather than a flat count. It returns no runs for
-/// [`DuplicateShardPolicy::KeepAll`], because that read drops nothing.
-pub fn collapsed_shard_runs<T: Eq>(
-    shards: &[T],
-    policy: DuplicateShardPolicy,
-) -> Vec<(usize, usize)> {
-    if !policy.collapses() {
-        return Vec::new();
-    }
+/// The indices come from a fold decision a reader already made (the
+/// session reports carry theirs), so grouping them lets the repair
+/// inventory name each run rather than a flat count, without re-deriving the
+/// fold a second time. An empty list names no run.
+pub fn grouped_shard_runs(indices: &[usize]) -> Vec<(usize, usize)> {
     let mut runs: Vec<(usize, usize)> = Vec::new();
-    for index in duplicate_shard_indices(shards) {
+    for index in indices {
         match runs.last_mut() {
-            Some((start, len)) if *start + *len == index => *len += 1,
-            _ => runs.push((index, 1)),
+            Some((start, len)) if *start + *len == *index => *len += 1,
+            _ => runs.push((*index, 1)),
         }
     }
     runs
@@ -3725,58 +3863,222 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_shard_detection_requires_a_shard_by_shard_complete_replay() {
+    fn duplicate_shard_detection_requires_a_shard_by_shard_tail_replay() {
         let a = b"alpha\n".to_vec();
         let b = b"beta\n".to_vec();
         let ab = [a.as_slice(), b.as_slice()].concat();
+        // A complete replay is the maximal tail replay and still collapses.
         assert_eq!(
             duplicate_shard_indices(&[a.clone(), b.clone(), a.clone(), b.clone()]),
             vec![2, 3]
         );
+        // A repeated shard that does not continue the kept tail is new
+        // content: matches against an earlier, non-tail position stay.
         assert!(duplicate_shard_indices(&[a.clone(), b.clone(), a.clone()]).is_empty());
-        assert!(duplicate_shard_indices(&[a, b, ab]).is_empty());
+        // Byte ranges are never compared: a shard that concatenates earlier
+        // shards but equals none of them is genuinely new content.
+        assert!(duplicate_shard_indices(&[a.clone(), b.clone(), ab]).is_empty());
+        // The PASEO-1d finding shape: a re-collect after total local loss
+        // re-seals only part of a session's sources (here the history shard
+        // `b`, while the row's `a` is held). The re-sealed shard equals the
+        // kept tail, so the detector flags it (the fold rule additionally
+        // requires the sequence evidence — see the sequenced pins below).
+        assert_eq!(
+            duplicate_shard_indices(&[a.clone(), b.clone(), b.clone()]),
+            vec![2]
+        );
+        // More than one re-collect cycle re-seals that tail again, and each
+        // cycle is a candidate, not just the first.
+        assert_eq!(
+            duplicate_shard_indices(&[a.clone(), b.clone(), b.clone(), b.clone()]),
+            vec![2, 3]
+        );
+        // A longer trailing run: the session's last two shards re-sealed.
+        let c = b"gamma\n".to_vec();
+        assert_eq!(
+            duplicate_shard_indices(&[a.clone(), b.clone(), c.clone(), b.clone(), c.clone()]),
+            vec![3, 4]
+        );
+        // A repeat against a non-tail window is still kept, even when a later
+        // tail replay would have matched: A,B,C,B,A,B,C keeps its trailing B,C
+        // because the kept sequence's tail is B,A.
+        assert!(duplicate_shard_indices(&[
+            a.clone(),
+            b.clone(),
+            c.clone(),
+            b.clone(),
+            a.clone(),
+            b.clone(),
+            c.clone(),
+        ],)
+        .is_empty());
+    }
+
+    /// The negative the PASEO-1d ruling pins (W1065): a re-seal that GREW is
+    /// genuine new content. Its bytes differ from the tail's, so no prefix,
+    /// substring or tail reasoning may swallow it — not even reading it as a
+    /// replay of the bytes it starts with.
+    #[test]
+    fn a_reseal_that_grew_is_new_content_and_stays() {
+        let row = b"row\n".to_vec();
+        let history = b"history\n".to_vec();
+        let grown = [history.as_slice(), b"new turn\n"].concat();
+        assert!(duplicate_shard_indices(&[row, history, grown]).is_empty());
+    }
+
+    /// The W1065 rework fold rule, pinned at the function level: byte
+    /// equality finds the candidates, the ARCHIVED SEQUENCE NUMBER decides
+    /// which candidates a Collapse read may fold.
+    ///
+    /// Same number on copy and kept partner = a second machine instance
+    /// re-sealed the file its predecessor already held — fold. Different
+    /// numbers = a validated consecutive repeat (`base_offset > 0`, exact
+    /// repeat allowed) — keep. Missing numbers = no evidence — keep, because
+    /// a read that cannot prove a re-seal keeps the user's duplicate rather
+    /// than risk dropping a real turn.
+    #[test]
+    fn the_fold_needs_same_sequence_evidence_a_repeat_at_a_new_number_stays() {
+        let a = b"alpha\n".to_vec();
+        let b = b"beta\n".to_vec();
+        let sequenced =
+            |shards: Vec<(Option<u64>, Vec<u8>)>| duplicate_shard_indices_sequenced(&shards);
+        // Same sequence number (the second instance re-sealed shard 2):
+        // the PASEO-1d finding shape, and it folds.
+        assert_eq!(
+            sequenced(vec![
+                (Some(1), a.clone()),
+                (Some(2), b.clone()),
+                (Some(2), b.clone()),
+            ]),
+            vec![2]
+        );
+        // Next sequence number (a genuine consecutive repeat): stays.
+        assert!(sequenced(vec![
+            (Some(1), a.clone()),
+            (Some(2), b.clone()),
+            (Some(3), b.clone()),
+        ])
+        .is_empty());
+        // A byte range that concatenates earlier shards is never a candidate,
+        // with or without sequence numbers.
+        let ab = [a.as_slice(), b.as_slice()].concat();
+        assert!(sequenced(vec![
+            (Some(1), a.clone()),
+            (Some(2), b.clone()),
+            (Some(3), ab.clone()),
+        ])
+        .is_empty());
+        // A repeat at an earlier, non-tail position is never a candidate.
+        assert!(sequenced(vec![
+            (Some(1), a.clone()),
+            (Some(2), b.clone()),
+            (Some(3), a.clone()),
+        ])
+        .is_empty());
+        // An ambiguous re-seal whose number cannot be claimed still keeps
+        // the copy: no evidence, no fold, no lost user content.
+        assert!(sequenced(vec![
+            (None, a.clone()),
+            (Some(2), b.clone()),
+            (None, b.clone()),
+        ])
+        .is_empty());
+        // Two re-collect cycles at the same numbers: both folds.
+        assert_eq!(
+            sequenced(vec![
+                (Some(1), a.clone()),
+                (Some(2), b.clone()),
+                (Some(2), b.clone()),
+                (Some(2), b.clone()),
+            ]),
+            vec![2, 3]
+        );
     }
 
     #[test]
-    fn keep_all_policy_returns_every_shard_and_collapse_drops_the_run() {
+    fn keep_all_policy_returns_every_shard_and_collapse_folds_the_proven_reseal() {
         let a = b"alpha\n".to_vec();
         let b = b"beta\n".to_vec();
+        // A second instance's whole re-seal: the sequence numbers repeat too.
         let resealed = vec![a.clone(), b.clone(), a.clone(), b.clone()];
+        let resealed_sequence = [Some(1), Some(2), Some(1), Some(2)];
 
         assert_eq!(
-            select_shard_bodies(resealed.clone(), DuplicateShardPolicy::Collapse),
+            select_shard_bodies_sequenced(
+                resealed.clone(),
+                &resealed_sequence,
+                DuplicateShardPolicy::Collapse
+            ),
             vec![a.clone(), b.clone()],
-            "the default keeps the first sequence and drops the replay"
+            "the default keeps the first instance and folds the proven re-seal"
         );
         assert_eq!(
-            select_shard_bodies(resealed.clone(), DuplicateShardPolicy::KeepAll),
+            select_shard_bodies_sequenced(
+                resealed.clone(),
+                &resealed_sequence,
+                DuplicateShardPolicy::KeepAll
+            ),
             resealed,
             "the opt-out returns every stored shard unchanged"
         );
 
         assert_eq!(
-            collapsed_shard_runs(&resealed, DuplicateShardPolicy::Collapse),
+            grouped_shard_runs(&[2, 3]),
             vec![(2, 2)],
-            "the replay is one run starting at index 2"
+            "the fold positions group into one run starting at index 2"
         );
         assert!(
-            collapsed_shard_runs(&resealed, DuplicateShardPolicy::KeepAll).is_empty(),
-            "the opt-out collapses nothing, so it names no run"
+            grouped_shard_runs(&[]).is_empty(),
+            "an opt-out read folds nothing, so it names no run"
         );
 
-        // A single-shard session sealed twice: the shape the ruling calls out.
+        // A single-shard session sealed twice by the second instance.
         let doubled = vec![a.clone(), a.clone()];
+        let doubled_sequence = [Some(1), Some(1)];
         assert_eq!(
-            collapsed_shard_runs(&doubled, DuplicateShardPolicy::Collapse),
+            grouped_shard_runs(&duplicate_shard_indices_sequenced(&[
+                (doubled_sequence[0], doubled[0].clone()),
+                (doubled_sequence[1], doubled[1].clone()),
+            ])),
             vec![(1, 1)]
         );
         assert_eq!(
-            select_shard_bodies(doubled.clone(), DuplicateShardPolicy::Collapse),
+            select_shard_bodies_sequenced(
+                doubled.clone(),
+                &doubled_sequence,
+                DuplicateShardPolicy::Collapse
+            ),
             vec![a.clone()]
         );
         assert_eq!(
-            select_shard_bodies(doubled, DuplicateShardPolicy::KeepAll).len(),
+            select_shard_bodies_sequenced(
+                doubled,
+                &doubled_sequence,
+                DuplicateShardPolicy::KeepAll
+            )
+            .len(),
             2
+        );
+
+        // The verdict's [A, B, B] under its natural sequences: a validated
+        // consecutive repeat takes the NEXT number, folds nothing.
+        let repeated = vec![a.clone(), b.clone(), b.clone()];
+        let repeated_sequence = [Some(1), Some(2), Some(3)];
+        assert!(duplicate_shard_indices_sequenced(&[
+            (repeated_sequence[0], repeated[0].clone()),
+            (repeated_sequence[1], repeated[1].clone()),
+            (repeated_sequence[2], repeated[2].clone()),
+        ])
+        .is_empty());
+        assert_eq!(
+            select_shard_bodies_sequenced(
+                repeated,
+                &repeated_sequence,
+                DuplicateShardPolicy::Collapse
+            )
+            .len(),
+            3,
+            "a genuine consecutive repeat stays in every collapse read"
         );
     }
 

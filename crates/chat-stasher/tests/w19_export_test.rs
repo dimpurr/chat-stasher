@@ -797,14 +797,15 @@ fn read_and_export_keep_a_repeated_delta_after_a_multishard_prefix() {
     assert_eq!(fs::read(file).unwrap(), read_body);
 }
 
-/// W304 · the opt-out. A whole-content replay — the session's entire body
-/// sealed again, so the shard sequence is `A,A` — is collapsed to its first copy
-/// by default, and `--no-collapse` (library:
-/// [`store::DuplicateShardPolicy::KeepAll`]) returns every stored shard. The
-/// archive is never touched either way: the second copy is still on disk, which
-/// the stage assertion at the end pins.
+/// W304 · the opt-out. A whole-content replay sealed at the NEXT sequence
+/// numbers — the shape the exact-repeat writer produces, `A,A` with each copy
+/// on its own number — carries no re-seal evidence on one stage, so the
+/// default read keeps every stored shard and `--no-collapse` (library:
+/// [`store::DuplicateShardPolicy::KeepAll`]) reads the same bytes in the
+/// default's words. The archive is never touched either way: the second copy
+/// is still on disk, which the stage assertion at the end pins.
 #[test]
-fn no_collapse_returns_every_shard_of_a_whole_content_replay() {
+fn no_collapse_reads_the_same_shards_the_default_reads_of_a_whole_content_replay() {
     let (dir, repo, key, mk) = build_fixture();
     let root = dir.path();
     let stage = stage_path(root, "m-alpha");
@@ -829,13 +830,19 @@ fn no_collapse_returns_every_shard_of_a_whole_content_replay() {
     let store = store_of(&repo, root, "m-alpha");
     store.push(&stage, &mk).unwrap();
 
-    let (collapsed, collapsed_shards) = store.read_session_concat("m-alpha", session, &mk).unwrap();
+    let (default_body, default_shards) =
+        store.read_session_concat("m-alpha", session, &mk).unwrap();
     assert_eq!(
-        collapsed_shards.len(),
-        1,
-        "the default read collapses the whole-content replay to its first copy"
+        default_shards.len(),
+        2,
+        "one stage cannot hold two entries at one sequence number, so no \
+         re-seal evidence exists and the default read keeps every stored shard"
     );
-    assert_eq!(collapsed, line);
+    assert_eq!(
+        default_body,
+        [line.as_slice(), line.as_slice()].concat(),
+        "the default read returns the stored bytes in sequence order"
+    );
 
     let keeping =
         store_of(&repo, root, "m-alpha").with_shard_policy(store::DuplicateShardPolicy::KeepAll);
@@ -853,20 +860,20 @@ fn no_collapse_returns_every_shard_of_a_whole_content_replay() {
         "the opt-out returns the stored bytes in sequence order"
     );
 
-    // Export is the same reader: the default writes the collapsed body and the
-    // flag writes every shard. The manifest's `shard_count` is the archive's own
+    // Export is the same reader: the default writes the same kept body the
+    // flag writes. The manifest's `shard_count` is the archive's own
     // count of stored shards, so it reads 2 either way — the written bytes are
     // the signal.
-    let collapsed_out = root.join("export-collapsed");
+    let default_out = root.join("export-default");
     export::export_sessions(
         &store,
         &mk,
         &Selector::default(),
-        &export_opts(&collapsed_out, Turns::All, false),
+        &export_opts(&default_out, Turns::All, false),
         &|_| {},
     )
     .unwrap();
-    let collapsed_entry = manifest(&collapsed_out)["sessions"]
+    let default_entry = manifest(&default_out)["sessions"]
         .as_array()
         .unwrap()
         .iter()
@@ -874,8 +881,9 @@ fn no_collapse_returns_every_shard_of_a_whole_content_replay() {
         .unwrap()
         .clone();
     assert_eq!(
-        fs::read(collapsed_out.join(collapsed_entry["relative_path"].as_str().unwrap())).unwrap(),
-        line
+        fs::read(default_out.join(default_entry["relative_path"].as_str().unwrap())).unwrap(),
+        [line.as_slice(), line.as_slice()].concat(),
+        "the default export writes every stored shard of the evidence-free repeat"
     );
 
     let kept_out = root.join("export-kept");
@@ -915,8 +923,10 @@ fn no_collapse_returns_every_shard_of_a_whole_content_replay() {
     );
     let default_stdout = String::from_utf8_lossy(&default_read.stdout).into_owned();
     assert!(
-        default_stdout.contains("[read] shards (seq order):") && !default_stdout.contains("000002"),
-        "the default read must collapse the replay:\n{default_stdout}"
+        default_stdout.contains("[read] shards (seq order):")
+            && default_stdout.contains("000001")
+            && default_stdout.contains("000002"),
+        "the default read keeps the evidence-free repeat:\n{default_stdout}"
     );
 
     let kept_read = run_cli(
@@ -973,7 +983,10 @@ fn no_collapse_returns_every_shard_of_a_whole_content_replay() {
 }
 
 /// W304 · the index opt-out is the environment variable, and it reaches the
-/// archive walk an activity index is built from.
+/// archive walk an activity index is built from. The pair this plants carries
+/// no re-seal evidence — each copy sits on its own next sequence number — so
+/// both policies read the same kept bytes here; the env matrix stays the
+/// real switch wiring the walk honours.
 #[test]
 fn keep_all_shards_env_var_shows_every_shard_to_the_index_walk() {
     let (dir, repo, _key, mk) = build_fixture();
@@ -1010,8 +1023,8 @@ fn keep_all_shards_env_var_shows_every_shard_to_the_index_walk() {
 
     assert_eq!(
         walk_lines(store::DuplicateShardPolicy::Collapse),
-        Some(1),
-        "the default index walk collapses the whole-content replay"
+        Some(2),
+        "an evidence-free repeat stays whole under the default walk too"
     );
     assert_eq!(
         walk_lines(store::DuplicateShardPolicy::KeepAll),
@@ -1039,8 +1052,9 @@ fn keep_all_shards_env_var_shows_every_shard_to_the_index_walk() {
 }
 
 /// W304 · the environment variable is wired to a real index build, not only to a
-/// policy value: `activity-index` over a stage that holds a whole-content replay
-/// measures one line by default and both lines under `CHAT_STASHER_NO_COLLAPSE`.
+/// policy value: `activity-index` over a stage that holds an evidence-free
+/// byte repeat measures both lines by default — one stage cannot prove a
+/// re-seal (W1065 rework) — and both under `CHAT_STASHER_NO_COLLAPSE`.
 #[test]
 fn keep_all_shards_env_var_reaches_an_index_build() {
     let (dir, _repo, _key, _mk) = build_fixture();
@@ -1076,8 +1090,9 @@ fn keep_all_shards_env_var_reaches_an_index_build() {
     );
     assert_eq!(
         line_count(&fs::read_to_string(&index_path).unwrap()),
-        Some(1),
-        "the default index build collapses the whole-content replay"
+        Some(2),
+        "the default index build keeps an evidence-free repeat: no sequence \
+         evidence exists on one stage, so both copies count"
     );
 
     let keep_all = run_cli_env(

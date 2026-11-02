@@ -182,8 +182,12 @@ fn activity_index_then_push_then_overview_roundtrips() {
     );
 }
 
+/// One stage holds one file per sequence number, so two shards with the same
+/// bytes at DIFFERENT numbers carry no re-seal evidence: the W1065 rework
+/// fold rule keeps both and every reader counts them. The activity index
+/// counts every line of both, so a genuine repeated turn stays measurable.
 #[test]
-fn activity_index_counts_an_identical_shard_once() {
+fn activity_index_counts_an_identical_stage_repeat_twice_when_no_reseal_evidence_exists() {
     let sb = sandbox();
     let stage = sb.path().join("stage");
     let machine = "mbp-test";
@@ -223,7 +227,11 @@ fn activity_index_counts_an_identical_shard_once() {
     let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
     let row: serde_json::Value =
         serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
-    assert_eq!(row["line_count"], 2, "duplicate shard lines count once");
+    assert_eq!(
+        row["line_count"], 4,
+        "an identical shard at a NEXT sequence number is kept content, and \
+         every one of its lines counts"
+    );
 }
 
 /// TICKET-4D-02 · the dimensions a Claude Code transcript states about itself

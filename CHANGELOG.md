@@ -204,14 +204,23 @@ under its own heading below.
 - **Repair the duplicated-session read path.** Users who ran `setup` step 4,
   `dest-init`, or added a new destination on `v0.2.0` through `v0.5.0-rc.2`
   may see duplicated turns in those older builds. In `read`, `export`, FTS
-  builds, activity indexes, and the repair inventory, a later run is dropped
-  only when it is a byte-identical, shard-by-shard replay of that session's
-  complete preceding shard sequence; other individual-shard repeats and
-  matches against concatenated shard bytes are kept. The inventory reports
+  builds, activity indexes, and the repair inventory, a later run is folded
+  out only when it is a byte-identical, shard-by-shard replay of the tail of
+  that session's preceding shard sequence **and** shares its archived
+  sequence number with the shard it replays (W1065): one stage holds one
+  file per sequence number, so two entries at one number are one machine
+  instance re-sealing, under a second stage root, the sequence file its
+  predecessor already held — a whole re-seal replays the complete sequence
+  number for number and folds the same way. Other individual-shard repeats
+  and matches against concatenated shard bytes are kept, and so is a repeat
+  that was sealed as the *next* sequence number: a validated consecutive
+  repeat — a real turn whose bytes equal the turn before it — is genuine
+  content that no reader may drop on content alone.
+  The inventory reports
   those other individual repeats as suspicious and kept, and it **lists every
-  collapsed run** — the session, where in its shard sequence the run starts, how
-  many shards it spans and their bytes — so a collapse can be audited rather
-  than trusted. New exact shard replays are no-ops at the writer. The collapse
+  folded run** — the session, where in its shard sequence the run starts, how
+  many shards it spans and their bytes — so a fold can be audited rather
+  than trusted. New exact shard replays are no-ops at the writer. The fold
   is a read decision and nothing is ever deleted: `read --no-collapse` and
   `export --no-collapse` return every stored shard, and setting
   `CHAT_STASHER_NO_COLLAPSE` (any value but `0`/`false`/`no`/`off`) makes the
@@ -476,9 +485,37 @@ under its own heading below.
   of its own. If the harness rewrites or truncates the file, the next pass
   re-reads the current snapshot as a new generation and records why, while every
   generation already sealed stays in the archive, byte-identical and still
-  extractable; a stage whose only new content is a machine-log generation
+  extractable; a   stage whose only new content is a machine-log generation
   pushes instead of being refused as empty. The read-side "user prompts only"
   view is the next phase, not this one.
+
+- **A two-source session that doubled after total local loss reads repaired
+  (W1065).** When a machine's stage and collector state are gone and
+  unchanged sources are collected again, the fresh instance re-seals the
+  sequence files its stage used to hold — a Grok session with both a
+  `session_docs` row and a `chat_history.jsonl` among them — and the reader
+  used to keep those re-seals as new content, so the body doubled on every
+  re-collect cycle. In `read`, `export`, FTS builds, activity indexes, and
+  the repair inventory, a later run is folded out only when it
+  byte-identically replays, shard by shard, the tail of the session's
+  preceding shard sequence **and** carries the same archived sequence number
+  as the shard it replays — the number a re-sealed sequence file keeps under
+  its second stage root. A complete re-seal replays the numbers number for
+  number and folds entirely. Duplicates a pre-W1065 build already archived
+  stay stored exactly as they are and already read
+  repaired, because the fold is a read decision; `read --no-collapse`,
+  `export --no-collapse` and `CHAT_STASHER_NO_COLLAPSE` still return every
+  stored shard and nothing is ever deleted. Genuine new content is not
+  swallowed: a re-seal whose bytes differ from the tail survives (a history
+  that grew while the machine was lost keeps its new turns); a repeat
+  against an earlier non-tail position — `A,B,A` — is still kept; and a
+  byte-identical turn that the collector sealed as the *next* sequence
+  number — the validated consecutive repeat, a real user turn that happens
+  to equal the turn before it — now survives in every reader, where the
+  content-only rule dropped it (W1065 rework). A shard whose bytes merely
+  concatenate or extend earlier shards was
+  never a replay and remains content. Full-text and activity indexes detect
+  the rule change and rebuild their rows once.
 
 #### Changed
 
@@ -586,6 +623,25 @@ under its own heading below.
   canonical shape — one archive id on two machines — printed "2 conversation(s)"
   and listed the same short id twice, which is the per-machine double count the
   change exists to remove, restated in the sentence that names it.
+- **A push that adopts stranded packs now names them in a new index file, and
+  torn debris no longer refuses the packs that verify around it (W1066).**
+  Two consequences of adopt-on-open met in production: adoption was per-open
+  (a killed push left a complete pack that every later open re-read and
+  re-verified, forever), and one torn file — the pre-atomic-publication shape
+  an interrupted push leaves under a final name — refused the whole adoption,
+  so a complete 15 MiB pack beside a five-week-old torn fragment was
+  re-uploaded wholesale. The push connection now persists what it verified
+  after its own snapshot: one new index file, a pure append (no existing
+  index file is touched, per the append-only invariant), gated by a
+  re-survey that skips anything already named — so a second machine to
+  persist the same adoption writes an identical-entry file and every reader
+  merges them — and a write failure is reported as `NOT persisted (...)`
+  without failing the push. A pack that cannot be read as a pack at all is
+  excluded from adoption as the debris it is (still never adopted, never
+  named, never touched, reported with the interrupted-push sentence), while
+  complete packs whose bytes do not verify still refuse the whole adoption
+  exactly as before. `prune-orphans`' "next push" prediction words the same
+  split.
 
 #### Fixed
 

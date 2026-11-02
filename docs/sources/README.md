@@ -35,7 +35,7 @@ The Status column uses exactly the words and rules of [docs/support.md](../suppo
 
 | Page | Surface | Status | Last verified |
 |---|---|---|---|
-| [chat.deepseek.com (web)](web-deepseek.md) | web | verified end-to-end (2026-09-24) | 2026-09-24 |
+| [chat.deepseek.com (web)](web-deepseek.md) | web | verified end-to-end on the earlier broad route (2026-09-24); the narrowed route of 2026-10-06 is not live-verified | 2026-09-24 |
 | [perplexity.ai (web)](web-perplexity.md) | web | experimental | not yet verified end to end |
 | [chatgpt.com (web)](web-chatgpt.md) | web | verified end-to-end (2026-09-24) | 2026-09-24 |
 | [gemini.google.com (web)](web-gemini.md) | web | verified end-to-end (2026-09-24) | 2026-09-24 |

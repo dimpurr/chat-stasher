@@ -557,9 +557,11 @@ enum Command {
         /// Print full session ids in per-session rows (default: privacy-safe short ids).
         #[arg(long)]
         full_ids: bool,
-        /// Show every stored shard. Default reads collapse legacy whole-content
-        /// replays while retaining verified sequence-bound captures, including
-        /// identical captured bodies. Nothing is deleted by either policy.
+        /// Show every stored shard. Default reads collapse the copies a
+        /// proven re-seal leaves — a copy that replays kept shards at the
+        /// same archived sequence numbers — while retaining verified
+        /// sequence-bound captures, including identical captured bodies.
+        /// Nothing is deleted by either policy.
         #[arg(long)]
         no_collapse: bool,
         /// ADR-061: also emit the records the source deleted, at their
@@ -906,10 +908,10 @@ enum Command {
         /// from an earlier export stay where they are.
         #[arg(long)]
         force: bool,
-        /// Write every stored shard. By default a run that byte-for-byte
-        /// replays the session's complete preceding shard sequence is collapsed
-        /// to its first copy, because that is what a re-seal leaves. The archive
-        /// is never modified either way.
+        /// Write every stored shard. By default the copies a proven re-seal
+        /// leaves are collapsed out of the body — a run that replays kept
+        /// shards under the same archived sequence numbers another machine
+        /// instance already held. The archive is never modified either way.
         #[arg(long)]
         no_collapse: bool,
         /// Print the plan and stop: no directory is created and no file is
@@ -1280,7 +1282,8 @@ enum Command {
     /// verify (budget spent, disk floor, remote unreadable, space
     /// pre-estimate refused — the next round resumes); 1 = a finished
     /// read that failed (the source proved corrupt, a refused local
-    /// write, or the listing named a file over the whole-file bound);
+    /// write, the listing named a file over the whole-file bound, or
+    /// the mirror volume's free space could not be queried);
     /// 2 = usage error (unconfigured, switch off, an undeclared
     /// `mirror_of`, an uninitialised destination, or the destination's
     /// masterkey file missing on this machine or unusable) — nothing
@@ -3277,7 +3280,12 @@ struct ActivityIndexState {
 
 /// Format of [`ActivityIndexState`]. A file that names a different format is
 /// a different contract's, and is discarded rather than parsed leniently.
-const ACTIVITY_INDEX_STATE_FORMAT: u32 = 1;
+/// W1065 raised it to 2 (the fold rule it was built on changed); the W1065
+/// rework raised it to 3: a fold now needs re-seal evidence, so rows derived
+/// under the content-only folds no longer describe what a build keeps —
+/// a genuine consecutive repeat that the 2-format build collapsed out of its
+/// counts must re-derive to be counted at all.
+const ACTIVITY_INDEX_STATE_FORMAT: u32 = 3;
 
 /// Name of the incremental state file inside `meta/<machine>/`.
 const ACTIVITY_INDEX_STATE_FILE: &str = ".activity-index-state-v1.json";
@@ -3446,8 +3454,20 @@ impl ActivityIndexContext {
             self.shard_bytes_read_hashed += bytes.len() as u64;
             shard_bodies.push(bytes);
         }
+        // One stage directory holds one file per sequence number, so the
+        // re-seal evidence rule can never fire here: two entries at one
+        // number would be one file. A validated consecutive repeat (`A,B,B`
+        // sealed as the next sequence) therefore stays in the analyzed
+        // lines — the activity count keeps both turns — and an archive-level
+        // re-seal never reaches this stage-side scan either, because the
+        // rebuild restores only the newest snapshot that carries files.
         let duplicate_indices: BTreeSet<_> = if self.policy.collapses() {
-            store::duplicate_shard_indices(&shard_bodies)
+            let paired: Vec<(Option<u64>, &Vec<u8>)> = shard_bodies
+                .iter()
+                .zip(shards.iter().map(|(sequence, _)| Some(*sequence)))
+                .map(|(body, sequence)| (sequence, body))
+                .collect();
+            store::duplicate_shard_indices_sequenced(&paired)
                 .into_iter()
                 .collect()
         } else {
@@ -9828,6 +9848,13 @@ fn mirror_step_after_push(
                         "each round retries the write and completes once the local \
                          cause is fixed"
                     }
+                    chat_stasher::mirror::HardClass::DiskQuery => {
+                        // The volume would not answer, so the round wrote
+                        // nothing: the next round re-checks before writing
+                        // and completes once the query answers again.
+                        "the mirror re-checks free space every round before writing, \
+                         and completes once the volume answers again"
+                    }
                 };
                 eprintln!(
                     "[run-once] mirror-sync warning: {}: {hard}; {}",
@@ -10995,6 +11022,10 @@ fn stranded_push_facts(
         None => None,
         Some(o) if o.refused().is_some() => Some((o.report.unindexed_packs(), "not-adopted")),
         Some(o) if o.adopted() => Some((o.report.unindexed_packs(), "adopted")),
+        // Debris is a state, not an action, and it is the one word every
+        // other surface already prints for the same bytes: the packs stay
+        // `torn` — reported, excluded, untouched.
+        Some(o) if !o.torn.is_empty() => Some((o.report.unindexed_packs(), "torn")),
         Some(_) => None,
     }
 }
@@ -11299,17 +11330,51 @@ fn cmd_push(
                 orphans.report.unindexed_bytes(),
             );
         }
-        match (stranded, orphans.refused()) {
-            (0, None) => {}
-            (_, None) => println!(
+        // Torn debris never enters an index file, not even as an exclusion: it
+        // is reported here as what it is, so `stranded` above keeps meaning
+        // "named by no index file" for packs of every kind.
+        if !orphans.torn.is_empty() {
+            let bytes = orphans.torn.iter().map(|pack| pack.bytes).sum::<u64>();
+            println!(
+                "[push] stranded packs : {} torn pack(s) / {bytes} bytes are debris from an interrupted push - never adoptable, never uploaded. {}",
+                orphans.torn.len(),
+                chat_stasher::debris::INTERRUPTED_PUSH_SENTENCE,
+            );
+        }
+        use chat_stasher::orphans::IndexAdoption;
+        match orphans.adoption.as_ref() {
+            // With nothing excluded, the number the count line printed and the
+            // set this backup deduplicated against are one and the same set.
+            Some(IndexAdoption::Adopted) if orphans.torn.is_empty() => println!(
                 "[push] stranded packs : adopted - this backup deduplicated against them and re-uploaded none of their content"
             ),
-            (0, Some(why)) => println!(
+            Some(IndexAdoption::Adopted) => println!(
+                "[push] stranded packs : adopted - this backup deduplicated against the pack(s) that verified and re-uploaded none of their content; the torn debris above was excluded"
+            ),
+            // Debris-only: the torn line above is the whole story — nothing
+            // was adoptable, nothing was refused, nothing was re-uploaded
+            // from debris that holds no content at all.
+            Some(IndexAdoption::Debris) => {}
+            Some(IndexAdoption::Refused { why }) if stranded == 0 => println!(
                 "[push] stranded packs : none unreachable, but the full index could not be built ({why})"
             ),
-            (_, Some(why)) => println!(
+            Some(IndexAdoption::Refused { why }) => println!(
                 "[push] stranded packs : NOT adopted ({why}) - their content was uploaded again"
             ),
+            Some(IndexAdoption::Plain) | None => {}
+        }
+        // What this push wrote about the packs its open verified: the
+        // naming file is what stops the next open from paying the re-read
+        // (W1066), and a skip or a failed write is a state an operator
+        // can act on, not a detail to absorb.
+        match summary.persisted.as_ref() {
+            Some(chat_stasher::orphans::PersistOutcome::Named { packs, .. }) => println!(
+                "[push] stranded packs : persisted - a new index file names the {packs} verified pack(s), so later opens reuse them without re-reading their bytes"
+            ),
+            Some(chat_stasher::orphans::PersistOutcome::NotWritten { why }) => println!(
+                "[push] stranded packs : NOT persisted ({why}) - they stay named by no index file and a later push tries again"
+            ),
+            None => {}
         }
     }
     println!("[push] snapshots      : {}", summary.snapshots_in_repo);
@@ -11366,8 +11431,8 @@ struct DuplicateRepairMachine {
 /// The inventory lists every run so a collapse is auditable: each names the
 /// session, where in its shard sequence the run begins, how many shards it
 /// spans, and the bytes they hold. Nothing here is removed — the run exists
-/// only because a whole-content replay is what a re-seal leaves, and the
-/// operator can see exactly what was dropped on read.
+/// only because a replay run, whole-sequence or trailing-partial, is what a
+/// re-seal leaves, and the operator can see exactly what was dropped on read.
 #[derive(serde::Serialize)]
 struct DuplicateRepairRun {
     machine: String,
@@ -11391,7 +11456,7 @@ struct DuplicateRepairReport {
     dry_run: bool,
     machines: Vec<DuplicateRepairMachine>,
     /// Every contiguous run a collapsing read drops, in machine then session
-    /// order. Empty when the destination holds no complete replay.
+    /// order. Empty when the destination holds no replay run.
     collapsed_runs: Vec<DuplicateRepairRun>,
     warnings: Vec<String>,
     physical_removal: &'static str,
@@ -11418,10 +11483,13 @@ fn duplicate_repair_report(
             suspicious_kept_bytes: 0,
         };
         for session in &machine.sessions {
+            // The read already made the fold decision — under the re-seal
+            // evidence rule ([`store::duplicate_shard_indices_sequenced`]) and
+            // with the provenance rescue on top — so this inventory reports
+            // exactly the copies the read dropped, not a second derivation
+            // that could disagree with what users actually see.
             let duplicate_indices: BTreeSet<_> =
-                store::duplicate_shard_indices(&session.shard_sha256)
-                    .into_iter()
-                    .collect();
+                session.folded_shard_indices.iter().copied().collect();
             for index in &duplicate_indices {
                 let bytes = session
                     .shard_bytes
@@ -11437,13 +11505,12 @@ fn duplicate_repair_report(
                 summary.duplicate_sessions += 1;
             }
 
-            // The reader collapses whole runs, not scattered shards, so the
-            // inventory names the runs: this is what makes a collapse auditable
+            // The reader folds whole runs, not scattered shards, so the
+            // inventory names the runs: this is what makes a fold auditable
             // rather than a bare count.
-            for (run_start_shard, run_shards) in store::collapsed_shard_runs(
-                &session.shard_sha256,
-                store::DuplicateShardPolicy::Collapse,
-            ) {
+            for (run_start_shard, run_shards) in
+                store::grouped_shard_runs(&session.folded_shard_indices)
+            {
                 let mut run_bytes = 0u64;
                 for index in run_start_shard..run_start_shard + run_shards {
                     let bytes = session
@@ -12548,10 +12615,27 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                         )
                     })?;
                     let mut bytes_read = 0u64;
-                    let mut shard_bodies = Vec::with_capacity(indexes.len());
+                    // One entry per (sequence number, archive path), keeping
+                    // the copy the newest snapshot holds: the walk below visits
+                    // a machine's snapshots newest-first, so the first entry
+                    // seen for a path is its newest version, exactly the copy
+                    // the cumulative reads keep. Older snapshots of the same
+                    // file stop here instead of becoming extra bodies.
+                    let mut held: BTreeMap<(Option<u64>, String), (usize, Vec<u8>)> =
+                        BTreeMap::new();
                     for idx in indexes {
+                        let (path, node) = &entries_all[*idx];
+                        let key = (
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .and_then(store::parse_shard_seq),
+                            path.to_string_lossy().into_owned(),
+                        );
+                        if held.contains_key(&key) {
+                            continue;
+                        }
                         let mut shard = Vec::new();
-                        if let Err(error) = repo.dump(&entries_all[*idx].1, &mut shard) {
+                        if let Err(error) = repo.dump(node, &mut shard) {
                             // Whatever was read from this shard before the read
                             // failed was still read, and the build's volume counts it.
                             return Err(LoadFailure::new(
@@ -12560,10 +12644,30 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                             ));
                         }
                         bytes_read += shard.len() as u64;
-                        shard_bodies.push(shard);
+                        held.insert(key, (*idx, shard));
                     }
-                    let selected: Vec<Vec<u8>> =
-                        store::select_shard_bodies(shard_bodies, fts_shard_policy);
+                    // The map's order is the accumulated order every reader
+                    // uses — sequence number first, archive path as the
+                    // tiebreak — so the fold rule sees the same shape a
+                    // cumulative `read` sees.
+                    let held_indexes: Vec<usize> = held.values().map(|(idx, _)| *idx).collect();
+                    let shard_bodies: Vec<Vec<u8>> =
+                        held.into_values().map(|(_, body)| body).collect();
+                    let sequences: Vec<Option<u64>> = held_indexes
+                        .iter()
+                        .map(|idx| {
+                            entries_all[*idx]
+                                .0
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .and_then(store::parse_shard_seq)
+                        })
+                        .collect();
+                    let selected: Vec<Vec<u8>> = store::select_shard_bodies_sequenced(
+                        shard_bodies,
+                        &sequences,
+                        fts_shard_policy,
+                    );
                     // ADR-061: a snapshot-source session is indexed as its
                     // assembled current-state body, so repeated whole-file
                     // copies cannot inflate the text and deleted turns stay
@@ -12749,8 +12853,7 @@ fn index_sources(
         .collect()
 }
 
-const INDEX_SOURCE_FINGERPRINT_DOMAIN: &[u8] =
-    b"chat-stasher-fts-source-v3-shard-sequence-replay-v1\0";
+const INDEX_SOURCE_FINGERPRINT_DOMAIN: &[u8] = b"chat-stasher-fts-source-v5-reseal-evidence-v1\0";
 const INDEX_DUPLICATE_RULE_VERSION: u32 = 1;
 
 fn index_source_fingerprint(
@@ -14127,7 +14230,8 @@ fn cmd_mirror_sync(budget_secs: Option<u64>, keep_ssh_masters: bool) -> ExitCode
         Err(e) if e.is::<chat_stasher::mirror::HardFailure>() => {
             // The checked-and-failed class (invariant 2, `CLAUDE.md`):
             // verified source corruption, a refused local write, an
-            // over-bound listing. Exit 1 with the class's own sentence —
+            // over-bound listing, or a free-space query the volume would
+            // not answer. Exit 1 with the class's own sentence —
             // never "did not finish" (exit 3), which a later round cannot
             // heal its way out of for the corruption half.
             if let Some(hard) = e.downcast_ref::<chat_stasher::mirror::HardFailure>() {
@@ -14347,7 +14451,7 @@ fn cmd_prune_orphans(
         eprintln!("prune-orphans: --apply is refused, and nothing was read or written.");
         eprintln!("prune-orphans: deleting an unindexed pack is not a maintenance detail here:");
         eprintln!(
-            "prune-orphans: \"unindexed\" means no index file names it, not that nothing uses it — a retry can reuse one and write a snapshot that depends on it while it stays unindexed on disk, so a pack can be the only copy of archived content."
+            "prune-orphans: \"unindexed\" means no index file names it, not that nothing uses it — a retry can reuse one and write a snapshot that depends on it, and it stays unindexed on disk until a later push names it in a new index file, so a pack can be the only copy of archived content."
         );
         eprintln!(
             "prune-orphans: a safe delete needs all three of these, and this build has none:"
@@ -14458,6 +14562,9 @@ fn prune_orphans_json(inventory: &chat_stasher::prune_orphans::Inventory) -> ser
     let next_push = match &inventory.next_push {
         NextPush::NothingStranded => serde_json::json!({"kind": "nothing_stranded"}),
         NextPush::WouldAdopt => serde_json::json!({"kind": "would_adopt"}),
+        NextPush::WouldAdoptExcludingTorn { torn } => {
+            serde_json::json!({"kind": "would_adopt_excluding_torn", "torn": torn})
+        }
         NextPush::Refused { why } => serde_json::json!({"kind": "refused", "why": why}),
     };
 
@@ -14595,6 +14702,11 @@ fn print_prune_orphans(inventory: &chat_stasher::prune_orphans::Inventory, dry_r
         NextPush::WouldAdopt => println!(
             "[prune] next push   : would adopt all {} unindexed pack(s); a later push uploads none of their blobs again",
             inventory.candidate_packs()
+        ),
+        NextPush::WouldAdoptExcludingTorn { torn } => println!(
+            "[prune] next push   : would adopt the {} pack(s) that verified and set aside the {} torn debris — debris is never adopted and stays unindexed",
+            inventory.stranded_packs(),
+            torn
         ),
         NextPush::Refused { why } => println!(
             "[prune] next push   : NOT adopted — {why}; a push re-uploads what these packs hold"
@@ -14825,6 +14937,8 @@ mod decision_surface_tests {
         for previous_domain in [
             b"chat-stasher-fts-source-v1\0".as_slice(),
             b"chat-stasher-fts-source-v2-prefix-reseal-collapse-v1\0".as_slice(),
+            b"chat-stasher-fts-source-v3-shard-sequence-replay-v1\0".as_slice(),
+            b"chat-stasher-fts-source-v4-sequence-tail-replay-v1\0".as_slice(),
         ] {
             assert_ne!(
                 index_source_fingerprint_with_domain(
@@ -14852,6 +14966,74 @@ mod decision_surface_tests {
         assert_eq!(store::duplicate_shard_indices(&resealed_prefix), vec![2, 3]);
         let concatenated_prefix = vec!["a".to_string(), "b".to_string(), "ab".to_string()];
         assert!(store::duplicate_shard_indices(&concatenated_prefix).is_empty());
+    }
+
+    /// W1065 rework: the detector still sees the shapes a re-seal leaves, but
+    /// the fold rule needs the sequence evidence — the same shard sealed
+    /// by a second machine instance under its own stage root carries the same
+    /// sequence number as the copy it replays, while a validated consecutive
+    /// repeat takes the *next* number and stays.
+    #[test]
+    fn shard_replay_folds_only_the_copies_that_share_a_sequence_number() {
+        let row = "row".to_string();
+        let history = "history".to_string();
+        // Total-local-loss re-seal: the history shard held at sequence 2 by
+        // the first instance, sealed again at sequence 2 by the second.
+        let reseal = vec![
+            (Some(1), row.clone()),
+            (Some(2), history.clone()),
+            (Some(2), history.clone()),
+        ];
+        assert_eq!(
+            store::duplicate_shard_indices_sequenced(&reseal),
+            vec![2],
+            "a copy that shares its sequence number with the shard it replays \
+             is a re-seal and folds"
+        );
+        // The verdict's [A, B, B]: a validated consecutive repeat takes the
+        // NEXT sequence number, so no evidence exists and nothing folds.
+        let genuine = vec![
+            (Some(1), row.clone()),
+            (Some(2), history.clone()),
+            (Some(3), history.clone()),
+        ];
+        assert!(
+            store::duplicate_shard_indices_sequenced(&genuine).is_empty(),
+            "a repeated turn sealed as the next sequence is genuine content \
+             and every reader must keep it"
+        );
+        // A whole re-seal: sequences number for number, the maximal case.
+        let whole = vec![
+            (Some(1), row.clone()),
+            (Some(2), history.clone()),
+            (Some(1), row.clone()),
+            (Some(2), history.clone()),
+        ];
+        assert_eq!(
+            store::duplicate_shard_indices_sequenced(&whole),
+            vec![2, 3],
+            "a second instance's whole re-seal replays the number sequence \
+             and folds entirely"
+        );
+        // No sequence evidence at all (unparseable or ambiguous names):
+        // keep the duplicate rather than risk eating user content.
+        let unnumbered = vec![
+            (None, row.clone()),
+            (Some(2), history.clone()),
+            (None, history.clone()),
+        ];
+        assert!(
+            store::duplicate_shard_indices_sequenced(&unnumbered).is_empty(),
+            "without sequence evidence the copy stays, never folds"
+        );
+        // A re-seal that grew while the machine was lost differs from the
+        // tail and survives as new content, sequenced or not.
+        let grown = "history with a new turn".to_string();
+        let grown_reseal = vec![(Some(1), row), (Some(2), history), (Some(2), grown)];
+        assert!(
+            store::duplicate_shard_indices_sequenced(&grown_reseal).is_empty(),
+            "a re-seal whose bytes grew is genuinely new content"
+        );
     }
 
     /// A file node with `size` bytes and the given content ids. `None` for
@@ -22381,9 +22563,14 @@ mod duplicate_repair_report_tests {
                         "same".to_string(),
                         "different".to_string(),
                     ],
-                    shard_sequences: vec![Some(1), Some(2), Some(3), Some(4)],
+                    // A whole re-seal by a second machine instance: the same
+                    // sequence numbers sealed again under a second stage root,
+                    // the two entries per number are the re-seal evidence, and
+                    // the read folded positions 2 and 3.
+                    shard_sequences: vec![Some(1), Some(2), Some(1), Some(2)],
                     shard_bytes: vec![5, 7, 5, 7],
                     shard_run_duplicates: Vec::new(),
+                    folded_shard_indices: vec![2, 3],
                 },
                 readback::SessionBackedUp {
                     machine: "machine-one".to_string(),
@@ -22395,6 +22582,7 @@ mod duplicate_repair_report_tests {
                     shard_sequences: vec![Some(1), Some(2), Some(3)],
                     shard_bytes: vec![5, 7, 5],
                     shard_run_duplicates: Vec::new(),
+                    folded_shard_indices: Vec::new(),
                 },
                 readback::SessionBackedUp {
                     machine: "machine-one".to_string(),
@@ -22406,6 +22594,24 @@ mod duplicate_repair_report_tests {
                     shard_sequences: vec![Some(1), Some(2), Some(3)],
                     shard_bytes: vec![5, 7, 12],
                     shard_run_duplicates: Vec::new(),
+                    folded_shard_indices: Vec::new(),
+                },
+                readback::SessionBackedUp {
+                    machine: "machine-one".to_string(),
+                    session_id: "genuinely-repeated-turn".to_string(),
+                    shard_count: 3,
+                    concat_bytes: 17,
+                    sha256: "concat-three".to_string(),
+                    shard_sha256: vec!["a".to_string(), "b".to_string(), "b".to_string()],
+                    // The verdict's [A, B, B]: a genuine consecutive repeat
+                    // takes the NEXT sequence number, carries no re-seal
+                    // evidence, and the read folded nothing — its byte
+                    // repeat must surface as kept, never as a copy a
+                    // read drops.
+                    shard_sequences: vec![Some(1), Some(2), Some(3)],
+                    shard_bytes: vec![5, 6, 6],
+                    shard_run_duplicates: Vec::new(),
+                    folded_shard_indices: Vec::new(),
                 },
             ],
         });
@@ -22416,11 +22622,11 @@ mod duplicate_repair_report_tests {
         assert_eq!(report.machines[0].duplicate_sessions, 1);
         assert_eq!(report.machines[0].duplicate_shards, 2);
         assert_eq!(report.machines[0].duplicate_bytes, 12);
-        assert_eq!(report.machines[0].suspicious_kept_sessions, 1);
-        assert_eq!(report.machines[0].suspicious_kept_shards, 1);
-        assert_eq!(report.machines[0].suspicious_kept_bytes, 5);
-        // The inventory lists every run a collapsing read drops, not just a
-        // count: only the complete replay is a run, and it begins at shard 2.
+        assert_eq!(report.machines[0].suspicious_kept_sessions, 2);
+        assert_eq!(report.machines[0].suspicious_kept_shards, 2);
+        assert_eq!(report.machines[0].suspicious_kept_bytes, 11);
+        // The inventory lists every run a fold dropped, not just a count:
+        // only the proven whole re-seal is a run, and it begins at shard 2.
         assert_eq!(report.collapsed_runs.len(), 1);
         let run = &report.collapsed_runs[0];
         assert_eq!(run.machine, "machine-one");

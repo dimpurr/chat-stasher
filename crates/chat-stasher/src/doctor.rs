@@ -3181,7 +3181,22 @@ fn inspect_stage_duplicates(config: &Config) -> StageDuplicateCheck {
                     }
                 }
             }
-            for index in crate::store::duplicate_shard_indices(&bodies) {
+            // Doctor counts the copies a Collapse read would actually fold,
+            // under the same re-seal evidence rule every reader applies
+            // ([`crate::store::duplicate_shard_indices_sequenced`]): a fold
+            // needs two entries at one sequence number, and one stage
+            // directory holds one file per number, so a stage holds none.
+            // A genuine consecutive repeat — the same bytes sealed as the
+            // NEXT sequence, the shape validated increments produce — is
+            // content the read keeps, and doctor must not suggest repairing
+            // it away; byte-identical pairs like that belong to the
+            // `repair-duplicates` report's kept-column instead.
+            let paired: Vec<(Option<u64>, &Vec<u8>)> = shards
+                .iter()
+                .zip(bodies.iter())
+                .map(|((sequence, _), body)| (Some(*sequence), body))
+                .collect();
+            for index in crate::store::duplicate_shard_indices_sequenced(&paired) {
                 duplicate_shards += 1;
                 duplicate_bytes = match duplicate_bytes.checked_add(bodies[index].len() as u64) {
                     Some(bytes) => bytes,
@@ -7234,14 +7249,39 @@ mod tests {
             .stage = Some(stage.to_string_lossy().into_owned());
 
         let check = inspect_stage_duplicates(&config);
+        // Two shards with the same bytes at DIFFERENT sequence numbers are a
+        // validated consecutive repeat — content every reader keeps — and a
+        // stage cannot hold the re-seal evidence (one file per number), so
+        // doctor must read this stage clean rather than suggest repairing a
+        // real user turn away (W1065 rework).
+        assert_eq!(check.state, "clean");
+        let machine = &check.machines.as_ref().unwrap()[0];
+        assert_eq!(machine.duplicate_sessions, 0);
+        assert_eq!(machine.duplicate_shards, 0);
+        assert_eq!(machine.duplicate_bytes, 0);
+        assert!(check
+            .repair_command
+            .starts_with("chat-stasher repair-duplicates"));
+
+        // The same bytes under the same sequence number in both the legacy
+        // layout and a bucket is the one shape a stage CAN hold twice: two
+        // files for one number, the layout migration's debris. That is a
+        // foldable duplicate pair and the scan counts it.
+        let legacy = stage
+            .join(crate::store::SESSIONS_DIR)
+            .join("machine-one")
+            .join("session-two");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("000001.jsonl"), b"synthetic\n").unwrap();
+        let bucket_two = legacy.join("000");
+        fs::create_dir_all(&bucket_two).unwrap();
+        fs::write(bucket_two.join("000001.jsonl"), b"synthetic\n").unwrap();
+        let check = inspect_stage_duplicates(&config);
         assert_eq!(check.state, "duplicates_found");
         let machine = &check.machines.as_ref().unwrap()[0];
         assert_eq!(machine.duplicate_sessions, 1);
         assert_eq!(machine.duplicate_shards, 1);
         assert_eq!(machine.duplicate_bytes, b"synthetic\n".len() as u64);
-        assert!(check
-            .repair_command
-            .starts_with("chat-stasher repair-duplicates"));
     }
 
     fn write(path: &Path, content: &str) {

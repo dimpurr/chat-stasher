@@ -104,11 +104,14 @@ chat-stasher repair-duplicates --destination <name>
 ```
 
 The duplicate session, shard and byte counts describe byte-identical shard-by-
-shard replays of a session's complete preceding sequence—the pattern readers
+shard replays of the tail of a session's preceding sequence that also share the
+replayed shard's archived sequence number—the re-seal evidence, since one stage
+holds one file per number—the pattern readers
 collapse. `collapsed-run` entries show where each such replay occurs. Separate
-`suspicious_kept_*` counts are individual repeated shards that do not form a
-complete replay; readers keep them because repetition alone does not prove a
-duplicate session.
+`suspicious_kept_*` counts are individual repeated shards that do not carry
+that evidence — a validated consecutive repeat sealed as the next sequence
+number among them; readers keep them because repetition alone does not prove a
+duplicate.
 Zero duplicate and suspicious shard counts do not clear an L3 warning caused by
 a final shard that repeats the concatenation of earlier shards.
 
@@ -158,9 +161,10 @@ push's data packs are still in the repository, so nothing is lost.
 
 Move exactly the file(s) the error names out of the repository's `index/` or
 `snapshots/` directory on the destination — move, do not delete — and run the
-command again. The next open picks the stranded packs up again. chat-stasher
-does not move or delete anything itself. A new push no longer produces such a
-file on SFTP.
+command again. The next open picks the stranded packs up again. A push that
+adopts them also names them in a new index file, so the re-read the adoption
+cost happens once, not on every open. chat-stasher does not move or delete
+anything itself. A new push no longer produces such a file on SFTP.
 
 ## Web chats and the browser extension
 
