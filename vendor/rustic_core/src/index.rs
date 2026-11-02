@@ -1,4 +1,4 @@
-use std::{sync::Arc, thread::sleep, time::Duration};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use derive_more::Constructor;
@@ -303,15 +303,16 @@ impl GlobalIndex {
     }
 
     /// Convert the `Arc<Index>` to an Index
+    ///
+    /// If the index is still shared — e.g. by tree loader threads on a slow
+    /// backend that have not fully shut down when the check ends the tree
+    /// walk — the inner index is cloned instead of unwrapped. The conversion
+    /// must never panic on other live references and must not depend on how
+    /// long they stay alive.
     pub fn into_index(self) -> Index {
         match Arc::try_unwrap(self.index) {
             Ok(index) => index,
-            Err(arc) => {
-                // Seems index is still in use; this could be due to some threads using it which didn't yet completely shut down.
-                // sleep a bit to let threads using the index shut down, after this index should be available to unwrap
-                sleep(Duration::from_millis(100));
-                Arc::try_unwrap(arc).expect("index still in use")
-            }
+            Err(arc) => (*arc).clone(),
         }
     }
 
