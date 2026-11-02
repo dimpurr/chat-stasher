@@ -235,6 +235,23 @@ impl BackupHarness {
 /// Subcommands. `push`/`read` are backed by the BackupStore
 /// (rustic_core); `doctor` answers one question — is a harness silently
 /// deleting your history?
+/// `sources enable|disable`: the scriptable edit of `[sources]` (ADR-065 D8).
+#[derive(Subcommand)]
+enum SourcesAction {
+    /// Turn sources on: collection starts with the next pass.
+    Enable {
+        /// Registry harness ids.
+        #[arg(required = true, value_name = "ID")]
+        ids: Vec<String>,
+    },
+    /// Turn sources off: new collection stops; nothing is deleted.
+    Disable {
+        /// Registry harness ids.
+        #[arg(required = true, value_name = "ID")]
+        ids: Vec<String>,
+    },
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Write a commented default config if none exists (non-destructive).
@@ -307,12 +324,41 @@ enum Command {
         /// Non-TTY runs always use this contract and never prompt.
         #[arg(long)]
         json: bool,
+        /// Collect exactly these registry sources (comma separated ids, see
+        /// `chat-stasher sources`). Every other source found on this machine
+        /// is recorded as off. Without a TTY, naming sources here or passing
+        /// `--all-detected` is how consent is given: a run with neither, on a
+        /// machine with nothing recorded, refuses with exit code 4.
+        #[arg(long, value_delimiter = ',', value_name = "ID,ID", conflicts_with = "all_detected")]
+        sources: Vec<String>,
+        /// Collect every source found on this machine, verified or not.
+        #[arg(long)]
+        all_detected: bool,
         /// The remote destination step: which recipe, and the names and
         /// locations it is spelled with. Every parameter here is optional as a
         /// *type* — what is required is decided per kind, so a missing one can
         /// be named rather than guessed at.
         #[command(flatten)]
         remote: SetupRemoteArgs,
+    },
+    /// Show which tools' sessions are collected (on), declined (off) or not
+    /// yet decided (pending), and change that. On a terminal this lists what
+    /// was found and asks which to collect; `sources enable|disable <id>` is
+    /// the scriptable form. Turning a source off stops new collection and
+    /// deletes nothing.
+    ///
+    /// Exit codes: 0 done · 2 usage (an id the registry does not list) ·
+    /// 3 the scan or the config could not be read.
+    Sources {
+        /// Stage directory to read for the upgrade rule (default: the
+        /// `[native_host] stage` the config names, if any).
+        #[arg(long)]
+        stage: Option<PathBuf>,
+        /// Print one JSON object and change nothing.
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        action: Option<SourcesAction>,
     },
     /// Collect one pass, push only when configured and changed, then exit.
     ///
@@ -2212,6 +2258,8 @@ fn run() -> ExitCode {
             uninstall_schedule,
             masterkey_saved_elsewhere,
             json,
+            sources,
+            all_detected,
             remote,
         } => cmd_setup(
             stage,
@@ -2220,8 +2268,17 @@ fn run() -> ExitCode {
             uninstall_schedule,
             masterkey_saved_elsewhere,
             json,
+            SetupSourceFlags {
+                sources,
+                all_detected,
+            },
             remote,
         ),
+        Command::Sources {
+            stage,
+            json,
+            action,
+        } => cmd_sources(stage, json, action),
         Command::RunOnce {
             stage,
             machine,
@@ -17175,6 +17232,7 @@ fn cmd_setup(
     uninstall_schedule: bool,
     masterkey_saved_elsewhere: bool,
     json: bool,
+    source_flags: SetupSourceFlags,
     mut remote: SetupRemoteArgs,
 ) -> ExitCode {
     let interactive = !json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
@@ -17201,9 +17259,66 @@ fn cmd_setup(
         return setup_bad_parameter(flag, &why, interactive);
     }
 
+    // ADR-065 D4/D5: the read-only scan above is shown, and what to collect is
+    // decided, before anything is written or collected. The scan saw every
+    // source; the answer below decides which of them the first save may touch.
+    let consent_registry = match scanner::load_registry_from_repo() {
+        Ok(registry) => registry,
+        Err(error) => return setup_could_not_scan(&error.into(), stage.as_ref(), interactive),
+    };
+    let consent_stage = stage.clone().or_else(setup_default_stage);
+    let consent =
+        chat_stasher::sources::evaluate(&config, &consent_registry, consent_stage.as_deref());
+    let source_rows = chat_stasher::sources::rows_from_scan(&consent_registry, &scan, &consent);
+    let mut source_answers: Option<Vec<(String, config::SourceChoice)>> = None;
+    if !interactive {
+        match setup_choose_sources_from_flags(
+            &source_rows,
+            &consent_registry,
+            &source_flags,
+            &consent,
+        ) {
+            Ok(answers) => source_answers = answers,
+            Err(SetupSourceRefusal::Bad(flag, why)) => {
+                return setup_bad_parameter(flag, &why, false)
+            }
+            Err(SetupSourceRefusal::NoConsent) => {
+                let next = chat_stasher::sources::next_command(stage.as_deref());
+                let detected: Vec<&str> = source_rows
+                    .iter()
+                    .filter(|r| r.selectable())
+                    .map(|r| r.id.as_str())
+                    .collect();
+                println!(
+                    "{}",
+                    json_string(&serde_json::json!({
+                        "schema_version": 1,
+                        "command": "setup",
+                        "healthy": false,
+                        "exit_code": chat_stasher::sources::EXIT_NO_CONSENT,
+                        "refusal": {
+                            "kind": "no_source_consent",
+                            "why": "no source has been chosen on this machine, so nothing was \
+                                    collected and nothing was written",
+                            "next": next,
+                        },
+                        "detected": detected,
+                        "sources": chat_stasher::sources::consent_json(&consent, &[]),
+                        "scanner": scanner::scan_report_json(&scan),
+                    }))
+                );
+                return ExitCode::from(chat_stasher::sources::EXIT_NO_CONSENT);
+            }
+        }
+    }
+
     if interactive {
         // Keep the scanner's established three-state wording byte-for-byte.
         print!("{}", render_setup_scan(&scan));
+        match setup_choose_sources_interactive(&source_rows) {
+            Ok(answers) => source_answers = Some(answers),
+            Err(code) => return code,
+        }
         if stage.is_none() {
             let default = setup_default_stage();
             // The default is *shown in the prompt*, never applied silently: the
@@ -17229,6 +17344,30 @@ fn cmd_setup(
             }
         }
     }
+
+    // The sources this run will collect from: what is already on, changed by the
+    // answer just given. The pre-pass below asks whether the first save would
+    // archive anything, and only a chosen source can make it do so.
+    let mut chosen_on: std::collections::BTreeSet<String> = consent
+        .ids(chat_stasher::sources::SourceState::On)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    for (id, choice) in source_answers.iter().flatten() {
+        match choice {
+            config::SourceChoice::On => {
+                chosen_on.insert(id.clone());
+            }
+            config::SourceChoice::Off => {
+                chosen_on.remove(id);
+            }
+        }
+    }
+    let archivable = scan
+        .records
+        .iter()
+        .filter(|record| chosen_on.contains(record.source.short()))
+        .count();
 
     // Nothing has been written yet, and nothing will be: choosing the directory
     // the user's archive lands in is not a decision this tool makes for them.
@@ -17325,7 +17464,7 @@ fn cmd_setup(
             // an archive the caller was never shown the key for, which is the
             // failure this pre-pass exists to prevent. `false` on Ok is a real
             // absence measured by the probe, not a fallback.
-            && (setup_local_repository_exists(&config).unwrap_or(true) || !scan.records.is_empty())
+            && (setup_local_repository_exists(&config).unwrap_or(true) || archivable > 0)
         {
             premissing.push("masterkey_saved_elsewhere");
         }
@@ -17534,6 +17673,28 @@ fn cmd_setup(
     // them — at the moment the flag was given, there was nothing to copy. A run
     // that would declare such a key would be declaring a backup nobody can have
     // made.
+    // ADR-065 D4: the answer is recorded now — after every refusal that must
+    // write nothing, and before the first pass that would collect.
+    let mut sources_written: Option<config::SourcesWrite> = None;
+    if let Some(answers) = &source_answers {
+        let edits = chat_stasher::sources::edits_for_choice(&consent, answers);
+        match Config::set_source_states(&edits) {
+            Ok(write) => {
+                if interactive {
+                    println!(
+                        "setup: recorded {} source answer(s) in [sources]; nothing is collected \
+                         from a source you did not choose",
+                        write.changed.len() + write.unchanged.len()
+                    );
+                }
+                sources_written = Some(write);
+            }
+            Err(error) => {
+                eprintln!("setup: could not record the source choice: {error:#}");
+                return ExitCode::from(1);
+            }
+        }
+    }
     let local_key_existed_before = setup_local_store(&config).key_file.exists();
     let local = setup_local_first_save(&config, stage, interactive);
     let readback = setup_read_back(&config, &local);
@@ -18138,30 +18299,330 @@ fn cmd_setup(
         return ExitCode::from(exit_code);
     }
 
-    println!(
-        "{}",
-        setup_json_payload(
-            scanner::scan_report_json(&scan),
-            Some(stage),
-            install_schedule,
-            schedule_status,
-            &next_run,
-            Some(&local),
-            Some(&chain),
-            &remote_report,
-            Ok(&host_check),
-            &missing,
-            &incomplete,
-            &remote_gaps.unread,
-            exit_code,
-            // Not a refused run: the local first save either ran or reported
-            // its own failure in `local`, so the payload renders the observed
-            // states rather than a pre-pass refusal.
-            None,
-            &keys,
-        )
+    let payload = setup_json_payload(
+        scanner::scan_report_json(&scan),
+        Some(stage),
+        install_schedule,
+        schedule_status,
+        &next_run,
+        Some(&local),
+        Some(&chain),
+        &remote_report,
+        Ok(&host_check),
+        &missing,
+        &incomplete,
+        &remote_gaps.unread,
+        exit_code,
+        // Not a refused run: the local first save either ran or reported
+        // its own failure in `local`, so the payload renders the observed
+        // states rather than a pre-pass refusal.
+        None,
+        &keys,
     );
+    // ADR-065: which sources this run collects from, and what it recorded.
+    let sources_value = serde_json::json!({
+        "collecting": chosen_on,
+        "recorded_by_this_run": sources_written.as_ref().map(|w| serde_json::json!({
+            "changed": w.changed.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+            "unchanged": w.unchanged,
+        })),
+        "consent_before_this_run": chat_stasher::sources::consent_json(&consent, &[]),
+    });
+    let payload = match serde_json::from_str::<serde_json::Value>(&payload) {
+        Ok(mut value) => {
+            value["sources"] = sources_value;
+            json_string(&value)
+        }
+        Err(_) => payload,
+    };
+    println!("{payload}");
     ExitCode::from(exit_code)
+}
+
+/// The two source flags of `setup`.
+struct SetupSourceFlags {
+    sources: Vec<String>,
+    all_detected: bool,
+}
+
+enum SetupSourceRefusal {
+    /// A flag value that cannot be honoured (exit 2).
+    Bad(&'static str, String),
+    /// No flag and nothing recorded: consent is owed (exit 4).
+    NoConsent,
+}
+
+/// ADR-065 D5: the non-interactive answer. `--sources` names the set to collect
+/// (every other source found here is recorded off); `--all-detected` names all
+/// of them; with neither, a machine that already has consent recorded goes on
+/// as it is, and one that does not is refused.
+fn setup_choose_sources_from_flags(
+    rows: &[chat_stasher::sources::SourceRow],
+    registry: &scanner::HarnessRegistry,
+    flags: &SetupSourceFlags,
+    consent: &chat_stasher::sources::Consent,
+) -> Result<Option<Vec<(String, config::SourceChoice)>>, SetupSourceRefusal> {
+    use chat_stasher::sources::RowKind;
+    if flags.all_detected {
+        return Ok(Some(
+            rows.iter()
+                .filter(|row| row.selectable())
+                .map(|row| (row.id.clone(), config::SourceChoice::On))
+                .collect(),
+        ));
+    }
+    if flags.sources.is_empty() {
+        return if consent.consent_recorded() {
+            Ok(None)
+        } else {
+            Err(SetupSourceRefusal::NoConsent)
+        };
+    }
+    let known: Vec<&str> = registry.harnesses.iter().map(|h| h.id.as_str()).collect();
+    let mut wanted: Vec<String> = Vec::new();
+    for id in &flags.sources {
+        let id = id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        let Some(row) = rows.iter().find(|row| row.id == id) else {
+            return Err(SetupSourceRefusal::Bad(
+                "--sources",
+                format!("`{id}` is not a registry source id; valid ids: {}", known.join(", ")),
+            ));
+        };
+        match row.kind {
+            RowKind::Unreadable => {
+                return Err(SetupSourceRefusal::Bad(
+                    "--sources",
+                    format!(
+                        "`{id}` is unreadable (whether it exists is unknown), so it cannot be \
+                         chosen until its store can be read"
+                    ),
+                ))
+            }
+            RowKind::NeedsPath => {
+                return Err(SetupSourceRefusal::Bad(
+                    "--sources",
+                    format!(
+                        "`{id}` needs a path first: state it under [harness_roots] in the \
+                         config, which also counts as turning it on"
+                    ),
+                ))
+            }
+            RowKind::NotApplicable => {
+                return Err(SetupSourceRefusal::Bad(
+                    "--sources",
+                    format!("`{id}` has no registry entry for this platform"),
+                ))
+            }
+            RowKind::Found { .. } | RowKind::NotFound => {}
+        }
+        if !wanted.iter().any(|w| w == id) {
+            wanted.push(id.to_string());
+        }
+    }
+    let mut answers: Vec<(String, config::SourceChoice)> = Vec::new();
+    for row in rows.iter().filter(|row| row.selectable()) {
+        let choice = if wanted.contains(&row.id) {
+            config::SourceChoice::On
+        } else {
+            config::SourceChoice::Off
+        };
+        answers.push((row.id.clone(), choice));
+    }
+    // A named source that is not on this machine yet: the user chose it, so it
+    // is recorded on and will be collected once it appears.
+    for id in &wanted {
+        if !answers.iter().any(|(known, _)| known == id) {
+            answers.push((id.clone(), config::SourceChoice::On));
+        }
+    }
+    Ok(Some(answers))
+}
+
+/// ADR-065 D4: show one row per source the scan found, with the marks the
+/// registry's verification dates pre-select, and take the multi-select. The
+/// prompt is the existing line prompt (a numbered list), which reads one line
+/// from stdin; it needs no raw-mode terminal and no new dependency.
+fn setup_choose_sources_interactive(
+    rows: &[chat_stasher::sources::SourceRow],
+) -> Result<Vec<(String, config::SourceChoice)>, ExitCode> {
+    let selectable: Vec<&chat_stasher::sources::SourceRow> =
+        rows.iter().filter(|row| row.selectable()).collect();
+    println!();
+    if selectable.is_empty() {
+        print!("{}", chat_stasher::sources::render_rows(rows, true, &[]));
+        println!(
+            "setup: no supported tool was found on this machine, so there is nothing to choose \
+             yet. The tools above that are not found stay undecided and are reported when they \
+             appear."
+        );
+        return Ok(Vec::new());
+    }
+    let defaults: Vec<bool> = selectable.iter().map(|row| row.preselected()).collect();
+    println!("Sources found on this machine. Nothing is collected until you choose.");
+    println!("[x] = marked because the registry records a dated verification, or you chose it before.");
+    print!("{}", chat_stasher::sources::render_rows(rows, true, &defaults));
+    loop {
+        let mut input = String::new();
+        if let Err(error) = prompt_setup_value(
+            "Collect which? Enter = keep the marks, numbers like 1,3, all, or none: ",
+            &mut input,
+        ) {
+            eprintln!("setup: could not read the source choice: {error}");
+            return Err(ExitCode::from(3));
+        }
+        match chat_stasher::sources::parse_selection(&input, &defaults) {
+            Ok(marks) => {
+                return Ok(selectable
+                    .iter()
+                    .zip(marks)
+                    .map(|(row, on)| {
+                        (
+                            row.id.clone(),
+                            if on {
+                                config::SourceChoice::On
+                            } else {
+                                config::SourceChoice::Off
+                            },
+                        )
+                    })
+                    .collect());
+            }
+            Err(why) => eprintln!("setup: {why}; try again"),
+        }
+    }
+}
+
+/// `chat-stasher sources` (ADR-065 D8): list, and on a terminal edit, which
+/// sources are collected; `enable` / `disable` for scripts.
+fn cmd_sources(stage: Option<PathBuf>, json: bool, action: Option<SourcesAction>) -> ExitCode {
+    use chat_stasher::sources;
+    let config = match config_or_refuse("sources") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let registry = match scanner::load_registry_from_repo() {
+        Ok(registry) => registry,
+        Err(error) => {
+            eprintln!("sources: the harness registry could not be read: {error}");
+            return ExitCode::from(3);
+        }
+    };
+    let stage = stage.or_else(|| {
+        config
+            .native_host
+            .as_ref()
+            .and_then(|native| native.stage.as_deref())
+            .map(PathBuf::from)
+    });
+    let consent = sources::evaluate(&config, &registry, stage.as_deref());
+
+    if let Some(action) = action {
+        let (ids, choice) = match action {
+            SourcesAction::Enable { ids } => (ids, config::SourceChoice::On),
+            SourcesAction::Disable { ids } => (ids, config::SourceChoice::Off),
+        };
+        let known: Vec<&str> = registry.harnesses.iter().map(|h| h.id.as_str()).collect();
+        for id in &ids {
+            if !known.contains(&id.as_str()) {
+                eprintln!(
+                    "sources: `{id}` is not a registry source id; valid ids: {}",
+                    known.join(", ")
+                );
+                return ExitCode::from(2);
+            }
+        }
+        let answers: Vec<(String, config::SourceChoice)> =
+            ids.iter().map(|id| (id.clone(), choice)).collect();
+        let edits = sources::edits_for_choice(&consent, &answers);
+        return match Config::set_source_states(&edits) {
+            Ok(write) => {
+                for id in &ids {
+                    println!("sources: {id} is {}", choice.word());
+                    if choice == config::SourceChoice::Off {
+                        println!("sources: {}", sources::disable_notice(id));
+                    }
+                }
+                if write.file_untouched {
+                    println!("sources: the config already said so; nothing was written");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("sources: {error:#}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
+    let scan = match scanner::scan(&config) {
+        Ok(scan) => scan,
+        Err(error) => {
+            eprintln!("sources: the scan could not run: {error}");
+            return ExitCode::from(3);
+        }
+    };
+    let rows = sources::rows_from_scan(&registry, &scan, &consent);
+    let pending_found = pending_found_in_scan(&scan, &consent);
+    if json {
+        println!(
+            "{}",
+            json_string(&serde_json::json!({
+                "schema_version": 1,
+                "command": "sources",
+                "sources": sources::consent_json(&consent, &pending_found),
+                "found": rows.iter().filter(|r| r.selectable()).map(|r| r.id.clone()).collect::<Vec<_>>(),
+            }))
+        );
+        return ExitCode::SUCCESS;
+    }
+    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if !interactive {
+        print!("{}", sources::render_rows(&rows, false, &[]));
+        println!("{}", sources::summary_line(&consent, &pending_found));
+        for notice in [
+            sources::upgrade_notice(&consent),
+            sources::unrecognised_notice(&consent),
+            sources::stage_evidence_notice(&consent),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            println!("{notice}");
+        }
+        return ExitCode::SUCCESS;
+    }
+    println!("{}", sources::summary_line(&consent, &pending_found));
+    let answers = match setup_choose_sources_interactive(&rows) {
+        Ok(answers) => answers,
+        Err(code) => return code,
+    };
+    if answers.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+    let edits = sources::edits_for_choice(&consent, &answers);
+    match Config::set_source_states(&edits) {
+        Ok(write) => {
+            println!(
+                "sources: recorded {} answer(s); {} unchanged",
+                write.changed.len(),
+                write.unchanged.len()
+            );
+            for (id, choice) in &answers {
+                if *choice == config::SourceChoice::Off && consent.state_of(id) == sources::SourceState::On
+                {
+                    println!("sources: {}", sources::disable_notice(id));
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("sources: {error:#}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// The failure path for "could not look at all".

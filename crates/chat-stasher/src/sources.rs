@@ -538,6 +538,268 @@ pub fn consent_json(consent: &Consent, pending_present: &[String]) -> serde_json
     })
 }
 
+// ---------------------------------------------------------------------------
+// The choice surface: rows, selection, and the explicit write (D4, D8, D9)
+// ---------------------------------------------------------------------------
+
+/// What a read-only scan found for one source, in the terms the choice needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowKind {
+    /// The store is here and was read. It can be chosen.
+    Found {
+        /// Session count, or `None` when it could not be enumerated: unknown,
+        /// never shown as zero.
+        sessions: Option<u64>,
+        /// Size in bytes when the scan already had it; `None` renders as
+        /// "unknown" because computing it would mean reading more.
+        bytes: Option<u64>,
+        path: Option<String>,
+    },
+    /// The scan could not tell whether the store exists (permissions, I/O).
+    /// Shown, and cannot be chosen.
+    Unreadable,
+    /// The registry has no verified path for this platform; the user has to
+    /// state one in `[harness_roots]` before the source can be read.
+    NeedsPath,
+    /// Looked for and not there.
+    NotFound,
+    /// The registry has no cell for this platform at all.
+    NotApplicable,
+}
+
+/// One source in the choice list.
+#[derive(Debug, Clone)]
+pub struct SourceRow {
+    pub id: String,
+    pub display_name: String,
+    pub kind: RowKind,
+    /// The dated verification the registry records for this platform.
+    pub verified: Option<String>,
+    /// The state the config gives it today.
+    pub current: SourceState,
+}
+
+impl SourceRow {
+    /// Only a source whose store was found can be chosen.
+    pub fn selectable(&self) -> bool {
+        matches!(self.kind, RowKind::Found { .. })
+    }
+
+    /// The pre-selection (D4): a recorded answer is kept, otherwise a source
+    /// with a dated verification is marked and an unverified one is not.
+    pub fn preselected(&self) -> bool {
+        if !self.selectable() {
+            return false;
+        }
+        match (self.current, self.verified.is_some()) {
+            (SourceState::On, _) => true,
+            (SourceState::Off, _) => false,
+            (SourceState::Pending, verified) => verified,
+        }
+    }
+}
+
+/// Build the rows from a read-only scan, in registry order.
+pub fn rows_from_scan(
+    registry: &HarnessRegistry,
+    scan: &crate::scanner::ScanReport,
+    consent: &Consent,
+) -> Vec<SourceRow> {
+    use crate::scanner::ProbeState;
+    let platform = crate::scanner::current_platform();
+    registry
+        .harnesses
+        .iter()
+        .map(|h| {
+            let probe = scan.probes.iter().find(|p| p.id == h.id);
+            let kind = match probe {
+                None => RowKind::NotFound,
+                Some(p) => match p.state {
+                    ProbeState::Scanned | ProbeState::FileTarget => {
+                        let from_records: u64 = scan
+                            .records
+                            .iter()
+                            .filter(|r| r.source.short() == h.id)
+                            .map(|r| r.byte_size)
+                            .sum();
+                        RowKind::Found {
+                            sessions: p.record_count,
+                            bytes: p.bytes.or(if p.record_count.is_some() {
+                                Some(from_records)
+                            } else {
+                                None
+                            }),
+                            path: p.root.as_ref().map(|r| r.display().to_string()),
+                        }
+                    }
+                    ProbeState::Missing => RowKind::NotFound,
+                    ProbeState::Indeterminate => RowKind::Unreadable,
+                    ProbeState::SkipUnascertained | ProbeState::SkipUnresolvable => {
+                        RowKind::NeedsPath
+                    }
+                    ProbeState::SkipWrongPlatform => RowKind::NotApplicable,
+                },
+            };
+            SourceRow {
+                id: h.id.clone(),
+                display_name: h.display_name.clone(),
+                kind,
+                verified: h.verified_date_on(platform).map(str::to_string),
+                current: consent.state_of(&h.id),
+            }
+        })
+        .collect()
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Render the choice list. `numbered` adds the `[x]`/`[ ]` marks and the numbers
+/// the multi-select takes; without it (the `sources` listing) each row shows
+/// its current state instead. Nothing here reads conversation text: a row is a
+/// name, a count, a size, a path and a verification date.
+pub fn render_rows(rows: &[SourceRow], numbered: bool, marks: &[bool]) -> String {
+    let mut out = String::new();
+    let mut n = 0usize;
+    let mut mark_i = 0usize;
+    for row in rows {
+        let RowKind::Found {
+            sessions,
+            bytes,
+            path,
+        } = &row.kind
+        else {
+            continue;
+        };
+        n += 1;
+        let sessions = sessions.map_or("unknown".to_string(), |c| c.to_string());
+        let size = bytes.map_or("unknown".to_string(), human_bytes);
+        let verified = match &row.verified {
+            Some(date) => format!("verified {date}"),
+            None => "not verified".to_string(),
+        };
+        let lead = if numbered {
+            let mark = if marks.get(mark_i).copied().unwrap_or(false) {
+                "x"
+            } else {
+                " "
+            };
+            mark_i += 1;
+            format!("[{mark}] {n:>2}")
+        } else {
+            format!("{:<8}", row.current.word())
+        };
+        out.push_str(&format!(
+            "  {lead}  {:<18} sessions {sessions:<7} size {size:<9} {verified:<22} {}\n",
+            row.id,
+            path.as_deref().unwrap_or("-")
+        ));
+    }
+    let list = |wanted: fn(&RowKind) -> bool| -> Vec<String> {
+        rows.iter()
+            .filter(|r| wanted(&r.kind))
+            .map(|r| r.id.clone())
+            .collect()
+    };
+    let unreadable = list(|k| matches!(k, RowKind::Unreadable));
+    if !unreadable.is_empty() {
+        out.push_str(&format!(
+            "  Cannot be chosen, unreadable (whether they exist is unknown; check permissions): {}\n",
+            unreadable.join(", ")
+        ));
+    }
+    let needs = list(|k| matches!(k, RowKind::NeedsPath));
+    if !needs.is_empty() {
+        out.push_str(&format!(
+            "  Need a path before they can be read (state it under [harness_roots] in the config): {}\n",
+            needs.join(", ")
+        ));
+    }
+    let missing = list(|k| matches!(k, RowKind::NotFound));
+    if !missing.is_empty() {
+        out.push_str(&format!("  Not found on this machine: {}\n", missing.join(", ")));
+    }
+    out
+}
+
+/// Parse the answer to the multi-select. `defaults` is the pre-selection, in
+/// the order of the numbered rows. Accepts Enter (keep the marks), `all`,
+/// `none`, or comma/space separated row numbers (the chosen set, replacing the
+/// marks). Anything else is an error naming what was not understood, so a typo
+/// never silently chooses or drops a source.
+pub fn parse_selection(input: &str, defaults: &[bool]) -> Result<Vec<bool>, String> {
+    let text = input.trim();
+    if text.is_empty() {
+        return Ok(defaults.to_vec());
+    }
+    match text.to_ascii_lowercase().as_str() {
+        "all" | "a" => return Ok(vec![true; defaults.len()]),
+        "none" | "n" => return Ok(vec![false; defaults.len()]),
+        _ => {}
+    }
+    let mut chosen = vec![false; defaults.len()];
+    for token in text.split(|c: char| c == ',' || c.is_whitespace()) {
+        if token.is_empty() {
+            continue;
+        }
+        let number: usize = token
+            .parse()
+            .map_err(|_| format!("`{token}` is not a row number, `all`, or `none`"))?;
+        if number == 0 || number > defaults.len() {
+            return Err(format!(
+                "{number} is not one of the {} listed row(s)",
+                defaults.len()
+            ));
+        }
+        chosen[number - 1] = true;
+    }
+    Ok(chosen)
+}
+
+/// The edits that record an answer for the selectable rows, plus — the first
+/// time anything is written with no `[sources]` table (D7) — an explicit `on`
+/// for every source that is on only through a declared root or the stage's
+/// history, so writing the table does not silently turn those off.
+pub fn edits_for_choice(
+    consent: &Consent,
+    answers: &[(String, crate::config::SourceChoice)],
+) -> Vec<(String, crate::config::SourceChoice)> {
+    let mut edits: Vec<(String, crate::config::SourceChoice)> = answers.to_vec();
+    if !consent.table_present {
+        for d in &consent.decisions {
+            if d.state == SourceState::On
+                && d.basis != Basis::Recorded
+                && !edits.iter().any(|(id, _)| id == &d.id)
+            {
+                edits.push((d.id.clone(), crate::config::SourceChoice::On));
+            }
+        }
+    }
+    edits
+}
+
+/// What `sources disable` tells the user (D9): off is not delete.
+pub fn disable_notice(id: &str) -> String {
+    format!(
+        "`{id}` is off: no new sessions are collected from it. Nothing was deleted. Sessions \
+         already archived stay in the archive. Copies already in the stage stay there, in \
+         plaintext, until the stage is reclaimed (`chat-stasher reclaim-stage`). To remove one \
+         archived session, see `chat-stasher purge <session-id>`."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
