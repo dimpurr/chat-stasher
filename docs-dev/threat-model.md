@@ -684,7 +684,7 @@ registered browser can reach the host, deliver into the stage, and ask the three
 read-only questions above, and the manifest's allowlist, which is what stops a
 different extension, is pinned to our extension id and is identical in all of
 them (`crates/chat-stasher/src/nativehost.rs:499-612`, `:488-491`;
-`crates/chat-stasher/src/main.rs:2765-2780`). The host's `summary` answer is
+`crates/chat-stasher/src/main.rs:2766-2781`). The host's `summary` answer is
 therefore a count over the stage the whole machine shares, not over the asking
 install's own captures.
 
@@ -875,9 +875,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:11080-11085`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:11081-11086`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:10938-10954`).
+  (`crates/chat-stasher/src/main.rs:10939-10955`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -888,7 +888,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:7610-7618`).
+  as many words (`crates/chat-stasher/src/main.rs:7611-7619`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -935,11 +935,11 @@ a real limitation of the current code.
    Grok's `prod-grok-backend.json` have parsers in this build, and its second
    mode reads copied Grok Bot cache backups in — read-only — as sealed rows,
    never writing anything back into the harness)
-   (`crates/chat-stasher/src/main.rs:239-1925`); **a command that puts sessions
+   (`crates/chat-stasher/src/main.rs:239-1926`); **a command that puts sessions
    back into a harness's own directories does not exist**. `read` reports
    **one session at a time** with its length and SHA-256, without printing
    conversation content
-   (`crates/chat-stasher/src/main.rs:530-533,12087-12119`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:530-533,12088-12120`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:838-942`) — see exposure 5
