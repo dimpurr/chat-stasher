@@ -298,6 +298,14 @@ impl SessionIdentity {
     }
 }
 
+/// Native id for a session whose file name is a constant and whose only
+/// identity is the directory it lives in: the first 16 hex digits of the
+/// SHA-256 of that directory path. Deterministic, and the path itself is not
+/// recoverable from the id.
+pub fn dir_scoped_native_id(dir: &str) -> String {
+    sha256_hex_prefix(dir, 16)
+}
+
 #[cfg(test)]
 mod tests {
     // B65 removed the `localhost` fallback, which was correct — and it

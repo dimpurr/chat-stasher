@@ -148,6 +148,21 @@ backup. If a pack an index **does** name fails verification, that is
 corruption of real content, and those commands still exit `1` for it — the
 debris classification only ever applies to what no index names.
 
+### A command fails and names an `index/…` or `snapshots/…` file as too short
+
+The error says the repository holds a file "too short to be complete" and
+names it, for example `index/<64 hex characters>` with `0 bytes`. On an SFTP
+destination, versions before the atomic index and snapshot publication wrote
+those two kinds of file straight to their final name, so a push cut off in that
+write could leave an empty file there. Nothing readable was ever in it, and the
+push's data packs are still in the repository, so nothing is lost.
+
+Move exactly the file(s) the error names out of the repository's `index/` or
+`snapshots/` directory on the destination — move, do not delete — and run the
+command again. The next open picks the stranded packs up again. chat-stasher
+does not move or delete anything itself. A new push no longer produces such a
+file on SFTP.
+
 ## Web chats and the browser extension
 
 ### A chat is not being captured

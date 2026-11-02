@@ -11041,7 +11041,7 @@ fn cmd_push(
     // A run-once pass reuses the scan evidence and shard count collection
     // already produced; a standalone push performs the full guard itself.
     let stage_check = match collected {
-        Some(evidence) => chat_stasher::collect::inspect_stage_for_push_with_evidence(
+        Some(evidence) => chat_stasher::collect::inspect_stage_for_push_with_handoff(
             &evidence.scan,
             stage,
             &state_dir,

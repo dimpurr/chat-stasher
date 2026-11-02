@@ -1709,6 +1709,24 @@ pub fn inspect_stage_for_push(
     )
 }
 
+/// The `run-once` in-process handoff: like
+/// [`inspect_stage_for_push_with_evidence`], but the audit's count is trusted
+/// after one `stat` of the sessions root instead of a walk of every machine
+/// and session directory. A moved root recounts. Standalone `push` must keep
+/// the full check and does not call this.
+pub fn inspect_stage_for_push_with_handoff(
+    scan: &ScanEvidence,
+    stage: &Path,
+    state_dir: &Path,
+    counted: &store::CountedStageShards,
+) -> anyhow::Result<PushStageCheck> {
+    let stage_shards = match counted.handed_off_count(stage) {
+        Some(count) => count,
+        None => store::sealed_shard_count(stage)?,
+    };
+    stage_check_from_parts(scan, state_dir, stage_shards)
+}
+
 /// Push-stage guard from evidence collection already validated. This is the
 /// `run-once` reuse path: the registry scan is collection's own, passed in
 /// rather than repeated, and the stage count is reused only while its
@@ -1724,6 +1742,14 @@ pub fn inspect_stage_for_push_with_evidence(
         Some(count) => count,
         None => store::sealed_shard_count(stage)?,
     };
+    stage_check_from_parts(scan, state_dir, stage_shards)
+}
+
+fn stage_check_from_parts(
+    scan: &ScanEvidence,
+    state_dir: &Path,
+    stage_shards: usize,
+) -> anyhow::Result<PushStageCheck> {
     let state = load_state(&state_dir.join(STATE_FILE))?;
     Ok(PushStageCheck {
         stage_shards,
