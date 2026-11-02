@@ -18,10 +18,25 @@
 //!   repository. `W1059_REPO=<dir>` reuses a repository built by an earlier
 //!   run so before/after read exactly the same bytes.
 //!
+//! Three fixture tests pin the fallback side of the same change — the cases
+//! where one session is held in a shape the fast lookup cannot answer for and
+//! the snapshot must be walked in full rather than reported as absent:
+//!
+//! * `extra_sessions_root_beside_top_level...` — a stage the writer never
+//!   produces (a second `sessions/<machine>/<session>/` root beside the top
+//!   level), pushed through the public store API because `push` accepts it
+//!   (it holds a normal top-level tree too).
+//! * `snapshot_without_a_top_level_sessions_dir...` and
+//!   `snapshot_whose_recorded_stage_path_is_absent...` — layouts `push`
+//!   refuses, so their snapshots are written through the repository API
+//!   `push` itself drives (`rustic_core`'s `backup`), with the metadata
+//!   (host, paths) shaped so only this fixture's snapshots answer the read.
+//!
 //! Everything is synthetic: generated ids and payload only.
 
 use chat_stasher::store::{self, BackupStore, StageWriter, StoreConfig};
-use rustic_core::repofile::MasterKey;
+use rustic_core::repofile::{MasterKey, SnapshotFile};
+use rustic_core::{BackupOptions, PathList, SnapshotOptions};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -280,4 +295,162 @@ fn benchmark_single_session_read_against_repository_history() {
         "[W1059] BENCH snapshots={snapshots} sessions={sessions} read_ms={times:?} miss_ms={miss_ms} miss_is_err={}",
         miss.is_err()
     );
+}
+
+// ----------------------------------------------------------------- fallbacks
+//
+// The fast lookup answers per snapshot, so the fixtures below each pin one
+// refusal it must make: a stage root holding anything beside the writer's
+// own names, a stage root with no top-level `sessions/` at all, and recorded
+// stage paths the tree does not carry. Every one of them must end in the full
+// recursive listing — the reader's shard bucketing matches a `sessions`
+// component anywhere in a path, so a session held in any of these shapes is
+// held, and a fallback that has been removed reads it as absent.
+
+/// The bytes one `add_shard` shard holds: every line followed by one newline.
+fn shard_body(tag: &str) -> Vec<u8> {
+    (0..4)
+        .map(|i| format!("{{\"t\":\"{tag}\",\"i\":{i}}}\n"))
+        .collect::<Vec<_>>()
+        .concat()
+        .into_bytes()
+}
+
+/// Back `source_dir` into `st`'s repository as one snapshot attributed to
+/// `host`, through the repository API `push` itself drives and outside every
+/// `push` guard. The guards read the writer's own layout (shards are counted
+/// under the top-level `sessions/` alone, and a stage without one is refused
+/// as empty), which is exactly the layout three of these fixtures step
+/// outside of; `rustic_core`'s `backup` stores the directory as it stands, so
+/// the tree is whatever the fixture built and the metadata is what the caller
+/// passes. Returns the saved snapshot for callers that re-save edited
+/// metadata beside it.
+fn backup_dir_as_host(
+    st: &BackupStore,
+    source_dir: &Path,
+    host: &str,
+    mk: &MasterKey,
+) -> SnapshotFile {
+    let (repo, _init) = st.open_or_init(mk).unwrap();
+    let snap = SnapshotOptions::default()
+        .host(host.to_string())
+        .to_snapshot()
+        .unwrap();
+    let source = PathList::from_string(
+        source_dir
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .expect("a test fixture path is valid utf-8"),
+    )
+    .unwrap()
+    .sanitize()
+    .unwrap();
+    repo.backup(&BackupOptions::default(), &source, snap)
+        .unwrap()
+}
+
+#[test]
+fn extra_sessions_root_beside_top_level_is_walked_in_full() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path();
+    let cfg = cfg_in(dir);
+    let mk = MasterKey::new();
+    store::persist_key_file(&cfg, &mk).unwrap();
+    let st = BackupStore::new(cfg, MACHINE.to_string());
+    let stage = dir.join("stage");
+    add_shard(&stage, &sid(1), "normal");
+    // A second sessions tree under a name the writer never uses. The full
+    // listing matched shard paths by their last `sessions` component anywhere,
+    // so this one counts as held; the fast lookup only reads the top-level
+    // `sessions/` and must fall back rather than call the session absent.
+    let scratch = dir.join("scratch");
+    add_shard(&scratch, &sid(8), "extra");
+    fs::create_dir_all(stage.join("extra")).unwrap();
+    fs::rename(
+        scratch.join("sessions"),
+        stage.join("extra").join("sessions"),
+    )
+    .unwrap();
+    st.push(&stage, &mk).unwrap();
+    let (bytes, hashes) = st
+        .read_session_concat(MACHINE, &sid(8), &mk)
+        .expect("a session under a sessions root beside the top level is held");
+    assert_eq!(bytes, shard_body("extra"));
+    assert_eq!(hashes.len(), 1, "one sealed shard");
+    // The writer's own layout in the same stage still takes the fast path.
+    let (bytes, _) = st.read_session_concat(MACHINE, &sid(1), &mk).unwrap();
+    assert_eq!(bytes, shard_body("normal"));
+}
+
+#[test]
+fn snapshot_without_a_top_level_sessions_dir_is_found_by_the_fallback() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path();
+    let cfg = cfg_in(dir);
+    let mk = MasterKey::new();
+    store::persist_key_file(&cfg, &mk).unwrap();
+    let st = BackupStore::new(cfg, MACHINE.to_string());
+    // An older layout: the machine's sessions sit under `meta/`, so the stage
+    // root resolves but holds no `sessions` child. `push` refuses a stage like
+    // this (no shards under the top-level `sessions/`), so the snapshot is
+    // written through the repository API with the directory exactly as the
+    // fixture built it.
+    let odd = dir.join("old-layout");
+    let session = sid(7);
+    let held = b"{\"t\":\"nested\",\"i\":0}\n";
+    let shard = odd
+        .join("meta")
+        .join("nest")
+        .join("sessions")
+        .join(MACHINE)
+        .join(&session)
+        .join("000001.jsonl");
+    fs::create_dir_all(shard.parent().unwrap()).unwrap();
+    fs::write(&shard, held).unwrap();
+    backup_dir_as_host(&st, &odd, MACHINE, &mk);
+    // A newer, writer-shaped snapshot of the same machine: the odd snapshot is
+    // the only one that can answer for session 7, and it must fall back.
+    let stage = dir.join("stage");
+    add_shard(&stage, &sid(1), "normal");
+    st.push(&stage, &mk).unwrap();
+    let (bytes, hashes) = st
+        .read_session_concat(MACHINE, &session, &mk)
+        .expect("a session the fast path cannot answer for is held, not absent");
+    assert_eq!(bytes, held);
+    assert_eq!(hashes.len(), 1, "one sealed shard");
+}
+
+#[test]
+fn snapshot_whose_recorded_stage_path_is_absent_is_found_by_the_fallback() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path();
+    let cfg = cfg_in(dir);
+    let mk = MasterKey::new();
+    store::persist_key_file(&cfg, &mk).unwrap();
+    let st = BackupStore::new(cfg, MACHINE.to_string());
+    // A writer-shaped stage, snapshotted through the repository API under a
+    // different host so the saved original never enters this machine's reads;
+    // what the machine sees is the same tree with edited metadata, the way a
+    // merged or repaired archive can describe a stage path its own tree does
+    // not carry. The lookup must fall back to walking the snapshot instead of
+    // taking the missing path component for an answer.
+    let stage = dir.join("stage");
+    add_shard(&stage, &sid(3), "moved");
+    let snapshot = backup_dir_as_host(&st, &stage, "another-host", &mk);
+    let mut recorded = snapshot.clone();
+    recorded.hostname = MACHINE.to_string();
+    recorded.paths = dir
+        .join("stage-that-has-since-moved")
+        .display()
+        .to_string()
+        .parse()
+        .unwrap();
+    let (repo, _init) = st.open_or_init(&mk).unwrap();
+    repo.save_snapshots(vec![recorded]).unwrap();
+    let (bytes, hashes) = st
+        .read_session_concat(MACHINE, &sid(3), &mk)
+        .expect("a session held under a path the snapshot does not record is held");
+    assert_eq!(bytes, shard_body("moved"));
+    assert_eq!(hashes.len(), 1, "one sealed shard");
 }

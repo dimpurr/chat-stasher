@@ -1533,17 +1533,21 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
 ///
 /// The fast path is taken only when it is *known* to see what the full listing
 /// would: every `snapshot.paths` entry resolves to a directory that has a
-/// `sessions` child. Anything else (a tree not shaped like a stage, a missing
-/// path) falls back to the full recursive listing, so an odd snapshot is
+/// `sessions` child and holds nothing beside the writer's own stage-root
+/// names ([`FAST_PATH_STAGE_TOPLEVEL`]). Anything else (a tree not shaped like
+/// a stage, a missing path, a stage root with an unrecognized entry) falls
+/// back to the full recursive listing, so an odd snapshot is
 /// still walked completely rather than guessed at. A tree blob that cannot be
 /// read is an error on either path, never an absence: only "this directory has
 /// no such child" means the snapshot does not hold the session.
 ///
 /// Narrowing, stated: the full listing matched the *last* `sessions` path
-/// component anywhere, so a `sessions` directory nested below
-/// `sessions/<x>/` could in theory also match. The writer never produces one
-/// (session ids are `harness.machine.uuid`, shards are `.jsonl` files), and
-/// the fast path does not look for it.
+/// component anywhere, so a `sessions` directory nested below some other
+/// directory — a second root parked beside the writer's, say — matched too.
+/// The writer never produces one, and the fast path does not look for it: a
+/// stage root holding any name outside [`FAST_PATH_STAGE_TOPLEVEL`] is
+/// refused the shortcut and walked in full, so an unrecognized layout costs
+/// time instead of turning a held session into a false absence.
 fn snapshot_session_entries<S: rustic_core::IndexedFull>(
     repo: &Repository<S>,
     snap: &SnapshotFile,
@@ -1577,8 +1581,37 @@ fn snapshot_session_entries<S: rustic_core::IndexedFull>(
         .with_context(|| unknown("tree walk"))
 }
 
-/// `Some(entries)` when every stage root resolved and holds `sessions/`;
-/// `None` to ask for the full listing.
+/// The names the writer itself puts at a stage root.
+///
+/// [`fast_session_entries`] takes its shortcut only through these. The full
+/// listing it replaces matched a session's shards by the *last* `sessions`
+/// component anywhere in the tree, so a `sessions/<machine>/<session>/`
+/// subtree parked somewhere the writer does not put it still counted as held —
+/// which is exactly what a backup reader must keep resolving. The fast path
+/// reads `sessions/` and `meta/` directly and never looks into anything else,
+/// so a stage root holding an unrecognized name is walked in full instead:
+/// the one direction this trade must never fail in is a held session reading
+/// as absent, and every name here is one the fast path can see past because
+/// the writer cannot place a session's shards or provenance under it.
+///
+/// Every writer-side entry at the stage root names itself through one of its
+/// own constants here except `ext-status`, which has no named constant. A new
+/// top-level directory the writer starts creating must join this list in the
+/// same change or the fast path quietly stops applying to stages that contain
+/// it — a cost, never a correctness break, which is the safe direction for
+/// this set to be wrong in.
+const FAST_PATH_STAGE_TOPLEVEL: &[&str] = &[
+    SESSIONS_DIR,
+    crate::manifest::META_DIR,
+    MACHINE_LOGS_DIR,
+    "ext-status",
+    crate::import::IMPORT_RAW_DIR,
+    crate::raw_export::EXPORT_FILES_DIR,
+    crate::inbox::STAGE_LOCK_FILE,
+];
+
+/// `Some(entries)` when every stage root resolved and holds `sessions/` under
+/// the writer's layout alone; `None` to ask for the full listing.
 fn fast_session_entries<S: rustic_core::IndexedFull>(
     repo: &Repository<S>,
     snap: &SnapshotFile,
@@ -1618,13 +1651,39 @@ fn fast_session_entries<S: rustic_core::IndexedFull>(
                 _ => return Ok(None),
             }
         }
-        let Some(sessions) = child(repo, &stage, SESSIONS_DIR.as_ref(), unknown)? else {
+        let Some(stage_tree_id) = stage.subtree else {
+            return Ok(None);
+        };
+        let stage_tree = repo
+            .get_tree(&stage_tree_id)
+            .with_context(|| unknown("tree walk"))?;
+        // One unrecognized entry beside the writer's layout is enough to lose
+        // the shortcut for the whole snapshot: the fast path cannot prove it
+        // still sees every `sessions/<machine>/<session>/` subtree the full
+        // listing would have matched, so the snapshot is walked in full
+        // instead — slower, never a false absence.
+        if stage_tree
+            .nodes
+            .iter()
+            .any(|node| match node.name().to_str() {
+                Some(name) => !FAST_PATH_STAGE_TOPLEVEL.contains(&name),
+                None => true,
+            })
+        {
+            return Ok(None);
+        }
+        let sessions_dir = std::ffi::OsStr::new(SESSIONS_DIR);
+        let Some(sessions) = stage_tree
+            .nodes
+            .iter()
+            .find(|node| node.name() == sessions_dir)
+        else {
             return Ok(None);
         };
         if sessions.node_type != NodeType::Dir {
             return Ok(None);
         }
-        if let Some(machine_dir) = child(repo, &sessions, machine.as_ref(), unknown)? {
+        if let Some(machine_dir) = child(repo, sessions, machine.as_ref(), unknown)? {
             if let Some(session_dir) = child(repo, &machine_dir, session_id.as_ref(), unknown)? {
                 if session_dir.node_type == NodeType::Dir {
                     let base = rel.join(SESSIONS_DIR).join(machine).join(session_id);
