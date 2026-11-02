@@ -2314,7 +2314,7 @@ println      crates/chat-stasher/src/main.rs:8716  "audit migration: scan comple
 eprintln     crates/chat-stasher/src/main.rs:8721  "audit migration: incomplete; retained committed progress; coverage unknown"
 eprintln     crates/chat-stasher/src/main.rs:8760  "collect: {e:#}"
 eprintln     crates/chat-stasher/src/main.rs:8782  "{command}: {error}"
-eprintln     crates/chat-stasher/src/main.rs:8795  "{command}: REFUSED exit_code={} — source `{id}` is {} ({meaning}), so nothing was                  read from it. Next: chat-stasher sources enable {id}"
+eprintln     crates/chat-stasher/src/main.rs:8795  "{command}: REFUSED exit_code={} — source `{id}` is {} ({meaning}), so nothing was read from it. Next: chat-stasher sources enable {id}"
 eprintln     crates/chat-stasher/src/main.rs:8809  "{label} REFUSED exit_code={} — {refusal}"
 eprintln     crates/chat-stasher/src/main.rs:8832  "collect: PARTIAL exit_code=3 — {} harness(es) recognised sessions this build cannot turn into SessionRecord values, so they were not archived. The shards written above are real; the archive is not complete."
 eprintln     crates/chat-stasher/src/main.rs:8857  "collect: PARTIAL exit_code=3 — {} codebuff session(s) could not be read whole and skipped this pass (nothing sealed for them; bounded skip observations recorded; retry next pass)"

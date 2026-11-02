@@ -8792,7 +8792,7 @@ fn require_source_on(
                 _ => "nobody has decided about it yet",
             };
             eprintln!(
-                "{command}: REFUSED exit_code={} — source `{id}` is {} ({meaning}), so nothing was                  read from it. Next: chat-stasher sources enable {id}",
+                "{command}: REFUSED exit_code={} — source `{id}` is {} ({meaning}), so nothing was read from it. Next: chat-stasher sources enable {id}",
                 chat_stasher::sources::EXIT_NO_CONSENT,
                 state.word()
             );
