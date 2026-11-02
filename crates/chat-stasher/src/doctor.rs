@@ -2120,6 +2120,8 @@ pub struct DebrisAtDestination {
     pub unknown: usize,
     /// Backend bytes those unknown packs occupy.
     pub unknown_bytes: u64,
+    /// ADR-063 ruling 6: the second line of the same class, tmp leftovers.
+    pub tmp: crate::prune_orphans::TmpDebris,
 }
 
 impl DebrisAtDestination {
@@ -2135,6 +2137,7 @@ impl DebrisAtDestination {
             stranded_bytes: inventory.stranded_bytes(),
             unknown: inventory.unknown_packs(),
             unknown_bytes: inventory.unknown_bytes(),
+            tmp: inventory.tmp.clone(),
         }
     }
 
@@ -2142,7 +2145,13 @@ impl DebrisAtDestination {
     /// empty is silence, which the doctor's healthy-run convention keeps.
     #[must_use]
     pub fn has_anything_to_say(&self) -> bool {
-        self.torn > 0 || self.stranded > 0 || self.unknown > 0
+        self.torn > 0
+            || self.stranded > 0
+            || self.unknown > 0
+            || self
+                .tmp
+                .line(crate::atomic_pack::now_secs(), fmt_bytes)
+                .is_some()
     }
 }
 
@@ -2629,6 +2638,7 @@ fn destination_probe_json(p: &DestinationProbe) -> serde_json::Value {
             "stranded_bytes": debris.stranded_bytes,
             "unknown": debris.unknown,
             "unknown_bytes": debris.unknown_bytes,
+            "tmp_debris": debris.tmp.json(crate::atomic_pack::now_secs()),
             "torn_sentence": crate::debris::INTERRUPTED_PUSH_SENTENCE,
             // Every candidate's earliest-seen time: the backend interface
             // carries no modification time, and this document never
@@ -6422,11 +6432,14 @@ fn print_debris(debris: &DebrisProbe) {
     }
     if measured.torn > 0 {
         eprintln!(
-            "               debris: {} torn pack(s) ({}) — {}",
+            "               debris: {} torn pack(s) ({}) under a final name (historical) — {}",
             measured.torn,
             fmt_bytes(measured.torn_bytes),
             crate::debris::INTERRUPTED_PUSH_SENTENCE
         );
+    }
+    if let Some(line) = measured.tmp.line(crate::atomic_pack::now_secs(), fmt_bytes) {
+        eprintln!("               debris: tmp — {line}");
     }
     if measured.stranded > 0 {
         eprintln!(

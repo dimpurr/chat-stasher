@@ -15,6 +15,38 @@ under its own heading below.
 
 #### Added
 
+- **A reclaim that finishes under a running collect no longer resets the
+  sessions the pass reaches afterwards (W1057).** `reclaim-stage` and a
+  collect pass take no lock against each other; the pass read the retained
+  manifest once, at its start, so a session reclaimed by a reclaim that
+  finished mid-pass looked unverifiable and was reread whole (the 11-01
+  opencode burst). A pass now re-reads the manifest when its file changed
+  before it gives up on a cursor. Every round that reset a session also appends one row to
+  `reset-causes-v1.jsonl` in the state directory: counts of resets by source
+  and cause, no session text, kept across rounds; the same counts print as a
+  `[collect] reset causes` line.
+
+- **Atomic pack publication on the SFTP and local-directory backends (W1055,
+  ADR-063 / ISSUE-006 step C).** A push now writes each pack under a temporary
+  name next to its final one (`<id>.tmp-<unix seconds>-<16 random hex>`), reads
+  it back from the destination, checks that it hashes to its id, and only then
+  renames it into place — so an interrupted push can no longer leave a
+  half-written file wearing a real pack name. If the final name already holds
+  byte-identical content (two machines pushing the same id), the push deletes
+  only its own temporary file and counts the pack as published; if the final
+  name holds different bytes, nothing is touched and the push stops with an
+  error. Temporary files an interruption leaves are deleted by name once both
+  the timestamp in the name and the destination's modification time are older
+  than seven days, on a push connection only (read-only commands never delete);
+  the older `<id>-tmp-` and `.chat-stasher-tmp` spellings are aged the same way.
+  `doctor` and `prune-orphans` report them on a `tmp debris` line beside the
+  historical torn-pack line, and print nothing on a healthy repository.
+  `opendal:fs` destinations keep their default `atomic_write_dir`, because
+  index and snapshot files still rely on that staged write. The pack writer
+  retries a transient failure on a fresh connection (the `retry` option applies
+  to it too), removes the failed attempt's temporary file at once rather than
+  waiting for the seven-day sweep, and reports a failed upload in plain words
+  instead of a bare backend error kind.
 - **`--offline` on `read`, `export` and `verify` (W1053).** A read-only
   switch that takes the mirror fallback away: the destination's backend is
   never constructed — no connection is opened at all, so nothing in the
