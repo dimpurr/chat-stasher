@@ -1031,6 +1031,51 @@ fn an_interactive_run_leaves_a_new_destination_key_undeclared() {
 /// The pty number the kernel itself binds to `master_fd`, or `None` when the
 /// kernel was not asked.
 ///
+/// ADR-065 D4: the real prompt on a real terminal. The row is shown before
+/// anything is collected, a typo is refused and asked again, and `none` means
+/// the first save leaves nothing behind while the answer is recorded off.
+#[cfg(unix)]
+#[test]
+fn the_source_choice_gates_the_first_save() {
+    let sandbox = Sandbox::new();
+    let stage = sandbox.stage();
+    let mut wizard = InteractiveWizard::run(
+        &sandbox,
+        &[
+            "setup",
+            "--stage",
+            stage.to_str().expect("a utf-8 stage path"),
+        ],
+    );
+    wizard.expect_within("Collect which?", "the source choice prompt");
+    assert!(
+        wizard.transcript.contains("[x]  1  claude-code"),
+        "a source with a dated verification starts marked: {}",
+        wizard.transcript
+    );
+    assert!(
+        !stage.join("sessions").exists(),
+        "nothing may be collected before the answer"
+    );
+    wizard.answer("9");
+    wizard.answer("none");
+    wizard.expect_within(
+        "Destination name (blank to skip",
+        "the destination-name prompt",
+    );
+    wizard.answer("");
+    wizard.expect_within("Install the scheduler now?", "the scheduler prompt");
+    wizard.answer("");
+    let (_status, _stderr, _transcript) = wizard.finish();
+
+    let config = fs::read_to_string(sandbox.config_file()).expect("the answer is recorded");
+    assert!(config.contains("claude-code = \"off\""), "{config}");
+    let staged = fs::read_dir(stage.join("sessions"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(staged, 0, "an unchosen source leaves nothing on the stage");
+}
+
 /// The harness reads a slave's path with `ptsname`, which on some libcs answers
 /// out of storage the whole process shares ([`PTY_ALLOC`]). The ioctl here
 /// writes into a buffer *this* call owns, so it is safe to call from any thread,

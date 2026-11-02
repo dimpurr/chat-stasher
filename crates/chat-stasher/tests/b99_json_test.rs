@@ -292,6 +292,7 @@ fn status_json_top_level_schema_is_stable() {
             "run_state",
             "scanner",
             "schema_version",
+            "sources",
         ]
     );
     assert_eq!(

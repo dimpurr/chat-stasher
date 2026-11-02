@@ -70,7 +70,15 @@ impl Sandbox {
     }
     fn run(&self, args: &[&str]) -> Output {
         let home = self.home();
-        Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
+        // The shipped registry, unless a test planted its own.
+        let registry = self.root.path().join("registry.json");
+        if registry.exists() {
+            command.env("CHAT_STASHER_REGISTRY", registry);
+        } else {
+            command.env_remove("CHAT_STASHER_REGISTRY");
+        }
+        command
             .args(args)
             .env("HOME", &home)
             .env(
@@ -81,7 +89,6 @@ impl Sandbox {
             .env("XDG_CONFIG_HOME", self.root.path().join("xdg-config"))
             .env("XDG_DATA_HOME", self.root.path().join("xdg-data"))
             .env("XDG_STATE_HOME", self.root.path().join("xdg-state"))
-            .env_remove("CHAT_STASHER_REGISTRY")
             .env_remove("CODEX_HOME")
             .env_remove("GEMINI_CLI_HOME")
             .env_remove("CLAUDE_CONFIG_DIR")
@@ -314,4 +321,243 @@ fn status_keeps_off_pending_and_not_found_apart() {
     assert!(human.contains("off, by your choice: codex"), "{human}");
     assert!(human.contains("pending, not collected until you decide: gemini-cli"), "{human}");
     assert!(human.contains("codex 1 (off)"), "{human}");
+}
+
+impl Sandbox {
+    fn setup(&self, extra: &[&str]) -> Output {
+        let stage = self.stage();
+        let mut args = vec![
+            "setup",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--masterkey-saved-elsewhere",
+        ];
+        args.extend_from_slice(extra);
+        self.run(&args)
+    }
+    fn config_text(&self) -> String {
+        fs::read_to_string(self.config_path()).unwrap_or_default()
+    }
+}
+
+/// `setup --sources` records the answer and collects only what it names.
+#[test]
+fn setup_sources_collects_only_the_named_source_and_records_the_rest_off() {
+    let sb = Sandbox::new();
+    sb.claude_session();
+    sb.codex_session(&sb.home().join(".codex/sessions"));
+    let out = sb.setup(&["--sources", "claude-code"]);
+    let combined = text(&out);
+    let config = sb.config_text();
+    assert!(config.contains("claude-code = \"on\""), "{config}\n{combined}");
+    assert!(config.contains("codex = \"off\""), "{config}");
+    assert_eq!(staged_harnesses(&sb.stage()), vec!["claude-code".to_string()]);
+    assert!(!tree_contains(&sb.stage(), UNCHOSEN));
+}
+
+/// `setup --all-detected` is the explicit "everything found".
+#[test]
+fn setup_all_detected_collects_every_found_source() {
+    let sb = Sandbox::new();
+    sb.claude_session();
+    sb.codex_session(&sb.home().join(".codex/sessions"));
+    let out = sb.setup(&["--all-detected"]);
+    assert_eq!(
+        staged_harnesses(&sb.stage()),
+        vec!["claude-code".to_string(), "codex".to_string()],
+        "{}",
+        text(&out)
+    );
+}
+
+/// No TTY and nothing recorded: exit 4, the next command, and nothing written.
+#[test]
+fn setup_with_no_tty_and_no_choice_refuses_and_writes_nothing() {
+    let sb = Sandbox::new();
+    sb.claude_session();
+    let stage = sb.stage();
+    let out = sb.run(&["setup", "--json", "--stage", stage.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["exit_code"], 4);
+    assert_eq!(value["refusal"]["kind"], "no_source_consent");
+    let next = value["refusal"]["next"].as_str().unwrap();
+    assert!(next.contains("--all-detected") && next.contains("--stage"), "{next}");
+    assert!(!sb.config_path().exists(), "the refusal must not write a config");
+    assert!(!stage.exists(), "the refusal must not create the stage");
+    assert!(!sb.root.path().join("xdg-data/chat-stasher/repo").exists());
+}
+
+/// An unknown id in `--sources` is a usage error.
+#[test]
+fn setup_sources_with_an_unknown_id_is_a_usage_error() {
+    let sb = Sandbox::new();
+    let out = sb.setup(&["--sources", "not-a-tool"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(!sb.config_path().exists());
+}
+
+/// `sources` edits touch only `[sources]`: every other byte survives.
+#[test]
+fn a_sources_edit_keeps_the_users_comments_and_order() {
+    let sb = Sandbox::new();
+    let head = "# my own note about this machine\nmachine = \"w1073\" # pinned\n\n# the table\n";
+    let table = "[sources]\n# work laptop: never codex\ncodex = \"on\" # was on\n";
+    let tail = "\n# roots below\n[harness_roots]\n# keep me\nzed = \"/fixture/zed\"\n";
+    sb.write_config(&format!("{head}{table}{tail}"));
+
+    let off = sb.run(&["sources", "disable", "codex"]);
+    assert_eq!(off.status.code(), Some(0), "{}", text(&off));
+    let on = sb.run(&["sources", "enable", "claude-code"]);
+    assert_eq!(on.status.code(), Some(0), "{}", text(&on));
+
+    let expected = format!(
+        "{head}[sources]\n# work laptop: never codex\ncodex = \"off\" # was on\n\
+         claude-code = \"on\"\n{tail}"
+    );
+    assert_eq!(sb.config_text(), expected);
+
+    // D9: off is not delete, and the command says so.
+    let notice = text(&off);
+    assert!(notice.contains("Nothing was deleted"), "{notice}");
+    assert!(notice.contains("plaintext"), "{notice}");
+    assert!(notice.contains("reclaim-stage"), "{notice}");
+    assert!(notice.contains("chat-stasher purge"), "{notice}");
+}
+
+/// `sources enable` on an id the registry does not list is exit 2.
+#[test]
+fn sources_with_an_unknown_id_is_a_usage_error() {
+    let sb = Sandbox::new();
+    let out = sb.run(&["sources", "enable", "not-a-tool"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(!sb.config_path().exists());
+}
+
+/// D7: the first `sources` write records what the upgrade rule carried over,
+/// so writing the table does not silently stop a source that was collecting.
+#[test]
+fn the_first_sources_write_records_carried_over_sources_explicitly() {
+    let sb = Sandbox::new();
+    sb.claude_session();
+    sb.write_config("[sources]\nclaude-code = \"on\"\n");
+    assert!(sb.collect().status.success());
+    sb.write_config("# no table yet\n");
+    let stage = sb.stage();
+    let out = sb.run(&[
+        "sources",
+        "--stage",
+        stage.to_str().unwrap(),
+        "disable",
+        "zed",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let config = sb.config_text();
+    assert!(config.contains("claude-code = \"on\""), "{config}");
+    assert!(config.contains("zed = \"off\""), "{config}");
+}
+
+/// The listing keeps off, on, not found and pending apart, and reads no text.
+#[test]
+fn the_sources_listing_keeps_off_and_not_found_apart() {
+    let sb = Sandbox::new();
+    sb.claude_session();
+    sb.codex_session(&sb.home().join(".codex/sessions"));
+    sb.write_config("[sources]\nclaude-code = \"on\"\ncodex = \"off\"\n");
+    let out = sb.run(&["sources"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let listing = String::from_utf8_lossy(&out.stdout).into_owned();
+    let line = |id: &str| {
+        listing
+            .lines()
+            .find(|l| l.contains(id) && l.contains("sessions"))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(line("codex").trim_start().starts_with("off"), "{listing}");
+    assert!(line("claude-code").trim_start().starts_with("on"), "{listing}");
+    let not_found = listing
+        .lines()
+        .find(|l| l.contains("Not found on this machine"))
+        .unwrap_or_default();
+    assert!(not_found.contains("gemini-cli"), "{listing}");
+    assert!(!not_found.contains("codex"), "off is not not-found: {listing}");
+    assert!(!listing.contains(UNCHOSEN) && !listing.contains(WANTED));
+}
+
+/// Sealing already-staged data is not collection: a source turned off keeps it.
+#[test]
+fn seal_of_stage_data_keeps_working_for_a_source_turned_off() {
+    let sb = Sandbox::new();
+    let cell = serde_json::json!({
+        "template": "~/x/",
+        "format": "jsonl",
+        "confidence": "source-confirmed",
+        "source": "W1073 fixture"
+    });
+    let registry = sb.root.path().join("registry.json");
+    fs::write(
+        &registry,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "generated": "W1073",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "Claude Code",
+                "seal_policy": "rename",
+                "seal_source": "W1073 fixture",
+                "paths": {"macos": cell, "linux": cell, "windows": cell}
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    sb.write_config("[sources]\nclaude-code = \"off\"\n");
+    let stage = sb.stage();
+    fs::create_dir_all(&stage).unwrap();
+    let active = stage.join("active.jsonl");
+    fs::write(&active, b"{\"synthetic\":true}\n").unwrap();
+    let out = sb.run(&[
+        "seal",
+        "--harness",
+        "claude-code",
+        "--active",
+        active.to_str().unwrap(),
+        "--stage",
+        stage.to_str().unwrap(),
+        "--machine",
+        "w1073",
+        "--session",
+        "claude-code.w1073.fixture",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(staged_harnesses(&stage).contains(&"claude-code".to_string()));
+}
+
+/// The app-driven backfill is a route to one named source, so it obeys the same
+/// gate. Off macOS it stops earlier on its own platform refusal (exit 3), which
+/// is a fact about the app, not about consent.
+#[test]
+fn backfill_refuses_a_source_that_is_not_on() {
+    let sb = Sandbox::new();
+    sb.write_config("[sources]\ngrok-bot = \"off\"\n");
+    let stage = sb.stage();
+    fs::create_dir_all(&stage).unwrap();
+    let out = sb.run(&[
+        "backfill",
+        "grok-bot",
+        "--stage",
+        stage.to_str().unwrap(),
+        "--machine",
+        "w1073",
+    ]);
+    let want = if cfg!(target_os = "macos") { 4 } else { 3 };
+    assert_eq!(out.status.code(), Some(want), "{}", text(&out));
+    if cfg!(target_os = "macos") {
+        assert!(
+            text(&out).contains("chat-stasher sources enable grok-bot"),
+            "{}",
+            text(&out)
+        );
+    }
 }

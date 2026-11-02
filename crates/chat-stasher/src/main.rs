@@ -22324,8 +22324,18 @@ fn render_sources_lines(
 ) -> String {
     let pending = pending_found_in_scan(report, consent);
     let mut out = String::new();
-    out.push_str(&chat_stasher::sources::summary_line(consent, &pending));
-    out.push('\n');
+    // Silent when there is nothing to decide or remember: every source is on
+    // and none is off or waiting. `status`'s default body is a fixed handful of
+    // lines (B78), so a machine with nothing to say keeps its bytes.
+    let quiet = consent.consent_recorded()
+        && pending.is_empty()
+        && consent
+            .ids(chat_stasher::sources::SourceState::Off)
+            .is_empty();
+    if !quiet {
+        out.push_str(&chat_stasher::sources::summary_line(consent, &pending));
+        out.push('\n');
+    }
     for notice in [
         chat_stasher::sources::upgrade_notice(consent),
         chat_stasher::sources::unrecognised_notice(consent),
