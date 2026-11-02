@@ -71,9 +71,9 @@
 //! any index file. Everything else keeps the all-or-nothing shape: one pack
 //! that reads as a pack but does not verify refuses the whole adoption.
 //!
-//! Adoption stops being per-open the moment a push survives it: after a push
-//! wrote its own index file and snapshot, it names the packs this open verified
-//! in **one new index file** ([`persist_verified`]). That is a pure append —
+//! Adoption stops being per-open the moment a push survives it: before a push
+//! writes its snapshot (W1077), and after its own index file, it names the packs
+//! this open verified in **one new index file** ([`persist_verified`]). That is a pure append —
 //! no existing index file is read for rewriting, removed or replaced, which is
 //! what keeps it inside ADR-001/ADR-016 while `repair index` (which rewrites)
 //! stays out of reach. Only a push connection writes it; read paths, `mirror`
@@ -81,9 +81,21 @@
 //! any pack another client has named in the meantime is skipped, so the worst
 //! two concurrent pushers can produce is two index files whose entries are
 //! identical (the same ids at the same offsets of the same pack) — whichever a
-//! reader's lookup hits resolves the same bytes. A failure to write is
-//! reported and costs nothing: the packs stay unindexed on disk, which is the
-//! state the next push re-derives.
+//! reader's lookup hits resolves the same bytes.
+//!
+//! The order is the safety property (W1077). A snapshot that reuses an adopted
+//! pack reaches trees and blobs only that pack holds; if the snapshot were
+//! published first, a kill before the naming index file left a snapshot whose
+//! trees are in no index, and a plain read failed with `Tree ID ... not found
+//! in index`. So the push publishes the naming index file first and the
+//! snapshot second ([`PersistOutcome::covers_dependency`] is the gate between
+//! them), and a failure to name the packs fails the push **before** any
+//! snapshot is written: a kill between the two leaves a harmless extra index
+//! file and no snapshot, and a failed write leaves neither, so no snapshot is
+//! ever published in a dependent state. The push cannot instead drop the
+//! adoption and re-upload, because the backup has already deduplicated against
+//! the adopted packs by the time the snapshot is about to be written; the next
+//! push re-verifies and tries again.
 //!
 //! The adoption path compares the unindexed set before and after verification,
 //! then passes the verified `IndexPacks` to a small pinned-rustic API that reads
@@ -536,9 +548,11 @@ fn hold_persist_before_write() {
 }
 
 /// What the push connection's persist step did with the packs its open
-/// verified. Never a failure of the push: a pack that is not named stays
-/// unindexed **on disk**, which is the state every earlier push left behind
-/// too, so the next push re-derives it and tries again.
+/// verified. When the push is about to publish a snapshot, anything but
+/// [`Self::covers_dependency`] fails the push before the snapshot is written
+/// (W1077); a pack that is not named stays unindexed **on disk**, which is the
+/// state every earlier push left behind too, so the next push re-derives it and
+/// tries again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PersistOutcome {
     /// One new index file now names every pack this open verified, so later
@@ -550,11 +564,17 @@ pub enum PersistOutcome {
         /// The id of the index file that was written.
         index: String,
     },
-    /// Nothing was written, and `why` says which of the three states that was:
-    /// every pack was already named by an index file that arrived in the
-    /// meantime (another client persisted them first), a listing the backend
-    /// would not serve, or a write that failed. The packs are no worse off
-    /// than before this push ran.
+    /// Every pack this open verified was already named by an index file when
+    /// the write was about to happen (another client persisted them first), so
+    /// nothing was written and nothing needed to be.
+    AlreadyNamed {
+        /// How many verified packs were found named.
+        packs: usize,
+    },
+    /// Nothing was written and the packs are not all named: a listing the
+    /// backend would not serve, a verified pack that is no longer listed, or a
+    /// write that failed; `why` says which. The packs are no worse off than
+    /// before this push ran, but a snapshot must not depend on them.
     NotWritten {
         /// What happened, worded for the push report.
         why: String,
@@ -566,6 +586,14 @@ impl PersistOutcome {
     #[must_use]
     pub fn named(&self) -> bool {
         matches!(self, Self::Named { .. })
+    }
+
+    /// Whether every pack this open verified is now named by some index file,
+    /// by this push's file or by another client's: the condition a snapshot
+    /// that reuses those packs needs before it may be published.
+    #[must_use]
+    pub fn covers_dependency(&self) -> bool {
+        matches!(self, Self::Named { .. } | Self::AlreadyNamed { .. })
     }
 }
 
@@ -585,10 +613,11 @@ impl PersistOutcome {
 /// unreferenced pack is never one of them, because only verified packs reach
 /// this function. Nothing is ever deleted or rewritten, per ADR-001/ADR-016.
 ///
-/// This cannot fail the push. Every failure lands in
-/// [`PersistOutcome::NotWritten`] and is reported; the packs stay unindexed on
-/// disk, which is exactly the state before this change, and the next push
-/// tries again.
+/// This function never errors; every failure lands in
+/// [`PersistOutcome::NotWritten`]. What a caller does with it depends on
+/// whether a snapshot depends on the packs: the push calls it before the
+/// snapshot is published and fails there unless
+/// [`PersistOutcome::covers_dependency`] (W1077).
 #[must_use]
 pub fn persist_verified(
     repo: &Repository<IndexedFullStatus>,
@@ -612,38 +641,37 @@ pub fn persist_verified(
         }
     };
     // Three facts decide each pack: still listed by the backend, and named by
-    // no index file the pre-write survey read. A pack that vanished from the
-    // listing cannot be named honestly (an append-only backend never drops
-    // one, so this is the unheard-of case, and skipping it is the fail-safe);
-    // a pack that got named in the meantime is done — someone else persisted
-    // it, or this push's own index file covered it, and re-naming it would
-    // only duplicate what a reader already merges.
+    // no index file the pre-write survey read. A pack that got named in the
+    // meantime is done: someone else persisted it, or this push's own index
+    // file covered it, and re-naming it would only duplicate what a reader
+    // already merges. A pack that is neither named nor listed cannot be named
+    // honestly (an append-only backend never drops one, so this is the
+    // unheard-of case); a snapshot cannot depend on it, so it is reported as
+    // not covered rather than skipped.
     let mut survivors = Vec::with_capacity(verified.len());
+    let mut vanished = 0usize;
     for pack in verified {
         let hex = pack.id.to_hex().to_string();
         if fresh.indexed.contains(&hex) {
             continue;
         }
         if !fresh.listed.contains_key(&hex) {
+            vanished += 1;
             continue;
         }
         survivors.push(pack.clone());
     }
-    let skipped = verified.len() - survivors.len();
-    if survivors.is_empty() {
-        if skipped == verified.len() {
-            return PersistOutcome::NotWritten {
-                why: format!(
-                    "{} pack(s) this push verified were already named by an index file when \
-                     the write was about to happen, so nothing was written",
-                    skipped
-                ),
-            };
-        }
+    if vanished > 0 {
         return PersistOutcome::NotWritten {
-            why: "nothing this push verified was still both listed and unnamed, so nothing \
-                  was written"
-                .to_string(),
+            why: format!(
+                "{vanished} pack(s) this push verified are neither listed by the backend nor \
+                 named by an index file, so nothing was written"
+            ),
+        };
+    }
+    if survivors.is_empty() {
+        return PersistOutcome::AlreadyNamed {
+            packs: verified.len(),
         };
     }
     hold_persist_before_write();
