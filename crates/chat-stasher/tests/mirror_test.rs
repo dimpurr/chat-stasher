@@ -2562,7 +2562,7 @@ fn binary_command(sandbox: &Path) -> std::process::Command {
             test_support::RUSTIC_CACHE_DIR_ENV,
             test_support::rustic_cache_root(&home),
         )
-        .env("XDG_CONFIG_HOME", sandbox.join("config"))
+        .env("XDG_CONFIG_HOME", test_support::consent_config_home(sandbox.join("config"), &[]))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
         .env("XDG_CACHE_HOME", sandbox.join("cache"))
@@ -2803,7 +2803,7 @@ fn run_once_mirrors_after_its_push_and_again_on_a_noop_pass() {
     fs::write(
         config_dir.join("config.toml"),
         format!(
-            "push_only_if_changed = false\n\n[destinations.storagebox]\nrepo = \
+            "push_only_if_changed = false\n\n[sources]\n\n[destinations.storagebox]\nrepo = \
              \"{}\"\nkey_file = \"{}\"\nno_cache = true\n\n[mirror]\nenabled = \
              true\nmirror_of = \"storagebox\"\nmin_free_gib = 1.0\n",
             sandbox.join("remote-repo").display(),
@@ -3126,7 +3126,7 @@ fn the_pass_reaps_the_ssh_masters_its_mirror_step_opened() {
     fs::write(
         config_dir.join("config.toml"),
         format!(
-            "push_only_if_changed = false\n\n[destinations.storagebox]\nrepo = \
+            "push_only_if_changed = false\n\n[sources]\n\n[destinations.storagebox]\nrepo = \
              \"{}\"\nkey_file = \"{}\"\nno_cache = true\n\n[destinations.backup2]\nrepo = \
              \"opendal:sftp\"\nkey_file = \"{}\"\n\n[destinations.backup2.options]\nendpoint = \
              \"ssh://127.0.0.1:1/none\"\n\n[mirror]\nenabled = true\nmirror_of = \
@@ -3231,7 +3231,7 @@ fn the_pass_warns_saying_each_round_re_checks_and_heals_once_the_source_is_fixed
     fs::write(
         config_dir.join("config.toml"),
         format!(
-            "push_only_if_changed = false\n\n[destinations.storagebox]\nrepo = \
+            "push_only_if_changed = false\n\n[sources]\n\n[destinations.storagebox]\nrepo = \
              \"{}\"\nkey_file = \"{}\"\nno_cache = true\n\n[destinations.box2]\nrepo = \
              \"{}\"\nkey_file = \"{}\"\nno_cache = true\n\n[mirror]\nenabled = true\nmirror_of = \
              \"box2\"\nmin_free_gib = 1.0\n",

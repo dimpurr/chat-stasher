@@ -103,8 +103,19 @@ impl Sandbox {
     }
 
     fn command(&self, args: &[&str]) -> Output {
+        // ADR-065 D5: without a TTY, consent is explicit. These tests are about
+        // the rest of the wizard, so a `setup` call here names every source
+        // found (`--all-detected`) unless the test chose its own flags.
+        let mut args: Vec<&str> = args.to_vec();
+        if args.first() == Some(&"setup")
+            && !args
+                .iter()
+                .any(|a| a.starts_with("--sources") || *a == "--all-detected")
+        {
+            args.push("--all-detected");
+        }
         Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
-            .args(args)
+            .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -955,6 +966,7 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     let stage = sandbox.stage();
     let args = [
         "setup",
+        "--all-detected",
         "--stage",
         stage.to_str().expect("stage path"),
         "--masterkey-saved-elsewhere",
@@ -992,6 +1004,7 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     // masterkey declaration, creates the key, and stops, touching no scheduler.
     let bootstrap = run(&[
         "setup",
+        "--all-detected",
         "--stage",
         stage.to_str().expect("stage path"),
         "--json",
@@ -1032,6 +1045,7 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     }
     let uninstall_args = [
         "setup",
+        "--all-detected",
         "--stage",
         stage.to_str().expect("stage path"),
         "--masterkey-saved-elsewhere",
@@ -1176,6 +1190,7 @@ fn setup_self_check_uses_the_installed_binary_selected_from_a_build_artifact() {
     let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args([
             "setup",
+            "--all-detected",
             "--stage",
             sandbox.stage().to_str().expect("stage path"),
             "--masterkey-saved-elsewhere",
@@ -1232,7 +1247,7 @@ fn setup_self_check_uses_the_installed_binary_selected_from_a_build_artifact() {
 fn non_tty_setup_emits_json_missing_parameters_and_does_not_echo_stdin() {
     let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
-        .arg("setup")
+        .args(["setup", "--all-detected"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -2504,6 +2519,7 @@ fn an_unusable_credential_variable_is_reported_to_a_non_tty_caller() {
     let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args([
             "setup",
+            "--all-detected",
             "--stage",
             sandbox.stage().to_str().expect("utf-8 stage"),
             "--destination",
@@ -2580,6 +2596,7 @@ fn the_written_destination_carries_credential_references_and_never_the_secret() 
     let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args([
             "setup",
+            "--all-detected",
             "--stage",
             sandbox.stage().to_str().expect("utf-8 stage"),
             "--destination",

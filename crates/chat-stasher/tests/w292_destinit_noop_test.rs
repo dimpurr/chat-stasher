@@ -85,7 +85,7 @@ fn command(root: &Path, registry: &Path) -> Command {
             test_support::RUSTIC_CACHE_DIR_ENV,
             test_support::rustic_cache_root(&home),
         )
-        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_CONFIG_HOME", test_support::consent_config_home(root.join("config"), &[]))
         .env("XDG_DATA_HOME", root.join("data"))
         .env("XDG_STATE_HOME", root.join("state"))
         .env("XDG_CACHE_HOME", root.join("cache"))
@@ -98,7 +98,7 @@ fn command(root: &Path, registry: &Path) -> Command {
 fn write_config(root: &Path, extra: &str) {
     let path = root.join("config/chat-stasher/config.toml");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, extra).unwrap();
+    fs::write(&path, format!("{extra}\n[sources]\n")).unwrap();
 }
 
 fn run_dest_init(root: &Path, registry: &Path, stage: &Path, repo: &Path, key: &Path) -> Output {

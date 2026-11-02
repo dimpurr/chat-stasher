@@ -18,7 +18,7 @@
 //! observation declaration.
 
 use chat_stasher::collect::{self, DestinationView};
-use chat_stasher::config::Config;
+use chat_stasher::config::{Config, SourceChoice};
 use chat_stasher::provenance;
 use chat_stasher::scanner;
 use chat_stasher::store;
@@ -181,8 +181,11 @@ impl Fixture {
     }
 
     fn collect(&self) -> collect::CollectReport {
+        // ADR-065: the pass collects only a source the user turned on.
+        let mut config = Config::default();
+        config.sources = Some([("codex".to_string(), SourceChoice::On)].into());
         collect::collect(
-            &Config::default(),
+            &config,
             &self.stage,
             MACHINE,
             &self.state,

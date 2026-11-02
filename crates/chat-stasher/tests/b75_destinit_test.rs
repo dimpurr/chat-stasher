@@ -73,7 +73,7 @@ fn write_config(
             // writing its metadata cache into the real user cache dir
             // (W289). It is a relocation, not a feature flag: the cache stays
             // on, exactly as a configured destination read has it.
-            "rustic_cache_dir = '{}'\n\n[destinations.target]\nrepo = '{}'\nkey_file = '{}'\n\n[destinations.source]\nrepo = '{}'\nkey_file = '{}'\n",
+            "rustic_cache_dir = '{}'\n\n[sources]\n\n[destinations.target]\nrepo = '{}'\nkey_file = '{}'\n\n[destinations.source]\nrepo = '{}'\nkey_file = '{}'\n",
             root.join("rustic-cache").display(),
             target_repo.display(),
             target_key.display(),
@@ -94,7 +94,7 @@ fn command(root: &Path, registry: &Path) -> Command {
             test_support::RUSTIC_CACHE_DIR_ENV,
             test_support::rustic_cache_root(&home),
         )
-        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_CONFIG_HOME", test_support::consent_config_home(root.join("config"), &["codex", "opencode"]))
         .env("XDG_DATA_HOME", root.join("data"))
         .env("XDG_STATE_HOME", root.join("state"))
         .env("XDG_CACHE_HOME", root.join("cache"))

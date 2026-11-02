@@ -29,6 +29,26 @@
 //! long another thread's child takes to reach its own `execve`.
 #![allow(dead_code)] // the integration suites also use `copy_executable`
 
+/// ADR-065: a pass collects only from sources the user turned on, so a test
+/// that drives a pass needs a real consent in its config. This returns
+/// `config_home` after making sure `<config_home>/chat-stasher/config.toml`
+/// exists with a `[sources]` table turning `on` on (an empty slice is the
+/// recorded decision that nothing is collected). A config file the test wrote
+/// itself is left exactly as written.
+pub fn consent_config_home(config_home: impl Into<std::path::PathBuf>, on: &[&str]) -> std::path::PathBuf {
+    let config_home = config_home.into();
+    let file = config_home.join("chat-stasher").join("config.toml");
+    if !file.exists() {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let mut text = String::from("[sources]\n");
+        for id in on {
+            text.push_str(&format!("{id} = \"on\"\n"));
+        }
+        std::fs::write(&file, text).unwrap();
+    }
+    config_home
+}
+
 /// One per-test temporary root, and the environment that points every real
 /// user-data location at it.
 ///

@@ -34,7 +34,7 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
             test_support::rustic_cache_root(&home),
         )
         .env("USERPROFILE", &home)
-        .env("XDG_CONFIG_HOME", sandbox.join("config"))
+        .env("XDG_CONFIG_HOME", test_support::consent_config_home(sandbox.join("config"), &[]))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
         .env("XDG_CACHE_HOME", sandbox.join("rh-cache"))
@@ -79,7 +79,7 @@ fn run_once_rebuilds_the_activity_index_before_push() {
     fs::create_dir_all(&config_dir).unwrap();
     fs::write(
         config_dir.join("config.toml"),
-        "push_only_if_changed = false\n",
+        "push_only_if_changed = false\n\n[sources]\n",
     )
     .unwrap();
 

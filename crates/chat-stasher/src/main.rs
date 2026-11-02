@@ -7363,7 +7363,15 @@ fn cmd_doctor(json: bool) -> ExitCode {
     // `pending` are choices and open questions, not gaps, and they are neither
     // "not found" nor "could not be read": they get their own object and line,
     // and no coverage or gap count above reads them as a shortfall.
-    let consent = report.config.as_ref().and_then(display_consent);
+    // Not evaluated when the doctor's own scan did not run: the registry is
+    // what that scan could not read (or never finished reading), and loading
+    // it again here, outside any deadline, is how a wedged registry would
+    // freeze the command.
+    let consent = if report.scan_failed {
+        None
+    } else {
+        report.config.as_ref().and_then(display_consent)
+    };
     let pending_found: Vec<String> = consent
         .as_ref()
         .map(|c| {
@@ -24287,6 +24295,10 @@ mod run_once_letta_tests {
     /// publishes, and cache and repo under the sandbox.
     fn declared_config(sandbox: &test_support::Sandbox, page_size: Option<u64>) -> Config {
         Config {
+            // The registry here is empty, so there is nothing to choose; an
+            // empty `[sources]` table is the recorded decision that says so,
+            // which is what lets the pass past the consent gate (ADR-065 D5).
+            sources: Some(Default::default()),
             push_only_if_changed: Some(false),
             rustic_cache_dir: Some(sandbox.rustic_cache_dir().display().to_string()),
             pull: Some(config::PullSectionConfig {
@@ -24530,6 +24542,7 @@ mod run_once_letta_tests {
             panic!("no declared producer means no producer step");
         };
         let config = Config {
+            sources: Some(Default::default()),
             push_only_if_changed: Some(false),
             ..Default::default()
         };

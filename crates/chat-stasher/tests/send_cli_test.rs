@@ -585,6 +585,11 @@ fn run_once_does_not_consume_a_declared_remote_inbox() {
     let stage = f.owner.root().join("synthetic-stage");
     let repo = f.owner.root().join("synthetic-repo");
     let key = f.owner.root().join("synthetic-masterkey.json");
+    // ADR-065: a pass needs a recorded source decision (here: no source on).
+    let config_file = f.owner.config_home().join("chat-stasher/config.toml");
+    let mut config_text = std::fs::read_to_string(&config_file).unwrap_or_default();
+    config_text.push_str("\n[sources]\n");
+    std::fs::write(&config_file, config_text).unwrap();
     let result = run(
         &f.owner,
         &[

@@ -742,6 +742,11 @@ fn a_declined_prompt_leaves_the_step_owed_and_records_nothing() {
         ],
     );
 
+    // ADR-065 D4: the wizard asks which sources to collect before anything
+    // else. Enter keeps the marks (the registry's verified source).
+    wizard.expect_within("Collect which?", "the source choice prompt");
+    wizard.answer("");
+
     // The wizard archives locally first, then shows the key and asks for the
     // declaration. The needle is the prompt's own sentence, so passing means
     // the run really did reach the interactive prompt rather than some other
@@ -835,6 +840,11 @@ fn an_interactive_no_on_one_of_several_keys_leaves_that_key_undeclared() {
         ],
     );
 
+    // ADR-065 D4: the wizard asks which sources to collect before anything
+    // else. Enter keeps the marks (the registry's verified source).
+    wizard.expect_within("Collect which?", "the source choice prompt");
+    wizard.answer("");
+
     // The local key's prompt: answer with the sentence, so that copy *is*
     // declared and the test is about a decline for one key rather than about
     // declines in general.
@@ -910,6 +920,11 @@ fn an_interactive_run_never_declares_the_key_it_just_created() {
         ],
     );
 
+    // ADR-065 D4: the wizard asks which sources to collect before anything
+    // else. Enter keeps the marks (the registry's verified source).
+    wizard.expect_within("Collect which?", "the source choice prompt");
+    wizard.answer("");
+
     // The created-key notice, in the wizard's own words, and — the property
     // under test — no declaration prompt for that key.
     wizard.expect_within("was created by this run", "the created-key notice");
@@ -971,6 +986,11 @@ fn an_interactive_run_leaves_a_new_destination_key_undeclared() {
             "backup",
         ],
     );
+
+    // ADR-065 D4: the wizard asks which sources to collect before anything
+    // else. Enter keeps the marks (the registry's verified source).
+    wizard.expect_within("Collect which?", "the source choice prompt");
+    wizard.answer("");
 
     wizard.expect_within(
         "destination key for `backup` was created by this run",

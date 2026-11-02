@@ -129,7 +129,7 @@ fn run_cli_args(sandbox: &Path, registry: &Path, args: &[String]) -> Output {
             test_support::rustic_cache_root(&home),
         )
         .env("USERPROFILE", &home)
-        .env("XDG_CONFIG_HOME", sandbox.join("xdg-config"))
+        .env("XDG_CONFIG_HOME", test_support::consent_config_home(sandbox.join("xdg-config"), &["claude-code", "crush", "cursor", "grok", "opencode"]))
         .env("XDG_DATA_HOME", sandbox.join("xdg-data"))
         .env("XDG_STATE_HOME", sandbox.join("xdg-state"))
         .env("CHAT_STASHER_REGISTRY", registry)

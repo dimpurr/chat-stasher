@@ -3958,6 +3958,31 @@ fn apply_source_edits(
     let mut text = raw.to_string();
     let mut changed: Vec<(String, Option<SourceChoice>)> = Vec::new();
     let mut unchanged: Vec<String> = Vec::new();
+    let mut wrote_empty_table = false;
+    // No answers to record is still an answer when none was ever recorded: an
+    // empty `[sources]` table is the decision that nothing is collected (for
+    // example `setup` on a machine where no supported tool was found), and it
+    // is what separates "decided: nothing" from "never asked".
+    if edits.is_empty() {
+        let has_table = toml_edit::ImDocument::parse(&text)
+            .context("parse the config as TOML")?
+            .get("sources")
+            .is_some();
+        if !has_table {
+            let ending = dominant_line_ending(&text, text.len());
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push_str(ending);
+            }
+            let mut section = String::from(if text.is_empty() { "" } else { "\n" });
+            section.push_str(SOURCES_SECTION_HEADER);
+            section.push_str("[sources]\n");
+            if ending == "\r\n" {
+                section = section.replace('\n', "\r\n");
+            }
+            text.push_str(&section);
+            wrote_empty_table = true;
+        }
+    }
     for (id, choice) in edits {
         if !is_bare_toml_key(id) {
             anyhow::bail!(
@@ -4033,7 +4058,7 @@ fn apply_source_edits(
             text = next;
         }
     }
-    let file_untouched = changed.is_empty();
+    let file_untouched = changed.is_empty() && !wrote_empty_table;
     Ok((
         if file_untouched {
             raw.to_string()

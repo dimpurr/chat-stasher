@@ -160,6 +160,8 @@ impl CollectFixture {
     }
 
     fn collect(&self) -> Output {
+        // ADR-065: the pass collects only a source the user turned on.
+        test_support::consent_config_home(self.sandbox.config_home(), &["claude-code"]);
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
         let cmd = self.sandbox.apply(&mut cmd);
         cmd.env("CHAT_STASHER_REGISTRY", &self.registry)

@@ -45,7 +45,7 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
             test_support::rustic_cache_root(&home),
         )
         .env("USERPROFILE", &home)
-        .env("XDG_CONFIG_HOME", sandbox.join("config"))
+        .env("XDG_CONFIG_HOME", test_support::consent_config_home(sandbox.join("config"), &[]))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
         .env("XDG_CACHE_HOME", sandbox.join("rh-cache"))
@@ -281,7 +281,7 @@ fn doctor_names_the_exact_repair_command_for_a_stale_index() {
             // real user cache dir (W289) on platforms where the redirected
             // HOME/XDG_CACHE_HOME cannot do that alone (Windows resolves the
             // cache root from the Known Folder API, not the environment).
-            "rustic_cache_dir = \"{}\"\n\n[destinations.fixture]\nrepo = \"{}\"\nkey_file = \"{}\"\n",
+            "rustic_cache_dir = \"{}\"\n\n[sources]\n\n[destinations.fixture]\nrepo = \"{}\"\nkey_file = \"{}\"\n",
             sandbox.join("rustic-cache").display(),
             repo.display(),
             key.display()

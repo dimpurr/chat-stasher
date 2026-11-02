@@ -65,7 +65,7 @@ fn push_does_not_call_an_unresolved_scan_empty() {
             test_support::RUSTIC_CACHE_DIR_ENV,
             test_support::rustic_cache_root(&home),
         )
-        .env("XDG_CONFIG_HOME", sandbox.path().join("config"))
+        .env("XDG_CONFIG_HOME", test_support::consent_config_home(sandbox.path().join("config"), &["codex"]))
         .env("XDG_DATA_HOME", sandbox.path().join("data"))
         .env("XDG_STATE_HOME", sandbox.path().join("state"))
         .env("CHAT_STASHER_REGISTRY", &registry)

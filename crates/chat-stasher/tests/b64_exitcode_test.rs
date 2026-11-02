@@ -70,7 +70,7 @@ fn run_collect(sandbox: &Path, opencode_db: &Path) -> Output {
             test_support::RUSTIC_CACHE_DIR_ENV,
             test_support::rustic_cache_root(&home),
         )
-        .env("XDG_CONFIG_HOME", sandbox.join("config"))
+        .env("XDG_CONFIG_HOME", test_support::consent_config_home(sandbox.join("config"), &["opencode"]))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
         .env("CHAT_STASHER_REGISTRY", &registry)
