@@ -1028,6 +1028,8 @@ impl Config {
                 path.display()
             )
         })?;
+        // reason: a table the text failed to produce reads back empty, and the
+        // comparison below then refuses the write; nothing is assumed present.
         let table = loaded.sources.unwrap_or_default();
         for (id, choice) in edits {
             if table.get(id) != Some(choice) {

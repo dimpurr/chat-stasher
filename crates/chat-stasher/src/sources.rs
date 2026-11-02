@@ -239,6 +239,7 @@ pub fn evaluate(config: &Config, registry: &HarnessRegistry, stage: Option<&Path
                 .cloned()
                 .collect()
         })
+        // reason: no `[sources]` table has no keys, so a measured empty.
         .unwrap_or_default();
 
     Consent {
@@ -692,6 +693,8 @@ pub fn render_rows(rows: &[SourceRow], numbered: bool, marks: &[bool]) -> String
             None => "not verified".to_string(),
         };
         let lead = if numbered {
+            // reason: an unmarked row shows `[ ]`, and that chooses nothing; a
+            // caller with fewer marks than rows cannot turn a source on here.
             let mark = if marks.get(mark_i).copied().unwrap_or(false) {
                 "x"
             } else {

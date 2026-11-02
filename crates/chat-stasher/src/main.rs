@@ -7407,6 +7407,8 @@ fn cmd_doctor(json: bool) -> ExitCode {
                 .map(|p| p.id.clone())
                 .collect()
         })
+        // reason: no consent evaluation means the `not_checked` object and no
+        // summary line below; this empty list is then never printed.
         .unwrap_or_default();
     if json {
         let mut value = chat_stasher::doctor::report_to_json(&report);

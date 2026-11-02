@@ -653,15 +653,15 @@ crates/chat-stasher/src/config.rs:544-560  d5891e21fb3e  lines=17
   <- docs-dev/install.md:300  :: pub fn load() -> anyhow::Result<Self> {
 crates/chat-stasher/src/config.rs:544-553  c32d09f8366a  lines=10
   <- docs-dev/install.md:315  :: pub fn load() -> anyhow::Result<Self> {
-crates/chat-stasher/src/config.rs:1161  7b104ed5e9f5  lines=1
+crates/chat-stasher/src/config.rs:1163  7b104ed5e9f5  lines=1
   <- docs-dev/install.md:827  :: eprintln!("warning: backend option environment reference wa…
-crates/chat-stasher/src/config.rs:1183-1190  14514872d0a4  lines=8
+crates/chat-stasher/src/config.rs:1185-1192  14514872d0a4  lines=8
   <- docs-dev/install.md:300  :: fn unusable_config(path: &Path, reason: String) -> anyhow::…
-crates/chat-stasher/src/config.rs:1240-1257  854dc4cb8667  lines=18
+crates/chat-stasher/src/config.rs:1242-1259  854dc4cb8667  lines=18
   <- docs-dev/install.md:827  :: fn classify_env_reference(
-crates/chat-stasher/src/config.rs:1321  21dc77f8cddb  lines=1
+crates/chat-stasher/src/config.rs:1323  21dc77f8cddb  lines=1
   <- docs-dev/install.md:823  :: fn resolve_option_env_refs(cfg: &mut Config, problems: &mut…
-crates/chat-stasher/src/config.rs:1718-1739  8e44ef0cf63a  lines=22
+crates/chat-stasher/src/config.rs:1720-1741  8e44ef0cf63a  lines=22
   <- docs-dev/install.md:294  :: /// Uses `$XDG_CONFIG_HOME` when set (Linux/Unix convention…
 crates/chat-stasher/src/credentials.rs:1-25  f658620bebf3  lines=25
   <- docs-dev/install.md:835  :: //! Persistent credential references for backend option val…
@@ -815,45 +815,45 @@ crates/chat-stasher/src/main.rs:2987-2993  8fa007df76e5  lines=7
   <- docs-dev/install.md:484  :: // Before the manifests, because this is the half the host …
 crates/chat-stasher/src/main.rs:3371-3384  016136448a8d  lines=14
   <- docs-dev/privacy.md:516  :: /// The row's `session_provenance` stamp, written identical…
-crates/chat-stasher/src/main.rs:7612-7627  71bc360695ef  lines=16
+crates/chat-stasher/src/main.rs:7614-7629  71bc360695ef  lines=16
   <- docs-dev/install.md:662  :: println!("  - {rejection}");
-crates/chat-stasher/src/main.rs:7617-7642  12c435612440  lines=26
+crates/chat-stasher/src/main.rs:7619-7644  12c435612440  lines=26
   <- docs-dev/install.md:666  :: touched, and no observation of these conversations exists."
-crates/chat-stasher/src/main.rs:7617-7625  56d34c8a57e0  lines=9
+crates/chat-stasher/src/main.rs:7619-7627  56d34c8a57e0  lines=9
   <- docs-dev/install.md:701  :: touched, and no observation of these conversations exists."
-crates/chat-stasher/src/main.rs:7626-7638  96c3f3280cb5  lines=13
+crates/chat-stasher/src/main.rs:7628-7640  96c3f3280cb5  lines=13
   <- docs-dev/install.md:698  :: "newly archived"
-crates/chat-stasher/src/main.rs:7740-7748  bc0056c35062  lines=9
+crates/chat-stasher/src/main.rs:7742-7750  bc0056c35062  lines=9
   <- docs-dev/threat-model.md:891  :: );
-crates/chat-stasher/src/main.rs:10082-10112  d0cde642ac5e  lines=31
+crates/chat-stasher/src/main.rs:10084-10114  d0cde642ac5e  lines=31
   <- docs-dev/install.md:966  :: fn schedule_platform_refusal(os: &str) -> Option<&'static s…
-crates/chat-stasher/src/main.rs:10307-10312  b76086ba166e  lines=6
+crates/chat-stasher/src/main.rs:10309-10314  b76086ba166e  lines=6
   <- docs-dev/privacy.md:1261  :: Ok(path) => path,
-crates/chat-stasher/src/main.rs:10442-10447  e3326b7ac7fd  lines=6
+crates/chat-stasher/src/main.rs:10444-10449  e3326b7ac7fd  lines=6
   <- docs-dev/privacy.md:892  :: /// The wording lives in [`chat_stasher::destdiag::install_…
-crates/chat-stasher/src/main.rs:10925-10928  b98db7ea7e0d  lines=4
+crates/chat-stasher/src/main.rs:10927-10930  b98db7ea7e0d  lines=4
   <- docs-dev/install.md:611  :: }
-crates/chat-stasher/src/main.rs:11150-11166  66f4a2e262d2  lines=17
+crates/chat-stasher/src/main.rs:11152-11168  66f4a2e262d2  lines=17
   <- SECURITY.md:70, docs-dev/threat-model.md:880  :: /// host of this run. No-op when `--keep-ssh-masters` is se…
-crates/chat-stasher/src/main.rs:11292-11297  13896e8d543a  lines=6
+crates/chat-stasher/src/main.rs:11294-11299  13896e8d543a  lines=6
   <- SECURITY.md:70, docs-dev/threat-model.md:878  :: eprintln!("push: cannot check stage metadata: {e:#}");
-crates/chat-stasher/src/main.rs:12301-12333  d0f0c8ab4f38  lines=33
+crates/chat-stasher/src/main.rs:12303-12335  d0f0c8ab4f38  lines=33
   <- docs-dev/threat-model.md:942  :: if let Some(line) = body_cache_stats_line(&body_cache) {
-crates/chat-stasher/src/main.rs:17189-17240  eb6db4f4050d  lines=52
+crates/chat-stasher/src/main.rs:17191-17242  eb6db4f4050d  lines=52
   <- docs-dev/install.md:306  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:17189-17200  8f911ffc9cf6  lines=12
+crates/chat-stasher/src/main.rs:17191-17202  8f911ffc9cf6  lines=12
   <- docs-dev/install.md:1038  :: "a stale index must be replaced, not kept: {content}"
-crates/chat-stasher/src/main.rs:17714-17715  7be7cb9cbea0  lines=2
+crates/chat-stasher/src/main.rs:17716-17717  7be7cb9cbea0  lines=2
   <- docs-dev/install.md:629  :: let only_masterkey_declaration_owed =
-crates/chat-stasher/src/main.rs:18086-18100  da484ba556b2  lines=15
+crates/chat-stasher/src/main.rs:18088-18102  da484ba556b2  lines=15
   <- docs-dev/install.md:630  :: `dest-init`) — the destination block itself does not have t…
-crates/chat-stasher/src/main.rs:21725-21732  9cd8be148a6b  lines=8
+crates/chat-stasher/src/main.rs:21727-21734  9cd8be148a6b  lines=8
   <- docs-dev/install.md:1028  :: render_status(report, false)
-crates/chat-stasher/src/main.rs:21750-21751  d745898fe057  lines=2
+crates/chat-stasher/src/main.rs:21752-21753  d745898fe057  lines=2
   <- docs-dev/install.md:999  :: // would answer "is my timer healthy?" from a machine the t…
-crates/chat-stasher/src/main.rs:22266-22267  f5217dab38af  lines=2
+crates/chat-stasher/src/main.rs:22268-22269  f5217dab38af  lines=2
   <- docs-dev/install.md:994  :: // them. `destinations` and `reclaim` are the machine-reada…
-crates/chat-stasher/src/main.rs:22372-22379  7df1b5962a59  lines=8
+crates/chat-stasher/src/main.rs:22374-22381  7df1b5962a59  lines=8
   <- docs-dev/install.md:1015  :: };
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:447, docs-dev/threat-model.md:722  :: //! ADR-022: content-addressed hash tracking for stage meta…

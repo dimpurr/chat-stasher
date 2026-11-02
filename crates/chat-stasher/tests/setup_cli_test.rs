@@ -617,6 +617,9 @@ fn missing_masterkey_declaration_alone_bootstraps_the_key_and_stops() {
     let unexpected: Vec<_> = added
         .iter()
         .filter(|path| *path != "data/chat-stasher" && !path.starts_with("data/chat-stasher/"))
+        // ADR-065: the source answer on this command line, checked above to
+        // carry no remote.
+        .filter(|path| !path.starts_with("config/chat-stasher"))
         .filter(|path| !is_cache_path(path.as_str()))
         .cloned()
         .collect();
