@@ -972,10 +972,13 @@ fn reclaim_carry_paths_match_full_rebuild() {
     );
 }
 
-/// W935 §4 case 12: a duplicated playback of whole shards collapses the same
-/// way in both paths under the default policy — and a policy *flip* between
-/// builds re-lines every session, so the increment still equals a full
-/// rebuild under the new policy rather than carrying collapse-era rows.
+/// W935 §4 case 12: a duplicated playback of whole shards is one shape both
+/// build paths must agree on — and a policy *flip* between builds re-lines
+/// every session, so the increment still equals a full rebuild under the new
+/// policy rather than carrying fold-era rows. W1065 rework: the replayed
+/// run sits at HIGHER sequence numbers with no same-number entry beside the
+/// originals, so no re-seal evidence exists and the default policy keeps
+/// both copies — the four lines of the doubled playback all count.
 #[test]
 fn duplicate_replay_and_policy_flip_match_full_rebuild() {
     let holder = tempfile::tempdir().unwrap();
@@ -996,8 +999,9 @@ fn duplicate_replay_and_policy_flip_match_full_rebuild() {
     let (collapsed_full, _) = full_rebuild(&sandbox, &stage, &[]);
     assert_eq!(
         rows_of(&collapsed_full)[&session_id("replayed")]["line_count"],
-        serde_json::json!(2),
-        "the default policy collapses the whole-content replay"
+        serde_json::json!(4),
+        "a whole-content replay at higher sequence numbers carries no re-seal \
+         evidence, so the default policy keeps both copies"
     );
 
     let (collapsed_incremental, _) = run_increment(&sandbox, &stage, &[]);
@@ -1015,15 +1019,15 @@ fn duplicate_replay_and_policy_flip_match_full_rebuild() {
     );
     assert_same_index(&kept_incremental, &kept_full);
 
-    // And the flip back: equality again, both ways, with no collapsed state
+    // And the flip back: equality again, both ways, with no kept-all state
     // left over from having run under the other policy.
     let (back_full, _) = full_rebuild(&sandbox, &stage, &[]);
     let (back_incremental, _) = run_increment(&sandbox, &stage, &[]);
     assert_same_index(&back_incremental, &back_full);
     assert_eq!(
         rows_of(&back_incremental)[&session_id("replayed")]["line_count"],
-        serde_json::json!(2),
-        "collapse is back"
+        serde_json::json!(4),
+        "the default policy is back, and the evidence-free repeat still counts twice"
     );
 }
 
