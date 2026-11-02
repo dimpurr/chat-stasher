@@ -17,15 +17,19 @@
 
 ## What it is
 
-crush is Charm's terminal coding agent (upstream project `charmbracelet/crush`, MIT). It keeps its chats in a project-level SQLite database, `.crush/crush.db`, in the working directory; the data directory defaults to `.crush` and follows the project. The registry notes that the global directories hold only configuration, not chat history (config under `~/.config/crush/`, data under `~/.local/share/crush/` on Linux, and `%APPDATA%\crush\` and `%LOCALAPPDATA%\crush\` on Windows). The entry is source-confirmed against upstream (`internal/db/connect.go`, `internal/config/load.go`). The same template is declared for macOS, Linux and Windows.
+crush is Charm's terminal coding agent (upstream project `charmbracelet/crush`, MIT). It keeps its chats in a project-level SQLite database, `.crush/crush.db`, in the working directory; the data directory defaults to `.crush` and follows the project. The registry notes that the global directories hold only configuration, not chat history (config under `~/.config/crush/`, data under `~/.local/share/crush/` on Linux, and `%APPDATA%\crush\` and `%LOCALAPPDATA%\crush\` on Windows). The path is source-confirmed against upstream (`internal/db/connect.go`, `internal/config/load.go`), and that same source is where the database is opened in WAL journal mode. The same template is declared for macOS, Linux and Windows.
 
 ## What we collect
 
-By declaration, the database file, archived whole with a `no-rename` seal policy (a single-file SQLite store whose file-descriptor behaviour was not confirmed). Read this together with the next section, because on a 2026-11-01 check the scanner of this build did not recognise that file. The template is relative to a working directory, so it has no fixed root: with no `[harness_roots]` entry for `crush`, `chat-stasher doctor` reports the source as skipped with the session count unknown, never zero. You name a root yourself ([`harness_roots`](../config.md#harness_roots)).
+Nothing, and this build does not try. All three cells are held at confidence `unascertained`, which the scanner reads as "do not look": with no `[harness_roots]` entry for `crush`, `chat-stasher doctor` reports the state as `skip_unascertained` and the session count as unknown — not as 0, because nothing was enumerated to be absent.
+
+The reason is not the file name. `crush.db` is a live WAL-mode SQLite database, and this build has no reader for crush's schema, so the only thing the collect path could do with it is copy the file whole while crush is writing to it. That is not a consistent snapshot, and a shard nobody can prove the contents of is worse than no shard: the source is held back instead. The registry's own `known_issue` carries the same reason.
+
+One residual, stated because it is easy to misread: a root you write yourself is still looked at, because an explicit root is you stating where the store is, and it outranks the confidence gate (`crates/chat-stasher/src/scanner.rs`, which resolves `explicit_root` before consulting confidence). But the cell's `format` is `sqlite`, so only a name ending `.sqlite` can qualify, and `crush.db` never does. Pointing `[harness_roots] crush` at a `.crush` directory therefore reads nothing. [`harness_roots`](../config.md#harness_roots) lists `crush` for that reason and says the same.
 
 ## Coverage and completeness
 
-The generated header says `not yet verified end to end`, and no real crush session has a recorded run. The only dated observation of this build's behaviour for this source is below.
+The generated header says `not yet verified end to end`, and no crush session has a recorded run — nor can one, while nothing is collected. The only measured observation of this source is below, and it is of a build that behaved differently.
 
 On 2026-11-01, with a debug build of this branch (base commit `2c8f0faf`) on one machine, an isolated home and a synthetic SQLite file only, `chat-stasher doctor --json` gave:
 
@@ -33,21 +37,24 @@ On 2026-11-01, with a debug build of this branch (base commit `2c8f0faf`) on one
 - `[harness_roots] crush` set to the `.crush` directory holding a file named `crush.db`: scanned, session count 0.
 - The same directory with a copy named `probe.sqlite`: session count 1.
 
-The reason is in the scanner: a file is a session only when its name ends with a suffix the registry's `format` declares, and `sqlite` yields `.sqlite`, not `.db` (`format_suffixes` and `build_record` in `crates/chat-stasher/src/scanner.rs`). crush's real file is `crush.db`. So, as of that check, a crush database written by crush itself is not counted by doctor or recognised by the scan in this build, whatever the status cell above says. The `run-once` collection path was not run in that check.
+The cells then were `source-confirmed` and their status said supported, so the scan walked the tree and matched names on `format` = `sqlite`, whose only suffix is `.sqlite` — not `.db` (`format_suffixes` and `build_record` in `crates/chat-stasher/src/scanner.rs`). A count of 0 there meant "looked, and no name matched", which is a different claim from the one the page makes now, and the honest fix was the second one, not the first.
+
+What changed (commit `a3880fd8`, merged into `main` on 2026-11-02) is the cells, not the name rule: they are `unascertained` and the status is `not supported`, so the guessed `$CWD/.crush` location is never walked at all. That is a declaration, not a measurement — no real crush store was read before or after. Both halves are pinned by `crates/chat-stasher/tests/w1064_registry_names_test.rs`, which drives the shipped registry with synthetic files: the probe refuses with `SkipUnascertained`, and a `crush.db` with its `-wal` sidecar under an explicit root yields no record.
 
 ## Quirks
 
-The store is per project, so one machine can hold many crush databases and a single `[harness_roots]` path names one location. The full-text index treats an archived crush shard as a database and reports it as "not indexable: sqlite" instead of guessing at text in it (`crates/chat-stasher/src/fts.rs`).
+The store is per project, so one machine can hold many crush databases, each with its WAL and shm sidecars, and a single `[harness_roots]` path names one location. The seal policy is `no-rename`. The full-text index treats an archived crush shard as a database and reports it as "not indexable: sqlite" instead of guessing at text in it (`crates/chat-stasher/src/fts.rs`); that path is unreachable while nothing is collected.
 
 ## Known issues
 
-From the registry: there is no reader extractor yet, so archived crush sessions render as the raw view only. And, from the check above, the `crush.db` file name is not matched by the scan in this build. This page does not claim collection works until a run records it.
+From the registry: not collected — `crush.db` is a WAL-mode SQLite database and this build has no reader for its schema, so a raw file copy would not be a consistent snapshot. Because nothing is archived, there is no reader extractor to be missing yet, and the archived-shape notes above describe what would happen if a shard existed. A reader for crush's schema is the way to restore support; until then the status cell says not supported and this page says the same.
 
 ## How to check it yourself
 
-Create a throwaway directory containing a copy of a crush database named `crush.db`, point `[harness_roots]` `crush` at the directory, and run `chat-stasher doctor`: a count of 0 reproduces the finding above; renaming the copy to end in `.sqlite` changes the count to 1. Do it on a copy, not on your live project.
+Point `[harness_roots] crush` at a throwaway directory holding a copy of a crush database named `crush.db`, and run `chat-stasher doctor`: the directory is looked at, and the name does not match the cell's `sqlite` format, so no session is read. With no root set, the same command reports the state `skip_unascertained` and the count unknown. Do it on a copy, not on your live project.
 
 ## Changelog
 
 2026-08-26 — the registry entry first appears in commit `12387a19`.
 2026-11-01 — the scan check above was recorded for this page; no change to the scanner was made.
+2026-11-02 — the three cells were set to `unascertained` and the source's status to not supported, with the reason recorded in the registry's `known_issue` (commit `a3880fd8`, merged into `main` on 2026-11-02); this page is re-cut around that, and the 2026-11-01 counts are kept as the record of the build they were taken on.
