@@ -7302,12 +7302,53 @@ fn cmd_doctor(json: bool) -> ExitCode {
         report.timed_out.extend(timed_out);
     }
     report.timed_out.extend(cli_checks.notes().to_vec());
+    // ADR-065 D10: which sources are collected, off or pending. `off` and
+    // `pending` are choices and open questions, not gaps, and they are neither
+    // "not found" nor "could not be read": they get their own object and line,
+    // and no coverage or gap count above reads them as a shortfall.
+    let consent = report.config.as_ref().and_then(display_consent);
+    let pending_found: Vec<String> = consent
+        .as_ref()
+        .map(|c| {
+            report
+                .probes
+                .iter()
+                .filter(|p| p.installed_p())
+                .filter(|p| c.state_of(&p.id) == chat_stasher::sources::SourceState::Pending)
+                .map(|p| p.id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     if json {
         let mut value = chat_stasher::doctor::report_to_json(&report);
         value["remote_inboxes"] = serde_json::json!(&inboxes);
+        value["sources"] = match &consent {
+            Some(c) => chat_stasher::sources::consent_json(c, &pending_found),
+            None => serde_json::json!({
+                "kind": "not_checked",
+                "why": "the config or the registry could not be read, so no source state was evaluated",
+            }),
+        };
         println!("{}", json_string(&value));
     } else {
         chat_stasher::doctor::print_report(&report);
+        if let Some(c) = &consent {
+            eprintln!("{}", chat_stasher::sources::summary_line(c, &pending_found));
+            eprintln!(
+                "  (off and pending sources are not gaps: they are a choice and an open \
+                 question, kept apart from \"not found\" and \"could not be read\")"
+            );
+            for notice in [
+                chat_stasher::sources::upgrade_notice(c),
+                chat_stasher::sources::unrecognised_notice(c),
+                chat_stasher::sources::stage_evidence_notice(c),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                eprintln!("{notice}");
+            }
+        }
         inboxes.print();
     }
     // W1043: one line per timed-out check, naming the culprit the trace
@@ -7707,6 +7748,11 @@ fn cmd_backfill_grok_bot(
         Ok(machine) => machine,
         Err(code) => return code,
     };
+    // ADR-065 D1/D3: this pass reads one named source (the app drives its own
+    // renderer), so it obeys the same gate a pass over the registry does.
+    if let Err(code) = require_source_on("backfill", &config, "grok-bot", Some(stage)) {
+        return code;
+    }
     let state_dir = chat_stasher::collect::default_state_dir();
     let store_cfg = resolve_store_config(
         &config,
@@ -8617,6 +8663,9 @@ fn cmd_collect(
     ) {
         Ok(report) => report,
         Err(e) => {
+            if let Some(code) = no_consent_exit("collect:", &e) {
+                return code;
+            }
             eprintln!("collect: {e:#}");
             return ExitCode::FAILURE;
         }
@@ -8624,6 +8673,52 @@ fn cmd_collect(
 
     print_collect_report(&report, stage, &state_dir, &machine);
     collect_exit_code(&report)
+}
+
+/// Refuse a command that reads one named source unless that source is `on`
+/// (ADR-065 D1/D3). Prints the state, what it means and the next command, and
+/// returns the dedicated no-consent exit code; nothing has been touched when it
+/// does.
+fn require_source_on(
+    command: &str,
+    config: &Config,
+    id: &str,
+    stage: Option<&Path>,
+) -> Result<(), ExitCode> {
+    let registry = match scanner::load_registry_from_repo() {
+        Ok(registry) => registry,
+        Err(error) => {
+            eprintln!("{command}: {error}");
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    let consent = chat_stasher::sources::evaluate(config, &registry, stage);
+    match consent.state_of(id) {
+        chat_stasher::sources::SourceState::On => Ok(()),
+        state => {
+            let meaning = match state {
+                chat_stasher::sources::SourceState::Off => "you turned it off",
+                _ => "nobody has decided about it yet",
+            };
+            eprintln!(
+                "{command}: REFUSED exit_code={} — source `{id}` is {} ({meaning}), so nothing was                  read from it. Next: chat-stasher sources enable {id}",
+                chat_stasher::sources::EXIT_NO_CONSENT,
+                state.word()
+            );
+            Err(ExitCode::from(chat_stasher::sources::EXIT_NO_CONSENT))
+        }
+    }
+}
+
+/// Map the seam's no-consent refusal (ADR-065 D5) to its exit code, printing
+/// the refusal in the command's own voice. `None` for any other error.
+fn no_consent_exit(label: &str, error: &anyhow::Error) -> Option<ExitCode> {
+    let refusal = error.downcast_ref::<chat_stasher::sources::NoConsentRecorded>()?;
+    eprintln!(
+        "{label} REFUSED exit_code={} — {refusal}",
+        chat_stasher::sources::EXIT_NO_CONSENT
+    );
+    Some(ExitCode::from(chat_stasher::sources::EXIT_NO_CONSENT))
 }
 
 /// The `collect` exit ladder, split from `cmd_collect` (W1047f Medium 5) so
@@ -8706,6 +8801,19 @@ fn print_collect_report(
     state_dir: &Path,
     machine: &str,
 ) {
+    // ADR-065: what this pass collected from, and what it was told to leave
+    // alone, on stderr beside the other diagnostics a timer's log keeps.
+    for notice in &report.source_notices {
+        eprintln!("{notice}");
+    }
+    println!(
+        "[collect] sources         : {} (the sources turned on; nothing else is read)",
+        if report.sources_on.is_empty() {
+            "none".to_string()
+        } else {
+            report.sources_on.join(", ")
+        }
+    );
     println!("[collect] stage           : {}", stage.display());
     println!("[collect] state           : {}", state_dir.display());
     println!("[collect] machine         : {machine}");
@@ -9207,6 +9315,24 @@ fn run_once_pass_with(
     // Pessimistic starting point: until a step proves otherwise this pass is
     // recorded as a failure, so an unexpected exit can never be read as "ok".
     let mut state = RunState::new(RunOutcome::Error, Some("start"), &machine_name, 0);
+    // ADR-065 D5: a pass with no recorded source consent refuses before it
+    // pulls, collects or pushes anything, rather than collecting everything it
+    // can find. Checked first so that nothing a later step does can read as the
+    // pass having worked. (The collect seam checks again; this is the early,
+    // whole-pass refusal.)
+    if let Ok(registry) = scanner::load_registry_from_repo() {
+        if let Err(refusal) = chat_stasher::sources::require_consent(config, &registry, stage) {
+            eprintln!(
+                "[run-once] result: REFUSED exit_code={} no_source_consent — {refusal}",
+                chat_stasher::sources::EXIT_NO_CONSENT
+            );
+            state.failed_step = Some("source-consent".to_string());
+            return (
+                ExitCode::from(chat_stasher::sources::EXIT_NO_CONSENT),
+                state,
+            );
+        }
+    }
     let state_dir = chat_stasher::collect::default_state_dir();
     // The destination is resolved from the same overrides this run will push
     // to, so `collect` accrues debt against the repository `push` settles it
@@ -9330,6 +9456,10 @@ fn run_once_pass_with(
     ) {
         Ok(report) => report,
         Err(e) => {
+            if let Some(code) = no_consent_exit("[run-once] result:", &e) {
+                state.failed_step = Some("source-consent".to_string());
+                return (code, state);
+            }
             eprintln!("[run-once] result: ERROR exit_code=1 collect={e:#}");
             state.failed_step = Some("collect".to_string());
             return (ExitCode::FAILURE, state);
@@ -17001,7 +17131,8 @@ fn cmd_init() -> ExitCode {
     match Config::init_default(config::DEFAULT_CONFIG_TEMPLATE) {
         Ok(()) => {
             eprintln!(
-                "next: chat-stasher collect --stage <stage-dir> && chat-stasher push --stage <stage-dir> && chat-stasher verify --stage <stage-dir>"
+                "next: chat-stasher setup (shows what it found and asks which tools to collect; \
+                 nothing is collected until you choose)"
             );
             ExitCode::SUCCESS
         }
@@ -20901,6 +21032,25 @@ fn setup_json_payload(
     json_string(&value)
 }
 
+/// The source states a display command (`status`, `doctor`, `sources`) reads
+/// the scan against: the whole registry, evaluated with the one stage the config
+/// names (`[native_host] stage`), since those commands are not given one. `None`
+/// when the registry itself could not be read — the caller then says so rather
+/// than printing states it never evaluated.
+fn display_consent(config: &Config) -> Option<chat_stasher::sources::Consent> {
+    let registry = scanner::load_registry_from_repo().ok()?;
+    let stage = config
+        .native_host
+        .as_ref()
+        .and_then(|native| native.stage.as_deref())
+        .map(PathBuf::from);
+    Some(chat_stasher::sources::evaluate(
+        config,
+        &registry,
+        stage.as_deref(),
+    ))
+}
+
 fn render_setup_scan(report: &scanner::ScanReport) -> String {
     render_status(report, false)
 }
@@ -20981,6 +21131,9 @@ fn cmd_status(
     }
 
     let scan = scanner::scan(&config);
+    // ADR-065: the states the scan above is read against. Evaluated against the
+    // one stage the config names, because `status` is not given one.
+    let display_consent = display_consent(&config);
     // Deliberately 3, not 1, when the scan fails. Nothing was scanned, so
     // `status` has no answer to give about this machine's coverage at all —
     // "did not finish / never started", the same call `doctor` makes on the
@@ -21106,6 +21259,7 @@ fn cmd_status(
                             writer_versions.as_deref(),
                             writer_version_error.as_deref(),
                             &keys_value,
+                            display_consent.as_ref(),
                         ),
                         &inboxes
                     )
@@ -21123,6 +21277,7 @@ fn cmd_status(
                         writer_versions.as_deref(),
                         writer_version_error.as_deref(),
                         &keys_value,
+                        display_consent.as_ref(),
                     ),
                     &inboxes
                 )
@@ -21132,7 +21287,10 @@ fn cmd_status(
     }
 
     if let Ok(report) = &scan {
-        eprint!("{}", render_status(report, sessions));
+        eprint!(
+            "{}",
+            render_status_with_sources(report, sessions, display_consent.as_ref())
+        );
     }
     inboxes.print();
     // A destination needs its own key backed up: a second machine reads that
@@ -21523,11 +21681,42 @@ fn status_json(
     writer_versions: Option<&[sidecar::MachineWriterStatus]>,
     writer_version_error: Option<&str>,
     keys_value: &serde_json::Value,
+    consent: Option<&chat_stasher::sources::Consent>,
 ) -> String {
     let mut scanner_value = match scan {
         Ok(report) => scanner::scan_report_json(report),
-        Err(why) => serde_json::json!({ "kind": "failed", "why": why }),
+        Err(ref why) => serde_json::json!({ "kind": "failed", "why": why }),
     };
+    // ADR-065 D10: each harness row says whether it is collected, so a found
+    // store that is `off` or `pending` is never read as one that was archived,
+    // and never counted as a gap.
+    let sources_value = match (consent, &scan) {
+        (Some(consent), Ok(report)) => chat_stasher::sources::consent_json(
+            consent,
+            &pending_found_in_scan(report, consent),
+        ),
+        (Some(consent), Err(_)) => chat_stasher::sources::consent_json(consent, &[]),
+        (None, _) => serde_json::json!({
+            "kind": "failed",
+            "why": "the harness registry could not be read, so no source state was evaluated",
+        }),
+    };
+    if let (Some(consent), Some(harnesses)) = (
+        consent,
+        scanner_value
+            .get_mut("harnesses")
+            .and_then(|value| value.as_array_mut()),
+    ) {
+        for harness in harnesses {
+            let state = harness
+                .get("harness")
+                .and_then(|id| id.as_str())
+                .map(|id| consent.state_of(id).word());
+            if let (Some(state), Some(object)) = (state, harness.as_object_mut()) {
+                object.insert("source_state".to_string(), serde_json::json!(state));
+            }
+        }
+    }
     let writer_version_status = match (writer_versions, writer_version_error) {
         (Some(versions), _) => serde_json::json!({"kind":"known", "machines":versions}),
         (None, Some(error)) => serde_json::json!({"kind":"failed", "why":error}),
@@ -21551,6 +21740,7 @@ fn status_json(
         ),
         "local": local,
         "scanner": scanner_value,
+        "sources": sources_value,
         "keys": keys_value,
     });
     json_string(&value)
@@ -21580,6 +21770,66 @@ fn status_exit_semantics(code: u8) -> &'static str {
 /// Only ids, paths, sizes, mtimes and flags ever reach stdout — never the
 /// content of a session.
 fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
+    render_status_with_sources(report, sessions, None)
+}
+
+/// The word that follows a source's count when it is not being collected, so a
+/// session found in an `off` or `pending` source never reads as one that was
+/// collected (ADR-065 D10). Empty for a source that is `on`, and for a
+/// report built without a consent evaluation.
+fn source_state_suffix(consent: Option<&chat_stasher::sources::Consent>, id: &str) -> &'static str {
+    use chat_stasher::sources::SourceState;
+    match consent.map(|c| c.state_of(id)) {
+        Some(SourceState::Off) => " (off)",
+        Some(SourceState::Pending) => " (pending)",
+        Some(SourceState::On) | None => "",
+    }
+}
+
+/// The sources that are pending and whose store this scan found: the tools
+/// `status` names until the user decides (ADR-065 D6).
+fn pending_found_in_scan(
+    report: &scanner::ScanReport,
+    consent: &chat_stasher::sources::Consent,
+) -> Vec<String> {
+    report
+        .probes
+        .iter()
+        .filter(|p| p.installed_p())
+        .filter(|p| consent.state_of(&p.id) == chat_stasher::sources::SourceState::Pending)
+        .map(|p| p.id.clone())
+        .collect()
+}
+
+/// The `[sources]` lines `status` prints under the scan: one summary of what is
+/// collected, off and pending, then any notice the consent evaluation owes.
+fn render_sources_lines(
+    report: &scanner::ScanReport,
+    consent: &chat_stasher::sources::Consent,
+) -> String {
+    let pending = pending_found_in_scan(report, consent);
+    let mut out = String::new();
+    out.push_str(&chat_stasher::sources::summary_line(consent, &pending));
+    out.push('\n');
+    for notice in [
+        chat_stasher::sources::upgrade_notice(consent),
+        chat_stasher::sources::unrecognised_notice(consent),
+        chat_stasher::sources::stage_evidence_notice(consent),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        out.push_str(&notice);
+        out.push('\n');
+    }
+    out
+}
+
+fn render_status_with_sources(
+    report: &scanner::ScanReport,
+    sessions: bool,
+    consent: Option<&chat_stasher::sources::Consent>,
+) -> String {
     let mut out = String::new();
 
     // One count per source actually found (registry-driven, so any harness
@@ -21594,7 +21844,7 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
     if !sessions {
         let breakdown = per_source
             .iter()
-            .map(|(src, n)| format!("{src} {n}"))
+            .map(|(src, n)| format!("{src} {n}{}", source_state_suffix(consent, src)))
             .collect::<Vec<_>>()
             .join(" · ");
         // B78: the count `doctor` prints and `status` used to swallow. It
@@ -21653,13 +21903,22 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
             ));
             out.push('\n');
         }
+        if let Some(consent) = consent {
+            out.push_str(&render_sources_lines(report, consent));
+        }
         out.push_str("details (one line per session): chat-stasher status --sessions\n");
         return out;
     }
 
     out.push('\n');
     for (src, n) in &per_source {
-        out.push_str(&format!("  {src:<22} sessions : {n}\n"));
+        out.push_str(&format!(
+            "  {src:<22} sessions : {n}{}\n",
+            source_state_suffix(consent, src)
+        ));
+    }
+    if let Some(consent) = consent {
+        out.push_str(&render_sources_lines(report, consent));
     }
     out.push_str(&format!(
         "  total                : {}  ({} compressed)",

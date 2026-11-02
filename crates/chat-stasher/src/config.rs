@@ -238,6 +238,55 @@ pub struct Config {
     /// pass (the first fill of a large repository spans several rounds), and
     /// `chat-stasher mirror sync` runs the same copy on demand.
     pub mirror: Option<MirrorSectionConfig>,
+
+    /// The `[sources]` table (ADR-065 D2): which registry sources this machine
+    /// collects, keyed by **registry harness id**, each `"on"` or `"off"`.
+    ///
+    /// `None` means the table is absent, which is a different fact from a table
+    /// with no entries: an absent table is the state before the user was ever
+    /// asked (and is what the upgrade rule of `sources::evaluate` keys on), an
+    /// empty one is a recorded decision that nothing is collected. A source
+    /// with no entry has no recorded state and is `pending`, so it is not
+    /// collected. A value other than `"on"` or `"off"` is a typo the user must
+    /// see, so it makes the whole file unusable rather than reading as either.
+    pub sources: Option<BTreeMap<String, SourceChoice>>,
+}
+
+/// One recorded answer in `[sources]`: the user turned a source on or off.
+///
+/// There is deliberately no `pending` value. Pending is the absence of an
+/// answer, and a file that spelled it out would let a hand-written line claim
+/// a decision nobody made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceChoice {
+    On,
+    Off,
+}
+
+impl SourceChoice {
+    /// The word as it is written in the file.
+    pub fn word(self) -> &'static str {
+        match self {
+            SourceChoice::On => "on",
+            SourceChoice::Off => "off",
+        }
+    }
+}
+
+/// What [`Config::set_source_states`] did to the file, in the same three-state
+/// shape the other config writers report: the caller prints which happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourcesWrite {
+    /// Ids whose entry was added or changed, with the previous value when there
+    /// was one.
+    pub changed: Vec<(String, Option<SourceChoice>)>,
+    /// Ids that already held exactly the requested value. Nothing was written
+    /// for them.
+    pub unchanged: Vec<String>,
+    /// True when the file was not rewritten at all (every entry was unchanged
+    /// and the table already existed).
+    pub file_untouched: bool,
 }
 
 /// The `[reclaim]` section (ADR-060 D5).
@@ -937,6 +986,61 @@ impl Config {
         write_atomic(&path, next.as_bytes())
             .with_context(|| format!("write {}", path.display()))?;
         Ok(DestinationWrite::Added)
+    }
+
+    /// Record `[sources]` answers (ADR-065 D8) and touch nothing else in the
+    /// file.
+    ///
+    /// Only the `[sources]` table changes. Every comment, every other section
+    /// and the file's line endings survive byte for byte, for the reason
+    /// [`Config::set_native_host_stage`] gives: this is a hand-written file and
+    /// a serde round-trip would delete what the user wrote. A requested value
+    /// the table already holds is not rewritten, and a call that changes
+    /// nothing does not write the file at all.
+    ///
+    /// A file that exists but is not valid TOML is an error, never an
+    /// overwrite. An absent file starts from the documented template, the same
+    /// first-run path `init` takes.
+    pub fn set_source_states(edits: &[(String, SourceChoice)]) -> anyhow::Result<SourcesWrite> {
+        let path = config_path();
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Config::init_default(DEFAULT_CONFIG_TEMPLATE)
+                    .with_context(|| format!("write default config {}", path.display()))?;
+                std::fs::read_to_string(&path)
+                    .with_context(|| format!("read {}", path.display()))?
+            }
+            Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+        };
+        let (updated, outcome) = apply_source_edits(&raw, edits)
+            .with_context(|| format!("update [sources] in {}", path.display()))?;
+        if outcome.file_untouched {
+            return Ok(outcome);
+        }
+        // The post-condition, checked rather than assumed: the text about to be
+        // written must load as a config and read back every requested answer.
+        // Writing a file the tool cannot read would be worse than failing here,
+        // where the user's original file is still untouched.
+        let loaded = Config::from_text(&updated).with_context(|| {
+            format!(
+                "the updated config for {} would not load; nothing was written",
+                path.display()
+            )
+        })?;
+        let table = loaded.sources.unwrap_or_default();
+        for (id, choice) in edits {
+            if table.get(id) != Some(choice) {
+                anyhow::bail!(
+                    "the updated config for {} would not read back `sources.{id}`; nothing was \
+                     written",
+                    path.display()
+                );
+            }
+        }
+        write_atomic(&path, updated.as_bytes())
+            .with_context(|| format!("write {}", path.display()))?;
+        Ok(outcome)
     }
 
     /// Expand every path-typed field in place. Fields whose `~` cannot be
@@ -1969,6 +2073,22 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # the weekly clean-up run exactly as before either way. Same dual spelling as
 # the cache quota: "10GB" is 10 x 10^9, "10GiB" is 10 x 2^30. Default 10 GiB.
 # stage_cap_bytes = "10GiB"
+
+# ---------------------------------------------------------------- sources
+# Which tools' sessions chat-stasher collects, keyed by registry harness id.
+# Run `chat-stasher setup` (or `chat-stasher sources`) to choose; it writes this
+# table for you and keeps everything else in this file as you wrote it.
+#
+#   "on"       collect this tool's sessions
+#   "off"      do not collect them (nothing already archived or staged is deleted)
+#   no line    not decided yet: reported as pending and NOT collected
+#
+# A path you state in [harness_roots] below counts as "on" for that tool unless
+# you write "off" here: an explicit "off" always wins.
+#
+# [sources]
+# claude-code = "on"
+# codex = "off"
 
 # ---------------------------------------------------------------- harness_roots
 # Tell the tool where a harness actually keeps its sessions, keyed by the
@@ -3815,6 +3935,164 @@ fn collect_value_string_spans(value: &toml_edit::Value, spans: &mut Vec<std::ops
     }
 }
 
+/// The comment block that heads a `[sources]` table this tool appends.
+const SOURCES_SECTION_HEADER: &str = "\
+# ---------------------------------------------------------------- sources
+# Which tools' sessions chat-stasher collects, keyed by registry harness id.
+# \"on\" collects them; \"off\" does not. A tool with no line here has not been
+# decided yet: it is reported as pending and is NOT collected until you choose.
+# Written by `chat-stasher setup` and `chat-stasher sources`; a hand edit works
+# too. Turning a source off stops new collection and deletes nothing: sessions
+# already archived stay, and copies already in the stage stay until reclaimed.
+";
+
+/// Apply `[sources]` edits to config text without touching any other byte.
+///
+/// Pure (text in, text out) so every file shape can be asserted without a
+/// filesystem. Returns the new text and what happened per id. When nothing
+/// changes, `file_untouched` is set and the returned text is the input.
+fn apply_source_edits(
+    raw: &str,
+    edits: &[(String, SourceChoice)],
+) -> anyhow::Result<(String, SourcesWrite)> {
+    let mut text = raw.to_string();
+    let mut changed: Vec<(String, Option<SourceChoice>)> = Vec::new();
+    let mut unchanged: Vec<String> = Vec::new();
+    for (id, choice) in edits {
+        if !is_bare_toml_key(id) {
+            anyhow::bail!(
+                "`{id}` cannot be a [sources] key: a registry harness id is letters, digits, `_` \
+                 or `-`"
+            );
+        }
+        let literal = toml_edit::Value::from(choice.word()).to_string();
+        let next: Option<String> = {
+            let doc = toml_edit::ImDocument::parse(&text).context("parse the config as TOML")?;
+            match doc.get("sources") {
+                None => {
+                    let ending = dominant_line_ending(&text, text.len());
+                    let mut out = text.clone();
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push_str(ending);
+                    }
+                    let mut section = String::from(if out.is_empty() { "" } else { "\n" });
+                    section.push_str(SOURCES_SECTION_HEADER);
+                    section.push_str(&format!("[sources]\n{id} = {literal}\n"));
+                    if ending == "\r\n" {
+                        section = section.replace('\n', "\r\n");
+                    }
+                    out.push_str(&section);
+                    changed.push((id.clone(), None));
+                    Some(out)
+                }
+                Some(item) => {
+                    let table = item.as_table().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "`sources` is not a standard [sources] table (an inline or dotted \
+                             form was found), so it cannot be edited in place"
+                        )
+                    })?;
+                    if table.is_dotted() {
+                        anyhow::bail!(
+                            "`sources` is written with dotted keys, so it cannot be edited in \
+                             place; rewrite it as a [sources] table"
+                        );
+                    }
+                    match table.get(id) {
+                        Some(existing) => {
+                            let previous = match existing.as_str() {
+                                Some("on") => Some(SourceChoice::On),
+                                Some("off") => Some(SourceChoice::Off),
+                                _ => None,
+                            };
+                            if previous == Some(*choice) {
+                                unchanged.push(id.clone());
+                                None
+                            } else {
+                                let span = existing.span().ok_or_else(|| {
+                                    anyhow::anyhow!("`sources.{id}` has no byte span to replace")
+                                })?;
+                                let mut out = String::with_capacity(text.len() + literal.len());
+                                out.push_str(&text[..span.start]);
+                                out.push_str(&literal);
+                                out.push_str(&text[span.end..]);
+                                changed.push((id.clone(), previous));
+                                Some(out)
+                            }
+                        }
+                        None => {
+                            let out = insert_source_line(&text, table, id, &literal)?;
+                            changed.push((id.clone(), None));
+                            Some(out)
+                        }
+                    }
+                }
+            }
+        };
+        if let Some(next) = next {
+            text = next;
+        }
+    }
+    let file_untouched = changed.is_empty();
+    Ok((
+        if file_untouched {
+            raw.to_string()
+        } else {
+            text
+        },
+        SourcesWrite {
+            changed,
+            unchanged,
+            file_untouched,
+        },
+    ))
+}
+
+/// Add `<key> = <literal>` as a new line inside an existing `[sources]` table:
+/// after its last key, or straight under the header when it has none. Same
+/// line-ending rules as [`insert_missing_stage_line`], which this mirrors for a
+/// different table and key.
+fn insert_source_line(
+    raw: &str,
+    table: &toml_edit::Table,
+    key: &str,
+    literal: &str,
+) -> anyhow::Result<String> {
+    let base = match table
+        .iter()
+        .filter(|(_, item)| item.is_value())
+        .last()
+        .and_then(|(_, item)| item.span())
+    {
+        Some(span) => span.end,
+        None => {
+            table
+                .span()
+                .ok_or_else(|| anyhow::anyhow!("`sources` has no byte span; cannot insert"))?
+                .end
+        }
+    };
+    let dominant_ending = dominant_line_ending(raw, base);
+    let Some(newline) = raw[base..].find('\n') else {
+        let mut out = String::with_capacity(raw.len() + literal.len() + key.len() + 8);
+        out.push_str(raw);
+        out.push_str(dominant_ending);
+        out.push_str(&format!("{key} = {literal}"));
+        return Ok(out);
+    };
+    let nl = base + newline;
+    let ending = if raw[..nl].ends_with('\r') {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut out = String::with_capacity(raw.len() + literal.len() + key.len() + 8);
+    out.push_str(&raw[..nl + 1]);
+    out.push_str(&format!("{key} = {literal}{ending}"));
+    out.push_str(&raw[nl + 1..]);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod line_ending_tests {
     use super::*;
@@ -4009,4 +4287,80 @@ fn template_documents_the_mirror_and_stays_empty() {
         DEFAULT_CONFIG_TEMPLATE.contains("mirror_of = \"storagebox\""),
         "the template names the mirror_of key"
     );
+}
+
+#[cfg(test)]
+mod sources_edit_tests {
+    use super::*;
+
+    fn edit(raw: &str, edits: &[(&str, SourceChoice)]) -> (String, SourcesWrite) {
+        let edits: Vec<(String, SourceChoice)> =
+            edits.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        apply_source_edits(raw, &edits).unwrap()
+    }
+
+    #[test]
+    fn appending_a_table_keeps_every_existing_byte() {
+        let raw = "# my notes\nrustic_repo = \"/x\" # keep me\n\n[harness_roots]\ncodex = \"/c\"\n";
+        let (out, write) = edit(raw, &[("claude-code", SourceChoice::On)]);
+        assert!(out.starts_with(raw), "existing bytes must be a prefix");
+        assert!(out.contains("[sources]\nclaude-code = \"on\"\n"));
+        assert_eq!(write.changed.len(), 1);
+        let cfg: Config = toml::from_str(&out).unwrap();
+        assert_eq!(cfg.sources.unwrap()["claude-code"], SourceChoice::On);
+    }
+
+    #[test]
+    fn updating_and_adding_inside_an_existing_table_keeps_comments_and_order() {
+        let raw = "# top\n[sources]\n# why codex\ncodex = \"on\" # trailing\nzed = \"off\"\n\n# after\n[harness_roots]\ncursor = \"/c\"\n";
+        let (out, write) = edit(
+            raw,
+            &[
+                ("codex", SourceChoice::Off),
+                ("zed", SourceChoice::Off),
+                ("cursor", SourceChoice::On),
+            ],
+        );
+        assert_eq!(
+            out,
+            "# top\n[sources]\n# why codex\ncodex = \"off\" # trailing\nzed = \"off\"\ncursor = \"on\"\n\n# after\n[harness_roots]\ncursor = \"/c\"\n"
+        );
+        assert_eq!(write.unchanged, vec!["zed".to_string()]);
+        assert_eq!(write.changed[0], ("codex".to_string(), Some(SourceChoice::On)));
+    }
+
+    #[test]
+    fn a_no_op_edit_does_not_touch_the_file() {
+        let raw = "[sources]\ncodex = \"on\"\n";
+        let (out, write) = edit(raw, &[("codex", SourceChoice::On)]);
+        assert!(write.file_untouched);
+        assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn crlf_files_stay_crlf() {
+        let raw = "# c\r\n[sources]\r\ncodex = \"on\"\r\n";
+        let (out, _) = edit(raw, &[("zed", SourceChoice::Off)]);
+        assert_eq!(out, "# c\r\n[sources]\r\ncodex = \"on\"\r\nzed = \"off\"\r\n");
+        let (out, _) = edit("# c\r\n", &[("zed", SourceChoice::Off)]);
+        assert!(!out.replace("\r\n", "").contains('\n'), "no bare LF: {out:?}");
+    }
+
+    #[test]
+    fn an_empty_table_header_gets_the_key_under_it() {
+        let raw = "[sources]\n# nothing yet\n[harness_roots]\n";
+        let (out, _) = edit(raw, &[("zed", SourceChoice::On)]);
+        let cfg: Config = toml::from_str(&out).unwrap();
+        assert_eq!(cfg.sources.unwrap()["zed"], SourceChoice::On);
+        assert!(out.contains("# nothing yet"));
+        assert!(out.ends_with("[harness_roots]\n"));
+    }
+
+    #[test]
+    fn the_shipped_template_gains_a_table_and_still_parses() {
+        let (out, _) = edit(DEFAULT_CONFIG_TEMPLATE, &[("codex", SourceChoice::On)]);
+        assert!(out.starts_with(DEFAULT_CONFIG_TEMPLATE));
+        let cfg: Config = toml::from_str(&out).unwrap();
+        assert_eq!(cfg.sources.unwrap()["codex"], SourceChoice::On);
+    }
 }
