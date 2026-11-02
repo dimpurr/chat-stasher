@@ -35,8 +35,6 @@ seed() {
   cp "$ROOT/.gitattributes" "$dir/.gitattributes"
   cp "$ROOT/scripts/dev/rebase-onto-main.sh" "$dir/scripts/dev/"
   cp "$ROOT/scripts/dev/setup-merge-drivers.sh" "$dir/scripts/dev/"
-  cp "$ROOT/scripts/dev/regenerate-merge-drivers.py" "$dir/scripts/dev/"
-  chmod +x "$dir/scripts/dev/regenerate-merge-drivers.py"
   git -C "$dir" init -q
   git -C "$dir" config user.name fixture
   git -C "$dir" config user.email fixture@example.invalid
@@ -129,6 +127,36 @@ u=$(git -C "$D" diff --name-only --diff-filter=U)
 MAIN" ] && ok "citations.lock kept the onto side (regeneration is integration's job)" \
          || bad "citations.lock unexpected: $(cat "$D/docs-dev/citations.lock")"
 [ -f "$D/src/t.txt" ] && ok "replayed commit present => rebase really completed" || bad "src/t.txt missing"
+
+echo "=================================================================="
+echo "Case 4: driver registered from a worktree that is later deleted (W1063)"
+echo "=================================================================="
+# The original failure: setup run inside a linked worktree wrote that worktree's
+# path into the shared config; the train then removed the worktree, the driver
+# command failed, and git reported a conflict although `git config` still showed
+# a registered driver. Reproduce with the legacy path form, then prove the
+# current setup survives the same deletion.
+D="$TMP/legacy"
+seed "$D"
+GONE="$TMP/gone-wt"
+git -C "$D" worktree add -q "$GONE" -b scratch-wt
+git -C "$D" config merge.regenerate-citations.driver "python3 $GONE/scripts/dev/regenerate-merge-drivers.py citations %O %A %B"
+git -C "$D" config merge.regenerate-inventory.driver "python3 $GONE/scripts/dev/regenerate-merge-drivers.py inventory %O %A %B"
+git -C "$D" worktree remove --force "$GONE"
+fork_regen "$D"
+git -C "$D" merge --no-ff topic >"$TMP/merge4a.log" 2>&1
+[ $? -ne 0 ] && ok "legacy path driver pointing at a deleted worktree conflicts (the reported bug)" \
+             || bad "legacy driver unexpectedly merged cleanly — Case 4 would prove nothing"
+git -C "$D" merge --abort >/dev/null 2>&1
+git -C "$D" worktree add -q "$GONE" -b scratch-wt2
+(cd "$GONE" && bash scripts/dev/setup-merge-drivers.sh) >/dev/null 2>&1
+git -C "$D" worktree remove --force "$GONE"
+git -C "$D" config --get merge.regenerate-citations.driver | grep -q "$GONE" \
+  && bad "driver still names the deleted worktree" || ok "registered driver names no path"
+git -C "$D" merge --no-ff topic >"$TMP/merge4b.log" 2>&1
+[ $? -eq 0 ] && ok "merge succeeds after the registering worktree is gone" \
+             || bad "merge rc!=0 after the registering worktree was deleted"
+grep -q "merge-regenerate" "$TMP/merge4b.log" && ok "driver speaks (regenerate reminder printed)" || bad "driver reminder missing"
 
 echo "=================================================================="
 if [ "$FAILED" -eq 0 ]; then echo "ALL PASS"; else echo "FAILURES: $FAILED"; fi

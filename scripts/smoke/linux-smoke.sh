@@ -90,10 +90,10 @@
 #                      no cell on any platform declares Zed's schema, so the
 #                      probe falls back to opencode's `session` table, which is
 #                      not Zed's layout. Planting one would invent a shape.
-#   continue           the cell's format is `json` with no `session_pattern`, and
-#                      the name-only fail-safe rejects a patternless JSON cell
-#                      outright (scanner.rs, build_record) — the shipped cell
-#                      enumerates nothing by design.
+#   continue           no fixture recipe yet. The cell's `session_pattern` (W1064)
+#                      now accepts `<uuid>.json` session files, so a recipe could
+#                      plant them; until one exists the throwaway HOME has no
+#                      `.continue/sessions`, and the state is a measured `missing`.
 #   github-copilot-cli the documented layout is
 #                      `session-state/<session-id>/events.jsonl`, so every
 #                      session's *filename* is the constant `events` and the id
@@ -721,7 +721,7 @@ NO_RECIPE = {
     "aider": "template_unresolvable",
     "crush": "template_unresolvable",
     "zed": "no_schema_in_build",
-    "continue": "cell_rejects_json",
+    "continue": "no_recipe_yet",
     "github-copilot-cli": "id_not_keyable",
 }
 
@@ -1161,7 +1161,7 @@ EXPECTED_STATE = {
     "confidence_unascertained": "skip_unascertained",
     "no_cell_for_platform": "skip_wrong_platform",
     "template_unresolvable": "skip_unresolvable",
-    "cell_rejects_json": "missing",
+    "no_recipe_yet": "missing",
     "id_not_keyable": "missing",
     "no_schema_in_build": "missing",
 }
