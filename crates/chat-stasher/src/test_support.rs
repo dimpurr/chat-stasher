@@ -66,6 +66,13 @@ pub fn consent_for_registry(
         .iter()
         .filter_map(|harness| harness["id"].as_str())
         .collect();
+    let config_home = config_home.into();
+    // A suite may plant a second registry in one sandbox; a file this helper
+    // wrote follows it, and a file the test wrote stays exactly as written.
+    let file = config_home.join("chat-stasher").join("config.toml");
+    if std::fs::read_to_string(&file).is_ok_and(|text| text.starts_with("[sources]\n")) {
+        std::fs::remove_file(&file).unwrap();
+    }
     consent_config_home(config_home, &ids)
 }
 

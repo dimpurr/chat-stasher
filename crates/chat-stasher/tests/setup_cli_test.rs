@@ -567,7 +567,10 @@ fn missing_masterkey_declaration_alone_bootstraps_the_key_and_stops() {
     assert!(sandbox.masterkey().exists(), "the masterkey must exist");
     // The source answer on this command line is recorded (ADR-065); no remote is.
     assert!(
-        !sandbox.read_config().contains("[destinations"),
+        !sandbox
+            .read_config()
+            .lines()
+            .any(|line| line.starts_with("[destinations")),
         "a bootstrap keys the local archive only; it must not write a destination block"
     );
     let state_run_marker = sandbox
