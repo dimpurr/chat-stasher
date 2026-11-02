@@ -1972,3 +1972,140 @@ fn w1068_tmp_names_in_index_and_snapshots_are_ignored_by_readers_and_aged_like_p
     assert!(!repo.join(&old_index).exists() && !repo.join(&old_snap).exists());
     assert!(repo.join(&young_index).exists());
 }
+
+// ======================================================================
+// W1068 review (test-only): verification of index and snapshot writes,
+// routing by backend, the short-file threshold, and failure wording.
+// ======================================================================
+
+/// Review M1: a read-back that does not hash to the name never becomes a
+/// final name, for an index or a snapshot as for a pack.
+#[test]
+fn w1068_review_m1_index_and_snapshot_bytes_that_do_not_hash_are_never_published() {
+    use chat_stasher::atomic_pack::{publish_file, FileKind};
+    for (kind, dir_name) in [
+        (FileKind::Index, "index"),
+        (FileKind::Snapshot, "snapshots"),
+    ] {
+        let (id, bytes) = pack(3);
+        let dir = tempfile::tempdir().unwrap();
+        let mut rig = Rig::new(dir.path());
+        rig.corrupt_tmp_reads = true;
+        let error = publish_file(&rig, kind, &id, bytes, 100, [2; 8]).unwrap_err();
+        assert!(matches!(error, PublishError::VerifyMismatch), "{error:?}");
+        assert!(
+            !dir.path().join(dir_name).join(&id).exists(),
+            "{dir_name}: failed verification must not leave a final name"
+        );
+    }
+}
+
+/// Review M2: the configuration decides which backend an index or snapshot
+/// write reaches. SFTP sends it through the publisher; a local directory and
+/// opendal:fs send it straight to the inner backend, as before W1068.
+#[test]
+fn w1068_review_m2_the_product_config_routes_index_and_snapshot_by_backend() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key = tmp.path().join("k.json");
+    let sftp = StoreConfig {
+        repo_root: "opendal:sftp".to_string(),
+        options: BTreeMap::from([
+            ("endpoint".to_string(), "127.0.0.1:1".to_string()),
+            ("user".to_string(), "nobody".to_string()),
+            ("retry".to_string(), "false".to_string()),
+        ]),
+        ..store_config(tmp.path(), &key)
+    };
+    let local = store_config(&tmp.path().join("local-repo"), &key);
+    let fs = opendal_fs_config(&tmp.path().join("fs-repo"), &key);
+    let (id, bytes) = pack(7);
+    let id: Id = id.parse().unwrap();
+    for (name, cfg, routed) in [
+        ("opendal:sftp", &sftp, true),
+        ("a local directory", &local, false),
+        ("opendal:fs", &fs, false),
+    ] {
+        for tpe in [FileType::Index, FileType::Snapshot] {
+            let inner = Arc::new(Recorder::default());
+            let wrapped = AtomicPackBackend::wrap(inner.clone(), cfg);
+            drop(wrapped.write_bytes(tpe, &id, false, bytes.clone()));
+            let direct = inner.other_writes.load(Ordering::SeqCst);
+            if routed {
+                assert_eq!(
+                    direct, 0,
+                    "{tpe:?} on {name} reached the inner backend directly"
+                );
+            } else {
+                assert_eq!(direct, 1, "{tpe:?} on {name} must be written directly");
+            }
+        }
+    }
+}
+
+/// Review L1: a file under 32 bytes is reported as short (a stored file is at
+/// least an IV and a MAC around its body); a 32-byte file is not.
+#[test]
+fn w1068_review_l1_an_index_file_under_32_bytes_is_short_and_one_of_32_is_not() {
+    use chat_stasher::orphans::{short_files, ShortFile};
+    let sandbox = sandbox_with_repository();
+    let repo = sandbox.repo();
+    let store = BackupStore::new(store_config(&repo, &sandbox.key()), "machine-a".to_string());
+    let backends = store.backends().unwrap();
+    assert!(
+        short_files(&backends).is_empty(),
+        "a healthy repository has no short files"
+    );
+    let now = unix_now();
+    let ten = "0a".repeat(32);
+    let thirty_one = "1f".repeat(32);
+    let thirty_two = "20".repeat(32);
+    plant(&repo, &format!("index/{ten}"), &[0u8; 10], now);
+    plant(&repo, &format!("index/{thirty_one}"), &[0u8; 31], now);
+    plant(&repo, &format!("index/{thirty_two}"), &[0u8; 32], now);
+    assert_eq!(
+        short_files(&backends),
+        vec![
+            ShortFile {
+                dir: "index",
+                id_hex: ten,
+                bytes: 10
+            },
+            ShortFile {
+                dir: "index",
+                id_hex: thirty_one,
+                bytes: 31
+            },
+        ]
+    );
+}
+
+/// Review L2: a failed index or snapshot write is not worded as a pack. The
+/// retry setting is one the writer cannot read, so the publisher fails before
+/// it touches the destination.
+#[test]
+fn w1068_review_l2_a_failed_index_or_snapshot_write_is_not_worded_as_a_pack() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = StoreConfig {
+        repo_root: "opendal:sftp".to_string(),
+        options: BTreeMap::from([
+            ("endpoint".to_string(), "127.0.0.1:1".to_string()),
+            ("user".to_string(), "nobody".to_string()),
+            ("retry".to_string(), "bogus".to_string()),
+        ]),
+        ..store_config(tmp.path(), &tmp.path().join("k.json"))
+    };
+    let (id, bytes) = pack(9);
+    let id: Id = id.parse().unwrap();
+    for (tpe, noun) in [
+        (FileType::Index, "an index file"),
+        (FileType::Snapshot, "a snapshot file"),
+    ] {
+        let wrapped = AtomicPackBackend::wrap(Arc::new(Recorder::default()), &cfg);
+        let error = wrapped
+            .write_bytes(tpe, &id, false, bytes.clone())
+            .expect_err("the publisher must fail")
+            .to_string();
+        assert!(!error.contains("pack"), "{error}");
+        assert!(error.contains(noun), "{error}");
+    }
+}

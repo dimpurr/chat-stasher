@@ -147,14 +147,14 @@ impl OperatorIo {
         };
         let _guard = RUNTIME.enter();
         let operator = opendal::Operator::via_iter(scheme, options)
-            .map_err(|_| anyhow!("could not open the destination for an atomic pack write"))?
+            .map_err(|_| anyhow!("could not open the destination for an atomic write"))?
             .layer(
                 opendal::layers::RetryLayer::new()
                     .with_max_times(retries)
                     .with_jitter(),
             );
         let op = opendal::blocking::Operator::new(operator)
-            .map_err(|_| anyhow!("could not start the atomic pack writer"))?;
+            .map_err(|_| anyhow!("could not start the atomic writer"))?;
         Ok(Self { op })
     }
 }
@@ -188,7 +188,7 @@ impl PackIo for OperatorIo {
     fn exists(&self, path: &str) -> anyhow::Result<bool> {
         self.op
             .exists(path)
-            .map_err(|e| failure_words("checking whether the pack already exists", &e))
+            .map_err(|e| failure_words("checking whether the file already exists", &e))
     }
 
     fn rename(&self, from: &str, to: &str) -> anyhow::Result<()> {
@@ -620,7 +620,7 @@ impl AtomicPackBackend {
         let mut slot = self
             .io
             .lock()
-            .map_err(|_| anyhow!("the atomic pack writer lock was poisoned"))?;
+            .map_err(|_| anyhow!("the atomic writer lock was poisoned"))?;
         if let Some(io) = slot.as_ref() {
             return Ok(Arc::clone(io));
         }
@@ -634,7 +634,7 @@ impl AtomicPackBackend {
         let mut slot = self
             .io
             .lock()
-            .map_err(|_| anyhow!("the atomic pack writer lock was poisoned"))?;
+            .map_err(|_| anyhow!("the atomic writer lock was poisoned"))?;
         *slot = None;
         let io = (self.factory)()?;
         *slot = Some(Arc::clone(&io));
@@ -678,7 +678,7 @@ impl AtomicPackBackend {
         bytes: &Bytes,
     ) -> Result<(), String> {
         let attempts = self.policy.attempts.max(1);
-        let mut io = self.io().map_err(|e| unreachable_words(&e))?;
+        let mut io = self.io().map_err(|e| unreachable_words(kind, &e))?;
         let mut last = String::new();
         let mut left = 0;
         for attempt in 1..=attempts {
@@ -702,7 +702,7 @@ impl AtomicPackBackend {
                         match self.io() {
                             Ok(fresh) => io = fresh,
                             Err(e) => {
-                                last = unreachable_words(&e);
+                                last = unreachable_words(kind, &e);
                                 break;
                             }
                         }
@@ -726,8 +726,11 @@ impl AtomicPackBackend {
     }
 }
 
-fn unreachable_words(error: &anyhow::Error) -> String {
-    format!("the destination could not be reached for the pack upload ({error:#})")
+fn unreachable_words(kind: FileKind, error: &anyhow::Error) -> String {
+    format!(
+        "the destination could not be reached for the upload of {} ({error:#})",
+        kind.noun()
+    )
 }
 
 fn backend_error(text: String) -> Box<RusticError> {
