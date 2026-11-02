@@ -542,6 +542,14 @@ impl BackupStore {
             opts = opts.options(self.cfg.backend_options());
         }
         let backends = opts.to_backends().context("build backend options")?;
+        // ADR-063 D1: on the SFTP and local-directory families a pack upload
+        // is written under a tmp name, verified and renamed. The wrapper is
+        // lazy (no second connection until the first pack write) and sits
+        // below every read seam, so reads are untouched.
+        let backends = RepositoryBackends::new(
+            crate::atomic_pack::AtomicPackBackend::wrap(backends.repository(), &self.cfg),
+            backends.repo_hot(),
+        );
         // The read seam, outermost first: ADR-062 D3's mirror-first reads
         // (LM-3) hold the body cache inside them when a mirror is attached,
         // because ruling 7 keys on provenance — a cache wrapped *around* a
@@ -792,6 +800,9 @@ impl BackupStore {
         // holds the snapshot we were handed is a read of the repository's own
         // answer, not a flag this function sets from its own intent.
         let snapshot_written = snaps.iter().any(|stored| stored.id == snap.id);
+        // ADR-063 D3 / ruling 2: this push connection is the only place
+        // tmp debris is ever deleted.
+        self.sweep_tmp_debris();
         let summary = snap
             .summary
             .as_ref()
@@ -1398,23 +1409,8 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
     for snap in snapshots {
         let snap_id = snap.id.to_hex().as_str().to_string();
         let short = &snap_id[..8.min(snap_id.len())];
-        let root = repo
-            .node_from_snapshot_and_path(snap, "")
-            .with_context(|| {
-                format!(
-                    "UNKNOWN: session `{}` cannot be resolved for machine `{machine}`: snapshot {short} tree root",
-                    crate::id::short_session_id(session_id)
-                )
-            })?;
-        let entries = repo
-            .ls(&root, &LsOptions::default())
-            .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
-            .with_context(|| {
-                format!(
-                    "UNKNOWN: session `{}` cannot be resolved for machine `{machine}`: snapshot {short} tree walk",
-                    crate::id::short_session_id(session_id)
-                )
-            })?;
+        let entries =
+            snapshot_session_entries(repo, snap, machine, session_id, short, policy.collapses())?;
         for (path, node) in entries {
             if node.node_type != NodeType::File {
                 continue;
@@ -1519,6 +1515,201 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
         concat
     };
     Ok(Some((body, hashes)))
+}
+
+/// The files of one snapshot that [`dump_cumulative_session`] can possibly
+/// care about: `(path relative to the snapshot root, node)`, in the same form
+/// a recursive `ls` of the root yields them.
+///
+/// W1059. The walk used to list the *whole* snapshot tree and filter, so one
+/// small session cost every file of every session of the machine, once per
+/// snapshot (field: 982 snapshots, 760-981 s for 1373 bytes). A dir-backup's
+/// tree mirrors the stage root's absolute path (`snapshot.paths` minus the
+/// leading `/`), under which the writer's layout is fixed:
+/// `sessions/<machine>/<session>/[<bucket>/]<shard>` and
+/// `meta/<machine>/provenance-v1.jsonl`. This reads exactly those directories
+/// (a handful of tree blobs plus the one session's subtree), so the cost is
+/// the session's, not the machine's.
+///
+/// The fast path is taken only when it is *known* to see what the full listing
+/// would: every `snapshot.paths` entry resolves to a directory that has a
+/// `sessions` child and holds nothing beside the writer's own stage-root
+/// names ([`FAST_PATH_STAGE_TOPLEVEL`]). Anything else (a tree not shaped like
+/// a stage, a missing path, a stage root with an unrecognized entry) falls
+/// back to the full recursive listing, so an odd snapshot is
+/// still walked completely rather than guessed at. A tree blob that cannot be
+/// read is an error on either path, never an absence: only "this directory has
+/// no such child" means the snapshot does not hold the session.
+///
+/// Narrowing, stated: the full listing matched the *last* `sessions` path
+/// component anywhere, so a `sessions` directory nested below some other
+/// directory — a second root parked beside the writer's, say — matched too.
+/// The writer never produces one, and the fast path does not look for it: a
+/// stage root holding any name outside [`FAST_PATH_STAGE_TOPLEVEL`] is
+/// refused the shortcut and walked in full, so an unrecognized layout costs
+/// time instead of turning a held session into a false absence.
+fn snapshot_session_entries<S: rustic_core::IndexedFull>(
+    repo: &Repository<S>,
+    snap: &SnapshotFile,
+    machine: &str,
+    session_id: &str,
+    short: &str,
+    want_provenance: bool,
+) -> anyhow::Result<Vec<(PathBuf, rustic_core::repofile::Node)>> {
+    let unknown = |what: &str| {
+        format!(
+            "UNKNOWN: session `{}` cannot be resolved for machine `{machine}`: snapshot {short} {what}",
+            crate::id::short_session_id(session_id)
+        )
+    };
+    let root = repo
+        .node_from_snapshot_and_path(snap, "")
+        .with_context(|| unknown("tree root"))?;
+    if let Some(found) = fast_session_entries(
+        repo,
+        snap,
+        &root,
+        machine,
+        session_id,
+        want_provenance,
+        &unknown,
+    )? {
+        return Ok(found);
+    }
+    repo.ls(&root, &LsOptions::default())
+        .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
+        .with_context(|| unknown("tree walk"))
+}
+
+/// The names the writer itself puts at a stage root.
+///
+/// [`fast_session_entries`] takes its shortcut only through these. The full
+/// listing it replaces matched a session's shards by the *last* `sessions`
+/// component anywhere in the tree, so a `sessions/<machine>/<session>/`
+/// subtree parked somewhere the writer does not put it still counted as held —
+/// which is exactly what a backup reader must keep resolving. The fast path
+/// reads `sessions/` and `meta/` directly and never looks into anything else,
+/// so a stage root holding an unrecognized name is walked in full instead:
+/// the one direction this trade must never fail in is a held session reading
+/// as absent, and every name here is one the fast path can see past because
+/// the writer cannot place a session's shards or provenance under it.
+///
+/// Every writer-side entry at the stage root names itself through one of its
+/// own constants here except `ext-status`, which has no named constant. A new
+/// top-level directory the writer starts creating must join this list in the
+/// same change or the fast path quietly stops applying to stages that contain
+/// it — a cost, never a correctness break, which is the safe direction for
+/// this set to be wrong in.
+const FAST_PATH_STAGE_TOPLEVEL: &[&str] = &[
+    SESSIONS_DIR,
+    crate::manifest::META_DIR,
+    MACHINE_LOGS_DIR,
+    "ext-status",
+    crate::import::IMPORT_RAW_DIR,
+    crate::raw_export::EXPORT_FILES_DIR,
+    crate::inbox::STAGE_LOCK_FILE,
+];
+
+/// `Some(entries)` when every stage root resolved and holds `sessions/` under
+/// the writer's layout alone; `None` to ask for the full listing.
+fn fast_session_entries<S: rustic_core::IndexedFull>(
+    repo: &Repository<S>,
+    snap: &SnapshotFile,
+    root: &rustic_core::repofile::Node,
+    machine: &str,
+    session_id: &str,
+    want_provenance: bool,
+    unknown: &dyn Fn(&str) -> String,
+) -> anyhow::Result<Option<Vec<(PathBuf, rustic_core::repofile::Node)>>> {
+    fn child<S: rustic_core::IndexedFull>(
+        repo: &Repository<S>,
+        dir: &rustic_core::repofile::Node,
+        name: &std::ffi::OsStr,
+        unknown: &dyn Fn(&str) -> String,
+    ) -> anyhow::Result<Option<rustic_core::repofile::Node>> {
+        let Some(id) = dir.subtree else {
+            return Ok(None);
+        };
+        let tree = repo.get_tree(&id).with_context(|| unknown("tree walk"))?;
+        Ok(tree.nodes.into_iter().find(|n| n.name() == name))
+    }
+
+    let stage_paths: Vec<PathBuf> = (&snap.paths).into_iter().map(PathBuf::from).collect();
+    if stage_paths.is_empty() {
+        return Ok(None);
+    }
+    let mut out = Vec::new();
+    for stage_path in stage_paths {
+        let rel: PathBuf = stage_path
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+            .collect();
+        let mut stage = root.clone();
+        for comp in rel.components() {
+            match child(repo, &stage, comp.as_os_str(), unknown)? {
+                Some(next) if next.node_type == NodeType::Dir => stage = next,
+                _ => return Ok(None),
+            }
+        }
+        let Some(stage_tree_id) = stage.subtree else {
+            return Ok(None);
+        };
+        let stage_tree = repo
+            .get_tree(&stage_tree_id)
+            .with_context(|| unknown("tree walk"))?;
+        // One unrecognized entry beside the writer's layout is enough to lose
+        // the shortcut for the whole snapshot: the fast path cannot prove it
+        // still sees every `sessions/<machine>/<session>/` subtree the full
+        // listing would have matched, so the snapshot is walked in full
+        // instead — slower, never a false absence.
+        if stage_tree
+            .nodes
+            .iter()
+            .any(|node| match node.name().to_str() {
+                Some(name) => !FAST_PATH_STAGE_TOPLEVEL.contains(&name),
+                None => true,
+            })
+        {
+            return Ok(None);
+        }
+        let sessions_dir = std::ffi::OsStr::new(SESSIONS_DIR);
+        let Some(sessions) = stage_tree
+            .nodes
+            .iter()
+            .find(|node| node.name() == sessions_dir)
+        else {
+            return Ok(None);
+        };
+        if sessions.node_type != NodeType::Dir {
+            return Ok(None);
+        }
+        if let Some(machine_dir) = child(repo, sessions, machine.as_ref(), unknown)? {
+            if let Some(session_dir) = child(repo, &machine_dir, session_id.as_ref(), unknown)? {
+                if session_dir.node_type == NodeType::Dir {
+                    let base = rel.join(SESSIONS_DIR).join(machine).join(session_id);
+                    let listed = repo
+                        .ls(&session_dir, &LsOptions::default())
+                        .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
+                        .with_context(|| unknown("tree walk"))?;
+                    out.extend(listed.into_iter().map(|(p, n)| (base.join(p), n)));
+                }
+            }
+        }
+        if want_provenance {
+            if let Some(meta) = child(repo, &stage, "meta".as_ref(), unknown)? {
+                if let Some(mdir) = child(repo, &meta, machine.as_ref(), unknown)? {
+                    if let Some(file) = child(repo, &mdir, "provenance-v1.jsonl".as_ref(), unknown)?
+                    {
+                        out.push((
+                            rel.join("meta").join(machine).join("provenance-v1.jsonl"),
+                            file,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(Some(out))
 }
 
 /// Declare the plaintext size of the session about to be dumped, so ADR-034's
@@ -3843,6 +4034,12 @@ mod tests {
 }
 
 impl StoreConfig {
+    /// Fill in the `opendal:fs` staging directory. Index and snapshot files
+    /// still depend on it: ADR-063's tmp/verify/rename covers packs only, so
+    /// keeping this default is what stops a torn index or snapshot from
+    /// sitting under its final name (ruling 3 as amended 2026-11-01). Packs
+    /// go through the wrapper's own writer, built from the root alone; a value
+    /// the user set themselves is never overwritten.
     fn with_atomic_fs_writes(
         &self,
         mut options: BTreeMap<String, String>,
@@ -3850,9 +4047,8 @@ impl StoreConfig {
         // OpenDAL fs otherwise exposes the final object before its bytes are written.
         // Stage under the repository root so publication uses a same-filesystem rename.
         // Building the operator creates this directory, even for read-only opens:
-        // the root must be writable unless staging already exists. Users can set
-        // atomic_write_dir explicitly on the same filesystem. Crash debris stays
-        // there; this code does not inspect or remove another writer's temp files.
+        // the root must be writable unless staging already exists. Crash debris stays
+        // there until a push's by-name sweep removes what is over seven days old.
         if self.repo_root == "opendal:fs" {
             if let Some(root) = options.get("root") {
                 let staging = Path::new(root).join(".chat-stasher-tmp");
@@ -3863,6 +4059,59 @@ impl StoreConfig {
         }
         options
     }
+
+    /// The `(scheme, options)` an [`crate::atomic_pack`] writer opens for this
+    /// destination, or `None` for a family ADR-063 leaves alone (S3/R2 are
+    /// atomic at the object, D2; `rest:` is not covered).
+    pub(crate) fn pack_publication_target(&self) -> Option<(String, BTreeMap<String, String>)> {
+        let fs_root = |root: &str| {
+            let absolute = std::path::absolute(root).ok()?;
+            let mut options = BTreeMap::new();
+            options.insert("root".to_string(), absolute.to_str()?.to_string());
+            Some(("fs".to_string(), options))
+        };
+        if repository_routes_local_backend(self) {
+            let root = self
+                .repo_root
+                .strip_prefix("local:")
+                .unwrap_or(&self.repo_root);
+            return fs_root(root);
+        }
+        match self.repo_root.as_str() {
+            "opendal:fs" => fs_root(self.options.get("root")?),
+            "opendal:sftp" => Some(("sftp".to_string(), self.backend_options())),
+            _ => None,
+        }
+    }
+}
+
+impl BackupStore {
+    /// Delete tmp debris older than seven days on this push connection
+    /// (ADR-063 D3). Best effort: a sweep that cannot run is worded and never
+    /// fails the push, because the debris it would have removed is inert.
+    fn sweep_tmp_debris(&self) {
+        match crate::atomic_pack::sweep_for_config(&self.cfg) {
+            Ok(Some(report)) => {
+                if report.removed > 0 {
+                    eprintln!(
+                        "[push] tmp debris : removed {} leftover file(s) ({} B) older than 7 days",
+                        report.removed, report.removed_bytes
+                    );
+                }
+                if report.failed > 0 || report.unlisted > 0 {
+                    eprintln!(
+                        "[push] tmp debris : the sweep could not finish ({} delete(s) failed, {} \
+                         director(ies) not listed); nothing was lost and the next push tries again",
+                        report.failed, report.unlisted
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!(
+                "[push] tmp debris : the sweep could not run ({error:#}); the next push tries again"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3870,7 +4119,10 @@ mod atomic_fs_tests {
     use super::*;
 
     #[test]
-    fn opendal_fs_publishes_objects_atomically() {
+    fn opendal_fs_keeps_its_staging_default_for_index_and_snapshot_files() {
+        // ADR-063 ruling 3, amended: packs go through the wrapper, but index
+        // and snapshot files still need the staged write, so the default
+        // stays and a user-set value still wins.
         let mut cfg = StoreConfig {
             repo_root: "opendal:fs".into(),
             options: BTreeMap::from([("root".into(), "synthetic-repo".into())]),
@@ -3896,5 +4148,30 @@ mod atomic_fs_tests {
         cfg.repo_root = "opendal:s3".into();
         cfg.options.remove("atomic_write_dir");
         assert!(!cfg.backend_options().contains_key("atomic_write_dir"));
+    }
+
+    #[test]
+    fn only_the_sftp_and_local_directory_families_publish_through_the_wrapper() {
+        let cfg = |root: &str, options: &[(&str, &str)]| StoreConfig {
+            repo_root: root.into(),
+            options: options
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            ..StoreConfig::default()
+        };
+        let scheme = |c: &StoreConfig| c.pack_publication_target().map(|(s, _)| s);
+        assert_eq!(scheme(&cfg("/abs/repo", &[])), Some("fs".to_string()));
+        assert_eq!(scheme(&cfg("local:/abs/repo", &[])), Some("fs".to_string()));
+        assert_eq!(
+            scheme(&cfg("opendal:fs", &[("root", "/abs/repo")])),
+            Some("fs".to_string())
+        );
+        assert_eq!(scheme(&cfg("opendal:sftp", &[])), Some("sftp".to_string()));
+        // D2: S3/R2 are atomic at the object; rest: is not covered.
+        assert_eq!(scheme(&cfg("opendal:s3", &[])), None);
+        assert_eq!(scheme(&cfg("rest:https://example.invalid/", &[])), None);
+        // opendal:fs without a root has nowhere to publish: not covered.
+        assert_eq!(scheme(&cfg("opendal:fs", &[])), None);
     }
 }

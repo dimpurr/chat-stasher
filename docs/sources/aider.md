@@ -10,9 +10,9 @@
 
 | OS | Session path template | Format | Confidence | Status |
 |---|---|---|---|---|
-| macOS | `$CWD/.aider.chat.history.md` | markdown / txt / jsonl | source-confirmed | supported |
-| Linux | `$CWD/.aider.chat.history.md` | markdown / txt / jsonl | source-confirmed | supported |
-| Windows | `$CWD/.aider.chat.history.md` | markdown / txt / jsonl | source-confirmed | supported |
+| macOS | `$CWD/.aider.chat.history.md` | md / markdown | source-confirmed | supported |
+| Linux | `$CWD/.aider.chat.history.md` | md / markdown | source-confirmed | supported |
+| Windows | `$CWD/.aider.chat.history.md` | md / markdown | source-confirmed | supported |
 <!-- END GENERATED -->
 
 ## What it is

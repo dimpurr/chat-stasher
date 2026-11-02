@@ -33,10 +33,10 @@
 //! copy's completed-round record ([`crate::mirrorstate`]) holds the proof's
 //! snapshot closure-complete. The caller hands the mirror in as
 //! [`MirrorHoldback`]; `None` (no section, switch off) runs the reclaim
-//! exactly as it ran before mirrors existed. A mirror whose `mirror_of` is
-//! degraded and therefore not consulted binds nothing: a degraded
-//! destination may not hold the whole machine's reclaim hostage (D3's own
-//! rule), its protection being the alarm layer and the union backfill.
+//! exactly as it ran before mirrors existed. With a mirror enabled the leg
+//! fails closed (ADR-062 D4): a `mirror_of` that is undeclared, or declared
+//! but degraded and so not consulted, holds every candidate as
+//! `mirror-unresolved` and deletes nothing.
 //!
 //! Default is a dry run: report what would be reclaimed and delete nothing.
 //! `--apply` writes each machine's retained summaries first — so the L3
@@ -153,6 +153,12 @@ pub enum BlockedKind {
     /// sentence this kind prints are [`crate::mirror::HELD_BACK_KIND`] and
     /// [`crate::mirror::HELD_BACK_SENTENCE`], the one spelling D6.3 fixed.
     NotMirrored,
+    /// The mirror leg could not be resolved (ADR-062 D4 fail-safe): `[mirror]`
+    /// is enabled but `mirror_of` is not a declared destination, or it is
+    /// declared but degraded and so not consulted this run. No snapshot can
+    /// be designated for the mirror, so the leg reads "not covered" and every
+    /// candidate is held; nothing is deleted. `detail` is the clear reason.
+    MirrorUnresolved { detail: String },
 }
 
 /// What the caller states about this machine's mirror, for the mirror leg
@@ -255,6 +261,7 @@ pub fn block_kind_word(kind: &BlockedKind) -> &'static str {
         // D6.3's fixed `--json` spelling, shared with every surface that
         // repeats it, so the report word never becomes a second vocabulary.
         BlockedKind::NotMirrored => crate::mirror::HELD_BACK_KIND,
+        BlockedKind::MirrorUnresolved { .. } => crate::mirror::UNRESOLVED_KIND,
     }
 }
 
@@ -503,6 +510,43 @@ pub fn reclaim_stage(
     // A held-back session is blocked per session as `not-mirrored`
     // ([`crate::mirror::HELD_BACK_KIND`]), the same word the row and
     // `--json` spell.
+    //
+    // Fail closed (ADR-062 D4, last bullet: a mirror source outside the
+    // healthy set designates no snapshot, so the leg is "not covered" and
+    // the reclaim holds back and alarms — "the safe direction"): with the
+    // mirror enabled, a `mirror_of` that is not a consulted must-prove
+    // destination (undeclared, or degraded) holds EVERY candidate. With
+    // `mirror == None` (no section / switch off) none of this runs.
+    if let Some(holdback) = mirror {
+        if !ready
+            .iter()
+            .any(|(dest, _, _)| dest.name == holdback.mirror_of)
+        {
+            let detail = match destinations.iter().find(|d| d.name == holdback.mirror_of) {
+                None if holdback.mirror_of.is_empty() => {
+                    "`[mirror] mirror_of` is empty while the mirror is enabled".to_string()
+                }
+                None => format!(
+                    "`[mirror] mirror_of` names \"{}\", which is not a declared destination",
+                    holdback.mirror_of
+                ),
+                Some(dest) => format!(
+                    "`[mirror] mirror_of` names \"{}\", which is {} and was not consulted \
+                     this run",
+                    holdback.mirror_of,
+                    dest.health.proof_role_word()
+                ),
+            };
+            if !report.candidates.is_empty() {
+                report.blocked.push(Blocked {
+                    destination: holdback.mirror_of.clone(),
+                    kind: BlockedKind::MirrorUnresolved { detail },
+                    sessions: report.candidates.len(),
+                    bytes: report.candidate_bytes,
+                });
+            }
+        }
+    }
     if let Some((holdback, mirroring, snapshots)) = mirror.and_then(|holdback| {
         ready
             .iter()

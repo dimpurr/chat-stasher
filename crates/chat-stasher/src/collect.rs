@@ -1405,6 +1405,27 @@ pub struct CollectReport {
     /// Stored cursors that could not prove themselves and were therefore
     /// treated as unread.
     pub unverified_cursors: usize,
+    /// W1057: why each reset of this pass happened, counted per
+    /// `(harness id, cause)`. Counts only: a cause is a fixed word from this
+    /// module's own vocabulary, never a session id, title or path. Every
+    /// session counted in [`Self::reset_records`] is counted here exactly once.
+    pub reset_causes: BTreeMap<(String, String), usize>,
+    /// W1057: sessions whose stored cursor looked unverifiable against the
+    /// manifest this pass loaded at its start, but verified against the
+    /// manifest as the reclaim left it by the time the session was reached.
+    /// A reclaim finishing while a pass is in flight is the only way this is
+    /// non-zero.
+    pub late_manifest_settled: usize,
+    /// W1057: how many times this pass re-read the retained manifest because
+    /// its file changed under the pass (a reclaim ran concurrently).
+    pub manifest_reloads: usize,
+    /// W1057: whether the retained manifest was readable when the pass began,
+    /// and how many session rows it held then. `None` rows is an unreadable or
+    /// absent manifest, not an empty one.
+    pub manifest_rows_at_start: Option<usize>,
+    /// W1057: a failure to append this pass's row to the durable reset-cause
+    /// ledger, as an I/O error kind word. `None` means it was written.
+    pub reset_ledger_error: Option<String>,
     pub scanned_records: usize,
     pub scanned_opencode_records: usize,
     pub scanned_cursor_records: usize,
@@ -1915,6 +1936,10 @@ pub fn collect_scan_report_with_relocation(
         });
     }
 
+    // W1057: stamp the manifest file BEFORE reading it, so a reclaim that
+    // rewrites it between the stamp and the read is seen as a change (and
+    // costs one redundant reload), never missed.
+    let manifest_stamp = manifest_file_stamp(stage, machine);
     let manifest_facts = load_local_manifest_facts(stage, machine);
     let mut records = scan.records.clone();
     records.sort_by(|a, b| a.absolute_path.cmp(&b.absolute_path));
@@ -1963,7 +1988,9 @@ pub fn collect_scan_report_with_relocation(
         destination_id: &destination_id,
         bucket_cap,
         remote_facts,
-        manifest_facts: manifest_facts.as_ref(),
+        manifest_rows_at_start: manifest_facts.as_ref().map(BTreeMap::len),
+        manifest_facts,
+        manifest_stamp,
         pass: &pass,
         counters: CollectCounters::default(),
         report,
@@ -2013,8 +2040,10 @@ pub fn collect_scan_report_with_relocation(
     let PassCollector {
         mut report,
         counters,
+        manifest_rows_at_start,
         ..
     } = collector;
+    report.manifest_rows_at_start = manifest_rows_at_start;
     report.files_statted = counters.files_statted;
     report.sqlite_sessions_queried = counters.sqlite_sessions_queried;
     // Machine logs are collected after every session, and into their own
@@ -2029,7 +2058,55 @@ pub fn collect_scan_report_with_relocation(
         destination,
         &mut report,
     )?;
+    // W1057: a round that reset or could not prove a cursor, or that had to
+    // re-read the manifest, is recorded durably beside the state files. The
+    // run log is overwritten by the next round; this row is not. A quiet
+    // round writes nothing (a pass with nothing to report leaves the state
+    // directory as it found it). A ledger that cannot be written is
+    // reported, never fatal: it must not cost the pass it describes.
+    let notable =
+        report.reset_records > 0 || report.unverified_cursors > 0 || report.manifest_reloads > 0;
+    let appended = if notable {
+        crate::resetledger::append_round(state_dir, &reset_ledger_round(&report, &pass))
+    } else {
+        Ok(())
+    };
+    if let Err(error) = appended {
+        report.reset_ledger_error = Some(match error.downcast_ref::<std::io::Error>() {
+            Some(io) => format!("{:?}", io.kind()),
+            None => "other".to_string(),
+        });
+    }
     Ok(report)
+}
+
+/// The durable row of one finished pass: counts and fixed words only.
+fn reset_ledger_round(report: &CollectReport, pass: &PassContext) -> crate::resetledger::Round {
+    let mut causes: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    for ((source, cause), count) in &report.reset_causes {
+        causes
+            .entry(source.clone())
+            .or_default()
+            .insert(cause.clone(), *count);
+    }
+    crate::resetledger::Round {
+        version: crate::resetledger::VERSION,
+        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        pass_started_unix: pass.pass_ts,
+        pass_finished_unix: crate::manifest::now_unix_seconds()
+            // reason: a clock before the epoch; the row then says 0 (the epoch itself) rather than a plausible time, and the pass it describes is unaffected
+            .unwrap_or_default(),
+        destination: report.destination_id.chars().take(12).collect(),
+        scanned_records: report.scanned_records,
+        changed: report.changed_records,
+        unchanged: report.unchanged_records,
+        reset: report.reset_records,
+        unverified_cursors: report.unverified_cursors,
+        manifest_rows_at_start: report.manifest_rows_at_start,
+        manifest_reloads: report.manifest_reloads,
+        late_manifest_settled: report.late_manifest_settled,
+        reset_causes: causes,
+    }
 }
 
 /// What one record's own read path decided — the [`ReadOutcome`] split
@@ -2042,6 +2119,86 @@ enum RecordFate {
     Processed,
     Skipped,
     Failed,
+}
+
+/// Size and modification time of the retained manifest file: cheap to take,
+/// and it changes whenever a reclaim rewrites the file (tmp + rename).
+type ManifestStamp = (u64, std::time::SystemTime);
+
+fn manifest_file_stamp(stage: &Path, machine: &str) -> Option<ManifestStamp> {
+    let meta = fs::metadata(crate::manifest::manifest_path(stage, machine)).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+/// W1057: why a stored cursor could not prove itself, as one fixed word per
+/// failure shape. Local proof first, then what the destination archive said;
+/// the words name a state of the stage, the retained summary and the archive,
+/// never a session.
+fn proof_gap_word(
+    entry: &DebtEntry,
+    machine: &str,
+    stage: &Path,
+    remote_facts: Option<&ArchiveFacts>,
+    manifest_facts: Option<&BTreeMap<String, ShardFact>>,
+) -> String {
+    if entry.machine != machine {
+        return "machine_partition".to_string();
+    }
+    let dir = store::session_shard_dir(stage, machine, &entry.session_id);
+    let local = match store::sealed_shard_entries(&dir) {
+        Err(_) => "stage_unreadable",
+        Ok(entries) if !entries.is_empty() => "stage_body_diverged",
+        Ok(_) => match manifest_facts {
+            None => "manifest_absent",
+            Some(facts) => match facts.get(&entry.session_id) {
+                None => "manifest_row_absent",
+                Some(_) => "manifest_row_differs",
+            },
+        },
+    };
+    let remote = match remote_facts {
+        None => "archive_unconsulted",
+        Some(facts) => {
+            if facts.contains_key(&(machine.to_string(), entry.session_id.clone())) {
+                "archive_differs"
+            } else {
+                "archive_lacks"
+            }
+        }
+    };
+    format!("{local}+{remote}")
+}
+
+/// W1057: the cause of a reset that no unproven cursor forced, from the write
+/// path the read took. For opencode: a normal record increment (the report
+/// has always counted its shard as a reset when a cursor existed), an
+/// increment-era entry whose map could not be reconciled, or a pre-increment
+/// entry; every other source's reread is one word.
+fn reset_cause_of_read(
+    record: &SessionRecord,
+    old: Option<&OffsetEntry>,
+    took_increment: bool,
+    took_full_export: bool,
+) -> &'static str {
+    if record.sqlite_layout != Some(SqliteSessionLayout::OpenCode) {
+        return "source_reread";
+    }
+    if took_increment {
+        "opencode_increment_write"
+    } else if took_full_export {
+        match old {
+            Some(entry)
+                if entry.opencode_record_digests.is_some()
+                    || entry.opencode_map_digest.is_some() =>
+            {
+                "opencode_map_unreconciled"
+            }
+            Some(_) => "opencode_pre_increment_entry",
+            None => "opencode_first_sight",
+        }
+    } else {
+        "opencode_other"
+    }
 }
 
 /// The pass-shared collector state: everything one record's read needs
@@ -2059,7 +2216,13 @@ struct PassCollector<'a> {
     destination_id: &'a str,
     bucket_cap: usize,
     remote_facts: Option<&'a ArchiveFacts>,
-    manifest_facts: Option<&'a BTreeMap<String, ShardFact>>,
+    /// The retained manifest summary as this pass last read it. Owned, not
+    /// borrowed (W1057): `reclaim-stage` takes no lock against a collect, so
+    /// a reclaim can finish while this pass is mid-flight, and the summary it
+    /// writes first (the body goes only afterwards) must then be re-read.
+    manifest_facts: Option<BTreeMap<String, ShardFact>>,
+    manifest_rows_at_start: Option<usize>,
+    manifest_stamp: Option<ManifestStamp>,
     pass: &'a PassContext,
     counters: CollectCounters,
     report: CollectReport,
@@ -2067,6 +2230,20 @@ struct PassCollector<'a> {
 }
 
 impl<'a> PassCollector<'a> {
+    /// W1057: re-read the retained manifest if its file changed since this
+    /// pass last read it. Returns whether the facts were replaced. A file that
+    /// is missing both times is unchanged: nothing new to learn from it.
+    fn refresh_manifest_facts(&mut self) -> bool {
+        let now = manifest_file_stamp(self.stage, self.machine);
+        if now == self.manifest_stamp {
+            return false;
+        }
+        self.manifest_stamp = now;
+        self.manifest_facts = load_local_manifest_facts(self.stage, self.machine);
+        self.report.manifest_reloads += 1;
+        true
+    }
+
     /// Collect one record, folding the whole read into the report. `Failed`
     /// means the read itself failed — the caller decides whether that is a
     /// read failure (a source that is still there) or a vanished source
@@ -2092,24 +2269,59 @@ impl<'a> PassCollector<'a> {
     fn process_record_inner(&mut self, record: &mut SessionRecord) -> anyhow::Result<RecordFate> {
         let stage = self.stage;
         let machine = self.machine;
+        #[cfg(test)]
+        tests_support::before_record(record);
         let key = state_key(record);
         let stored = self.debts.get(&key).cloned();
         // A stored cursor is a claim, not a fact. It is only reused once it has
         // discharged itself against the stage, the local reclaim manifest, or
         // this destination's own archive.
         let mut unverifiable = None;
+        // W1057: why the proof failed, in the fixed words of
+        // [`proof_gap_word`]; kept for the reset-cause row below.
+        let mut proof_gap = None;
         if let Some(entry) = stored.as_ref() {
-            match verify_debt(
+            let mut verdict = verify_debt(
                 entry,
                 machine,
                 stage,
                 self.remote_facts,
-                self.manifest_facts,
-            )? {
+                self.manifest_facts.as_ref(),
+            )?;
+            // W1057: `reclaim-stage` and this pass share no lock. A reclaim
+            // that finishes while the pass is in flight deletes the body of
+            // sessions the pass has not reached yet — after having written
+            // the retained summary that settles them, which this pass read
+            // at its start, before the summary named them. The summary is
+            // written strictly before any body goes, so a body found gone
+            // with no settling summary is first a reason to read the summary
+            // again, not yet a reason to reread the source whole.
+            if matches!(verdict, DebtVerdict::Unverifiable(_)) && self.refresh_manifest_facts() {
+                verdict = verify_debt(
+                    entry,
+                    machine,
+                    stage,
+                    self.remote_facts,
+                    self.manifest_facts.as_ref(),
+                )?;
+                if !matches!(verdict, DebtVerdict::Unverifiable(_)) {
+                    self.report.late_manifest_settled += 1;
+                }
+            }
+            match verdict {
                 DebtVerdict::OwedOnStage
                 | DebtVerdict::SettledInArchive
                 | DebtVerdict::SettledReclaimed => {}
-                DebtVerdict::Unverifiable(reason) => unverifiable = Some(reason),
+                DebtVerdict::Unverifiable(reason) => {
+                    unverifiable = Some(reason);
+                    proof_gap = Some(proof_gap_word(
+                        entry,
+                        machine,
+                        stage,
+                        self.remote_facts,
+                        self.manifest_facts.as_ref(),
+                    ));
+                }
             }
         }
         if let Some(reason) = unverifiable {
@@ -2135,7 +2347,7 @@ impl<'a> PassCollector<'a> {
                     stage,
                     machine,
                     &mut self.counters,
-                    self.manifest_facts,
+                    self.manifest_facts.as_ref(),
                 ) {
                     Ok(position) => Some(position),
                     // W1049: the cursor resolution proves a stage-derived
@@ -2189,6 +2401,10 @@ impl<'a> PassCollector<'a> {
         // The cursor is still handed down so the outcome can report this as a
         // reread rather than a first read; `force_reset` is what actually stops
         // it from being reused.
+        // W1057: which write path the read took is told by the counters it
+        // moves; snapshot them so the cause of a reset can be named after.
+        let full_exports_before = self.counters.sqlite_full_exports;
+        let increments_before = self.counters.sqlite_increment_passes;
         let read = collect_one(
             record,
             old.as_ref(),
@@ -2199,7 +2415,7 @@ impl<'a> PassCollector<'a> {
             self.bucket_cap,
             &mut self.counters,
             self.pass,
-            self.manifest_facts,
+            self.manifest_facts.as_ref(),
         );
         match read {
             Ok(ReadOutcome::Processed(processed)) => {
@@ -2238,6 +2454,21 @@ impl<'a> PassCollector<'a> {
                 }
                 if outcome.reset {
                     self.report.reset_records += 1;
+                    let cause = match proof_gap.as_ref() {
+                        Some(gap) => format!("unverifiable:{gap}"),
+                        None => reset_cause_of_read(
+                            record,
+                            old.as_ref(),
+                            self.counters.sqlite_increment_passes > increments_before,
+                            self.counters.sqlite_full_exports > full_exports_before,
+                        )
+                        .to_string(),
+                    };
+                    *self
+                        .report
+                        .reset_causes
+                        .entry((record.source.short().to_string(), cause))
+                        .or_default() += 1;
                 }
                 self.report.source_bytes_read += outcome.bytes_read;
                 self.report.delta_bytes_read += outcome.bytes_read;
@@ -6418,3 +6649,34 @@ mod opencode_increment_tests {
         assert!(parsed.opencode_map_digest.is_none());
     }
 }
+
+/// W1057: a deterministic seam for the collect/reclaim race fixtures: a hook
+/// that runs on the pass's own thread just before a given record is read, so
+/// a test can let a reclaim finish exactly there.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::SessionRecord;
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnMut(&SessionRecord)>;
+
+    thread_local! {
+        static BEFORE_RECORD: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn set_before_record(hook: Option<Hook>) {
+        BEFORE_RECORD.with(|slot| *slot.borrow_mut() = hook);
+    }
+
+    pub(super) fn before_record(record: &SessionRecord) {
+        BEFORE_RECORD.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().as_mut() {
+                hook(record);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+#[path = "collect_reclaim_race_tests.rs"]
+mod reclaim_race_tests;

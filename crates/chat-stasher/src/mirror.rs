@@ -2273,6 +2273,26 @@ pub const HELD_BACK_KIND: &str = "not-mirrored";
 /// the sentence names.
 pub const HELD_BACK_SENTENCE: &str = "the mirror has not synced to this snapshot yet";
 
+/// The `--json` / record word for the fail-closed hold the reclaim applies
+/// when `[mirror]` is enabled but its `mirror_of` destination cannot be
+/// resolved to a consulted must-prove destination this run (not declared,
+/// or degraded and therefore not consulted). ADR-062 D4: a mirror source
+/// outside the healthy set yields no designated snapshot, the mirror leg
+/// reads "not covered", and reclaim holds back and alarms. Every candidate
+/// is held; nothing is deleted.
+pub const UNRESOLVED_KIND: &str = "mirror-unresolved";
+
+/// The human phrase for [`UNRESOLVED_KIND`], one spelling across surfaces.
+pub const UNRESOLVED_SENTENCE: &str =
+    "the mirror proof is unavailable because `[mirror] mirror_of` \
+     is not a declared, healthy, consulted destination";
+
+/// Whether a recorded block kind is one of the mirror leg's own holds
+/// (the mirror, not a destination, is why the bytes stay).
+pub fn is_hold_kind(kind: &str) -> bool {
+    kind == HELD_BACK_KIND || kind == UNRESOLVED_KIND
+}
+
 /// Whether one mirror row is a fact or a finding. The mirror never raises
 /// a red on any surface: a first fill is progress, not failure (ADR-062
 /// C2), and even a failed round leaves the archive and the remote
@@ -2378,6 +2398,22 @@ fn held_back_count_row(state_dir: &Path, mirror_of: &str) -> Option<MirrorRow> {
         .filter(|block| block.kind == HELD_BACK_KIND && block.destination == mirror_of)
         .map(|block| block.sessions)
         .sum();
+    let unresolved: usize = attempt
+        .blocked
+        .iter()
+        .filter(|block| block.kind == UNRESOLVED_KIND)
+        .map(|block| block.sessions)
+        .sum();
+    if unresolved > 0 {
+        return Some(MirrorRow {
+            severity: MirrorRowSeverity::Yellow,
+            sentence: format!(
+                "[mirror] reclaim holds {unresolved} session(s) back and deletes nothing — \
+                 {UNRESOLVED_SENTENCE}; declare `{mirror_of}` as a destination, or restore its \
+                 health with a successful push, or set `[mirror] enabled = false`",
+            ),
+        });
+    }
     (held_back > 0).then(|| MirrorRow {
         severity: MirrorRowSeverity::Yellow,
         sentence: format!(

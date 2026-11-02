@@ -1353,7 +1353,7 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
             // fix and a severity C2 already fixed — one wording, one
             // blame. The fact stays visible where facts live: `doctor`'s
             // table and `--json`, which carry the recorded kind verbatim.
-            ReclaimShare::Blocking { kind, .. } if kind == crate::mirror::HELD_BACK_KIND => {}
+            ReclaimShare::Blocking { kind, .. } if crate::mirror::is_hold_kind(kind) => {}
             ReclaimShare::Blocking {
                 kind,
                 error_kind,
@@ -1434,14 +1434,22 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
             let mirror_blocks: Vec<&crate::reclaimstate::ReclaimBlock> = attempt
                 .blocked
                 .iter()
-                .filter(|block| block.kind == crate::mirror::HELD_BACK_KIND)
+                .filter(|block| crate::mirror::is_hold_kind(&block.kind))
                 .collect();
             let destination_blocks: Vec<&crate::reclaimstate::ReclaimBlock> = attempt
                 .blocked
                 .iter()
-                .filter(|block| block.kind != crate::mirror::HELD_BACK_KIND)
+                .filter(|block| !crate::mirror::is_hold_kind(&block.kind))
                 .collect();
             let mirror_only = !mirror_blocks.is_empty() && destination_blocks.is_empty();
+            let mirror_sentence = if mirror_blocks
+                .iter()
+                .any(|b| b.kind == crate::mirror::UNRESOLVED_KIND)
+            {
+                crate::mirror::UNRESOLVED_SENTENCE
+            } else {
+                crate::mirror::HELD_BACK_SENTENCE
+            };
             let severity = if streak >= BLOCKED_STREAK_ALARM && !mirror_only {
                 Severity::Red
             } else {
@@ -1492,7 +1500,7 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                          one of them, the `[mirror]` rows carry the count, and a completed \
                          `mirror sync` round frees them",
                         fmt_bytes(bytes),
-                        crate::mirror::HELD_BACK_SENTENCE,
+                        mirror_sentence,
                     )
                 }
                 (_, false) => {
@@ -1521,7 +1529,7 @@ fn word_alerts(mut reconciliation: Reconciliation) -> Reconciliation {
                             "{words}; {mirror_held} session(s) / {} held back — {} (the \
                              `[mirror]` rows carry the count)",
                             fmt_bytes(mirror_bytes),
-                            crate::mirror::HELD_BACK_SENTENCE,
+                            mirror_sentence,
                         )
                     }
                 }
@@ -2373,7 +2381,7 @@ pub fn doctor_lines(r: &Reconciliation) -> Vec<String> {
                     sessions,
                     bytes,
                     ..
-                } if kind == crate::mirror::HELD_BACK_KIND => format!(
+                } if crate::mirror::is_hold_kind(kind) => format!(
                     "held back by the local copy ({kind}) — {sessions} session(s) / {} held \
                      back",
                     fmt_bytes(*bytes)
