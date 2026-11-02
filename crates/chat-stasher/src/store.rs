@@ -242,6 +242,12 @@ pub struct PushSummary {
     /// open did about them. `None` means the repository was created by this
     /// push (a fresh repository has no packs at all).
     pub orphans: Option<crate::orphans::OrphanOutcome>,
+    /// What this push did about naming the packs its open verified in a new
+    /// index file. `None` when there was nothing to name — no adoption
+    /// happened, or the repository was created by this push — so the healthy
+    /// and the refused case both stay silent where the earlier behaviour was
+    /// silent. Named/NotWritten say what the push connection wrote (W1066).
+    pub persisted: Option<crate::orphans::PersistOutcome>,
 }
 
 /// BackupStore: owns repository open/init, push, and read-back.
@@ -608,7 +614,7 @@ impl BackupStore {
         mk: &MasterKey,
     ) -> anyhow::Result<(Repository<IndexedFullStatus>, bool)> {
         self.open_or_init_with_progress(mk, NoProgressBars {})
-            .map(|(r, init, _)| (r, init))
+            .map(|(r, init, _, _)| (r, init))
     }
 
     /// Open an existing repository and build its index, reaching the packs no
@@ -637,7 +643,9 @@ impl BackupStore {
     ///
     /// The third element is what the open found out about packs the index files
     /// do not name, and what it did about them; a repository this call creates
-    /// has none, and reports `None`.
+    /// has none, and reports `None`. The fourth is the backend handles the
+    /// open built and is what a push re-uses for its own post-backup writes
+    /// (the persist step) instead of dialing the destination a second time.
     fn open_or_init_with_progress<P: ProgressBars>(
         &self,
         mk: &MasterKey,
@@ -646,6 +654,7 @@ impl BackupStore {
         Repository<IndexedFullStatus>,
         bool,
         Option<crate::orphans::OrphanOutcome>,
+        RepositoryBackends,
     )> {
         let backends = self.backends()?;
         let repo = Repository::new_with_progress(&self.cfg.repository_options(), &backends, pb)?;
@@ -653,7 +662,7 @@ impl BackupStore {
         if self.repo_exists(&backends)? {
             let opened = repo.open(&creds).context("open existing repository")?;
             let (r, outcome) = crate::orphans::index_adopting(opened, &backends, mk)?;
-            Ok((r, false, Some(outcome)))
+            Ok((r, false, Some(outcome), backends))
         } else {
             let config_opts = ConfigOptions::default().set_append_only(true);
             let r = repo
@@ -661,7 +670,7 @@ impl BackupStore {
                 .context("init new repository")?
                 .to_indexed()
                 .context("index new repository")?;
-            Ok((r, true, None))
+            Ok((r, true, None, backends))
         }
     }
 
@@ -747,7 +756,7 @@ impl BackupStore {
         // is already counted above and gives the `shards=N/total` scale.
         let push_progress =
             std::sync::Arc::new(crate::push_progress::PushProgress::new(stage_shards as u64));
-        let (r, init, orphans) = self.open_or_init_with_progress(
+        let (r, init, orphans, backends) = self.open_or_init_with_progress(
             mk,
             crate::push_progress::PushProgressBars::new(push_progress),
         )?;
@@ -804,6 +813,21 @@ impl BackupStore {
         // holds the snapshot we were handed is a read of the repository's own
         // answer, not a flag this function sets from its own intent.
         let snapshot_written = snaps.iter().any(|stored| stored.id == snap.id);
+        // W1066: the push connection is also the only connection that names
+        // in a new index file the packs this open verified from the index-less
+        // set. The write is a pure append gated by a pre-write survey (see
+        // `orphans::persist_verified`); a failure to write is reported and
+        // leaves the push to succeed, because un-named packs are exactly the
+        // state pushes left behind before this change.
+        let persisted = orphans
+            .as_ref()
+            .filter(|outcome| {
+                // Only an open that verified packs has anything to persist: a
+                // refusal, a plain index or an all-debris survey names nothing,
+                // and a push that reports one of those states already said why.
+                !outcome.verified.is_empty()
+            })
+            .map(|outcome| crate::orphans::persist_verified(&r, &backends, &outcome.verified));
         // ADR-063 D3 / ruling 2: this push connection is the only place
         // tmp debris is ever deleted.
         self.sweep_tmp_debris();
@@ -824,6 +848,7 @@ impl BackupStore {
             snapshot_host: snap.hostname.clone(),
             repo_was_init: init,
             orphans,
+            persisted,
         })
     }
 

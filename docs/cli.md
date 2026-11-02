@@ -300,13 +300,15 @@ build does not have: a repository-wide lock every client honors for its whole pu
 or read, a conditional delete carrying an object version, and a trustworthy
 backend modification time to age candidates by. The refusal is not a formality.
 "Unindexed" means no index file names the pack, not that nothing uses it — a
-retry is allowed to reuse one and write a snapshot that depends on it while it
-stays unindexed on disk, so a pack can be the only copy of archived content.
+retry is allowed to reuse one and write a snapshot that depends on it, and it
+stays unindexed on disk only until the push that adopts it names it in a new
+index file, so a pack can be the only copy of archived content.
 [docs-dev/orphan-packs.md](../docs-dev/orphan-packs.md) has the full argument.
 
 Every pack it reports is classified the way the shared interrupted-push
 classification does: a pack whose bytes verify complete is **stranded** — a
-later open adopts it, and the report says so; a pack that cannot be read as a
+later open adopts it, the report says so, and the push that adopts it names it
+in a new index file so later opens stop re-reading it; a pack that cannot be
 pack at all (its length field declares a header the file cannot hold, or the
 header will not decrypt) is **torn debris** from an interrupted push — it
 belongs to no backup and can be ignored, and it makes the survey neither

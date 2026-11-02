@@ -97,4 +97,4 @@ Implementation: `crates/chat-stasher/src/sqlite_probe.rs:417-472`,
 `crates/chat-stasher/src/id.rs:239-298`,
 `crates/chat-stasher/src/inbox.rs:635-664`,
 `crates/chat-stasher/src/export.rs:990-1007`, and
-`crates/chat-stasher/src/store.rs:1778-1781`.
+`crates/chat-stasher/src/store.rs:1802-1805`.

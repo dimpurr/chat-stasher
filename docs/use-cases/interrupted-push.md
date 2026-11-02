@@ -27,7 +27,7 @@ worth telling apart:
 
 | What it left | What it is | What happens to it |
 |---|---|---|
-| **Stranded** pack — complete, but its index file was never written | Finished content with no index entry yet | The next command that opens the repository verifies it and adopts it, and your next push uploads none of its content again. Not a failure, not debris. |
+| **Stranded** pack — complete, but its index file was never written | Finished content with no index entry yet | The next command that opens the repository verifies it and adopts it, your next push uploads none of its content again, and that push names the pack in a new index file so later opens stop re-reading it. Not a failure, not debris. |
 | **Torn** pack — half a file, under the name the finished pack would have had | The interrupted write itself: no index file names it, and its own length field describes a header the file cannot hold | Classified as debris and skipped by every scanning command, forever harmless. No tool action is needed or exists to clean it in this build. |
 
 Neither kind appears in a snapshot. A snapshot only ever references content
