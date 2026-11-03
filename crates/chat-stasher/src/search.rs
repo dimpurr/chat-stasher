@@ -1120,7 +1120,8 @@ pub fn search_sessions(
 
     let snaps = repo
         .get_all_snapshots()
-        .context("list snapshots for search")?;
+        .context("list snapshots for search")
+        .map_err(|error| crate::orphans::explain_short_files(&backends, error))?;
     let snapshots_in_repo = snaps.len();
 
     // SRCH-1b · the per-destination snapshot session cache, when the caller

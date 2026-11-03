@@ -2230,6 +2230,10 @@ fn main() -> ExitCode {
 }
 
 fn run() -> ExitCode {
+    // Snapshot the live ssh masters before any remote operation so the
+    // end-of-run reap only shuts down masters this process created (reap.rs).
+    // One `ps` fork; silent.
+    reap::record_startup_snapshot();
     // Before clap, not after: a browser starts this binary with no subcommand
     // and with arguments (an origin, or a manifest path and an add-on id) that
     // clap would reject as unknown. `nativehost-protocol.md` §3 makes this
@@ -4536,9 +4540,18 @@ where
             .map_err(|e| ActivityIndexError::Read(format!("open destination: {e:#}")))?;
         let (repo, _adoption) = chat_stasher::orphans::open_adopting(cfg, &backends, mk)
             .map_err(|e| ActivityIndexError::Read(format!("open destination: {e:#}")))?;
-        let mut snapshots = repo
-            .get_all_snapshots()
-            .map_err(|e| ActivityIndexError::Read(format!("list destination snapshots: {e:#}")))?;
+        let mut snapshots = repo.get_all_snapshots().map_err(|e| {
+            // W1071 review fix (M1): the one helper every other listing
+            // failure in this file walks. It attaches the recovery words as
+            // the error's outer context, so the message leads with them —
+            // the same shape `raw_export`, `overview` and the readback
+            // paths print — instead of the inline copy this replaces.
+            let error = chat_stasher::orphans::explain_short_files(
+                &backends,
+                anyhow::Error::from(e).context("list destination snapshots"),
+            );
+            ActivityIndexError::Read(format!("{error:#}"))
+        })?;
         snapshots.retain(|snapshot| snapshot.hostname == machine);
         snapshots.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.time.clone()));
         if snapshots.is_empty() {
@@ -4688,9 +4701,16 @@ fn list_destination_machine_snapshot_ids(
         chat_stasher::orphans::open_adopting(cfg, &backends, mk).map_err(|e| {
             ActivityIndexError::Read(format!("open destination for snapshot recheck: {e:#}"))
         })?;
-    let snapshots = repo
-        .get_all_snapshots()
-        .map_err(|e| ActivityIndexError::Read(format!("re-list destination snapshots: {e:#}")))?;
+    let snapshots = repo.get_all_snapshots().map_err(|e| {
+        // W1071 review fix (M1): the second of the three inline copies this
+        // replaces — the recheck listing takes the same shared wording the
+        // first one now takes.
+        let error = chat_stasher::orphans::explain_short_files(
+            &backends,
+            anyhow::Error::from(e).context("re-list destination snapshots"),
+        );
+        ActivityIndexError::Read(format!("{error:#}"))
+    })?;
     Ok(snapshots
         .iter()
         .filter(|snapshot| snapshot.hostname == machine)
@@ -5154,7 +5174,8 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
         .context("open repository for overview")?;
     let snaps = repo
         .get_all_snapshots()
-        .context("list snapshots for overview")?;
+        .context("list snapshots for overview")
+        .map_err(|error| chat_stasher::orphans::explain_short_files(&backends, error))?;
     let newest = readback::newest_snapshot_per_host(snaps);
 
     let mut out = OverviewRead {
@@ -12702,7 +12723,10 @@ fn cmd_index(action: IndexAction) -> ExitCode {
             let build_result = (|| -> anyhow::Result<chat_stasher::fts::BuildStats> {
                 let snapshots = repo
                     .get_all_snapshots()
-                    .context("list archive snapshots for FTS")?;
+                    .context("list archive snapshots for FTS")
+                    .map_err(|error| {
+                        chat_stasher::orphans::explain_short_files(&backends, error)
+                    })?;
                 // ADR-046 (draft) Phase 1: the index is a reader cache of the
                 // archive, so it is built from the same folded control policy
                 // every read applies. Hidden identities never enter the index,
@@ -16483,6 +16507,209 @@ mod decision_surface_tests {
         assert_eq!(after_race.hits.len(), 3);
     }
 
+    /// A repository with one machine's archived stage, the smallest shape
+    /// the W1071 listing tests need: a store config whose cache lives under
+    /// the fixture (W289), one sealed shard, and the machine declaration the
+    /// rebuild steps copy through.
+    fn w1071_listing_fixture(dir: &tempfile::TempDir) -> (StoreConfig, MasterKey) {
+        let repo_path = dir.path().join("repo");
+        let stage = dir.path().join("stage");
+        let cfg = StoreConfig {
+            repo_root: repo_path.to_string_lossy().into_owned(),
+            key_file: dir.path().join("masterkey.json"),
+            connections: 1,
+            options: BTreeMap::new(),
+            // This fixture really opens the repository it builds, so the
+            // metadata cache belongs under the fixture too (W289).
+            cache_dir: Some(dir.path().join("rustic-cache")),
+            no_cache: false,
+        };
+        let machine = "fixture-machine";
+        let session = "claude-code.fixture-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+        write_shard(
+            &stage,
+            machine,
+            session,
+            &[cc_line("2025-01-15T12:34:56.789Z")],
+        );
+        let meta = stage.join("meta").join(machine);
+        fs::create_dir_all(&meta).unwrap();
+        fs::write(
+            meta.join("machine.json"),
+            serde_json::to_vec(&identity::MachineDeclaration {
+                machine_id: machine.to_string(),
+                display_name: "Fixture Machine".into(),
+                os: "test".into(),
+                first_seen_unix: 1,
+                declared_harnesses: vec!["claude-code".into()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mk = MasterKey::new();
+        BackupStore::new(cfg.clone(), machine.to_string())
+            .push(&stage, &mk)
+            .unwrap();
+        (cfg, mk)
+    }
+
+    fn plant_short_snapshot(repo_path: &Path, byte: u8) -> String {
+        let id = format!("{byte:02x}").repeat(32);
+        fs::write(repo_path.join("snapshots").join(&id), b"").unwrap();
+        id
+    }
+
+    /// The assertions every W1071 listing-failure message must satisfy: the
+    /// shared helper's wording leads (the helper attaches it as the error's
+    /// outer context, `{:#}` prints outer first), the file is named, the
+    /// manual step is given, and — when the listing had a provenance line
+    /// of its own — that line survives inside the shared wording. An empty
+    /// `provenance` is for the listings that carry no line of their own.
+    fn assert_short_file_house_wording(message: &str, id: &str, provenance: &str) {
+        assert!(
+            message.starts_with("the repository holds"),
+            "{provenance}: the shared helper's wording leads the message, the way it \
+             does on every other listing failure in this file: {message}"
+        );
+        assert!(
+            message.contains(id),
+            "{provenance}: the short snapshot is named: {message}"
+        );
+        assert!(
+            message.contains("move exactly"),
+            "{provenance}: the manual step is named: {message}"
+        );
+        if provenance.is_empty() {
+            return;
+        }
+        assert!(
+            message.contains(provenance),
+            "{provenance}: the provenance of the failed listing survives the shared \
+             wording: {message}"
+        );
+    }
+
+    /// W1071 review fix (M1): the first archive listing a destination
+    /// rebuild takes, hurt by a short snapshot — the error names the file,
+    /// in the one wording `explain_short_files` owns. This was one of the
+    /// three inline copies of that wording the review found.
+    #[test]
+    fn destination_rebuild_names_a_short_snapshot_with_the_house_wording() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (cfg, mk) = w1071_listing_fixture(&dir);
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let id = plant_short_snapshot(&PathBuf::from(&cfg.repo_root), 0xbb);
+        let machine = "fixture-machine";
+        let error = rebuild_destination_partition(&workspace, &cfg, machine, &mk)
+            .expect_err("the first listing must fail while a short snapshot is present");
+        let ActivityIndexError::Read(message) = &error else {
+            panic!("a listing failure is a read failure, not a write failure: {error}");
+        };
+        assert_short_file_house_wording(message, &id, "list destination snapshots");
+    }
+
+    /// W1071 review fix (M1): the publish-time recheck — the listing that
+    /// races a concurrent push — names a short snapshot that lands between
+    /// the two listings with the same words. This was the second of the
+    /// three inline copies.
+    #[test]
+    fn destination_rebuild_recheck_names_a_short_snapshot_landed_mid_rebuild() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (cfg, mk) = w1071_listing_fixture(&dir);
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let machine = "fixture-machine";
+        let repo_path = PathBuf::from(&cfg.repo_root);
+        let id = "cc".repeat(32);
+        let mut planted = false;
+        let error = rebuild_destination_partition_with_hook(&workspace, &cfg, machine, &mk, || {
+            if !planted {
+                planted = true;
+                plant_short_snapshot(&repo_path, 0xcc);
+            }
+        })
+        .expect_err("the recheck listing must fail while a short snapshot is present");
+        assert!(
+            planted,
+            "the hook ran between the two listings, as the race it models requires"
+        );
+        let ActivityIndexError::Read(message) = &error else {
+            panic!("a recheck listing failure is a read failure, not a write failure: {error}");
+        };
+        assert_short_file_house_wording(message, &id, "re-list destination snapshots");
+    }
+
+    /// W1071 review fix (M1): the overview's archive read went through the
+    /// shared helper already; this locks it in place, because it is one of
+    /// the five `main` listing paths and it shipped with no direct test.
+    #[test]
+    fn overview_archive_read_names_a_short_snapshot() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (cfg, mk) = w1071_listing_fixture(&dir);
+        let id = plant_short_snapshot(&PathBuf::from(&cfg.repo_root), 0xaa);
+        // `OverviewRead` carries no `Debug`, so the outcome is matched rather
+        // than `expect_err`'d; the open list is the only success shape here.
+        let error = match read_overview_indexes(&cfg, &mk) {
+            Err(error) => error,
+            Ok(unexpected) => panic!(
+                "the overview listing must fail while a short snapshot is present, but \
+                 {} machine(s) answered",
+                unexpected.snapshot_machines.len()
+            ),
+        };
+        let text = format!("{error:#}");
+        assert!(
+            text.starts_with("the repository holds"),
+            "the shared helper's wording leads the message: {text}"
+        );
+        assert!(text.contains(&id), "the short snapshot is named: {text}");
+        assert!(
+            text.contains("move exactly"),
+            "the manual step is named: {text}"
+        );
+    }
+
+    /// W1071 review fix (M1): the wizard's idempotence evidence — how many
+    /// snapshots the local repository holds — names a short snapshot with
+    /// the shared words instead of an inline copy. This was the third of
+    /// the three.
+    #[test]
+    fn setup_snapshot_count_names_a_short_snapshot_with_the_house_wording() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo_path = dir.path().join("repo");
+        let config = chat_stasher::config::Config {
+            rustic_repo: Some(repo_path.to_string_lossy().into_owned()),
+            rustic_key_file: Some(dir.path().join("masterkey.json").display().to_string()),
+            // The store this drives really opens the repository, so the
+            // metadata cache belongs under the fixture (W289).
+            rustic_cache_dir: Some(dir.path().join("rustic-cache").display().to_string()),
+            ..Default::default()
+        };
+        let stage = dir.path().join("stage");
+        let machine = "fixture-machine";
+        let session = "claude-code.fixture-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+        write_shard(
+            &stage,
+            machine,
+            session,
+            &[cc_line("2025-01-15T12:34:56.789Z")],
+        );
+        let store_cfg = setup_local_store(&config);
+        let mk = MasterKey::new();
+        // `push` works straight from `mk`; `setup_snapshot_count` reads the
+        // key off the disk, so this fixture persists it where the config
+        // points before it asks the count.
+        store::persist_key_file(&store_cfg, &mk).unwrap();
+        BackupStore::new(store_cfg.clone(), machine.to_string())
+            .push(&stage, &mk)
+            .unwrap();
+        let id = plant_short_snapshot(&repo_path, 0xdd);
+        let error = setup_snapshot_count(&config)
+            .expect_err("the snapshot count must fail while a short snapshot is present");
+        assert_short_file_house_wording(&error, &id, "");
+    }
+
     #[test]
     fn seal_help_and_active_guard_follow_decision() {
         let mut command = cli_command_on_worker_stack();
@@ -19450,7 +19677,13 @@ fn setup_snapshot_count(config: &Config) -> Result<usize, String> {
         .map_err(|error| format!("{error:#}"))?;
     repo.get_all_snapshots()
         .map(|snapshots| snapshots.len())
-        .map_err(|error| format!("{error:#}"))
+        .map_err(|error| {
+            // W1071 review fix (M1): the third inline copy — the count's
+            // message is the shared helper's wording, not a hand-rolled
+            // concatenation, so it cannot drift from the others.
+            let error = chat_stasher::orphans::explain_short_files(&backends, error.into());
+            format!("{error:#}")
+        })
 }
 
 /// Decide what the two passes did to the repository, from observations only.

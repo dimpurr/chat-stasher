@@ -513,7 +513,7 @@ returns them with each matched or unplaced session that has a provenance row;
 older archives without one omit the field
 (`crates/chat-stasher/src/activity.rs:132-213`,
 `crates/chat-stasher/src/collect.rs:2467-2478`,
-`crates/chat-stasher/src/main.rs:3372-3385`,
+`crates/chat-stasher/src/main.rs:3376-3389`,
 `crates/chat-stasher/src/search.rs:749-795`). The parent id is still session
 metadata in plaintext in the stage and inside the encrypted archive; it can link
 a subagent to its parent conversation.
@@ -889,7 +889,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:116`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:374-614,3116-3118,3158-3168`; `crates/chat-stasher/src/main.rs:10452-10457`).
+kept on your machine (`crates/chat-stasher/src/store.rs:374-614,3126-3128,3168-3178`; `crates/chat-stasher/src/main.rs:10473-10478`).
 
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
@@ -1209,7 +1209,7 @@ be the worse failure.
 profile is retired.** `chat-stasher install-native-host --uninstall` removes the
 host manifest for every browser on the machine in one pass, so an install you
 left in place can no longer deliver and its captures wait in its outbox instead
-(`crates/chat-stasher/src/main.rs:2875-2913`, `:2942-2948`). Draining each
+(`crates/chat-stasher/src/main.rs:2879-2917`, `:2946-2952`). Draining each
 profile's outbox first is the subject of
 [install.md → Before you remove the host](../docs/install.md#before-you-remove-the-host),
 and it is worth doing because an outbox goes away with its profile.
@@ -1247,10 +1247,10 @@ are plaintext in the stage exactly like a session's.
 is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
-archive (`crates/chat-stasher/src/store.rs:3116-3118`). The key file
+archive (`crates/chat-stasher/src/store.rs:3126-3128`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
-(`crates/chat-stasher/src/store.rs:3158-3228`).
+(`crates/chat-stasher/src/store.rs:3168-3238`).
 
 There is one key file per repository — `rustic_key_file` for the local archive,
 `key_file` per destination, defaulting to
@@ -1258,7 +1258,7 @@ There is one key file per repository — `rustic_key_file` for the local archive
 that copy alone, and a copy of one does not restore another. A second machine
 reads a destination with that destination's key and does not use the local one,
 which is why every key file has to be backed up
-(`crates/chat-stasher/src/main.rs:10317-10322`).
+(`crates/chat-stasher/src/main.rs:10338-10343`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin

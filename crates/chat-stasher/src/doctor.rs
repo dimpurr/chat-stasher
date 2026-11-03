@@ -55,6 +55,7 @@ pub const KEYS_CHECK: &str = "key inventory";
 pub const DEST_RECONCILE_CHECK: &str = "D12 destination reconciliation";
 pub const MIRROR_CHECK: &str = "D13 local mirror";
 pub const INBOX_STATUS_CHECK: &str = "remote inbox status";
+pub const SHORT_FILES_CHECK: &str = "short index/snapshot files";
 
 /// Per-check budgets, in seconds. A budget is a *diagnosis* bound, not an
 /// archive bound: every check above is a read of a few files, a bounded walk
@@ -2051,6 +2052,17 @@ pub struct DoctorReport {
     /// read. Filled by the library's own [`run()`] — file reads and one
     /// directory walk only, never a destination connection.
     pub mirror: Option<crate::mirror::MirrorStatus>,
+    /// W1071 — index or snapshot files too short to be complete (W1068
+    /// follow-up). `None` for the same reason as `reclaim`: the repository
+    /// path and key both derive from a config this run could not read, and
+    /// `None` is also what a check that outlived its deadline leaves behind.
+    /// `Some(ShortFilesCheck::Checked { .. })` is the finished listing — the
+    /// healthy silence when empty — while every no-answer variant is the
+    /// "unknown, not absent" family, never a measured-and-clean placeholder
+    /// for a listing the run could not take (W1071 review H1). Filled by
+    /// the library's own [`run()`] — two read-only size listings via
+    /// [`crate::orphans::short_files_checked`], never a snapshot read.
+    pub short_files: Option<ShortFilesCheck>,
     /// W1043 — the checks that outlived their own deadline, in the order
     /// they ran. Not empty ⇒ each named check's section is an **unknown**:
     /// its field carries a placeholder (`None`, a `TimedOut` verdict, an
@@ -2807,7 +2819,7 @@ fn activity_index_json(freshness: &ActivityIndexFreshness) -> serde_json::Value 
 /// The checks a run cannot perform without a usable config, in the order
 /// [`print_report`] presents them. [`DoctorReport::not_checked`] returns this
 /// list only for a report whose `config_error` is set.
-const CHECKS_NEEDING_CONFIG: [&str; 12] = [
+const CHECKS_NEEDING_CONFIG: [&str; 13] = [
     "D3 harness scan, footprints and archive gaps",
     "D4 risk summary",
     "D5 repository reclaim",
@@ -2820,6 +2832,7 @@ const CHECKS_NEEDING_CONFIG: [&str; 12] = [
     "D12 destination reconciliation (timers, credentials, last push, reclaim)",
     "D13 local mirror (size, last sync, snapshots behind, orphans)",
     "machine identity",
+    "short index/snapshot files",
 ];
 
 /// The report for a config file that exists and cannot be used.
@@ -2920,6 +2933,9 @@ pub fn config_unreadable(
         // mirror directory under the data root), so an unreadable config
         // means this check did not run.
         mirror: None,
+        // W1071: the repository path and key are config-derived, so an
+        // unreadable config means the short-files listing did not run.
+        short_files: None,
         timed_out: checks.notes().to_vec(),
     }
 }
@@ -3643,6 +3659,16 @@ pub fn run() -> DoctorReport {
         })
     };
 
+    // W1071 — short index/snapshot files, read-only size listings only.
+    let short_files = {
+        let config = config.clone();
+        checks
+            .run(SHORT_FILES_CHECK, BACKED_WALK_BUDGET_SECS, move || {
+                Some(inspect_short_files(&config))
+            })
+            .flatten()
+    };
+
     DoctorReport {
         config_source: config.source,
         config_error: None,
@@ -3673,6 +3699,7 @@ pub fn run() -> DoctorReport {
         keys,
         dest_reconcile,
         mirror,
+        short_files,
         timed_out: checks.notes().to_vec(),
     }
 }
@@ -3887,6 +3914,164 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
         size_repack: s.size_sum().repack,
         append_only,
     }
+}
+
+/// W1071 — outcome of the short index/snapshot file listing: the same
+/// three-family shape [`ReclaimCheck`] already taught this file, because a
+/// repository the run could not see turned out to be the one shape this
+/// row could not tell apart from a clean one (W1071 review H1). Every
+/// non-`Checked` variant means **unknown, not absent** — the row must
+/// never word a listing it could not take as a checked-and-clean
+/// repository, which is what collapsing those states into an empty answer
+/// did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShortFilesCheck {
+    /// No repository directory at the resolved and confirmed-absent path —
+    /// there was nothing to list, which is a state about the machine, not a
+    /// measurement about the repository.
+    NoRepo { repo_root: PathBuf },
+    /// The repository directory exists but the master key could not be
+    /// read, so no listing can be taken.
+    NoKey { key_file: PathBuf, error: String },
+    /// The repository could not be built into a backend, or one of its two
+    /// size listings failed (network, permission or I/O) — the short files
+    /// are unknown.
+    OpenFailed { repo_root: PathBuf, error: String },
+    /// Both size listings answered; these files are too short to be
+    /// complete (possibly none — the healthy silence).
+    Checked {
+        files: Vec<crate::orphans::ShortFile>,
+    },
+}
+
+impl ShortFilesCheck {
+    /// Why this check carries no listing (W1071 review H1), or `None` for a
+    /// checked repository — the one wording the `--json` row and the
+    /// terminal line share, so the two surfaces cannot disagree about a
+    /// hole. Callers match [`Self::Checked`] before asking, so the `None`
+    /// half is for the type system, never a wording a reader sees.
+    #[must_use]
+    pub fn no_answer_reason(&self) -> Option<String> {
+        match self {
+            Self::Checked { .. } => None,
+            Self::NoRepo { repo_root } => Some(format!(
+                "no repository directory at {}",
+                repo_root.display()
+            )),
+            Self::NoKey { key_file, error } => Some(format!(
+                "the masterkey at {} could not be read: {error}",
+                key_file.display()
+            )),
+            Self::OpenFailed { repo_root, error } => Some(format!(
+                "the repository at {} could not be listed: {error}",
+                repo_root.display()
+            )),
+        }
+    }
+}
+
+/// W1071 — list index and snapshot files too short to be complete.
+///
+/// Read-only: two size listings via [`crate::orphans::short_files_checked`],
+/// never a snapshot read. A repository this check could not see is one of
+/// the no-answer states of [`ShortFilesCheck`] — unknown, with the leg that
+/// broke named by [`ShortFilesCheck::no_answer_reason`] — so `--json`
+/// answers `{"checked": false, "reason": …}` and the human table keeps its
+/// row, rather than either surface wording an un-taken listing as
+/// checked-and-clean (W1071 review H1 broke the empty-vec collapse that
+/// used to live here). A short file found by a finished listing is named
+/// by the print row and `--json` with the same
+/// [`crate::orphans::short_files_words`] recovery wording every
+/// snapshot-listing failure path uses.
+#[must_use]
+pub fn inspect_short_files(config: &Config) -> ShortFilesCheck {
+    use std::collections::BTreeMap;
+
+    let data_root = default_data_root();
+    let repo_root = config
+        .rustic_repo
+        .as_deref()
+        .map(expand_tilde)
+        .unwrap_or_else(|| data_root.join("repo"));
+    // The same three-way directory verdict `inspect_reclaim` renders: a
+    // path that confirmed-absent is NoRepo, one that exists as something
+    // else, or cannot be confirmed at all, is a failure to see it — the
+    // Windows shape-folding note there applies here unchanged.
+    match fs::metadata(&repo_root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return ShortFilesCheck::OpenFailed {
+                repo_root,
+                error: "repository path exists but is not a directory".to_string(),
+            };
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return match sqlite_probe::confirm_absence(&repo_root) {
+                Ok(()) => ShortFilesCheck::NoRepo { repo_root },
+                Err(shape) => ShortFilesCheck::OpenFailed {
+                    repo_root,
+                    error: format!("could not confirm repository directory: {shape}"),
+                },
+            };
+        }
+        Err(e) => {
+            return ShortFilesCheck::OpenFailed {
+                repo_root,
+                error: format!("could not confirm repository directory: {e}"),
+            };
+        }
+    }
+    let key_file = config
+        .rustic_key_file
+        .as_deref()
+        .map(expand_tilde)
+        .unwrap_or_else(|| data_root.join("masterkey.json"));
+    let cfg = crate::store::StoreConfig {
+        repo_root: repo_root.to_string_lossy().into_owned(),
+        key_file: key_file.clone(),
+        connections: 1,
+        options: BTreeMap::new(),
+        cache_dir: config.rustic_cache_dir.as_deref().map(expand_tilde),
+        // reason: rustic_no_cache unset = rustic's default (cache on); a config
+        // default, not an unknown read result collapsed to false.
+        no_cache: config.rustic_no_cache.unwrap_or(false),
+    };
+    if let Err(error) = crate::store::load_key_file(&cfg) {
+        return ShortFilesCheck::NoKey {
+            key_file,
+            error: format!("{error:#}"),
+        };
+    }
+    let mut opts = rustic_backend::BackendOptions::default().repository(cfg.repo_root.as_str());
+    if cfg.repo_root.starts_with("opendal:") || cfg.repo_root.starts_with("rest:") {
+        let mut options = BTreeMap::new();
+        options.insert("connections".to_string(), cfg.connections.to_string());
+        opts = opts.options(options);
+    }
+    let backends = match opts.to_backends() {
+        Ok(backends) => backends,
+        Err(error) => {
+            return ShortFilesCheck::OpenFailed {
+                repo_root,
+                error: format!("build the repository backend: {error:#}"),
+            };
+        }
+    };
+    let (files, failures) = crate::orphans::short_files_checked(&backends);
+    if !failures.is_empty() {
+        let error = failures
+            .iter()
+            .map(|failure| {
+                format!(
+                    "`{}` directory listing failed: {}",
+                    failure.dir, failure.error
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return ShortFilesCheck::OpenFailed { repo_root, error };
+    }
+    ShortFilesCheck::Checked { files }
 }
 
 // ---------------------------------------------------------------------------
@@ -4982,6 +5167,32 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
             }
             (None, None) => serde_json::json!({"checked": false}),
         },
+        // W1071 review H1: `checked: true` is reserved for a listing that
+        // really answered; a repository the run could not see is
+        // `checked: false` with the one shared reason, so a script can
+        // never read a broken listing as "the repository holds none".
+        "short_files": match (&r.short_files, r.check_timed_out_after(SHORT_FILES_CHECK)) {
+            (Some(ShortFilesCheck::Checked { files }), _) => serde_json::json!({
+                "checked": true,
+                "files": files.iter().map(|f| serde_json::json!({
+                    "dir": f.dir,
+                    "id": f.id_hex,
+                    "bytes": f.bytes,
+                })).collect::<Vec<_>>(),
+            }),
+            (Some(check), _) => {
+                // reason: only a no-answer variant reaches this arm — the
+                // `Checked` arm above is matched first — so the reason is
+                // always Some and the default keeps the arm total for the
+                // compiler, not a wording any reader sees.
+                let reason = check.no_answer_reason().unwrap_or_default();
+                serde_json::json!({"checked": false, "reason": reason})
+            }
+            (None, Some(secs)) => {
+                serde_json::json!({"checked": false, "timed_out_after_secs": secs})
+            }
+            (None, None) => serde_json::json!({"checked": false}),
+        },
     })
 }
 
@@ -5781,6 +5992,7 @@ pub fn print_report(r: &DoctorReport) {
                 "the reclaimable garbage is unknown, not zero",
             );
         }
+        print_short_files(&r.short_files, r.check_timed_out_after(SHORT_FILES_CHECK));
         if let Some(cache) = &r.cache {
             eprintln!("D6 · Local metadata cache occupancy");
             print_cache(cache);
@@ -5927,6 +6139,8 @@ pub fn print_report(r: &DoctorReport) {
             "the reclaimable garbage is unknown, not zero",
         );
     }
+
+    print_short_files(&r.short_files, r.check_timed_out_after(SHORT_FILES_CHECK));
 
     // D6 — how much the local metadata cache actually occupies
     if let Some(cache) = &r.cache {
@@ -6739,6 +6953,60 @@ fn print_reclaim(r: &ReclaimCheck) {
     eprintln!();
 }
 
+/// W1071 — one read-only row for short index/snapshot files. Healthy
+/// repositories stay silent (no heading); a repository holding short files
+/// names them with the same recovery wording every snapshot-listing failure
+/// path uses. Never auto-isolates or deletes.
+///
+/// A repository this check could not list keeps its row and words it as
+/// UNKNOWN, never the healthy silence (W1071 review H1): the no-repository
+/// state answers in the same calm register [`print_reclaim`] wordings its
+/// skip in, and the two failure states use the 🔴 UNKNOWN family the
+/// timed-out section below established, because a size listing the run
+/// could not take and a check that never answered read the same to whoever
+/// is deciding whether the archive is healthy.
+fn print_short_files(check: &Option<ShortFilesCheck>, timed_out_after_secs: Option<u64>) {
+    match (check, timed_out_after_secs) {
+        (Some(ShortFilesCheck::Checked { files }), _) => {
+            if files.is_empty() {
+                return;
+            }
+            eprintln!("Short index/snapshot files (W1071 follow-up to W1068):");
+            eprintln!("  {}", crate::orphans::short_files_words(files));
+            eprintln!();
+        }
+        (Some(ShortFilesCheck::NoRepo { repo_root }), _) => {
+            eprintln!(
+                "Short index/snapshot files (W1071 follow-up to W1068): (skipped) no repository \
+                 directory at {} — nothing to list, so this row is not a checked-and-clean \
+                 finding.",
+                repo_root.display()
+            );
+            eprintln!();
+        }
+        (Some(check), _) => {
+            // reason: only the two failure variants reach this arm (`Checked`
+            // and `NoRepo` are matched above), so the reason is always Some;
+            // the default keeps the arm total for the compiler, never a
+            // wording a reader sees.
+            let reason = check.no_answer_reason().unwrap_or_default();
+            eprintln!(
+                "Short index/snapshot files (W1071 follow-up to W1068) — 🔴 UNKNOWN: {reason}. \
+                 Short index/snapshot files are unknown, not absent; nothing here proves none \
+                 exist."
+            );
+            eprintln!();
+        }
+        (None, Some(secs)) => print_timed_out_section(
+            "Short index/snapshot files (W1071 follow-up to W1068):",
+            SHORT_FILES_CHECK,
+            secs,
+            "short index/snapshot files are unknown, not absent",
+        ),
+        (None, None) => {}
+    }
+}
+
 fn print_archive_gaps(gaps: &[scanner::ArchiveGap]) {
     if gaps.is_empty() {
         return;
@@ -7328,6 +7596,7 @@ mod json_tests {
             keys: Some(Vec::new()),
             dest_reconcile: None,
             mirror: None,
+            short_files: Some(ShortFilesCheck::Checked { files: Vec::new() }),
 
             timed_out: Vec::new(),
         }
@@ -7413,9 +7682,123 @@ mod json_tests {
                 "risks",
                 "scan_failed",
                 "schema_version",
+                "short_files",
                 "stage_duplicate_shards",
                 "timed_out",
             ]
+        );
+    }
+
+    /// W1071 review H1: `short_files` keeps `checked: true` for a listing
+    /// that answered (whatever it found, including nothing) and answers
+    /// `checked: false` with the shared reason for every no-answer state —
+    /// the empty-vec collapse that used to word a repository the run could
+    /// not see as `{"checked": true, "files": []}` is what this pins out of
+    /// existence.
+    #[test]
+    fn short_files_json_keeps_uptaken_listings_out_of_checked_true() {
+        // A checked-and-clean repository stays checked with its empty list.
+        let v = report_to_json(&report());
+        assert_eq!(
+            v["short_files"],
+            serde_json::json!({"checked": true, "files": []}),
+            "the healthy silence shape is unchanged: {v}"
+        );
+
+        // Each no-answer variant is checked: false and carries the reason,
+        // never a files array a script could count as "none found".
+        for (check, reason_needle) in [
+            (
+                ShortFilesCheck::NoRepo {
+                    repo_root: PathBuf::from("/nowhere/repo"),
+                },
+                "no repository directory at /nowhere/repo",
+            ),
+            (
+                ShortFilesCheck::NoKey {
+                    key_file: PathBuf::from("/nowhere/masterkey.json"),
+                    error: "key file not found".to_string(),
+                },
+                "the masterkey at /nowhere/masterkey.json could not be read",
+            ),
+            (
+                ShortFilesCheck::OpenFailed {
+                    repo_root: PathBuf::from("/nowhere/repo"),
+                    error: "backend refused".to_string(),
+                },
+                "the repository at /nowhere/repo could not be listed: backend refused",
+            ),
+        ] {
+            let mut r = report();
+            r.short_files = Some(check);
+            let v = report_to_json(&r);
+            let short = &v["short_files"];
+            assert_eq!(
+                short["checked"],
+                serde_json::json!(false),
+                "a listing this check could not take: {short}"
+            );
+            assert!(
+                short["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains(reason_needle)),
+                "the reason names the leg that broke: {short}"
+            );
+            assert!(
+                short.get("files").is_none(),
+                "no files array may ride an un-taken listing: {short}"
+            );
+        }
+
+        // A checked listing that found something stays true with its files.
+        let mut r = report();
+        r.short_files = Some(ShortFilesCheck::Checked {
+            files: vec![crate::orphans::ShortFile {
+                dir: "snapshots",
+                id_hex: "aa".repeat(32),
+                bytes: 0,
+            }],
+        });
+        let v = report_to_json(&r);
+        assert_eq!(
+            v["short_files"]["files"][0]["id"],
+            serde_json::json!("aa".repeat(32)),
+            "a found short file is carried: {v}"
+        );
+    }
+
+    /// W1071 review H1, the leg a spawned CLI cannot reach: a repository
+    /// path that exists as a regular file. `fs::metadata` answers it, so the
+    /// path is neither absent (NoRepo) nor openable — and the answer must be
+    /// the OpenFailed state, the exact state the old code collapsed into a
+    /// checked-and-clean empty list, pinned here as exact equality including
+    /// the wording of the reason.
+    #[test]
+    fn inspect_short_files_words_a_file_at_the_repository_path_as_open_failed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::write(&repo, b"not a directory").unwrap();
+        let config = crate::config::Config {
+            rustic_repo: Some(repo.display().to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            inspect_short_files(&config),
+            ShortFilesCheck::OpenFailed {
+                repo_root: repo.clone(),
+                error: "repository path exists but is not a directory".to_string(),
+            },
+            "a path that is not a directory is a failure to see, never a clean listing"
+        );
+        let reason = inspect_short_files(&config).no_answer_reason();
+        assert!(
+            reason
+                == Some(format!(
+                    "the repository at {} could not be listed: repository path exists but is \
+                     not a directory",
+                    repo.display()
+                )),
+            "the reason carries the path and the leg that broke: {reason:?}"
         );
     }
 
@@ -7851,7 +8234,7 @@ mod report_to_json_shape_tests {
             keys: None,
             dest_reconcile: None,
             mirror: None,
-
+            short_files: None,
             timed_out: Vec::new(),
         }
     }
@@ -7872,6 +8255,7 @@ mod report_to_json_shape_tests {
             "native_host",
             "stage_duplicate_shards",
             "mirror",
+            "short_files",
         ] {
             assert!(
                 v.get(key).is_some(),
@@ -9257,7 +9641,7 @@ mod w1043_deadline_tests {
         // its deadline and the note that a wedged run leaves behind. The
         // labels are the same consts `run()` traces, so a section can never
         // claim a budget a different check waited out.
-        let sections: [(&str, &str); 10] = [
+        let sections: [(&str, &str); 11] = [
             ("desktop_retention", DESKTOP_RETENTION_CHECK),
             ("reclaim", RECLAIM_CHECK),
             ("cache", CACHE_CHECK),
@@ -9268,6 +9652,7 @@ mod w1043_deadline_tests {
             ("destination_reconciliation", DEST_RECONCILE_CHECK),
             ("native_host", NATIVE_HOST_CHECK),
             ("mirror", MIRROR_CHECK),
+            ("short_files", SHORT_FILES_CHECK),
         ];
         for (key, check) in sections {
             let mut report = minimal_w1043_report();
@@ -9363,6 +9748,7 @@ mod w1043_deadline_tests {
             keys: None,
             dest_reconcile: None,
             mirror: None,
+            short_files: None,
             timed_out: Vec::new(),
         }
     }
