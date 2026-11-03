@@ -5143,9 +5143,7 @@ mod tests {
     /// `sqlite_probe.rs` seals under the workbuddy schema — with whatever the
     /// case is about spelled into the row.
     fn workbuddy_envelope_with(fields: &str) -> String {
-        format!(
-            r#"{{"schema":"chat-stasher.workbuddy.session.v1","session":{{{fields}}}}}"#
-        )
+        format!(r#"{{"schema":"chat-stasher.workbuddy.session.v1","session":{{{fields}}}}}"#)
     }
 
     /// One synthetic cbc event line, the shape the shared core writes on the
@@ -5165,12 +5163,14 @@ mod tests {
         let row = build_row("s", "mbp", "workbuddy", &[line.as_str()]);
         assert_eq!(row.dimensions.cwd, ["/w/one"]);
         assert_eq!(
-            row.dimensions.tenant, ["account-fixture"],
+            row.dimensions.tenant,
+            ["account-fixture"],
             "the account the app scoped the row to is a namespace one account's \
              sessions share, which is what makes it a tenancy"
         );
         assert_eq!(
-            row.dimensions.container, ["project-fixture"],
+            row.dimensions.container,
+            ["project-fixture"],
             "the project key the row records is an opaque identity the harness \
              wrote, not a path, and a row without one stays unobserved"
         );
@@ -5200,8 +5200,7 @@ mod tests {
         // A soft-deleted row exports a bare tombstone — the id, the deleted
         // fact, no row payload — so there is nothing to read, and the deletion
         // itself is not an archived/pinned lifecycle state.
-        let line =
-            r#"{"schema":"chat-stasher.workbuddy.session.v1","session":"fixture-row","deleted":true}"#;
+        let line = r#"{"schema":"chat-stasher.workbuddy.session.v1","session":"fixture-row","deleted":true}"#;
         let row = build_row("s", "mbp", "workbuddy", &[line]);
         assert!(
             row.dimensions.is_empty(),
@@ -5353,8 +5352,14 @@ mod tests {
         );
         let json = to_jsonl(&build_row("s", "mbp", "workbuddy", &[envelope.as_str()]));
         assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
-        assert!(json.contains(r#""tenant":["account-fixture"]"#), "line: {json}",);
-        assert!(json.contains(r#""container":["project-fixture"]"#), "line: {json}");
+        assert!(
+            json.contains(r#""tenant":["account-fixture"]"#),
+            "line: {json}",
+        );
+        assert!(
+            json.contains(r#""container":["project-fixture"]"#),
+            "line: {json}"
+        );
         assert!(!json.contains("\"status\""), "line: {json}");
 
         let event = cbc_event_with(r#","cwd":"/w/one""#);
