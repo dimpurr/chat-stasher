@@ -2336,7 +2336,7 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 ///
 /// This is the harness's side of [`crate::provenance::SessionProvenance`]: what
 /// the archived records themselves say about where the session came from, as
-/// opposed to what the collection path or the registry already recorded. Ten
+/// opposed to what the collection path or the registry already recorded. Thirteen
 /// harnesses have a reader today — `claude-code` (its working directory and
 /// owning tenancy), `gemini-cli` (its `projectHash`), `opencode` (its
 /// directory, project and workspace keys, and archive fact), `cursor` (its
@@ -2345,8 +2345,12 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 /// `cwd`), `codex` (its `session_meta` record's working directory and
 /// repository), `hermes-agent` (its `sessions` row's directory, gateway peer
 /// binding, repository identity, and its archived / pinned flags), `zed`
-/// (the workspace folders its `threads` table records), and `continue` (the
-/// workspace directory its session file names); every other harness
+/// (the workspace folders its `threads` table records), `continue` (the
+/// workspace directory its session file names), `deepseek-harness` (the
+/// working directory its session header frame opens with), `workbuddy`
+/// (its store row's directory, account and project keys, plus the store's
+/// companion transcript core), and `codebuddy` (the directory the shared
+/// transcript core states on its event records); every other harness
 /// answers with the empty set, which is the honest answer for a dimension
 /// nothing was read from — and never a value inferred from the harness name.
 ///
@@ -2361,6 +2365,40 @@ fn session_dimensions(harness: &str, lines: &[&str]) -> crate::provenance::Sessi
                     continue;
                 };
                 fold_claude_code_dimensions(&mut dimensions, &record);
+            }
+        }
+        "deepseek-harness" => {
+            // One decoded rollout per session, a header frame followed by its
+            // append records, so the same per-line loop — only the header is
+            // ever read.
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                fold_deepseek_harness_dimensions(&mut dimensions, &record);
+            }
+        }
+        "workbuddy" => {
+            // The dual-store shape: one sealed store envelope for the row and
+            // the transcript records of the shared cbc core beside it, both
+            // under one session id, so one loop reads each line for the fact it
+            // states.
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                fold_workbuddy_dimensions(&mut dimensions, &record);
+            }
+        }
+        "codebuddy" => {
+            // The transcript core is all a CodeBuddy CLI session has: the CLI
+            // keeps no session store, so the directory its event records state
+            // is the one fact this harness can observe.
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                fold_cbc_event_dimensions(&mut dimensions, &record);
             }
         }
         "opencode" => {
@@ -2838,6 +2876,127 @@ fn fold_continue_dimensions(
     dimensions.insert_cwd(workspace.clone());
     dimensions.insert_container(workspace);
     true
+}
+
+/// A DeepSeek Harness rollout states exactly one dimension fact about itself,
+/// and it states it once: the header frame the decoded session opens with,
+/// `{"type":"session", "version", "id", "createdAt", "cwd", "isSeeded",
+/// "delegationDepth", "agentPreset", ["parentSession"], ["origin"]}`. That
+/// header's `cwd` is the working directory the session ran in — a path, so it
+/// lands in `cwd` under the same rule as Claude Code's, and it is
+/// **authoritative**: the source directory's `<slug-of-cwd>` segment is a lossy
+/// sanitization the registry's own notes forbid parsing, and the append
+/// records after the header (`user/message`, `turn/start` and their sibling
+/// types) carry no directory of their own, so the header stays the only
+/// record this fold reads.
+///
+/// Neither is a container, a tenancy or a lifecycle state anything is inferred
+/// into: the header names no account and no project, `session.lock` is a
+/// 0-byte file that proves nothing about quiescence, so `tenant`, `container`
+/// and `status` stay exactly as empty as the records leave them.
+///
+/// A header whose `cwd` is absent, empty, null or of another type observes
+/// nothing, and a record that is not the header is left unread no matter what
+/// key it carries: "directory moved into the path" and "session said where it
+/// ran" must stay two different facts.
+fn fold_deepseek_harness_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) {
+    if record.get("type").and_then(serde_json::Value::as_str) != Some("session") {
+        return;
+    }
+    if let Some(cwd) = non_empty_str(record.get("cwd")) {
+        dimensions.insert_cwd(cwd);
+    }
+}
+
+/// WorkBuddy's sessions answer their dimensions from two halves the archive
+/// holds under one session id: the sealed store envelope carrying the whole
+/// `sessions` row, and the shared cbc transcript core the desktop app writes
+/// beside its store. Three of the row's columns are dimension facts, and they
+/// are three different kinds of fact:
+///
+/// `cwd` is where the session ran — a path, never a repository identity, the
+/// same rule Claude Code's directory answers to. The transcript records of the
+/// same session state the same directory again (through
+/// [`fold_cbc_event_dimensions`]), and the two readings are merged rather than
+/// one hiding the other.
+///
+/// `user_id` is the account the app scoped the row to: the WorkBuddy user the
+/// session belongs to, keyed by the store's own cloud indexes, one account
+/// owning many sessions — a namespace rather than a person, which is what
+/// makes it a tenancy. A row that records none — the empty string of an
+/// unauthenticated local install — stays unobserved rather than filed under a
+/// fabricated one, the same reading Hermes Agent's local rows get.
+///
+/// `project_id` is the inverse case, and the one that makes the pair a pair:
+/// an opaque project key the harness itself recorded, not derived from the
+/// directory. It is the container the session belonged to when the row names
+/// one — and the zero-populated column this measurement found locally is the
+/// same shape Hermes Agent's `git_repo_root` had (schema-real, never guessed),
+/// so the fold is wired now and honest rows will record what they say.
+///
+/// **The row's `status` column is deliberately not read.** Measured as
+/// `Pending` by default and `completed` after a run, it is the state of the
+/// *generation run* the record last lived through — the same reading Cursor's
+/// `none` / `completed` / `aborted` gets, and folding it would assert that a
+/// conversation was archived because a run finished. A soft-deleted row
+/// exports a bare tombstone with no row payload at all, and the deletion is
+/// not an archived/pinned lifecycle state either: the tombstone shape is how
+/// the reader records the row's absence, a different fact from a dimension
+/// value.
+///
+/// Only a line sealed under the workbuddy schema vouches for its row: the same
+/// object under another schema, or none, is a record nothing vouches for — the
+/// rule every other envelope fold applies. The transcript leg is not under an
+/// envelope; it reads only what each event record states itself.
+fn fold_workbuddy_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) {
+    if record.get("schema").and_then(serde_json::Value::as_str)
+        == Some(crate::sqlite_probe::WORKBUDDY_SESSION_SCHEMA)
+    {
+        if let Some(session) = record.get("session").and_then(serde_json::Value::as_object) {
+            if let Some(cwd) = non_empty_str(session.get("cwd")) {
+                dimensions.insert_cwd(cwd);
+            }
+            if let Some(tenant) = non_empty_str(session.get("user_id")) {
+                dimensions.insert_tenant(tenant);
+            }
+            if let Some(project) = non_empty_str(session.get("project_id")) {
+                dimensions.insert_container(project);
+            }
+        }
+    }
+    fold_cbc_event_dimensions(dimensions, record);
+}
+
+/// The WorkBuddy desktop app and the CodeBuddy CLI build their transcripts on
+/// one shared event core, and that core states the session's working directory
+/// on its event records: the `message`, `reasoning`, `function_call` and
+/// `function_call_result` records each carry the directory the session was
+/// running in beside their payload, measured on both harnesses' installed
+/// builds. A path is a path and not a repository identity, so the value lands
+/// in `cwd` under the same rule as Claude Code's per-line directory: every
+/// distinct directory an event record states is kept — the core restates one
+/// session's directory, and a session the app genuinely moved records each
+/// place it ran rather than only the last.
+///
+/// The metadata records of the same core state no directory: `session-meta`
+/// carries its metadata under a nested `meta` key and no `cwd` of its own (the
+/// recorded kinds are the app's own `codebuddy.ai/*` strings), and none is
+/// inferred from the session a record names. A record whose `cwd` is absent,
+/// empty or of another type observes nothing, and a line that does not parse
+/// states nothing at all.
+fn fold_cbc_event_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) {
+    if let Some(cwd) = non_empty_str(record.get("cwd")) {
+        dimensions.insert_cwd(cwd);
+    }
 }
 
 /// Hermes Agent exports a session as one envelope that carries, beside the
