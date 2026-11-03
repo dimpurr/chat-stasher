@@ -913,7 +913,8 @@ impl BackupStore {
             .context("open repository for the node metadata diff")?;
         let mut snaps: Vec<SnapshotFile> = repo
             .get_all_snapshots()
-            .context("list snapshots for the node metadata diff")?
+            .context("list snapshots for the node metadata diff")
+            .map_err(|error| self.explain_short_files(error))?
             .into_iter()
             .filter(|snap| snap.hostname == self.machine)
             .collect();
@@ -1037,7 +1038,8 @@ impl BackupStore {
         self.require_sound_packs(&repo)?;
         let snapshots = repo
             .get_all_snapshots()
-            .context("list snapshots for consumed audit")?;
+            .context("list snapshots for consumed audit")
+            .map_err(|error| self.explain_short_files(error))?;
         let mut found = BTreeSet::new();
 
         for snapshot in snapshots {
@@ -1094,7 +1096,9 @@ impl BackupStore {
     ) -> anyhow::Result<(Repository<IndexedFullStatus>, SnapshotFile)> {
         let (repo, _adoption) = self.open_indexed(mk)?;
         self.require_sound_packs(&repo)?;
-        let snaps = repo.get_all_snapshots()?;
+        let snaps = repo
+            .get_all_snapshots()
+            .map_err(|error| self.explain_short_files(error.into()))?;
         let newest_for_host = snaps
             .iter()
             .filter(|s| s.hostname == self.machine)
@@ -1291,7 +1295,10 @@ impl BackupStore {
             .open_indexed(mk)
             .context("open repository for session content")?;
         self.require_sound_packs(&repo)?;
-        let snaps = repo.get_all_snapshots().context("list snapshots")?;
+        let snaps = repo
+            .get_all_snapshots()
+            .context("list snapshots")
+            .map_err(|error| self.explain_short_files(error))?;
         let grouped_hosts = crate::readback::snapshots_by_host_newest_first(snaps);
         // ADR-046 (draft) Phase 1: an explicit session read is a reader, so
         // the effective control stream is folded from the union of every
@@ -1431,7 +1438,10 @@ impl BackupStore {
             .open_indexed(mk)
             .context("open repository for export")?;
         self.require_sound_packs(&repo)?;
-        let snaps = repo.get_all_snapshots().context("list snapshots")?;
+        let snaps = repo
+            .get_all_snapshots()
+            .context("list snapshots")
+            .map_err(|error| self.explain_short_files(error))?;
 
         for (machine, host_snaps) in crate::readback::snapshots_by_host_newest_first(snaps) {
             let wanted_here: BTreeSet<&str> = wanted
@@ -4438,7 +4448,7 @@ impl StoreConfig {
 impl BackupStore {
     /// W1068: after a failed push step, name any index or snapshot file too
     /// short to be complete (one read-only listing; never on a healthy path).
-    fn explain_short_files(&self, error: anyhow::Error) -> anyhow::Error {
+    pub(crate) fn explain_short_files(&self, error: anyhow::Error) -> anyhow::Error {
         match self.backends() {
             Ok(backends) => crate::orphans::explain_short_files(&backends, error),
             Err(_) => error,

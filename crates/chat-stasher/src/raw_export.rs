@@ -844,7 +844,10 @@ pub fn read_archived_export<W: Write>(
         .open_indexed(mk)
         .context("open repository for export readback")?;
     archive.require_sound_packs(&repo)?;
-    let snaps = repo.get_all_snapshots().context("list snapshots")?;
+    let snaps = repo
+        .get_all_snapshots()
+        .context("list snapshots")
+        .map_err(|error| archive.explain_short_files(error))?;
     let Some((_, host_snaps)) = crate::readback::snapshots_by_host_newest_first(snaps)
         .into_iter()
         .find(|(host, _)| host == machine)

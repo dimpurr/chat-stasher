@@ -206,9 +206,9 @@ age gate would have to outlast the slowest concurrent upload (minutes for a larg
 pack) and would then refuse to reuse our own just-killed push's packs, which is
 the entire point of the change. Completeness is also the stronger guard: it is a
 property of the bytes, not a guess about who is writing them.
-`crates/chat-stasher/src/orphans.rs:870-872` is where every non-torn failure to
+`crates/chat-stasher/src/orphans.rs:904-906` is where every non-torn failure to
 validate sends the open back to the plain index, and
-`crates/chat-stasher/src/orphans.rs:882-893` where a pack set that changed under
+`crates/chat-stasher/src/orphans.rs:916-927` where a pack set that changed under
 the open does — the same fallback for both refusers, because neither is a state
 the index should be rebuilt from.
 
@@ -240,7 +240,7 @@ by the deliberately planned one-off action ADR-016 reserves.
 **Adoption is fenced by a survey, so a healthy repository is untouched.**
 `crates/chat-stasher/src/orphans.rs:340-378` diffs the backend's pack listing against
 the packs the index files name, and
-`crates/chat-stasher/src/orphans.rs:849-863` refuses to adopt when the index names a
+`crates/chat-stasher/src/orphans.rs:883-897` refuses to adopt when the index names a
 pack the backend no longer has. That case matters: adopting from existing index
 files plus only newly verified packs would otherwise drop that entry — and an
 entry for a missing pack is one the local metadata cache can still serve, a documented
