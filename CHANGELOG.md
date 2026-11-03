@@ -15,6 +15,23 @@ under its own heading below.
 
 #### Added
 
+- **You choose which tools are collected (ADR-065).** Every tool on a machine
+  is `on`, `off` or `pending`, and only `on` is collected. `setup` now scans
+  read-only, lists what it found (sessions, size when known, path, whether the
+  registry records a dated verification) and asks which to collect before the
+  first archive runs; without a terminal, `setup --sources <id,id>` or
+  `setup --all-detected` gives the answer, and `run-once`, `collect` and
+  `setup` on a machine with no choice recorded refuse with exit code `4` and
+  name the next command. The answer lives in a `[sources]` table in
+  `config.toml`; a path stated in `[harness_roots]` counts as on unless the
+  table says off. A tool installed later stays pending and is named by
+  `status` and every pass until you decide. The new `chat-stasher sources`
+  command lists and edits the states (`sources enable|disable <id>`); turning
+  a tool off stops new collection and deletes nothing. A machine upgraded with
+  no `[sources]` table and a stage that already holds sessions keeps
+  collecting the tools that stage holds and treats every other tool as
+  pending. `init && run-once` on a fresh machine now refuses until a choice is
+  made. See [`docs/setup.md`](docs/setup.md) and [`docs/config.md`](docs/config.md).
 - **S3/R2 remote inboxes (RI-5).** `inbox-init`, `inbox-pull` and `send`
   accept an `s3://<bucket>/<prefix>` locator beside `fs://`. The endpoint and
   keys come from `CHAT_STASHER_INBOX_S3_*` in the environment, never from the

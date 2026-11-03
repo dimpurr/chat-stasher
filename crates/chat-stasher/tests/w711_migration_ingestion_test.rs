@@ -363,6 +363,8 @@ fn collect_writes_audit_after_sealing_and_repeat_is_idempotent() {
     let key = root.join("audit-key");
     fs::write(&key, [7; 32]).unwrap();
     let stage = root.join("stage");
+    // ADR-065: the pass collects only a source the user turned on.
+    test_support::consent_config_home(sandbox.config_home(), &["claude-code"]);
     let run = || {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
         sandbox.apply(&mut cmd);

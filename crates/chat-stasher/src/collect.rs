@@ -1397,6 +1397,14 @@ fn machine_log_body_capture_withheld(harness: &str, log_id: &str) -> bool {
 /// Complete metadata-only summary of one `collect` pass.
 #[derive(Debug, Clone, Default)]
 pub struct CollectReport {
+    /// ADR-065: the source-consent lines this pass owes the reader, built from
+    /// the same evaluation that narrowed the pass's sources — the upgrade
+    /// notice (D7), the pending sources it named (D6) and any `[sources]` key
+    /// that matches no registry id. Ready to print; empty when there is
+    /// nothing to say.
+    pub source_notices: Vec<String>,
+    /// ADR-065: the registry ids this pass collected from (the `on` sources).
+    pub sources_on: Vec<String>,
     /// Digest of the destination this pass read *for*.
     pub destination_id: String,
     /// A pre-ADR-012 per-machine state file was present and deliberately
@@ -1699,7 +1707,15 @@ pub fn inspect_stage_for_push(
     state_dir: &Path,
     machine: &str,
 ) -> anyhow::Result<PushStageCheck> {
-    let scan = scanner::scan_with_machine(config, machine)
+    // The guard asks "does anything this machine collects have sessions?", so
+    // it scans the same consented registry a pass collects from (ADR-065 D3).
+    // A pending or off source with sessions must not make an empty stage look
+    // unsafe: nothing of it was ever going to be staged.
+    let registry =
+        scanner::load_registry_from_repo().context("load the harness registry for the guard")?;
+    let consent = crate::sources::evaluate(config, &registry, Some(stage));
+    let narrowed = crate::sources::consented_registry(&registry, &consent);
+    let scan = scanner::scan_counted(config, &narrowed, machine)
         .context("scan harness sessions for empty-stage guard")?;
     inspect_stage_for_push_with_evidence(
         &ScanEvidence::from_scan_report(&scan),
@@ -1779,19 +1795,46 @@ pub fn collect(
     destination: &DestinationView<'_>,
 ) -> anyhow::Result<CollectReport> {
     let scan_started = std::time::Instant::now();
-    let scan = scanner::scan_with_machine(config, machine).context("scan harness sessions")?;
+    // ADR-065 D3 — the one seam. A pass derives its sources from the registry
+    // narrowed to the sources the user turned on, so collect, run-once and the
+    // hourly timer cannot diverge, and everything that hangs off a registry
+    // entry (its session roots, its machine logs) is gone for a source that is
+    // off or pending. With no consent recorded at all there is nothing to
+    // narrow to, and the pass refuses (D5) instead of collecting everything.
+    let registry = scanner::load_registry_from_repo().context("load the harness registry")?;
+    let consent = crate::sources::require_consent(config, &registry, stage)?;
+    let narrowed = crate::sources::consented_registry(&registry, &consent);
+    let mut source_notices: Vec<String> = Vec::new();
+    source_notices.extend(crate::sources::upgrade_notice(&consent));
+    source_notices.extend(crate::sources::unrecognised_notice(&consent));
+    source_notices.extend(crate::sources::stage_evidence_notice(&consent));
+    source_notices.extend(crate::sources::pending_notice(
+        &crate::sources::pending_and_present(config, &registry, &consent),
+    ));
+    let sources_on: Vec<String> = consent
+        .ids(crate::sources::SourceState::On)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let scan =
+        scanner::scan_counted(config, &narrowed, machine).context("scan harness sessions")?;
     let scan_ms = scan_started.elapsed().as_millis() as u64;
     let collect_started = std::time::Instant::now();
     // W1049: the fresh-identity rescan a vanished source triggers. Lazy on
     // purpose — it reloads the registry and re-walks ONE harness family's
     // roots, so a pass where nothing vanishes pays nothing — and re-derived
     // from the same registry precedence the pass's own scan read, so the
-    // probe can never walk roots this build would not have collected.
+    // probe can never walk roots this build would not have collected. It keeps
+    // only a source the consent seam above kept: a vanished source is one the
+    // pass was collecting, and the filter makes that a property of the code
+    // rather than of the call site.
     let relocate = |harness_id: &str| -> anyhow::Result<scanner::ScanReport> {
         let mut registry = scanner::load_registry_from_repo().with_context(|| {
             format!("reload the harness registry to re-walk the {harness_id} store")
         })?;
-        registry.harnesses.retain(|entry| entry.id == harness_id);
+        registry.harnesses.retain(|entry| {
+            entry.id == harness_id && consent.state_of(&entry.id) == crate::sources::SourceState::On
+        });
         scanner::scan_with_registry_and_machine(config, &registry, machine).with_context(|| {
             format!("re-walk the {harness_id} roots for a source that vanished mid-pass")
         })
@@ -1807,6 +1850,8 @@ pub fn collect(
     )?;
     report.scan_ms = scan_ms;
     report.collect_ms = collect_started.elapsed().as_millis() as u64;
+    report.source_notices = source_notices;
+    report.sources_on = sources_on;
     Ok(report)
 }
 

@@ -34,6 +34,14 @@ chat-stasher setup
 
 The wizard asks one question at a time. Press Enter to accept the value in brackets.
 
+### Choosing which tools to collect
+
+Before anything is collected, the wizard scans read-only and lists the AI tools it found, one row each: the number of sessions, the size when it is cheap to know (otherwise `unknown`), the path, and whether the registry records a dated verification for it. Tools with a dated verification are marked `[x]`; unverified ones are not. A tool whose store could not be read is listed and cannot be chosen. A tool that needs a path says so: state it under `[harness_roots]`, which also turns it on. The scan never reads conversation text.
+
+Type the numbers to collect (`1,3`), `all`, `none`, or press Enter to keep the marks. Only then does the first archive run, and only the tools you chose are collected. Your answer is written to the `[sources]` table of the config (see [config.md](config.md#sources)); the rest of the file is left as you wrote it.
+
+A tool you installed later is not collected until you choose it. `status` and every pass name it as pending. `chat-stasher sources` lists the states and, on a terminal, edits them; `chat-stasher sources enable <id>` and `chat-stasher sources disable <id>` do the same from a script. Turning a tool off stops new collection and deletes nothing: sessions already archived stay, and copies already in the stage stay in plaintext until the stage is reclaimed.
+
 ### 1. The stage
 
 ```
@@ -127,6 +135,8 @@ chat-stasher setup --stage ~/stash/chat-stasher/stage \
   --remote-secret-key-env CHAT_STASHER_R2_SECRET_ACCESS_KEY \
   --install-schedule
 ```
+
+Without a terminal there is no question to answer, so consent is given by a flag: `--sources <id,id>` collects exactly those tools (every other tool found on the machine is recorded as off), and `--all-detected` collects every tool found. A run with neither, on a machine where no tool has been chosen, refuses with exit code `4`, writes nothing, and prints the command to run next. A machine that already has its choices recorded goes on with them.
 
 `--json` asks for the same object from an interactive terminal.
 

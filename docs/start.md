@@ -45,6 +45,15 @@ First, write a config file. `init` creates `~/.config/chat-stasher/config.toml` 
 chat-stasher init
 ```
 
+Next, choose which AI tools chat-stasher may collect from. Nothing is collected until you do: a fresh machine has no source chosen, and `run-once` and `collect` refuse with exit code `4` until one is. The simplest way is the wizard, `chat-stasher setup`, which shows what it found and asks. In a script, name the tools:
+
+```sh
+chat-stasher sources                      # lists what was found and the state of each tool
+chat-stasher sources enable claude-code   # collect this tool
+```
+
+`chat-stasher setup --all-detected --stage <dir>` chooses every tool it finds. See [setup.md](setup.md#choosing-which-tools-to-collect).
+
 Next, make a **stage**. This is a folder where new sessions wait, sealed, until they are pushed into the encrypted archive. Put it somewhere you will not delete:
 
 ```sh

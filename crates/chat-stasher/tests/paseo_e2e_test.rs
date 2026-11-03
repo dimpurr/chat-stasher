@@ -267,7 +267,10 @@ impl World {
                 test_support::RUSTIC_CACHE_DIR_ENV,
                 test_support::rustic_cache_root(self.path()),
             )
-            .env("XDG_CONFIG_HOME", self.path().join("config"))
+            .env(
+                "XDG_CONFIG_HOME",
+                test_support::consent_config_home(self.path().join("config"), &["codex", "grok"]),
+            )
             .env("XDG_DATA_HOME", self.path().join("data"))
             .env("XDG_STATE_HOME", self.path().join("state"))
             .env("XDG_CACHE_HOME", self.path().join("cache"))

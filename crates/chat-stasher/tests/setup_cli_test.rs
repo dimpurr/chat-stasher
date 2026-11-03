@@ -103,8 +103,19 @@ impl Sandbox {
     }
 
     fn command(&self, args: &[&str]) -> Output {
+        // ADR-065 D5: without a TTY, consent is explicit. These tests are about
+        // the rest of the wizard, so a `setup` call here names every source
+        // found (`--all-detected`) unless the test chose its own flags.
+        let mut args: Vec<&str> = args.to_vec();
+        if args.first() == Some(&"setup")
+            && !args
+                .iter()
+                .any(|a| a.starts_with("--sources") || *a == "--all-detected")
+        {
+            args.push("--all-detected");
+        }
         Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
-            .args(args)
+            .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -554,8 +565,12 @@ fn missing_masterkey_declaration_alone_bootstraps_the_key_and_stops() {
     // no archive snapshot (no run-once pass), no config remote, no scheduler.
     assert!(sandbox.repository().exists(), "the repository must exist");
     assert!(sandbox.masterkey().exists(), "the masterkey must exist");
+    // The source answer on this command line is recorded (ADR-065); no remote is.
     assert!(
-        !sandbox.config_file().exists(),
+        !sandbox
+            .read_config()
+            .lines()
+            .any(|line| line.starts_with("[destinations")),
         "a bootstrap keys the local archive only; it must not write a destination block"
     );
     let state_run_marker = sandbox
@@ -602,6 +617,9 @@ fn missing_masterkey_declaration_alone_bootstraps_the_key_and_stops() {
     let unexpected: Vec<_> = added
         .iter()
         .filter(|path| *path != "data/chat-stasher" && !path.starts_with("data/chat-stasher/"))
+        // ADR-065: the source answer on this command line, checked above to
+        // carry no remote.
+        .filter(|path| !path.starts_with("config/chat-stasher"))
         .filter(|path| !is_cache_path(path.as_str()))
         .cloned()
         .collect();
@@ -955,6 +973,7 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     let stage = sandbox.stage();
     let args = [
         "setup",
+        "--all-detected",
         "--stage",
         stage.to_str().expect("stage path"),
         "--masterkey-saved-elsewhere",
@@ -992,6 +1011,7 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     // masterkey declaration, creates the key, and stops, touching no scheduler.
     let bootstrap = run(&[
         "setup",
+        "--all-detected",
         "--stage",
         stage.to_str().expect("stage path"),
         "--json",
@@ -1032,6 +1052,7 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     }
     let uninstall_args = [
         "setup",
+        "--all-detected",
         "--stage",
         stage.to_str().expect("stage path"),
         "--masterkey-saved-elsewhere",
@@ -1176,6 +1197,7 @@ fn setup_self_check_uses_the_installed_binary_selected_from_a_build_artifact() {
     let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args([
             "setup",
+            "--all-detected",
             "--stage",
             sandbox.stage().to_str().expect("stage path"),
             "--masterkey-saved-elsewhere",
@@ -1232,7 +1254,7 @@ fn setup_self_check_uses_the_installed_binary_selected_from_a_build_artifact() {
 fn non_tty_setup_emits_json_missing_parameters_and_does_not_echo_stdin() {
     let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
-        .arg("setup")
+        .args(["setup", "--all-detected"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -2465,9 +2487,9 @@ fn a_declared_destination_without_a_repo_is_reported_rather_than_exiting() {
     // A half-written block is the user's: the wizard adopts it as it stands and
     // never rewrites it.
     assert_eq!(value["destination"]["config"]["kind"], "already_declared");
-    assert_eq!(
-        sandbox.read_config(),
-        before,
+    // The source answer is the one thing this run adds, after the user's bytes.
+    assert!(
+        sandbox.read_config().starts_with(&before),
         "the adopted block must be left exactly as it was found"
     );
     // The reason has to name what is missing, or a wrapper knows only that
@@ -2504,6 +2526,7 @@ fn an_unusable_credential_variable_is_reported_to_a_non_tty_caller() {
     let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args([
             "setup",
+            "--all-detected",
             "--stage",
             sandbox.stage().to_str().expect("utf-8 stage"),
             "--destination",
@@ -2580,6 +2603,7 @@ fn the_written_destination_carries_credential_references_and_never_the_secret() 
     let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args([
             "setup",
+            "--all-detected",
             "--stage",
             sandbox.stage().to_str().expect("utf-8 stage"),
             "--destination",

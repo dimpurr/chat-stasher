@@ -26,10 +26,10 @@ The coding agents and web AI chats you already use, in one archive ([status per 
 curl -fsSL https://chatstasher.com/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"                   # the line the installer prints if this folder is not on PATH
 chat-stasher doctor                                    # read-only: is anything deleting your history?
-chat-stasher init && chat-stasher run-once --stage ~/stash/chat-stasher/stage
+chat-stasher setup                                     # shows what it found and asks which tools to collect
 ```
 
-The first command installs the CLI into `~/.local/bin` (checksum-verified, no `sudo`); the `export` is the line the installer prints when that folder is not already on your `PATH`, and running it twice is harmless. `doctor` changes nothing; `run-once` makes your first local, encrypted archive.
+The first command installs the CLI into `~/.local/bin` (checksum-verified, no `sudo`); the `export` is the line the installer prints when that folder is not already on your `PATH`, and running it twice is harmless. `doctor` changes nothing; `setup` shows the AI tools it found, asks which of them to collect, and then makes your first local, encrypted archive. Nothing is collected from a tool you did not choose. Scripts name their choice with `setup --sources <id,id>` or `setup --all-detected`; see [Choosing which tools to collect](docs/setup.md#choosing-which-tools-to-collect).
 
 The install script places a prebuilt macOS binary today. Linux and Windows builds arrive with **0.5.0**; until then those platforms build from source. All of it is in [Install](#install), and backups to a remote and scheduling are in [Your first archive](#your-first-archive).
 

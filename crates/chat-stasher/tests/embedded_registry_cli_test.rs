@@ -58,6 +58,17 @@ fn installed_binary_uses_embedded_registry_outside_checkout() {
     let key_file = outside.path().join("masterkey.json");
 
     assert_success(run(binary, outside.path(), home.path(), &["init"]), "init");
+    // ADR-065: nothing is collected until the user chooses, so choose through
+    // the shipped command, which also exercises the embedded registry's ids.
+    assert_success(
+        run(
+            binary,
+            outside.path(),
+            home.path(),
+            &["sources", "enable", "claude-code"],
+        ),
+        "sources enable",
+    );
     assert_success(
         run(
             binary,

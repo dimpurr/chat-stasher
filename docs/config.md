@@ -35,6 +35,21 @@ chat-stasher reads one file: `~/.config/chat-stasher/config.toml` (or `$XDG_CONF
 
 Local paths follow `XDG_DATA_HOME` when it is set.
 
+## `[sources]`
+
+Which tools' sessions are collected. Keys are the same tool ids as `[harness_roots]`; each value is `"on"` or `"off"`:
+
+```toml
+[sources]
+claude-code = "on"
+codex = "off"
+```
+
+- A tool with no line is **pending**: nobody has decided, and nothing is collected from it. A file with no `[sources]` table at all means no tool has been chosen yet.
+- A path you state in `[harness_roots]` counts as `"on"` for that tool when it has no line here. An explicit `"off"` wins over a stated path.
+- A value other than `"on"` or `"off"` makes the whole file unusable, so a typo is never read as a choice.
+- `chat-stasher setup` and `chat-stasher sources` write this table and keep everything else in the file as you wrote it. `"off"` stops new collection and deletes nothing already archived or staged.
+
 ## `[harness_roots]`
 
 Tells the scanner where a tool keeps its sessions, when that is not where the built-in registry looks, or when the registry has no verified path for your system. Keys are tool ids:

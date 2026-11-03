@@ -1018,6 +1018,19 @@ fi
 # ------------------------------------------------------------------- step 4/8
 step "4/8 · run-once (collect -> seal -> push)"
 RUN_LOG="$WORK/run-once.txt"
+# ADR-065: nothing is collected until the user chooses. A fresh machine with
+# no recorded source decision must refuse (exit 4, no_source_consent) — lock
+# the gate here before giving consent through the shipped command below.
+rc=0; "$INSTALLED" run-once --stage "$STAGE" --machine "$SMOKE_MACHINE" >"$RUN_LOG" 2>&1 || rc=$?
+check "run-once without consent refuses (exit 4)" 4 "$rc"
+assert "the refusal names no_source_consent and collects nothing" \
+  "$(grep -q 'no_source_consent' "$RUN_LOG" && echo 0 || echo 1)"
+# Give consent the scriptable way (ADR-065 D8 `sources enable`); the ids below
+# are exactly the harnesses planted in step 1/8.
+CONSENT_LOG="$WORK/sources-enable.txt"
+rc=0; "$INSTALLED" sources enable claude-code codex gemini-cli opencode openclaw hermes-agent cursor >"$CONSENT_LOG" 2>&1 || rc=$?
+check "sources enable exits 0" 0 "$rc"
+sed 's/^/[smoke]   | /' "$CONSENT_LOG" || true
 rc=0; "$INSTALLED" run-once --stage "$STAGE" --machine "$SMOKE_MACHINE" >"$RUN_LOG" 2>&1 || rc=$?
 check "run-once exits 0" 0 "$rc"
 grep -E '^\[(collect|push|run-once)\]' "$RUN_LOG" | sed 's/^/[smoke]   | /' || true

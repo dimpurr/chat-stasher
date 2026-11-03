@@ -81,7 +81,7 @@ fn run_once_with_a_declared_but_unreadable_producer_archives_and_exits_3() {
     fs::write(
         config_dir.join("config.toml"),
         format!(
-            "push_only_if_changed = false\n\n[pull.letta]\naccount_id = \
+            "push_only_if_changed = false\n\n[sources]\n\n[pull.letta]\naccount_id = \
              \"synthetic-account\"\ninbox = \"{}\"\n",
             inbox.display()
         ),
@@ -181,7 +181,7 @@ fn run_once_without_a_declaration_stays_a_complete_pass() {
     fs::create_dir_all(&config_dir).unwrap();
     fs::write(
         config_dir.join("config.toml"),
-        "push_only_if_changed = false\n",
+        "push_only_if_changed = false\n\n[sources]\n",
     )
     .unwrap();
 
@@ -252,7 +252,11 @@ fn run_once_refuses_an_invalid_declaration_naming_the_key() {
         );
         let config_dir = sandbox.join("config").join("chat-stasher");
         fs::create_dir_all(&config_dir).unwrap();
-        fs::write(config_dir.join("config.toml"), bad).unwrap();
+        fs::write(
+            config_dir.join("config.toml"),
+            format!("[sources]\n\n{bad}"),
+        )
+        .unwrap();
         let out = run(
             sandbox,
             &[

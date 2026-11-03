@@ -15,6 +15,7 @@ chat-stasher <command> --help
 |---|---|---|
 | [`init`](#init) | Writes a commented config file, if none exists | Config (new file only) |
 | [`setup`](#setup) | First-run wizard: first archive, key, destination, timer | Yes |
+| [`sources`](#sources) | Shows which tools are collected, off or pending, and changes that | Config (`[sources]` only) |
 | [`doctor`](#doctor) | Is anything on this machine deleting its history? | No |
 | [`run-once`](#run-once) | One archive pass: pull any declared producer, collect, then push if changed | Stage, archive |
 | [`schedule`](#schedule) | Renders, installs or removes the hourly timer | Timer files (with `install` / `uninstall`) |
@@ -61,7 +62,7 @@ Lower-level commands, used by the ones above or for repair, are listed under [Pl
 
 ### Exit codes
 
-The same four codes are used everywhere a command answers a question about the archive:
+The same codes are used everywhere a command answers a question about the archive:
 
 | Code | Meaning |
 |---|---|
@@ -69,6 +70,7 @@ The same four codes are used everywhere a command answers a question about the a
 | `1` | Read everything, and the answer is "nothing" (for `status`: not healthy). |
 | `2` | Usage error. Nothing was done. |
 | `3` | Could not finish reading. Any "0" in the output is unproven. |
+| `4` | No tool has been chosen for collection on this machine (`run-once`, `collect`, non-interactive `setup`), or the named tool is off or pending (`backfill`). Nothing was collected. The message names the next command. |
 
 Exceptions are listed per command. `ui` never exits `1`.
 
@@ -104,10 +106,28 @@ The first-run wizard: [setup.md](setup.md).
 | `--remote-endpoint`, `--remote-user`, `--remote-ssh-key`, `--remote-bucket`, `--remote-region`, `--remote-root` | The destination's values. `--remote-region` defaults to `auto`. |
 | `--remote-access-key-id-env <VAR>`, `--remote-secret-key-env <VAR>` | The **names** of the variables that hold the S3 credentials. |
 | `--trust-host` | The person declares they checked the SFTP fingerprint. |
+| `--sources <id,id>` | Collect exactly these tools; every other tool found is recorded as off. See [setup.md](setup.md#choosing-which-tools-to-collect). |
+| `--all-detected` | Collect every tool found on this machine. |
 | `--install-schedule` / `--uninstall-schedule` | Install or remove the timers after setup. |
 | `--json` | One JSON object. Always on when not attached to a terminal. |
 
-Exit codes: `0` done · `1` a step did not finish · `2` missing parameter or malformed flag, refused before anything was written · `3` something could not be read. One `2` is different: when the declaration is the only thing owed and the run refused *before* the local archive pass (`steps.local_save` is `not_attempted`), it creates the local repository and every key it will ask about, so there are files to copy, and stops there. The same rule reaches a destination's key one step later — any key a run creates cannot be covered by a flag given before it existed, so a run that created one names the new file and stops with `2` as well, whether or not it stopped before the archive pass. [setup.md](setup.md#for-scripts-and-agents) has the details.
+Exit codes: `0` done · `1` a step did not finish · `2` missing parameter or malformed flag, refused before anything was written · `3` something could not be read · `4` no tool has been chosen and neither `--sources` nor `--all-detected` was given (nothing written). One `2` is different: when the declaration is the only thing owed and the run refused *before* the local archive pass (`steps.local_save` is `not_attempted`), it creates the local repository and every key it will ask about, so there are files to copy, and stops there. The same rule reaches a destination's key one step later — any key a run creates cannot be covered by a flag given before it existed, so a run that created one names the new file and stops with `2` as well, whether or not it stopped before the archive pass. [setup.md](setup.md#for-scripts-and-agents) has the details.
+
+### `sources`
+
+Shows which tools' sessions are collected, and changes that. Every tool is `on` (collected), `off` (you declined it) or `pending` (nobody has decided; not collected). `off` and `pending` are not gaps, and they are kept apart from "not found" and "could not be read".
+
+| Form | Meaning |
+|---|---|
+| `chat-stasher sources` | List what was found with each tool's state. On a terminal it then asks which to collect, like the wizard. |
+| `chat-stasher sources enable <id>...` | Turn tools on. |
+| `chat-stasher sources disable <id>...` | Turn tools off. Nothing is deleted: archived sessions stay, staged copies stay in plaintext until reclaimed, and [`purge`](#purge) is the per-session command. |
+| `--stage <dir>` | Stage to read for the upgrade rule below (default: `[native_host] stage`). |
+| `--json` | One JSON object; changes nothing. |
+
+Only the `[sources]` table of the config is edited; comments and the rest of the file are kept. Exit codes: `0` done · `2` an id the registry does not list · `3` the scan or config could not be read.
+
+A machine upgraded from an earlier version, with no `[sources]` table and a stage that already holds sessions, keeps collecting the tools that stage holds. Every other tool is pending, and each pass prints one notice until you record the choices.
 
 ### `doctor`
 
@@ -184,6 +204,8 @@ A `[keys]` line is added for each **destination** whose key needs attention: one
 `[dest]` and `[reclaim]` lines are added when a declared destination disagrees with what the machine's timers and the weekly stage clean-up actually do: a destination no installed timer pushes, one whose `env:` credentials a timer cannot resolve, one a timer covers but no push has been recorded against, one whose `push-state` record exists but cannot be read, or a reclaim blocked for several weeks running. Each line is the same sentence `doctor` reports and the menu bar app shows, with the fix command beneath it. A machine whose destinations are all covered, timer-resolvable, record-successful and currently reclaiming prints no such line — and the lines do not change the exit code, which stays the timer verdict documented above.
 
 A `[mirror]` line is added when the machine's local mirror has something to say: a first fill in progress (phrased as progress — the bytes of the listing that are downloaded onto the disk, `downloaded X of Y (Z%)`, with the hash-verified bytes beside them as `of which V (W%) hash-verified`, so the tool's number and the directory's own size say the same thing; never as a red), a round that failed, a record that cannot be read, or the steady row once the copy is complete — its size on disk, the last sync's time and age, how many snapshots the closure record does not cover, and how many orphan files the copy carries. Those four are the mirror's settled field family: the same wording shows in this line, in `doctor`'s `D13` section and in the menu bar app, which decodes the rows from `--json` rather than rewording them. No `[mirror]` section configured prints no line at all — while a section with the switch off still prints the one line it owes when a leftover copy is on disk (the copy's measured size and file count; it keeps every byte until you delete it — see [config.md](config.md#mirror)), so turning the mirror off is silence only when no bytes are left behind. A mirror line never moves the exit code either.
+
+When something is off, pending or undecided, a `[sources]` line says what is collected, what you turned off and which detected tools are pending; the `[scan]` counts mark sessions in an off or pending tool as `(off)` or `(pending)`, so a session that was found is never read as one that was archived. `status --json` carries the same under `sources`. `doctor` prints the same line and counts neither off nor pending as a gap.
 
 ### `dest-init`
 

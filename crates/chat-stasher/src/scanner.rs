@@ -275,6 +275,14 @@ pub struct RegistryHarness {
     /// to distinct groups).
     #[serde(default)]
     pub product_group: Option<String>,
+    /// The dated human verification the support tables read
+    /// (`scripts/gen-support-matrix.py`, `verified: {date, scope, platform?}`):
+    /// a real session was archived end to end on a real machine. Absent means
+    /// no such run is recorded, which is not the same as "never worked". The
+    /// source-consent wizard (ADR-065 D4) pre-selects exactly the sources that
+    /// carry one.
+    #[serde(default)]
+    pub verified: Option<RegistryVerified>,
     #[serde(default)]
     pub paths: RegistryPaths,
     /// Per-machine input logs this harness's own local app keeps (ADR-053 D1):
@@ -336,6 +344,32 @@ pub struct RegistryHarness {
     /// so an uncredited harness can never be rename-sealed.
     #[serde(default)]
     pub seal_source: String,
+}
+
+/// A harness's recorded end-to-end verification. Only the fields the consent
+/// wizard needs are read; `scope` and `version` stay in the data file for the
+/// support tables, which own their wording.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegistryVerified {
+    /// Full ISO day (`YYYY-MM-DD`) the verification was recorded.
+    pub date: String,
+    /// When set, limits the claim to one platform cell (`macos`, `linux`,
+    /// `windows`); absent means the record speaks for the harness's primary
+    /// store on the platform it was made on.
+    #[serde(default)]
+    pub platform: Option<String>,
+}
+
+impl RegistryHarness {
+    /// The verification date that applies on `platform`, if one is recorded.
+    /// A record scoped to another platform does not vouch for this one.
+    pub fn verified_date_on(&self, platform: &str) -> Option<&str> {
+        let verified = self.verified.as_ref()?;
+        match verified.platform.as_deref() {
+            Some(scoped) if scoped != platform => None,
+            _ => Some(verified.date.as_str()),
+        }
+    }
 }
 
 /// One declared machine log: an append-only per-machine file a harness's local
@@ -1835,10 +1869,26 @@ pub fn reset_scan_with_machine_calls() {
 /// Registry-driven scan with a caller-selected machine partition. Archive
 /// commands use this after resolving their explicit `--machine` or the local
 /// hostname, so a missing local hostname cannot block the explicit route.
+///
+/// This scans the **whole** registry — it is the display scan, and it sees
+/// every source whatever the user chose. A pass that collects must not call it:
+/// it narrows the registry to the consented sources first (ADR-065 D3, see
+/// `crate::sources::consented_registry`) and scans that with [`scan_counted`].
 pub fn scan_with_machine(config: &Config, machine: &str) -> io::Result<ScanReport> {
-    SCAN_WITH_MACHINE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let registry = load_registry_from_repo()?;
-    scan_with_registry_and_machine(config, &registry, machine)
+    scan_counted(config, &registry, machine)
+}
+
+/// [`scan_with_registry_and_machine`] counted by [`SCAN_WITH_MACHINE_CALLS`].
+/// This is the scan a collecting pass runs over its (consent-narrowed)
+/// registry; the counter keeps proving that a quiet pass scans exactly once.
+pub fn scan_counted(
+    config: &Config,
+    registry: &HarnessRegistry,
+    machine: &str,
+) -> io::Result<ScanReport> {
+    SCAN_WITH_MACHINE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    scan_with_registry_and_machine(config, registry, machine)
 }
 
 /// Registry-driven scan with an already-loaded registry and explicit machine
@@ -1937,6 +1987,74 @@ pub fn grok_bot_persistence_root(config: &Config) -> Option<PathBuf> {
         return None;
     }
     static_prefix_root(&cell.template).map(|(root, _)| root)
+}
+
+/// Whether a source's store is on this machine, answered from its root paths
+/// alone: a few `stat` calls, no directory walk and no database open.
+///
+/// This exists for the one question a pass may ask about a source nobody has
+/// turned on: "is it there, so I can name it as pending?" (ADR-065 D6). The
+/// full probe enumerates sessions, which is right for the display scan the
+/// user asked for and wrong for an hourly pass that has no business opening a
+/// store the user has not chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootPresence {
+    /// At least one of the source's roots exists.
+    Present,
+    /// Every root the registry and the config resolve was measured absent.
+    Absent,
+    /// A root could not be stat'ed, or none resolves on this platform; absence
+    /// is not established.
+    Unknown,
+}
+
+/// [`RootPresence`] for one registry entry, resolved with the same precedence
+/// the probe uses: the registry's env override, then a root the config states,
+/// then the template's static prefix. A cell the registry marks
+/// `unascertained` is not guessed at unless the user stated a root.
+pub fn root_presence(config: &Config, harness: &RegistryHarness) -> RootPresence {
+    let platform = current_platform();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut resolve = |key: &str, cell: Option<&RegistryCell>| {
+        let explicit = config.explicit_harness_root(key).map(expand_tilde);
+        if let Some(cell) = cell {
+            if let Some((root, _)) = root_from_env_override(cell) {
+                candidates.push(root);
+                return;
+            }
+        }
+        if let Some(root) = explicit {
+            candidates.push(root);
+            return;
+        }
+        if let Some(cell) = cell {
+            if Confidence::classify(&cell.confidence).scan_allowed() {
+                if let Some((root, _)) = static_prefix_root(&cell.template) {
+                    candidates.push(root);
+                }
+            }
+        }
+    };
+    resolve(&harness.id, harness.paths.cell_for(platform));
+    for root in &harness.source_roots {
+        resolve(
+            &format!("{}:{}", harness.id, root.id),
+            root.paths.cell_for(platform),
+        );
+    }
+    let mut unknown = candidates.is_empty();
+    for path in &candidates {
+        match fs::metadata(path) {
+            Ok(_) => return RootPresence::Present,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => unknown = true,
+        }
+    }
+    if unknown {
+        RootPresence::Unknown
+    } else {
+        RootPresence::Absent
+    }
 }
 
 /// Where a declared machine log resolves to, or why it was not looked at.

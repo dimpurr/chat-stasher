@@ -94,7 +94,10 @@ impl Sandbox {
                 test_support::RUSTIC_CACHE_DIR_ENV,
                 test_support::rustic_cache_root(&home),
             )
-            .env("XDG_CONFIG_HOME", self.dir.path().join("config"))
+            .env(
+                "XDG_CONFIG_HOME",
+                test_support::consent_config_home(self.dir.path().join("config"), &[]),
+            )
             .env("XDG_DATA_HOME", self.dir.path().join("data"))
             .env("XDG_STATE_HOME", self.dir.path().join("state"))
             .env("XDG_CACHE_HOME", self.dir.path().join("cache"))
@@ -117,7 +120,7 @@ impl Sandbox {
         fs::write(
             config_dir.join("config.toml"),
             format!(
-                "[destinations.storagebox]\nrepo = '{}'\nkey_file = '{}'\nno_cache = \
+                "[sources]\n\n[destinations.storagebox]\nrepo = '{}'\nkey_file = '{}'\nno_cache = \
                  true\n\n[mirror]\nenabled = true\nmirror_of = 'storagebox'\nmin_free_gib = \
                  1.0\n",
                 self.repo().display(),

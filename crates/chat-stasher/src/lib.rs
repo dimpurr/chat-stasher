@@ -73,6 +73,7 @@ pub mod shard_facts;
 mod shard_writer;
 pub mod sidecar;
 pub mod snapshot_cache;
+pub mod sources;
 pub mod sqlite_probe;
 pub mod stagereclaim;
 pub mod store;
