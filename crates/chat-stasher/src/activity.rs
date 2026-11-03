@@ -4885,6 +4885,327 @@ mod tests {
         );
     }
 
+    // ------------------------------------- deepseek-harness · the one dsh fact
+    //
+    // The one fact a `dsh` session states about itself: the working directory
+    // its header frame opened with. No other record type carries a directory,
+    // and the lossy slug in the source path is forbidden fruit by the
+    // registry's own note, so no test here spells one.
+
+    /// One synthetic `dsh` session header frame — the first frame of a decoded
+    /// rollout — spelling exactly the keys the installed build wrote when this
+    /// fold was measured, plus whatever `fields` the case is about.
+    fn dsh_header_with(pairs: &str) -> String {
+        format!(
+            r#"{{"type":"session","version":4,"id":"session-synthetic","createdAt":1780000000000,"isSeeded":false,"delegationDepth":0,"agentPreset":"standard"{pairs}}}"#
+        )
+    }
+
+    #[test]
+    fn a_dsh_session_header_states_its_working_directory() {
+        let row = build_row(
+            "s",
+            "mbp",
+            "deepseek-harness",
+            &[dsh_header_with(r#","cwd":"/w/one""#).as_str()],
+        );
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert!(
+            row.dimensions.is_valid(),
+            "the one recorded fact is a well-formed dimension: {:?}",
+            row.dimensions
+        );
+    }
+
+    #[test]
+    fn a_dsh_session_that_named_no_directory_stays_unobserved() {
+        // Absent, empty, null, and mistyped are four spellings of the same
+        // nothing, and none of them becomes a value — and never the sanitized
+        // slug of the directory the file was found under, which the registry
+        // forbids parsing.
+        let row = build_row(
+            "s",
+            "mbp",
+            "deepseek-harness",
+            &[
+                "not json at all",
+                dsh_header_with("").as_str(),
+                dsh_header_with(r#","cwd":"""#).as_str(),
+                dsh_header_with(r#","cwd":null"#).as_str(),
+                dsh_header_with(r#","cwd":0"#).as_str(),
+                dsh_header_with(r#","cwd":["/w/one"]"#).as_str(),
+                r#"{"cwd":"/w/one"}"#,
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "a header that stated no directory observes nothing: {:?}",
+            row.dimensions
+        );
+        assert!(row.dimensions.is_valid());
+    }
+
+    #[test]
+    fn only_a_dsh_session_header_states_a_working_directory() {
+        // The header is the only record a `dsh` rollout states its directory
+        // on; the append records after it carry conversation and turn facts, so
+        // a `cwd` shaped key on one of them is not the session's directory and
+        // is not read.
+        for prefix in ["user", "assistant", "tool", "turn/start", "step/start"] {
+            let line = format!(
+                r#"{{"type":"{prefix}/message","seq":1,"time":1780000000000,"cwd":"/w/invented"}}"#
+            );
+            let row = build_row("s", "mbp", "deepseek-harness", &[line.as_str()]);
+            assert!(
+                row.dimensions.is_empty(),
+                "a `{prefix}` record is not the header, whatever key it carries: {:?}",
+                row.dimensions
+            );
+        }
+    }
+
+    #[test]
+    fn the_dsh_dimensions_travel_in_the_index_line() {
+        let line = dsh_header_with(r#","cwd":"/w/one""#);
+        let json = to_jsonl(&build_row("s", "mbp", "deepseek-harness", &[line.as_str()]));
+        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
+        assert!(!json.contains("\"container\""), "line: {json}");
+        assert!(!json.contains("\"tenant\""), "line: {json}");
+        assert!(!json.contains("\"status\""), "line: {json}");
+    }
+
+    // ------------------------------- workbuddy / codebuddy · the cbc event core
+    //
+    // The WorkBuddy desktop app and the CodeBuddy CLI share one transcript
+    // event core, and WorkBuddy adds the store row the desktop app keeps: the
+    // facts the core and that row state about a session of either harness.
+
+    /// One synthetic WorkBuddy store envelope line — the whole `sessions` row
+    /// `sqlite_probe.rs` seals under the workbuddy schema — with whatever the
+    /// case is about spelled into the row.
+    fn workbuddy_envelope_with(fields: &str) -> String {
+        format!(
+            r#"{{"schema":"chat-stasher.workbuddy.session.v1","session":{{{fields}}}}}"#
+        )
+    }
+
+    /// One synthetic cbc event line, the shape the shared core writes on the
+    /// WorkBuddy desktop app and the CodeBuddy CLI: the fields a message
+    /// record carries, with whatever the case is about spelled in.
+    fn cbc_event_with(pairs: &str) -> String {
+        format!(
+            r#"{{"id":"m1","timestamp":1780000000000,"type":"message","role":"user","sessionId":"session-synthetic"{pairs}}}"#
+        )
+    }
+
+    #[test]
+    fn a_workbuddy_row_states_its_directory_account_and_project() {
+        let line = workbuddy_envelope_with(
+            r#""id":"fixture-row","cwd":"/w/one","user_id":"account-fixture","project_id":"project-fixture","transport":"local","status":"completed""#,
+        );
+        let row = build_row("s", "mbp", "workbuddy", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert_eq!(
+            row.dimensions.tenant, ["account-fixture"],
+            "the account the app scoped the row to is a namespace one account's \
+             sessions share, which is what makes it a tenancy"
+        );
+        assert_eq!(
+            row.dimensions.container, ["project-fixture"],
+            "the project key the row records is an opaque identity the harness \
+             wrote, not a path, and a row without one stays unobserved"
+        );
+    }
+
+    #[test]
+    fn a_workbuddy_row_status_is_a_run_state_never_a_lifecycle() {
+        // The row's `status` column, measured as `Pending` by default and
+        // `completed` after a run, is the state of the *generation run* the
+        // record last lived through — the same reading Cursor's
+        // `none`/`completed`/`aborted` gets. Folding it would assert a
+        // conversation was archived because a run finished.
+        let line = workbuddy_envelope_with(
+            r#""id":"fixture-row","cwd":"/w/one","transport":"local","status":"completed""#,
+        );
+        let row = build_row("s", "mbp", "workbuddy", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert!(
+            row.dimensions.status.is_empty(),
+            "the run a row records completing is not a session lifecycle: {:?}",
+            row.dimensions.status
+        );
+    }
+
+    #[test]
+    fn a_workbuddy_tombstone_states_no_dimension() {
+        // A soft-deleted row exports a bare tombstone — the id, the deleted
+        // fact, no row payload — so there is nothing to read, and the deletion
+        // itself is not an archived/pinned lifecycle state.
+        let line =
+            r#"{"schema":"chat-stasher.workbuddy.session.v1","session":"fixture-row","deleted":true}"#;
+        let row = build_row("s", "mbp", "workbuddy", &[line]);
+        assert!(
+            row.dimensions.is_empty(),
+            "a tombstone carries no row and no dimension: {:?}",
+            row.dimensions
+        );
+    }
+
+    #[test]
+    fn an_anonymous_workbuddy_row_records_only_its_directory() {
+        // A row that records no account and no project — the local rows of a
+        // single-account install — still says where it ran, and nothing else
+        // is invented beside it.
+        let line = workbuddy_envelope_with(r#""id":"fixture-row","cwd":"/w/one""#);
+        let row = build_row("s", "mbp", "workbuddy", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert!(
+            row.dimensions.tenant.is_empty() && row.dimensions.container.is_empty(),
+            "a row that named no account and no project observes neither: {:?}",
+            row.dimensions
+        );
+    }
+
+    #[test]
+    fn an_absent_empty_or_mistyped_workbuddy_value_records_no_dimension() {
+        let row = build_row(
+            "s",
+            "mbp",
+            "workbuddy",
+            &[
+                "not json at all",
+                workbuddy_envelope_with(
+                    r#""id":"fixture-row","cwd":"","user_id":"","project_id":"""#,
+                )
+                .as_str(),
+                workbuddy_envelope_with(
+                    r#""id":"fixture-row","cwd":7,"user_id":{"id":"x"},"project_id":["p"]"#,
+                )
+                .as_str(),
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "an empty or mistyped value is nothing observed, never a value: {:?}",
+            row.dimensions
+        );
+        assert!(row.dimensions.is_valid());
+    }
+
+    #[test]
+    fn an_unsealed_workbuddy_session_object_states_no_dimension() {
+        // Only a line sealed under the workbuddy schema vouches for its row:
+        // the same object under another schema, or none, is a record nothing
+        // vouches for — the rule every other envelope fold applies.
+        for line in [
+            r#"{"session":{"cwd":"/w/one","user_id":"account-fixture","project_id":"project-fixture"}}"#,
+            r#"{"schema":"chat-stasher.workbuddy.session.v2","session":{"cwd":"/w/one"}}"#,
+            r#"{"schema":"chat-stasher.hermes-agent.session.v1","session":{"cwd":"/w/one","user_id":"account-fixture"}}"#,
+        ] {
+            let row = build_row("s", "mbp", "workbuddy", &[line]);
+            assert!(
+                row.dimensions.is_empty(),
+                "an unsealed or foreign row states nothing: {line} {:?}",
+                row.dimensions
+            );
+        }
+    }
+
+    #[test]
+    fn a_cbc_event_line_states_the_working_directory_of_its_session() {
+        // The shared core writes the session's directory on its event records —
+        // the message, reasoning and call records of both harnesses measured
+        // carrying it — so it is read the way Claude Code's per-line `cwd`
+        // is: every distinct place the events state, never only the last.
+        for harness in ["workbuddy", "codebuddy"] {
+            let row = build_row(
+                "s",
+                "mbp",
+                harness,
+                &[
+                    cbc_event_with(r#","cwd":"/w/one""#).as_str(),
+                    cbc_event_with(r#","cwd":"/w/two""#).as_str(),
+                    cbc_event_with(r#","cwd":"/w/one""#).as_str(),
+                ],
+            );
+            assert_eq!(
+                row.dimensions.cwd,
+                ["/w/one", "/w/two"],
+                "each place the core said the session ran is kept once: {harness} {:?}",
+                row.dimensions.cwd
+            );
+            assert!(
+                row.dimensions.tenant.is_empty()
+                    && row.dimensions.container.is_empty()
+                    && row.dimensions.status.is_empty(),
+                "an event record states a directory and nothing else: {harness} {:?}",
+                row.dimensions
+            );
+        }
+    }
+
+    #[test]
+    fn a_cbc_event_line_without_a_directory_stays_unobserved() {
+        // The desktop app's `session-meta`, measured with its metadata under a
+        // `meta` key and no directory of its own: nothing is inferred from the
+        // session the record names, and an absent, empty or mistyped directory
+        // on any event record observes nothing.
+        let session_meta = r#"{"id":"meta1","timestamp":1780000000000,"type":"session-meta","sessionId":"session-synthetic","meta":{"codebuddy.ai/hostKind":"synthetic-host"}}"#;
+        let row = build_row(
+            "s",
+            "mbp",
+            "codebuddy",
+            &[
+                session_meta,
+                cbc_event_with("").as_str(),
+                cbc_event_with(r#","cwd":"""#).as_str(),
+                cbc_event_with(r#","cwd":null"#).as_str(),
+                cbc_event_with(r#","cwd":4"#).as_str(),
+                "not json at all",
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "no event record stated a directory, so none was observed: {:?}",
+            row.dimensions
+        );
+        assert!(row.dimensions.is_valid());
+    }
+
+    #[test]
+    fn another_harness_reads_no_cbc_dimensions() {
+        // The same event bytes under a harness nobody asked about: the fact
+        // belongs to the harness whose records state it.
+        let line = cbc_event_with(r#","cwd":"/w/one""#);
+        for harness in ["zed", "continue", "gemini-cli", "deepseek-harness"] {
+            let row = build_row("s", "mbp", harness, &[line.as_str()]);
+            assert!(
+                row.dimensions.is_empty(),
+                "dimensions are read per harness, not per shape: {harness} {:?}",
+                row.dimensions
+            );
+        }
+    }
+
+    #[test]
+    fn the_cbc_dimensions_travel_in_the_index_line() {
+        let envelope = workbuddy_envelope_with(
+            r#""id":"fixture-row","cwd":"/w/one","user_id":"account-fixture","project_id":"project-fixture""#,
+        );
+        let json = to_jsonl(&build_row("s", "mbp", "workbuddy", &[envelope.as_str()]));
+        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
+        assert!(json.contains(r#""tenant":["account-fixture"]"#), "line: {json}",);
+        assert!(json.contains(r#""container":["project-fixture"]"#), "line: {json}");
+        assert!(!json.contains("\"status\""), "line: {json}");
+
+        let event = cbc_event_with(r#","cwd":"/w/one""#);
+        let json = to_jsonl(&build_row("s", "mbp", "codebuddy", &[event.as_str()]));
+        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
+        assert!(!json.contains("\"tenant\""), "line: {json}");
+        assert!(!json.contains("\"container\""), "line: {json}");
+        assert!(!json.contains("\"status\""), "line: {json}");
+    }
+
     // ------------------------------------------------- W219 · account keys
 
     /// A shard record line carrying one account envelope, spelled exactly the

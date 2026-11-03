@@ -1409,6 +1409,249 @@ fn activity_index_records_the_workspace_and_repositories_a_composer_states() {
     );
 }
 
+/// One synthetic DeepSeek Harness rollout, one session: the decoded header
+/// frame a `session.v4.jsonl.zstd` file opens with, spelled with exactly the
+/// keys the installed build wrote when this projection was measured, plus an
+/// append record after it so the header is pinned as the *first* record.
+fn dsh_rollout() -> Vec<String> {
+    vec![
+        concat!(
+            r#"{"type":"session","version":4,"id":"session-fixture-dsh","createdAt":1780000000000,"#,
+            r#""cwd":"/w/fixture-project","isSeeded":false,"delegationDepth":0,"agentPreset":"synthetic"}"#
+        )
+        .to_string(),
+        concat!(
+            r#"{"type":"turn/start","seq":1,"time":1780000000500,"data":{"turn":1}}"#
+        )
+        .to_string(),
+    ]
+}
+
+/// The working directory a `dsh` session header states reaches the written
+/// index as the session's `cwd` — and nothing else does, because the header is
+/// the only record the harness state a directory on: no tenant, no container,
+/// no lifecycle, and never the lossy slug of the directory the file was found
+/// under.
+#[test]
+fn activity_index_records_the_cwd_a_dsh_session_header_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "deepseek-harness.mbp-test.dsh-4d-1";
+    write_shard(&stage, machine, session, &dsh_rollout());
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/fixture-project"]),
+        "the directory the header opened with is recorded as a path: {row}"
+    );
+    assert!(
+        row["dimensions"].get("tenant").is_none()
+            && row["dimensions"].get("container").is_none()
+            && row["dimensions"].get("status").is_none(),
+        "the header states one fact, and the index records exactly that one: {}",
+        row["dimensions"]
+    );
+}
+
+/// A `dsh` session whose header named no directory states nothing: the written
+/// line carries no dimensions object at all, and never the sanitized slug of
+/// the source directory the registry forbids parsing.
+#[test]
+fn activity_index_leaves_a_dsh_session_without_a_cwd_unobserved() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "deepseek-harness.mbp-test.dsh-4d-2";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[concat!(
+            r#"{"type":"session","version":4,"id":"session-fixture-dsh","createdAt":1780000000000,"#,
+            r#""isSeeded":false,"delegationDepth":0,"agentPreset":"synthetic"}"#
+        )
+        .to_string()],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert!(
+        row.get("dimensions").is_none(),
+        "a header that named no directory observes nothing, and no directory is \
+         inferred from where the file was found: {row}"
+    );
+}
+
+/// One synthetic WorkBuddy session in the dual-store shape W1046 archives:
+/// the sealed store envelope carrying the whole `sessions` row, beside one
+/// transcript record of the shared cbc event core.
+fn workbuddy_session_lines() -> Vec<String> {
+    vec![
+        concat!(
+            r#"{"schema":"chat-stasher.workbuddy.session.v1","session":{"#,
+            r#""id":"wb-4d-1","cwd":"/w/fixture-project","user_id":"account-fixture","#,
+            r#""project_id":"project-fixture","transport":"local","status":"completed","#,
+            r#""created_at":1780000000000,"updated_at":1780000000000,"is_playground":0}}"#
+        )
+        .to_string(),
+        concat!(
+            r#"{"id":"m1","timestamp":1780000000000,"type":"message","role":"user","#,
+            r#""sessionId":"wb-4d-1","cwd":"/w/fixture-project"}"#
+        )
+        .to_string(),
+    ]
+}
+
+/// The facts a WorkBuddy session's two halves state reach the written index:
+/// the directory the row and the event core both name, the account the app
+/// scoped the row to, and the project key the row records — and no lifecycle
+/// state, because the row's `completed` is the state of a generation run, not
+/// a session lifecycle.
+#[test]
+fn activity_index_records_the_dimensions_a_workbuddy_session_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "workbuddy.mbp-test.wb-4d-1";
+    write_shard(&stage, machine, session, &workbuddy_session_lines());
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/fixture-project"]),
+        "the row and the event core both name one directory, which the index \
+         records once: {row}"
+    );
+    assert_eq!(
+        row["dimensions"]["tenant"],
+        serde_json::json!(["account-fixture"]),
+        "the account the app scoped the row to is a tenancy: {row}"
+    );
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["project-fixture"]),
+        "the project key the row records is a container identity: {row}"
+    );
+    assert!(
+        row["dimensions"].get("status").is_none(),
+        "a run completing is not a session being archived: {}",
+        row["dimensions"]
+    );
+}
+
+/// One synthetic CodeBuddy CLI transcript record of the shared cbc event core.
+/// The CLI has no session store — the transcript file is the only record a
+/// session exists — so the event record's own directory is the one fact the
+/// index can read.
+#[test]
+fn activity_index_records_the_cwd_a_codebuddy_event_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "codebuddy.mbp-test.cb-4d-1";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[concat!(
+            r#"{"id":"m1","timestamp":1780000000000,"type":"message","role":"user","#,
+            r#""sessionId":"cb-4d-1","cwd":"/w/fixture-project"}"#
+        )
+        .to_string()],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/fixture-project"]),
+        "the directory the event core states is recorded as a path: {row}"
+    );
+    assert!(
+        row["dimensions"].get("tenant").is_none()
+            && row["dimensions"].get("container").is_none()
+            && row["dimensions"].get("status").is_none(),
+        "the transcript record states one fact, and exactly one is recorded: {}",
+        row["dimensions"]
+    );
+}
+
 /// A machine that has a snapshot but no activity index must be *named* — it
 /// must never vanish silently (that would fold "no index" into "no sessions").
 #[test]
