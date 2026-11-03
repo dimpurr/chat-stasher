@@ -469,7 +469,7 @@ different facts and stay different. A later observation may add a **supplement**
 beside that record: the project a source reported, the source's name, and the
 time it was observed; it never replaces what the capture recorded, so the archive
 shows both what was known then and what was learned afterwards
-(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:3100-3149`). A project name is a label from
+(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:3303-3352`). A project name is a label from
 the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
@@ -523,7 +523,7 @@ which is a different fact from where the archive found them. A Claude Code
 transcript names the working directory it ran in and the organization that
 authored it — the account, where there is no organization — and both land on the
 session's row beside the collection-time provenance
-(`crates/chat-stasher/src/activity.rs:2352-2620`,
+(`crates/chat-stasher/src/activity.rs:2335-2624`,
 `crates/chat-stasher/src/provenance.rs:22-55`). Two things about that are worth
 stating plainly. A working directory is a **path, not a repository**: it says
 where the harness ran, never which project or repository the work belonged to,
@@ -607,6 +607,39 @@ placeholder — while the agent the key does name still arrives. The sealed
 replica rows did not gain a byte; what is new is that the two facts now also
 sit on the index line beside them, as plaintext session metadata like the
 paths and ids above.
+
+A DeepSeek Harness session states one fact of its own: the working
+directory its header frame opens with, measured on every session file this
+build has seen — a non-empty absolute path, and the only authoritative cwd the
+harness records (`crates/chat-stasher/src/activity.rs:2881-2912`). It lands on
+the session's row as its `cwd` under the same path rule as Claude Code's. The
+append records after the header carry no directory, and the lossy `<slug-of-cwd>`
+segment of the source path is forbidden by the registry's own notes, so a
+header that named no directory leaves the row with no dimensions object at all
+rather than a slug no one may parse. The header names no account and no
+project, and its 0-byte `session.lock` proves nothing about lifecycle, so tenancy,
+container and status stay unobserved for a `dsh` session. The sealed rollout
+gained no byte: what is new is that the header's directory also sits on the
+index line beside it.
+
+The WorkBuddy desktop app and the CodeBuddy CLI share one transcript event
+core, and the index now reads what each half states plainly. The event records
+of that core — the message, reasoning and call records of both harnesses,
+measured on their installed builds — carry the session's working directory
+beside their payload, and it is recorded the way Claude Code's per-line
+directory is (`crates/chat-stasher/src/activity.rs:2976-3000`). A WorkBuddy
+session adds the store row the desktop app keeps a sealed copy of: beside the
+same directory, the `user_id` of the account the app scoped the row to — a
+namespace one account's many sessions share, the same reading Hermes Agent's
+gateway peer and Claude Code's organization id get — and the `project_id` the
+row can name, an opaque project key the harness recorded and a path can never
+replace (`crates/chat-stasher/src/activity.rs:2914-2974`). The row's `status`
+column is deliberately not read: measured as `Pending` then `completed`, it is
+the state of a generation run, not a session lifecycle, and a soft-deleted row
+exports a bare tombstone that carries no row payload and no dimension at all
+(`crates/chat-stasher/src/sqlite_probe.rs:849-858`). None of these values is
+inferred from the harness name, and each missing one stays absent from the
+row rather than being recorded as empty.
 
 ### The harnesses' own prompt-history files (`machine-logs/`)
 
