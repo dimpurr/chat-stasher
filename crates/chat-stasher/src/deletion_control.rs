@@ -797,7 +797,8 @@ pub fn occurrence_inventory(
     store.require_sound_packs(&repo)?;
     let snaps = repo
         .get_all_snapshots()
-        .context("list snapshots for preview")?;
+        .context("list snapshots for preview")
+        .map_err(|error| crate::orphans::explain_short_files(&backends, error))?;
     let mut inventory = OccurrenceInventory {
         snapshots_in_repo: snaps.len(),
         ..OccurrenceInventory::default()
