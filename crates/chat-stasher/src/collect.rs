@@ -485,7 +485,9 @@ pub enum DebtVerdict {
     /// The debt was settled: the destination's archive holds exactly it.
     SettledInArchive,
     /// The debt was settled and reclaimed: the stage body was deleted after
-    /// being proven, and the local manifest records the matching fact triple.
+    /// being proven, and the local manifest row proves the debt — its exact
+    /// triple, or the per-shard identities that cover everything the debt
+    /// names ([`retained_summary_covers`], W1054f2).
     SettledReclaimed,
     Unverifiable(&'static str),
 }
@@ -1087,7 +1089,7 @@ pub(crate) fn load_local_manifest_facts(
                             shard_count: row.shard_count,
                             concat_bytes: row.concat_bytes,
                             concat_sha256: row.concat_sha256,
-                            shard_identities: Vec::new(),
+                            shard_identities: row.shard_identities,
                         },
                     );
                 }
@@ -1140,8 +1142,10 @@ fn dir_covers(dir: &Path, fact: &ShardFact) -> anyhow::Result<bool> {
 /// A debt is proved locally if:
 /// - the machine partition does not match (fails locally as Unverifiable);
 /// - the stage still covers the claimed shard prefix (OwedOnStage);
-/// - the stage body was reclaimed, its shard directory is empty, and the local manifest
-///   matches the claimed shard triple (SettledReclaimed).
+/// - the stage body was reclaimed, its shard directory is empty, and the
+///   retained manifest row proves the debt — its exact triple, or
+///   (W1054f2) per-shard coverage of everything the debt names
+///   ([`retained_summary_covers`]) (SettledReclaimed).
 ///
 /// Returns `Some(verdict)` if the debt was settled locally, or `None` if remote archive
 /// verification is required.
@@ -1164,13 +1168,34 @@ pub(crate) fn debt_settled_locally(
         if let Some(facts) = manifest_facts {
             if facts
                 .get(&entry.session_id)
-                .is_some_and(|fact| same_shard_payload(fact, &entry.shards))
+                .is_some_and(|fact| retained_summary_covers(fact, &entry.shards))
             {
                 return Ok(Some(DebtVerdict::SettledReclaimed));
             }
         }
     }
     Ok(None)
+}
+
+/// Whether the retained manifest row proves the debt was settled with the
+/// shard set the reclaim's proof covered (W1054f2).
+///
+/// Equality was the only answer while a row carried the bare triple, and it
+/// stays first: a row written before rows gained identities still settles
+/// exactly its equal debt, never a different one. Coverage answers what the
+/// 11-01 resets left open — a debt whose recorded shard fact *lags* the body
+/// the reclaim then proved (a second destination's pass appended the growth
+/// after this destination's last write, or a pass's cursor save was lost
+/// after its seal) names shards the proof covered all along, and the row
+/// now answers them shard for shard, the same way the destination's own
+/// archive would ([`archive_contains_shards`]); the same reasoning
+/// [`stage_covers`] states for the stage — requiring equality turns one
+/// destination's progress into another's "unverifiable" — holds one layer
+/// down. A debt *ahead* of the row (growth the row never saw) is settled
+/// only by the destination's archive, exactly as before, because the row
+/// could not have proven it.
+fn retained_summary_covers(fact: &ShardFact, debt: &ShardFact) -> bool {
+    same_shard_payload(fact, debt) || archive_contains_shards(fact, debt)
 }
 
 /// Discharge a stored cursor against the authorities that can speak for
@@ -2325,6 +2350,10 @@ impl<'a> PassCollector<'a> {
         // W1057: why the proof failed, in the fixed words of
         // [`proof_gap_word`]; kept for the reset-cause row below.
         let mut proof_gap = None;
+        // W1054f2: whether this record's debt discharged itself as reclaimed
+        // — the context the increment-map reconcile needs to adopt the
+        // durable map (see [`reconcile_opencode_increment_map`]).
+        let mut settled_reclaimed = false;
         if let Some(entry) = stored.as_ref() {
             let mut verdict = verify_debt(
                 entry,
@@ -2356,7 +2385,9 @@ impl<'a> PassCollector<'a> {
             match verdict {
                 DebtVerdict::OwedOnStage
                 | DebtVerdict::SettledInArchive
-                | DebtVerdict::SettledReclaimed => {}
+                | DebtVerdict::SettledReclaimed => {
+                    settled_reclaimed = matches!(verdict, DebtVerdict::SettledReclaimed);
+                }
                 DebtVerdict::Unverifiable(reason) => {
                     unverifiable = Some(reason);
                     proof_gap = Some(proof_gap_word(
@@ -2454,6 +2485,7 @@ impl<'a> PassCollector<'a> {
             record,
             old.as_ref(),
             unverifiable.is_some(),
+            settled_reclaimed,
             stage,
             self.state_dir,
             machine,
@@ -2756,6 +2788,7 @@ fn collect_one(
     record: &SessionRecord,
     old: Option<&OffsetEntry>,
     force_reset: bool,
+    settled_reclaimed: bool,
     stage: &Path,
     state_dir: &Path,
     machine: &str,
@@ -2783,6 +2816,7 @@ fn collect_one(
                 layout,
                 old,
                 force_reset,
+                settled_reclaimed,
                 stage,
                 state_dir,
                 machine,
@@ -3141,6 +3175,7 @@ fn process_sqlite(
     layout: SqliteSessionLayout,
     old: Option<&OffsetEntry>,
     force_reset: bool,
+    settled_reclaimed: bool,
     stage: &Path,
     state_dir: &Path,
     machine: &str,
@@ -3190,6 +3225,7 @@ fn process_sqlite(
             record,
             old,
             force_reset,
+            settled_reclaimed,
             stage,
             state_dir,
             machine,
@@ -4641,6 +4677,7 @@ fn process_opencode(
     record: &SessionRecord,
     old: Option<&OffsetEntry>,
     force_reset: bool,
+    settled_reclaimed: bool,
     stage: &Path,
     state_dir: &Path,
     machine: &str,
@@ -4722,7 +4759,10 @@ fn process_opencode(
     //
     // * an increment-era entry reconciles its endorsement — the map file
     //   first, then a rebuild from the staged records — and anything that
-    //   cannot be endorsed degrades to a full observation below;
+    //   cannot be endorsed degrades to a full observation below; the one
+    //   addition (W1054f2) is the adoption of the durable map when the
+    //   entry's debt settled as reclaimed: see
+    //   [`reconcile_opencode_increment_map`];
     // * a fresh destination (no entry of its own) folds the stage this
     //   machine already holds: if the fold equals the fresh map there is
     //   nothing to seal (W283, one session shared by every destination), and
@@ -4735,7 +4775,14 @@ fn process_opencode(
         None
     } else if let Some(entry) = old {
         if increment_era {
-            reconcile_opencode_increment_map(entry, state_dir, &record.id, stage, machine)
+            reconcile_opencode_increment_map(
+                entry,
+                state_dir,
+                &record.id,
+                stage,
+                machine,
+                settled_reclaimed,
+            )
         } else {
             None
         }
@@ -5000,16 +5047,37 @@ pub(crate) fn fold_opencode_staged_map(
 /// and only a matching result is trusted. Anything else answers `None`, and the
 /// caller degrades to one full export that re-derives the map — never a silent
 /// empty map, never a mismatched map.
+///
+/// W1054f2 adds one adoption, between the exact match and the rebuild: when
+/// the pass has already settled this entry's debt as reclaimed
+/// (`settled_reclaimed` — the retained summary proved the shard set the
+/// reclaim archived), a readable map answers even when the entry's own cache
+/// disagrees with it. Every map file is written in the same pass that sealed
+/// (or pre-pass-folded, at the reclaim) the very records it names onto this
+/// shared stage, so a map ahead of this destination's cursor is another
+/// destination's delivered progress, and the reclaim's proof already holds
+/// the superset — the W1054 ruling for the pre-increment baseline, taken to
+/// the increment era. This is also what keeps a reclaim from turning two
+/// destinations' shared session into a whole-session re-export: the second
+/// destination's records are not this pass's to re-deliver, and only a
+/// reclaimed stage (no bodies to fold from, no shard set to diverge on)
+/// reaches this branch. The entry's digests converge to the adopted map in
+/// the same pass, so the adoption is once per divergence, not a standing
+/// exception.
 fn reconcile_opencode_increment_map(
     entry: &OffsetEntry,
     state_dir: &Path,
     session_id: &str,
     stage: &Path,
     machine: &str,
+    settled_reclaimed: bool,
 ) -> Option<BTreeMap<String, String>> {
     if let Some(records) = load_opencode_record_map_any(stage, machine, state_dir, session_id) {
         if opencode_map_matches_entry(&records, entry) {
             return Some(records); // intact fast path: no stage read at all
+        }
+        if settled_reclaimed {
+            return Some(records);
         }
     }
     // Rebuild from the staged records (D2: "the map is rebuilt from the
@@ -6374,6 +6442,61 @@ mod shard_fact_tests {
         let mut archive = fact(1, b"record\n");
         archive.shard_identities[0].sha256 = sha256_hex(b"other\n");
         assert!(!archive_contains_shards(&archive, &fact(1, b"record\n")));
+    }
+
+    /// A two-shard fact whose aggregate fields agree with its fingerprints:
+    /// the row shape a reclaim writes for a body another destination grew.
+    fn two_shard_fact(first: &[u8], second: &[u8]) -> ShardFact {
+        let mut concat = Vec::new();
+        let mut identities = Vec::new();
+        for (sequence, body) in [(1_u64, first), (2, second)] {
+            concat.extend_from_slice(body);
+            identities.push(ShardFingerprint {
+                sequence,
+                bytes: body.len() as u64,
+                sha256: sha256_hex(body),
+            });
+        }
+        ShardFact {
+            shard_count: 2,
+            concat_bytes: concat.len() as u64,
+            concat_sha256: sha256_hex(&concat),
+            shard_identities: identities,
+        }
+    }
+
+    #[test]
+    fn a_legacy_row_settles_only_its_exact_debt() {
+        // The pre-identities row: no fingerprint to answer with, so the
+        // triple must speak for exactly the same shard set.
+        let mut row = two_shard_fact(b"first\n", b"second\n");
+        row.shard_identities.clear();
+        let mut debt = row.clone();
+        debt.shard_identities.clear();
+        assert!(retained_summary_covers(&row, &debt));
+        debt.concat_bytes += 1;
+        assert!(
+            !retained_summary_covers(&row, &debt),
+            "a bare-triple row cannot cover a different triple"
+        );
+    }
+
+    #[test]
+    fn a_retained_row_covers_a_debt_that_lags_the_proven_body() {
+        // The W1054 finding: this destination's recorded fact names the body
+        // as it stood at its last write, while the reclaim proved the
+        // two-shard body another destination had grown — the row covers
+        // every shard the debt claims.
+        let row = two_shard_fact(b"first\n", b"second\n");
+        let lagging = fact(1, b"first\n");
+        assert!(retained_summary_covers(&row, &lagging));
+        // A debt claiming a shard the proof never saw (a third, post-survey
+        // shard) is ahead of the row, not behind it: only the destination's
+        // archive can settle that one.
+        assert!(
+            !retained_summary_covers(&row, &fact(3, b"third\n")),
+            "the row proves only the shards the reclaim enumerated"
+        );
     }
 }
 
