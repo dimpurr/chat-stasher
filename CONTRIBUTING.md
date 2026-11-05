@@ -396,8 +396,11 @@ Seven of these checks guard properties that are easy to break without noticing:
   page's prose is true; it holds exactly the boundary between the generated
   half and the written half.
 - `check-doc-links.py` resolves every link between our own Markdown files,
-  including the `#fragment` on each one. A link to a file that moved, or to a
-  heading that was renamed under it, renders perfectly and fails silently, and
+  including the `#fragment` on each one. It reads the tracked Markdown set —
+  the material a checkout sits beside, draft notes and scratch trees, is never
+  mistaken for the document set — so a local run asks the same question a
+  clean CI checkout will. A link to a file that moved, or to a heading that
+  was renamed under it, renders perfectly and fails silently, and
   no other check in this list reads a document for its links. External links are
   counted, never fetched: a gate that needs the network fails when the network
   does, and someone else's 404 is not a fact about this repository.
