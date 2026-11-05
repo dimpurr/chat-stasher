@@ -156,6 +156,32 @@ pub struct PassMetrics {
     pub mirror_sync_ms: u64,
     /// Collector state saves plus this run-state write.
     pub state_saves: u64,
+    /// W1083 (S4): SQLite sessions the increment gate skipped without a
+    /// sweep. Queried minus skipped minus exported is the sessions the pass
+    /// swept and sealed nothing new for.
+    #[serde(default)]
+    pub sqlite_sessions_skipped: u64,
+    /// W1083 (S4): opencode sessions swept inside the freshness grace
+    /// window despite an equal cursor (ISSUE-008 ①).
+    #[serde(default)]
+    pub sqlite_sessions_grace_swept: u64,
+    /// W1083 (S4): opencode sessions swept because this pass was the
+    /// nightly full round (ISSUE-008 B).
+    #[serde(default)]
+    pub sqlite_sessions_full_swept: u64,
+    /// W1083 (S4): whether this pass ran as the nightly full sweep.
+    #[serde(default)]
+    pub opencode_full_sweep: bool,
+    /// W1083 (S3): shard-body bytes re-read and hashed while proving
+    /// stage coverage and stage shard facts at hash-cache miss.
+    #[serde(default)]
+    pub stage_covers_bytes_read: u64,
+    /// W1083 (C): hash-cache lookups answered without reading.
+    #[serde(default)]
+    pub hash_cache_hits: u64,
+    /// W1083 (C): hash-cache lookups that had to read the bytes.
+    #[serde(default)]
+    pub hash_cache_misses: u64,
 }
 
 impl PassMetrics {
@@ -186,6 +212,8 @@ impl PassMetrics {
              files_statted={} source_bytes_read={} shard_bytes_read_hashed={} \
              sqlite_sessions_queried={} sqlite_sessions_exported={} \
              state_saves={} activity_index_sessions_carried={}; \
+             gate: skipped={} grace_swept={} full_swept={} full_sweep={} \
+             stage_covers_bytes_read={} hash_cache_hits={} hash_cache_misses={}; \
              sg3: full_exports={} incr_passes={} incr_records={} incr_bytes={} growth_bytes={}",
             self.letta_pull_ms,
             self.scan_ms,
@@ -206,6 +234,13 @@ impl PassMetrics {
             self.sqlite_sessions_exported,
             self.state_saves,
             self.activity_index_sessions_carried,
+            self.sqlite_sessions_skipped,
+            self.sqlite_sessions_grace_swept,
+            self.sqlite_sessions_full_swept,
+            self.opencode_full_sweep,
+            self.stage_covers_bytes_read,
+            self.hash_cache_hits,
+            self.hash_cache_misses,
             self.sqlite_full_exports,
             self.sqlite_increment_passes,
             self.sqlite_increment_records,

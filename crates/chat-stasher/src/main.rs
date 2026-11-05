@@ -9018,6 +9018,37 @@ fn print_collect_report(
         "[collect] read bytes      : delta_or_full={} prefix_validated={}",
         report.delta_bytes_read, report.prefix_bytes_validated
     );
+    // W1083 / ISSUE-008 S4: the gate's own ledger, one line per round —
+    // checked (sessions whose rows were probed), skipped (gate answered
+    // unchanged), exported (re-sealed), and the two reasons an equal cursor
+    // still swept: a session still inside the freshness grace window, and
+    // the nightly full round that ignores the gate on purpose. A quiet
+    // incremental pass reads skipped≈checked, exported small; a pass whose
+    // skipped collapses toward zero is the increment failing, visible here
+    // before anything is lost.
+    println!(
+        "[collect] sqlite gate      : checked={} skipped={} exported={} grace_swept={} full_swept={} full_sweep_pass={}",
+        report.sqlite_sessions_queried,
+        report.sqlite_sessions_skipped,
+        report.sqlite_sessions_exported,
+        report.sqlite_sessions_grace_swept,
+        report.sqlite_sessions_full_swept,
+        report.opencode_full_sweep
+    );
+    // W1083 / ISSUE-008 S3: what the stage-coverage proofs re-read (the
+    // `dir_covers` family, at hash-cache miss) and what the hash cache
+    // answered without reading. A quiet pass keeps the reads near zero —
+    // that is the whole point of the cache — and a growing read count
+    // points at either churn or a cold cache.
+    println!(
+        "[collect] stage covers    : bytes_read={} hash_cache_hits={} hash_cache_misses={}",
+        report.stage_covers_bytes_read, report.hash_cache_hits, report.hash_cache_misses
+    );
+    if let Some(kind) = &report.hash_cache_save_error {
+        println!(
+            "[collect] hash cache      : could not be saved this round ({kind}); the next pass re-reads instead of reusing",
+        );
+    }
     // W1057: why each reset happened, counts per harness and cause word.
     // Only when there was a reset; the same counts are kept per round in the
     // state directory's reset-cause ledger.
@@ -9594,6 +9625,16 @@ fn run_once_pass_with(
     state.phases.shard_bytes_read_hashed = report.shard_bytes_read_hashed;
     state.phases.sqlite_sessions_queried = report.sqlite_sessions_queried;
     state.phases.sqlite_sessions_exported = report.sqlite_sessions_exported;
+    // W1083 (S4): the increment gate's ledger, durable in the run state.
+    state.phases.sqlite_sessions_skipped = report.sqlite_sessions_skipped;
+    state.phases.sqlite_sessions_grace_swept = report.sqlite_sessions_grace_swept;
+    state.phases.sqlite_sessions_full_swept = report.sqlite_sessions_full_swept;
+    state.phases.opencode_full_sweep = report.opencode_full_sweep;
+    // W1083 (S3): stage-coverage re-reads and hash-cache answers, so the
+    // round's own counters can say whether the cache still holds.
+    state.phases.stage_covers_bytes_read = report.stage_covers_bytes_read;
+    state.phases.hash_cache_hits = report.hash_cache_hits;
+    state.phases.hash_cache_misses = report.hash_cache_misses;
     // ADR-061 (SG-3): the increment era's own counters, into the durable
     // run-state the live-day gate reads (D6's written-vs-growth rule).
     state.phases.sqlite_full_exports = report.sqlite_full_exports;

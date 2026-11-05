@@ -1643,6 +1643,69 @@ pub fn opencode_session_cursor(db: &Path, session_id: &str) -> Result<OpenCodeCu
     opencode_session_cursor_with_conn(&conn, session_id)
 }
 
+/// A reusable read-only connection for opencode cursor probes (ISSUE-008
+/// ②-b: a pass probes every session, and the measured cost of that was
+/// almost entirely a fresh `Connection::open` per session — ~12.7 ms each,
+/// ~97% of the probe's price — not the five queries, which cost ~0.4 ms on
+/// a reused connection).
+///
+/// One prober serves one pass and keeps one connection per store path.
+/// Each probe still takes its **own** `BEGIN` snapshot, exactly the
+/// transaction `opencode_session_cursor` opened per call before: a pass
+/// deliberately does *not* pin one read transaction across all its probes,
+/// because that would freeze every probe at the pass's start — a session
+/// written at 10:03 would probe as-if-at-10:00 for a pass that started at
+/// 10:00 — and would hold the store's WAL pinned against checkpoints for
+/// the pass's whole runtime. Per-probe fresh data is the pre-existing
+/// freshness contract; the prober only removes the re-open.
+pub struct OpenCodeProber {
+    conn: Option<(PathBuf, Connection)>,
+}
+
+impl Default for OpenCodeProber {
+    fn default() -> Self {
+        OpenCodeProber { conn: None }
+    }
+}
+
+impl OpenCodeProber {
+    /// The cursor of one session in the store at `db`, reusing the
+    /// connection when the pass already opened this store.
+    pub fn cursor(&mut self, db: &Path, session_id: &str) -> Result<OpenCodeCursor, String> {
+        if !self.conn.as_ref().is_some_and(|(path, _conn)| path == db) {
+            let conn =
+                open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
+            conn.busy_timeout(Duration::from_secs(2))
+                .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
+            ensure_opencode_schema(&conn)?;
+            self.conn = Some((db.to_path_buf(), conn));
+        }
+        let Some((_, conn)) = self.conn.as_mut() else {
+            // reason: the block above either stored the connection or
+            // returned its error; nothing reaches here
+            return Err("the store connection vanished mid-probe".to_string());
+        };
+        conn.execute_batch("BEGIN")
+            .map_err(|error| format!("failed to start read-only transaction: {error}"))?;
+        match opencode_session_cursor_with_conn(conn, session_id) {
+            Ok(cursor) => {
+                conn.execute_batch("COMMIT")
+                    .map_err(|error| format!("failed to end read-only transaction: {error}"))?;
+                Ok(cursor)
+            }
+            Err(error) => {
+                // reason: a read-only transaction holds no changes, so the
+                // rollback's own outcome is not the failure that matters —
+                // a rollback that fails leaves the transaction open, and
+                // the next BEGIN on this connection reports that failure
+                // as its own error
+                conn.execute_batch("ROLLBACK").ok();
+                Err(error)
+            }
+        }
+    }
+}
+
 /// One complete read of a session's rows, in the record form ADR-061 writes
 /// records from: the session row, every message row **without** its parts
 /// inlined (parts are records of their own), and every part row. The rows are

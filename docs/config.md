@@ -29,6 +29,8 @@ chat-stasher reads one file: `~/.config/chat-stasher/config.toml` (or `$XDG_CONF
 | `rustic_no_cache` | `false` | Turn that metadata cache off. Nothing is lost; each command re-reads metadata instead. |
 | `backup_interval_secs` | `3600` | How often the timer runs. Read when the timer is rendered, so run `schedule install` again after changing it. |
 | `push_only_if_changed` | `true` | Skip the push when nothing changed, and tell `dest-init` not to publish a snapshot the destination already holds. With `false`, an hourly `run-once` and every `dest-init` write a snapshot even when nothing changed (each snapshot costs a little metadata). An explicit `push` always records the stage as it stands. |
+| `opencode_full_sweep_start_hour` | `0` | First local hour of the nightly opencode full re-read window. Once a day, the first pass inside `[start, end)` re-reads every opencode session instead of skipping by cursor, catching rewrites that moved no timestamp; a missed window still triggers a sweep when the last one falls too far behind. The window may wrap midnight; setting both hours the same turns the nightly off. |
+| `opencode_full_sweep_end_hour` | `5` | One past the last local hour of that window. |
 | `machine` | unset | Pin this machine's partition name in the archive. New installs leave it unset: a random identity is generated on the first run. Set it only to keep writing to a partition an older install created. |
 | `claude_projects_dir` | `~/.claude/projects` | Where Claude Code keeps sessions. |
 | `codex_sessions_dir` | `~/.codex/sessions` | Where Codex CLI keeps sessions. |

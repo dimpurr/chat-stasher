@@ -64,7 +64,7 @@ providers you configure yourself.
 |---|---|
 | **Can see** | Nothing. |
 | **Cannot see** | Your conversation content, your session ids, your account identity, your destination address, whether you run this at all. |
-| **Evidence** | The repository contains no project-operated endpoint. The CLI's network capabilities are exactly two, both user-configured: the rustic/opendal backend you point `push` at (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:115-120,166-182`), and the declared Letta API a `pull letta` command or a `[pull.letta]` scheduled pass reads (`crates/chat-stasher/src/letta.rs:236-246`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:161-164`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's exact paths (a plan may name three: the list, the body, and a body's optional second step), or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:442-468,470-481`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:33`, `:747-754`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:125`). |
+| **Evidence** | The repository contains no project-operated endpoint. The CLI's network capabilities are exactly two, both user-configured: the rustic/opendal backend you point `push` at (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:115-120,193-202`), and the declared Letta API a `pull letta` command or a `[pull.letta]` scheduled pass reads (`crates/chat-stasher/src/letta.rs:236-246`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:161-164`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's exact paths (a plan may name three: the list, the body, and a body's optional second step), or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:442-468,470-481`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:33`, `:747-754`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:125`). |
 
 **Why this is worth stating precisely:** this is not a promise we are keeping.
 It is a property of there being no such link in the code. We could not read your
@@ -82,7 +82,7 @@ build you did not compile yourself, or a dependency (see
 |---|---|
 | **Can see** | That encrypted objects exist; their **sizes**; their **timestamps**; how many there are and how that changes over time. From the SFTP/SSH case specifically, also your source IP and connection times, as with any SSH server. Your account with them, obviously. |
 | **Cannot see** | Conversation text, session ids, platform names, which harness a session came from — all of it is inside the encrypted rustic repository. |
-| **Evidence** | Content is written through `rustic_core` into a repository whose master key never leaves your machine (`crates/chat-stasher/src/store.rs:374-614,3126-3128,3168-3178`). The backend is `rustic_backend` with the opendal feature and the options you supply (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:166-182`). SSH connection handling: `crates/chat-stasher/src/reap.rs:1-12`. |
+| **Evidence** | Content is written through `rustic_core` into a repository whose master key never leaves your machine (`crates/chat-stasher/src/store.rs:374-614,3126-3128,3168-3178`). The backend is `rustic_backend` with the opendal feature and the options you supply (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:193-202`). SSH connection handling: `crates/chat-stasher/src/reap.rs:1-12`. |
 
 **This is a real metadata leak and we are stating it plainly.** A destination
 provider learns your **backup rhythm and volume**: how often you archive, how
@@ -838,7 +838,7 @@ machine:
 - **Harness session stores are opened read-only.** Every SQLite connection uses
   `SQLITE_OPEN_READ_ONLY` with a `mode=ro` URI, falling back to
   `mode=ro&immutable=1` when a WAL store has no `-shm`
-  (`crates/chat-stasher/src/sqlite_probe.rs:2567-2586`). The WorkBuddy reader
+  (`crates/chat-stasher/src/sqlite_probe.rs:2630-2649`). The WorkBuddy reader
   is the one deliberate exception to the fallback (W1046): its live sessions
   can sit in the uncheckpointed WAL, so `immutable=1` is never used for its
   store — a WAL store without a `-shm` is read through a copied db, `-wal` and
@@ -847,7 +847,7 @@ machine:
   content. The module states the
   intent that a read-only probe never creates or touches `-wal`/`-shm` sidecars
   (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
-  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:3408-3456`).
+  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:3471-3519`).
   The WorkBuddy half is pinned by its own test, which copies a live WAL
   store without the `-shm` and proves the uncheckpointed rows still read and
   no sidecar appears beside the original (`crates/chat-stasher/tests/workbuddy_scanner_test.rs:689-726`).
@@ -875,9 +875,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:11323-11328`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:11364-11369`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:11181-11197`).
+  (`crates/chat-stasher/src/main.rs:11222-11238`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -939,7 +939,7 @@ a real limitation of the current code.
    back into a harness's own directories does not exist**. `read` reports
    **one session at a time** with its length and SHA-256, without printing
    conversation content
-   (`crates/chat-stasher/src/main.rs:581-584,12335-12367`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:581-584,12376-12408`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:891-995`) — see exposure 5

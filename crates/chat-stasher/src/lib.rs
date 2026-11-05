@@ -23,6 +23,7 @@ pub mod doctor;
 pub mod export;
 pub mod fts;
 pub mod grok_bot;
+pub mod hashcache;
 pub mod id;
 pub mod identity;
 pub mod import;

@@ -167,6 +167,29 @@ pub struct Config {
     /// pushing on a timer regardless of change pays that cost for nothing.
     pub push_only_if_changed: Option<bool>,
 
+    /// First local hour of the nightly opencode full-sweep window
+    /// (ISSUE-008 B, W1083). The window is half-open: `[start, end)`, and the
+    /// first scheduled pass that starts inside it — once per local calendar
+    /// day — re-reads every opencode session instead of gating on cursors,
+    /// catching writes that moved no timestamp at all (the residue an
+    /// incremental gate cannot see by construction; bounded to about a day).
+    ///
+    /// Default [`crate::collect::DEFAULT_OPENCODE_FULL_SWEEP_START_HOUR`]
+    /// (0). Clamped into `0..=23` at its use site the way
+    /// `rustic_connections` is; a nonsense value never fails the run, it
+    /// reads as the nearest hour. A machine that misses every window hour
+    /// still full-sweeps when the last completed one falls too far behind
+    /// (see `collect::opencode_full_sweep_due`).
+    pub opencode_full_sweep_start_hour: Option<u32>,
+
+    /// One past the last local hour of the nightly opencode full-sweep
+    /// window. Default
+    /// [`crate::collect::DEFAULT_OPENCODE_FULL_SWEEP_END_HOUR`] (5). Setting
+    /// the same hour as the start empties the window: the nightly round is
+    /// off, and only the missed-window catch-up remains. A window may wrap
+    /// midnight (`start` 22, `end` 5).
+    pub opencode_full_sweep_end_hour: Option<u32>,
+
     /// Named destinations. More than one may be declared; each carries its own
     /// repository and its own key.
     ///
@@ -1989,6 +2012,15 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # Skip the run when nothing changed since the last one. Default true.
 # A no-change push still writes a snapshot, which is not free.
 # push_only_if_changed = true
+
+# Nightly full re-read of every opencode session (ISSUE-008). One pass a
+# day, inside these local hours, skips the incremental gate and re-reads
+# every opencode session, catching the one change shape nothing cheaper can
+# see: a rewrite that moved no timestamp. Default window: 0 (midnight)
+# through 5, i.e. [0, 5). The window may wrap midnight; setting the same
+# hour for both turns it off.
+# opencode_full_sweep_start_hour = 0
+# opencode_full_sweep_end_hour = 5
 
 # Explicitly pin this machine's archive partition name.
 # Existing installs set this to keep the partition they are already writing to;
