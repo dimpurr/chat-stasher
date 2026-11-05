@@ -28,6 +28,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::collect::ShardFingerprint;
 use crate::store;
 
 /// Directory under the stage holding per-machine metadata sidecars.
@@ -71,6 +72,20 @@ pub struct SessionManifest {
     pub concat_bytes: u64,
     /// sha256 of the concatenated payload.
     pub concat_sha256: String,
+    /// Exact per-shard identities of the body this row summarises, in global
+    /// sequence order — the same fingerprint shape a stored debt's
+    /// [`crate::collect::ShardFact`] holds. A reclaim-proven row can settle a
+    /// debt that names a *subset* of it (W1054f2): one destination's recorded
+    /// fact lags a stage another destination's pass grew before the reclaim,
+    /// and the proof covered the superset, so the retained summary must
+    /// answer shard for shard the same way the destination's own archive
+    /// does. Absent on rows written before this field: those rows settle
+    /// exactly-equal debts and nothing more — unknown stays unknown.
+    ///
+    /// Not part of the L3 reconciliation comparison, like `sealed_at_unix`:
+    /// L3 compares the digest triple, and the triple has not moved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shard_identities: Vec<ShardFingerprint>,
     /// Unix seconds when this summary was generated (bookkeeping only, not
     /// part of the reconciliation comparison).
     pub sealed_at_unix: i64,
@@ -148,8 +163,13 @@ pub fn generate_manifest_at(
         }
         let session_id = entry.file_name().to_string_lossy().into_owned();
         // Same derivation as `verify::expected_manifest`: count the sealed
-        // shards and hash their concatenation in global sequence order.
-        let shard_count = store::sealed_shard_entries(&entry.path())?.len();
+        // shards and hash their concatenation in global sequence order —
+        // one walk that also records each shard's own fingerprint, the way
+        // the survey and a stored debt do, so the row can answer a debt
+        // shard for shard (W1054f2).
+        let mut shards = store::sealed_shard_entries(&entry.path())?;
+        shards.sort_by_key(|(sequence, _)| *sequence);
+        let shard_count = shards.len();
         // A session directory with no sealed shard has no body to summarise.
         // Two ways to get here and both must be skipped:
         //   * the body was reclaimed (`stagereclaim`) — the session dir deliberately
@@ -162,13 +182,27 @@ pub fn generate_manifest_at(
         if shard_count == 0 {
             continue;
         }
-        let concat = store::concat_shards(stage, machine, &session_id)?;
+        let mut concat = Vec::new();
+        let mut shard_identities = Vec::with_capacity(shard_count);
+        for (sequence, path) in &shards {
+            // Same read semantics as `store::concat_shards_in_dir`, which this
+            // enumeration replaces: sorted by global sequence, raw bytes
+            // extended in order, nothing else read.
+            let bytes = fs::read(path)?;
+            shard_identities.push(ShardFingerprint {
+                sequence: *sequence,
+                bytes: bytes.len() as u64,
+                sha256: hex_digest(&Sha256::digest(&bytes)),
+            });
+            concat.extend_from_slice(&bytes);
+        }
         out.push(SessionManifest {
             session_id,
             machine: machine.to_string(),
             shard_count,
             concat_bytes: concat.len() as u64,
             concat_sha256: hex_digest(&Sha256::digest(&concat)),
+            shard_identities,
             sealed_at_unix,
             // A capture-time fact — the codebuff chat directory name's own
             // instant (ADR-054 D4) — is read back from the stage-side file
@@ -538,6 +572,7 @@ mod tests {
             shard_count: 1,
             concat_bytes: 0,
             concat_sha256: "0".repeat(64),
+            shard_identities: Vec::new(),
             sealed_at_unix: 1,
             captured_start: None,
         };
@@ -559,6 +594,7 @@ mod tests {
             shard_count: 2,
             concat_bytes: 99,
             concat_sha256: "abc".into(),
+            shard_identities: Vec::new(),
             sealed_at_unix: 100,
             captured_start: None,
         };
@@ -576,6 +612,7 @@ mod tests {
             shard_count: 2,
             concat_bytes: 99,
             concat_sha256: "abc".into(),
+            shard_identities: Vec::new(),
             sealed_at_unix: 100,
             captured_start: None,
         };
@@ -593,6 +630,7 @@ mod tests {
             shard_count: 1,
             concat_bytes: 1,
             concat_sha256: "a".into(),
+            shard_identities: Vec::new(),
             sealed_at_unix: 1,
             captured_start: None,
         };
@@ -602,6 +640,7 @@ mod tests {
             shard_count: 1,
             concat_bytes: 1,
             concat_sha256: "a".into(),
+            shard_identities: Vec::new(),
             sealed_at_unix: 2,
             captured_start: None,
         };

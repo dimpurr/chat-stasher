@@ -1185,6 +1185,7 @@ mod tests {
             shard_count: 2,
             concat_bytes: 0,
             concat_sha256: "b".repeat(64),
+            shard_identities: Vec::new(),
             sealed_at_unix: 1,
             captured_start: None,
         };
@@ -1233,6 +1234,7 @@ mod tests {
             shard_count: 1,
             concat_bytes: 10,
             concat_sha256: "a".repeat(64),
+            shard_identities: Vec::new(),
             sealed_at_unix: 1,
             captured_start: Some(stored_start.clone()),
         };
@@ -1246,6 +1248,7 @@ mod tests {
             shard_count: 1,
             concat_bytes: 10,
             concat_sha256: "a".repeat(64),
+            shard_identities: Vec::new(),
             sealed_at_unix: 2,
             captured_start: None,
         }];
@@ -1274,6 +1277,7 @@ mod tests {
             shard_count: 1,
             concat_bytes: 10,
             concat_sha256: "a".repeat(64),
+            shard_identities: Vec::new(),
             sealed_at_unix: 3,
             captured_start: Some(fresh_start.clone()),
         }];
