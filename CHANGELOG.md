@@ -536,6 +536,36 @@ under its own heading below.
 
 #### Changed
 
+- **An hourly pass costs what the hour changed, not what the archive totals
+  (ISSUE-008).** The collector re-proved many things that nearly always still
+  held, at a cost that grew with the archive instead of with the day's change:
+  every JSONL session's committed prefix was re-read and re-hashed to validate
+  its stored cursor (gigabytes on a long-built archive, every single round),
+  every stored debt re-read its stage shards to prove itself, the debt ledger
+  was re-serialized and fsynced once per record because the unchanged path
+  stamped a whole-store fingerprint that opencode's constant writers moved on
+  every pass, and every opencode session paid for a fresh SQLite connection to
+  answer a five-question probe. A collected-from store now: skips a session
+  whose logical cursor is unchanged, through one reused read-only connection
+  per pass, except inside a 60-second freshness window after the session's
+  newest signal — opencode writes parts seconds after the rows they belong
+  to and rewrites some rows without moving any timestamp, so an equal cursor
+  is not trusted for a session written moments ago; re-reads **every** opencode
+  session once a day in a configurable night window
+  (`opencode_full_sweep_start_hour` / `opencode_full_sweep_end_hour`, default
+  0 to 5 local time; a machine that misses its window still catches up), so
+  per-record digests catch the one change shape no timestamp signals — a
+  rewrite that bumps nothing — bounding a missed write to about a day; writes
+  the debt ledger once per pass instead of once per record; and validates
+  JSONL prefixes and stage coverage through hash results remembered by file
+  identity (size, mtime, inode), so bytes that did not move are not re-read.
+  Sealing, pushing and `verify` still hash the real bytes on their own paths
+  and never consult that cache; deleting it costs one pass of re-reading and
+  nothing else. Each round's lines now say what the gate did — sessions
+  checked, skipped, re-sealed, swept by the grace window or the night round
+  (`[collect] sqlite gate`), and the stage bytes re-read for coverage
+  (`[collect] stage covers`) — in the `run-once` log, the phases summary and
+  `run-state.json`.
 - **Interrupted-push debris is classified, skipped and worded as debris, never
   as corruption (ISSUE-006 step A).** A push can be interrupted at any moment,
   and can leave a half-written pack under its final name — a file no index
