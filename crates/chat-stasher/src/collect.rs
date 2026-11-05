@@ -2149,6 +2149,9 @@ pub fn collect(
         full_sweep,
     )?;
     if full_sweep {
+        // reason: the marker's clock share's failure mode with every other
+        // pass stamp — a clock before the epoch records the epoch itself, so
+        // a broken clock costs a wrongly-dated marker, never a missed sweep
         let finished_at = crate::manifest::now_unix_seconds().unwrap_or_default();
         write_opencode_full_sweep_marker(state_dir, finished_at)?;
     }
