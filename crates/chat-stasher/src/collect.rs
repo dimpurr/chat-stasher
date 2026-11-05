@@ -4123,29 +4123,42 @@ fn unchanged_content_sqlite(
 /// The session did not change; the stored entry is carried over untouched.
 ///
 /// The whole-store fingerprint is deliberately **not** refreshed here
-/// (W1083, ISSUE-008 ②-b): the opencode store is written by workers almost
+/// (W1083, ISSUE-008 ②-a): the opencode store is written by workers almost
 /// continuously, so a refreshed fingerprint differs on every pass, and the
 /// old refresh made the persisted entry differ from the stored one even
 /// when nothing in the session moved — a pseudo-change that re-serialized
 /// the whole debt file once per unchanged session, every pass (the ~8,000
-/// `state_saves` a round once measured). The fingerprint a *changed* round
-/// wrote still lets the next pass take the whole-store shortcut when the
-/// store really is quiet; an unchanged round claims nothing new, so it
-/// records nothing new.
+/// `state_saves` a round once measured). A stored fingerprint therefore
+/// stays the one the session's last *changed* round wrote: it still lets a
+/// quiet store take the whole-store shortcut, and a moved store falls
+/// through to this session's per-session fields exactly as before — an
+/// unchanged round claims nothing new, so it records nothing new.
+///
+/// The one thing an unchanged round still repairs (b100, kept): an entry
+/// that has **no** entry-level fingerprint at all — a state file from
+/// before fingerprints moved out of the cursor — gets one, so the shape
+/// migrates forward and a quiet store can take the shortcut from the next
+/// pass. That repair happens once per legacy entry (the entry then carries
+/// a fingerprint; this branch never touches it again), so it costs today's
+/// production state — where every opencode entry already holds a
+/// fingerprint — nothing at all.
 ///
 /// `old` is reused rather than rebuilt so a hand-edited or older entry keeps
 /// whatever else it carries.
 fn unchanged_sqlite(
     record: &SessionRecord,
     old: &OffsetEntry,
-    _store_fingerprint: &str,
+    store_fingerprint: &str,
     dimensions: crate::provenance::SessionProvenance,
     counters: &mut CollectCounters,
 ) -> Processed {
     // W1083 (S4): one session the gate answered "unchanged" for, without a
     // sweep.
     counters.sqlite_sessions_skipped += 1;
-    let state = old.clone();
+    let mut state = old.clone();
+    if state.store_fingerprint.is_none() {
+        state.store_fingerprint = Some(store_fingerprint.to_string());
+    }
     Processed {
         state,
         outcome: CollectOutcome {
