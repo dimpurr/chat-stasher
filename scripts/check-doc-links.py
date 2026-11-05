@@ -8,6 +8,21 @@ repository reads the Markdown for its links, so a rename could break one and
 every gate stayed green — which is exactly what happened when `docs/` became
 `docs-dev/` and `README.md`'s own support section was rewritten twice.
 
+Which documents are read, and why that has to be a decision at all:
+
+  * Tracked Markdown, and only tracked Markdown, read from the index the way
+    `check-private-paths.py` reads it. A working checkout sits beside material
+    that is not part of the public document set — draft notes, scratch trees —
+    and that is exactly what a clean CI checkout does not have. Walking the
+    whole filesystem instead made a local run report 458 broken links a CI
+    checkout could not even see: red here, green there, which is the inverse
+    of what a local gate is for. Reading the index means a local run asks the
+    same question a clean checkout will ask, so the two answers agree.
+  * A root that is not a git work tree — the self-test's fixtures, an exported
+    tree — has no tracked set, so the fallback walks the filesystem directly.
+    `SKIP_DIRS` below is that fallback's skip list; the tracked set needs no
+    such list, because nothing Git ignores is in the index.
+
 What is checked, and what is deliberately not:
 
   * Relative links between repository files: the target must exist. Both
@@ -35,13 +50,16 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Directories that are not part of the public document set: build output,
-# dependencies, and anything fetched rather than written.
+# Directories the filesystem fallback does not descend into: build output,
+# dependencies, and anything fetched rather than written. A tracked set has no
+# use for this list — nothing Git ignores is in the index — so it applies only
+# when the root is not a git work tree and there is no index to read.
 SKIP_DIRS = {".git", "target", "node_modules", ".wxt", ".output", "__pycache__", "dist"}
 
 # `[text](target)` and `![alt](target)`, with an optional title after the
@@ -150,7 +168,40 @@ class Problem:
         return f"{self.path}:{self.line}: {self.why}: {self.target}"
 
 
+def tracked_markdown(root: str) -> list[str] | None:
+    """Every tracked Markdown file, or None when Git cannot answer.
+
+    `git ls-files` reads the index, which is what makes the answer the public
+    document set rather than whatever happens to sit on disk. A tracked path
+    whose working-tree copy is gone contributes nothing: a deletion is a fact
+    `git status` reports, and a link checker that crashed on one would be a
+    crash, not a finding.
+    """
+    proc = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True)
+    if proc.returncode != 0:
+        return None
+    names = proc.stdout.decode("utf-8", "replace").split("\0")
+    return [
+        name
+        for name in names
+        if name.endswith((".md", ".markdown")) and os.path.isfile(os.path.join(root, name))
+    ]
+
+
 def markdown_files(root: str) -> list[str]:
+    """Every document the check reads, as root-relative paths.
+
+    In a git work tree that is the tracked Markdown set, because "what a
+    clean checkout will have" is the question the check exists to answer the
+    same way locally that CI answers it. A root that is not a git work tree —
+    the self-test's fixtures, an exported tree — has no index to read, and
+    there the filesystem is walked and SKIP_DIRS is what keeps build output
+    out of the answer: walking what is there is a weaker but real answer,
+    never a silent green.
+    """
+    tracked = tracked_markdown(root)
+    if tracked is not None:
+        return sorted(tracked)
     found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
@@ -221,6 +272,11 @@ def selftest() -> int:
     Each case is the whole fixture: a file set and whether the check must
     complain about it. A case that is meant to pass carries the file it links
     to, so passing means resolving something real rather than resolving nothing.
+
+    The fixtures come in two shapes, because there are two ways to enumerate
+    the documents. Plain directories exercise the filesystem fallback; the
+    git battery exercises the tracked set, with real (throwaway) git
+    repositories, because the index is the thing that decides what is read.
     """
     b = "# B\n\n## A heading here\n"
     cases: list[tuple[str, dict[str, str], bool]] = [
@@ -274,6 +330,55 @@ def selftest() -> int:
                 failures += 1
             verdict = "ok" if case_ok else "WRONG"
             print(f"[doc-links] selftest {verdict}: {label} (want_fail={want_fail}, got={got_fail})")
+    # The tracked-set half. The draft that sits beside the index carries two
+    # dead links, so a walker that read what Git does not track would flip the
+    # passing case red — that discrimination is the property under test, not a
+    # detail of the fixture. A passing case must also have read and resolved
+    # the one tracked link, or its green would prove nothing.
+    git_cases: list[tuple[str, dict[str, str], list[str], bool]] = [
+        (
+            "a tracked link resolves and an untracked draft beside it is not read",
+            {
+                "docs/a.md": "# A\n\nSee [b](b.md).\n",
+                "docs/b.md": b,
+                "drafts/notes.md": "# Drafts\n\nSee [x](missing.md) and [y](b.md#nope).\n",
+            },
+            ["docs/a.md", "docs/b.md"],
+            False,
+        ),
+        (
+            "a tracked broken link still fails",
+            {"docs/a.md": "# A\n\nSee [b](missing.md).\n"},
+            ["docs/a.md"],
+            True,
+        ),
+    ]
+    for label, files, tracked, want_fail in git_cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, body in files.items():
+                full = os.path.join(tmp, name)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w", encoding="utf-8") as handle:
+                    handle.write(body)
+            init = subprocess.run(
+                ["git", "-C", tmp, "init", "-q", "-b", "main"], capture_output=True
+            )
+            if init.returncode != 0:
+                print("[doc-links] selftest cannot run: git init failed")
+                return 1
+            add = subprocess.run(
+                ["git", "-C", tmp, "add", "--"] + tracked, capture_output=True
+            )
+            if add.returncode != 0:
+                print("[doc-links] selftest cannot run: git add failed")
+                return 1
+            problems, local, _ = check(tmp)
+            got_fail = bool(problems)
+            case_ok = got_fail == want_fail and (want_fail or (local == 1 and not problems))
+            if not case_ok:
+                failures += 1
+            verdict = "ok" if case_ok else "WRONG"
+            print(f"[doc-links] selftest {verdict}: {label} (want_fail={want_fail}, got={got_fail}, local={local})")
     print(f"[doc-links] SELFTEST: {'PASS' if failures == 0 else 'FAIL'} ({failures} wrong)")
     return 0 if failures == 0 else 1
 
