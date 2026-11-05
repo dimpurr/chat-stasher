@@ -201,6 +201,7 @@ impl Fixture {
             20,
             &DestinationView::unreachable("fixture-destination"),
             Some(&relocate),
+            false,
         )
         .unwrap()
     }

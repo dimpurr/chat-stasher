@@ -606,6 +606,10 @@ struct RunContext {
     debts: BTreeMap<String, collector::DebtEntry>,
     remote_facts: Option<collector::ArchiveFacts>,
     manifest_facts: Option<BTreeMap<String, collector::ShardFact>>,
+    /// W1083: the backfill leg has one cache instance for its whole run so
+    /// per-conversation proofs share stage-shard digests; disabled, never
+    /// persisted — see the `wanted` loop above.
+    hash_cache: collector::HashCache,
 }
 
 struct DeliveryOutcome {
@@ -1043,6 +1047,7 @@ fn prepare_traversal(
                 debts: BTreeMap::new(),
                 remote_facts: None,
                 manifest_facts: None,
+                hash_cache: no_hash_cache_for_ctx(),
             };
             return Ok((ctx, Vec::new()));
         }
@@ -1071,6 +1076,9 @@ fn prepare_traversal(
     } else {
         None
     };
+    // W1083: the backfill leg has no pass-wide hash cache; its proofs keep
+    // today's read-everything behaviour.
+    let mut no_hash_cache = collector::HashCache::disabled();
     let mut wanted: BTreeSet<(String, String)> = BTreeSet::new();
     for agent in &selected {
         let session_id = session_id_for(req.machine, agent);
@@ -1080,6 +1088,7 @@ fn prepare_traversal(
                 req.machine,
                 req.stage,
                 manifest_facts.as_ref(),
+                &mut no_hash_cache,
             ) {
                 Ok(Some(_)) => {}
                 Ok(None) | Err(_) => {
@@ -1104,8 +1113,15 @@ fn prepare_traversal(
         debts,
         remote_facts,
         manifest_facts,
+        hash_cache: no_hash_cache_for_ctx(),
     };
     Ok((ctx, selected))
+}
+
+/// W1083: the disabled cache instance a `RunContext` carries; one helper so
+/// the both constructions of the context say the same thing.
+fn no_hash_cache_for_ctx() -> collector::HashCache {
+    collector::HashCache::disabled()
 }
 
 fn session_id_for(machine: &str, agent: &str) -> String {
@@ -1339,6 +1355,7 @@ fn deliver_one(
             req.stage,
             ctx.remote_facts.as_ref(),
             ctx.manifest_facts.as_ref(),
+            ctx.hash_cache.as_mut(),
         ) {
             Ok(collector::DebtVerdict::OwedOnStage)
             | Ok(collector::DebtVerdict::SettledInArchive)
@@ -1466,8 +1483,13 @@ fn deliver_one(
     .map_err(|error| format!("the shard could not be sealed: {error:#}"))?;
     collector::write_grok_bot_union(&union_path, union.clone())
         .map_err(|error| format!("the union state could not be written: {error:#}"))?;
-    let shards = collector::stage_shard_fact(req.stage, req.machine, session_id)
-        .map_err(|error| format!("the sealed shard could not be re-read: {error:#}"))?;
+    let shards = collector::stage_shard_fact(
+        req.stage,
+        req.machine,
+        session_id,
+        ctx.hash_cache.as_mut(),
+    )
+    .map_err(|error| format!("the sealed shard could not be re-read: {error:#}"))?;
     let cursor = collector::grok_bot_delivery_cursor(source_bytes, &union, delivered_now)
         .map_err(|error| format!("the delivery cursor could not be built: {error:#}"))?;
     let entry = collector::DebtEntry {

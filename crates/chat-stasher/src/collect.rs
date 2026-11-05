@@ -76,13 +76,14 @@
 //! names has still never been read for.
 
 use crate::config::Config;
+use crate::hashcache::{self, HashCache};
 use crate::models::{SessionRecord, SqliteSessionLayout};
 use crate::scanner;
 use crate::sqlite_probe::{
-    cursor_global_schema, grok_schema, opencode_session_cursor, read_cursor_legacy_session,
+    cursor_global_schema, grok_schema, read_cursor_legacy_session,
     read_github_copilot_session, read_hermes_session, read_openclaw_session, read_sqlite_session,
     read_workbuddy_session, read_zed_session, sqlite_session_cursor, sqlite_store_fingerprint,
-    zed_schema, OpenCodeCursor,
+    zed_schema, OpenCodeCursor, OpenCodeProber,
 };
 use crate::store;
 use anyhow::{anyhow, bail, Context};
@@ -102,6 +103,130 @@ pub(crate) const STATE_FILE: &str = "debts-v2.json";
 /// resulting full reread is visible instead of silent.
 const LEGACY_STATE_FILE: &str = "offsets-v1.json";
 const READ_RETRIES: usize = 3;
+
+/// ISSUE-008 B (W1083): the durable marker of the last completed opencode
+/// full-sweep round, in the state directory beside the debt file.
+pub(crate) const FULL_SWEEP_MARKER_FILE: &str = "opencode-full-sweep-v1.json";
+const FULL_SWEEP_MARKER_VERSION: u32 = 1;
+/// First local hour of the default nightly window. The window is half-open:
+/// `[start, end)`.
+pub const DEFAULT_OPENCODE_FULL_SWEEP_START_HOUR: u32 = 0;
+/// One past the last local hour of the default nightly window.
+pub const DEFAULT_OPENCODE_FULL_SWEEP_END_HOUR: u32 = 5;
+/// A machine that missed every nightly window (asleep through all of it
+/// several days running) full-sweeps on the first pass after this much time
+/// since the last completed one, whatever the clock says, so the gate's
+/// residue is bounded by roughly a day and a bit rather than by sleeping
+/// hours. A marker that has never been written does not catch up — the next
+/// nightly window seeds it.
+const FULL_SWEEP_CATCHUP_SECS: i64 = 28 * 3600;
+/// The ≥60 s grace window around a session's freshest signal (ISSUE-008 ①,
+/// W1083 A). opencode writes parts up to tens of seconds after the row they
+/// belong to, and an in-place message rewrite does not move the session
+/// row's own time — so a session whose latest signal is fresher than this
+/// window is swept even when its cursor compares equal, while a session
+/// quiet for longer may be skipped by the gate.
+pub const OPENCODE_GRACE_WINDOW_MS: i64 = 60_000;
+
+/// The durable marker as it lives on disk.
+#[derive(Debug, Serialize, Deserialize)]
+struct FullSweepMarker {
+    version: u32,
+    last_unix: i64,
+}
+
+/// When the marker last recorded a completed full sweep; `None` for a file
+/// that does not exist or does not parse (an unknown marker is "never", and
+/// the next in-window pass seeds it).
+pub fn load_opencode_full_sweep_marker(state_dir: &Path) -> Option<i64> {
+    let raw = fs::read(state_dir.join(FULL_SWEEP_MARKER_FILE)).ok()?;
+    let marker: FullSweepMarker = serde_json::from_slice(&raw).ok()?;
+    if marker.version != FULL_SWEEP_MARKER_VERSION {
+        return None;
+    }
+    Some(marker.last_unix)
+}
+
+/// Record a completed full sweep. tmp + rename, so a reader never sees a
+/// torn marker; no fsync, because a lost marker costs one extra full sweep,
+/// never a missed one.
+pub fn write_opencode_full_sweep_marker(state_dir: &Path, last_unix: i64) -> anyhow::Result<()> {
+    let path = state_dir.join(FULL_SWEEP_MARKER_FILE);
+    let bytes = serde_json::to_vec(&FullSweepMarker {
+        version: FULL_SWEEP_MARKER_VERSION,
+        last_unix,
+    })?;
+    let tmp = path.with_file_name(format!(".{FULL_SWEEP_MARKER_FILE}.tmp"));
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// The configured window, clamped the way `rustic_connections` is clamped at
+/// its own use site: an hour past 23 reads as 23, and a config that sets
+/// the same hour for both ends is an empty window — the nightly sweep is
+/// off, and only the catch-up rule remains. Both are stated, never errors:
+/// the value still names a real window, just not a useful one, and the
+/// report says what ran.
+pub fn opencode_full_sweep_hours(config: &Config) -> (u32, u32) {
+    let clamp = |hour: Option<u32>, default: u32| match hour {
+        Some(hour) => hour.clamp(0, 23),
+        None => default,
+    };
+    (
+        clamp(
+            config.opencode_full_sweep_start_hour,
+            DEFAULT_OPENCODE_FULL_SWEEP_START_HOUR,
+        ),
+        clamp(
+            config.opencode_full_sweep_end_hour,
+            DEFAULT_OPENCODE_FULL_SWEEP_END_HOUR,
+        ),
+    )
+}
+
+/// Whether this pass is the nightly opencode full-sweep round (ISSUE-008 B).
+///
+/// The gate (A) is deliberately fallible in one known way that no signal can
+/// close: an in-place row rewrite that bumps no timestamp changes no count,
+/// no high-water mark and no session time. One full sweep a day re-reads
+/// every session and lets the per-record digests catch exactly that residue,
+/// bounding a missed write to "the next nightly round" (worst case ~a day,
+/// the trade ISSUE-008 §6 records). The daily full round is *nightly* so the
+/// extra reads run while the machine is otherwise quiet.
+///
+/// Pure on its inputs so tests can pin the calendar rules:
+/// * inside the configured local window, at most once per local calendar
+///   day — a later window hour the same day stays incremental;
+/// * no marker yet: only the window applies (a fresh install full-sweeps on
+///   its first night, not in the middle of its first afternoon);
+/// * a marker older than the catch-up bound: now, whatever the hour, so a
+///   machine that never runs during the window still gets a sweep roughly
+///   daily.
+pub fn opencode_full_sweep_due(
+    last_full: Option<i64>,
+    now_unix: i64,
+    local_hour: u32,
+    now_local_day: chrono::NaiveDate,
+    last_full_local_day: Option<chrono::NaiveDate>,
+    (start_hour, end_hour): (u32, u32),
+) -> bool {
+    if let Some(last) = last_full {
+        if now_unix - last >= FULL_SWEEP_CATCHUP_SECS {
+            return true;
+        }
+    }
+    let in_window = if start_hour <= end_hour {
+        local_hour >= start_hour && local_hour < end_hour
+    } else {
+        // A window that wraps midnight ("22" to "5") is a real night, not a
+        // paradox: the hours come back from the local clock either side of
+        // the wrap.
+        local_hour >= start_hour || local_hour < end_hour
+    };
+    in_window && last_full_local_day != Some(now_local_day)
+}
+
 
 /// Durable cursor for one source file. `prefix_len` is intentionally repeated
 /// alongside `offset`: the state is self-describing and a partially written
@@ -759,6 +884,7 @@ fn stage_prefix_entry(
     machine: &str,
     counters: &mut CollectCounters,
     manifest_facts: Option<&BTreeMap<String, ShardFact>>,
+    hash_cache: &mut HashCache,
 ) -> anyhow::Result<Option<OffsetEntry>> {
     // A SQLite session's cursor is logical, not a file offset, so the stage
     // cannot be turned into one without re-exporting the session. Those paths
@@ -793,14 +919,18 @@ fn stage_prefix_entry(
                 // W880: one source file stat'ed.
                 counters.files_statted += 1;
                 if fact.concat_bytes > 0 && source_len >= fact.concat_bytes {
-                    let prefix = read_range(&record.absolute_path, 0, fact.concat_bytes)
-                        .with_context(|| {
-                            format!(
-                                "read source prefix ({})",
-                                path_digest(&record.absolute_path)
-                            )
-                        })?;
-                    if sha256_hex(&prefix) == fact.concat_sha256 {
+                    // W1083 (C): the restored-prefix validation hashes the
+                    // source's first `concat_bytes` bytes — which on a
+                    // source that did not move since the last pass the
+                    // hash cache already remembers, so a reclaimed body
+                    // whose source is quiet is proved without re-reading
+                    // it.
+                    let prefix = hash_cache.prefix_sha256(
+                        &record.absolute_path,
+                        fact.concat_bytes,
+                        None,
+                    )?;
+                    if prefix.sha256 == fact.concat_sha256 {
                         let offset = fact.concat_bytes;
                         return Ok(Some(OffsetEntry {
                             offset,
@@ -992,6 +1122,7 @@ fn cursor_or_stage_covered_position(
     machine: &str,
     counters: &mut CollectCounters,
     manifest_facts: Option<&BTreeMap<String, ShardFact>>,
+    hash_cache: &mut HashCache,
 ) -> anyhow::Result<OffsetEntry> {
     // An unverifiable stored cursor is handed down unchanged: `force_reset`
     // is what stops its reuse, and spending the stage's body read under a
@@ -1016,7 +1147,14 @@ fn cursor_or_stage_covered_position(
         if let Some(fact) = manifest_facts.and_then(|m| m.get(&record.id)) {
             if fact.concat_bytes > entry.cursor.offset {
                 if let Some(covered) =
-                    stage_prefix_entry(record, stage, machine, counters, manifest_facts)?
+                    stage_prefix_entry(
+                        record,
+                        stage,
+                        machine,
+                        counters,
+                        manifest_facts,
+                        hash_cache,
+                    )?
                 {
                     if covered.offset > entry.cursor.offset {
                         return Ok(covered);
@@ -1027,7 +1165,14 @@ fn cursor_or_stage_covered_position(
         return Ok(entry.cursor.clone());
     }
     Ok(
-        match stage_prefix_entry(record, stage, machine, counters, manifest_facts)? {
+        match stage_prefix_entry(
+            record,
+            stage,
+            machine,
+            counters,
+            manifest_facts,
+            hash_cache,
+        )? {
             Some(covered) if covered.offset > entry.cursor.offset => covered,
             _ => entry.cursor.clone(),
         },
@@ -1039,8 +1184,12 @@ pub(crate) fn stage_shard_fact(
     stage: &Path,
     machine: &str,
     session_id: &str,
+    hash_cache: &mut HashCache,
 ) -> anyhow::Result<ShardFact> {
-    shard_fact_in_dir(&store::session_shard_dir(stage, machine, session_id))
+    shard_fact_in_dir(
+        &store::session_shard_dir(stage, machine, session_id),
+        hash_cache,
+    )
 }
 
 /// Observe what the stage currently holds in one shard directory.
@@ -1049,26 +1198,33 @@ pub(crate) fn stage_shard_fact(
 /// (ADR-053 D4): its directory is the only difference from a session, so its
 /// cursor is accountable for the same `(shard_count, concat_bytes,
 /// concat_sha256)` triple, with the same per-shard fingerprints.
-fn shard_fact_in_dir(dir: &Path) -> anyhow::Result<ShardFact> {
+///
+/// The digests run through the pass's hash cache (W1083 C): a directory whose
+/// shards still carry the size, mtime and inode the cache last read answers
+/// without re-reading its bytes — the fingerprints a debt is written against
+/// describe the same bytes they always did. A cache that cannot vouch for a
+/// file re-reads it, exactly as before.
+fn shard_fact_in_dir(dir: &Path, hash_cache: &mut HashCache) -> anyhow::Result<ShardFact> {
     let mut entries = store::sealed_shard_entries(dir)?;
     entries.sort_by_key(|(sequence, _)| *sequence);
     let shard_count = entries.len();
-    let concat = store::concat_shards_in_dir(dir)?;
+    let mut shard_identities = Vec::with_capacity(entries.len());
+    let mut concat_bytes = 0u64;
+    for (sequence, path) in &entries {
+        let answer = hash_cache.file_sha256(path, None)?;
+        shard_identities.push(ShardFingerprint {
+            sequence: *sequence,
+            bytes: answer.size,
+            sha256: answer.sha256,
+        });
+        concat_bytes += answer.size;
+    }
+    let concat = hash_cache.shard_concat_sha256(dir, &entries, concat_bytes)?;
     Ok(ShardFact {
         shard_count,
-        concat_bytes: concat.len() as u64,
-        concat_sha256: sha256_hex(&concat),
-        shard_identities: entries
-            .into_iter()
-            .map(|(sequence, path)| {
-                let bytes = fs::read(path)?;
-                Ok(ShardFingerprint {
-                    sequence,
-                    bytes: bytes.len() as u64,
-                    sha256: sha256_hex(&bytes),
-                })
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?,
+        concat_bytes,
+        concat_sha256: concat.sha256,
+        shard_identities,
     })
 }
 
@@ -1112,29 +1268,112 @@ pub(crate) fn load_local_manifest_facts(
 /// equality would make one destination's progress look like another's
 /// corruption. Anything that shortens or rewrites the covered prefix still
 /// fails, which is the property being defended.
+///
+/// The same directory prefix test, so a machine log's cursor is proved by the
+/// machinery a session's is; the `hash_cache` is the pass's, so a stage whose
+/// shards did not move answers from remembered digests instead of re-reads.
 fn stage_covers(
     stage: &Path,
     machine: &str,
     session_id: &str,
     fact: &ShardFact,
+    hash_cache: &mut HashCache,
 ) -> anyhow::Result<bool> {
-    dir_covers(&store::session_shard_dir(stage, machine, session_id), fact)
+    dir_covers_with_cache(
+        &store::session_shard_dir(stage, machine, session_id),
+        fact,
+        hash_cache,
+    )
 }
 
-/// [`stage_covers`] for an already-resolved shard directory, so a machine log's
-/// cursor is proved by the same prefix test a session's is.
+/// [`stage_covers`] for an already-resolved shard directory, folded through
+/// the pass's hash cache (W1083 C): the shard bytes `fact` speaks for are
+/// re-read only when one of them moved.
 fn dir_covers(dir: &Path, fact: &ShardFact) -> anyhow::Result<bool> {
-    if store::sealed_shard_entries(dir)?.len() < fact.shard_count {
+    dir_covers_with_cache(dir, fact, &mut HashCache::disabled())
+}
+
+/// [`dir_covers`] through the pass's hash cache. The prefix test is the same
+/// one — sequence-ordered shard bytes up to `fact.concat_bytes`, sha256,
+/// compare — but a directory whose every shard still has the size, mtime
+/// and inode the cache last read answers from the remembered digest, so a
+/// quiet pass re-reads nothing (ISSUE-008 S3: the bytes re-read and hashed
+/// for coverage must track the pass's change, not the stage's total size).
+fn dir_covers_with_cache(
+    dir: &Path,
+    fact: &ShardFact,
+    hash_cache: &mut HashCache,
+) -> anyhow::Result<bool> {
+    let mut entries = store::sealed_shard_entries(dir)?;
+    if entries.len() < fact.shard_count {
         return Ok(false);
     }
-    let concat = store::concat_shards_in_dir(dir)?;
-    let Ok(covered) = usize::try_from(fact.concat_bytes) else {
-        return Ok(false);
-    };
-    if concat.len() < covered {
+    entries.sort_by_key(|(sequence, _)| *sequence);
+    // The per-shard facts compose into the same prefix conclusion without
+    // concatenating anything: a fact written by this build names every
+    // shard it accounts for (sequence, size, digest), so matching each
+    // *file* against its recorded fingerprint — through the hash cache, a
+    // stat once the file is known — proves exactly the bytes the fact's
+    // `concat_sha256` was computed over are still those bytes. That keeps
+    // a session that grew re-proving its *whole* covered prefix from
+    // re-reading it: only the new shard is read, once (ISSUE-008 S3).
+    if let Some(covers) = dir_covers_by_fingerprints(&entries, fact, hash_cache)? {
+        return Ok(covers);
+    }
+    let covered = fact.concat_bytes;
+    let answer = hash_cache.shard_concat_sha256(dir, &entries, covered)?;
+    // A miss that ran short of the covered length is exactly the "the stage
+    // no longer holds what the fact says" case the whole-read path returned
+    // `false` for; a hit, by construction, was stored only over exactly
+    // `covered` bytes — the digest of fewer bytes was never stored.
+    if !answer.from_cache && answer.bytes_read != covered {
         return Ok(false);
     }
-    Ok(sha256_hex(&concat[..covered]) == fact.concat_sha256)
+    Ok(answer.sha256 == fact.concat_sha256)
+}
+
+/// The per-shard half of [`dir_covers_with_cache`]. `Some` answers the
+/// coverage question outright; `None` means the fact does not carry the
+/// fingerprint list this composition needs (a legacy debt, a malformed
+/// sequence set) and the caller falls back to the concatenation read.
+///
+/// Composition, and every way it refuses to guess: the directory's first
+/// `shard_count` sequences must be exactly the fact's sequences in order;
+/// each file's cached size and digest must equal the recorded fingerprint;
+/// and the fingerprinted sizes must sum to `concat_bytes`, so the bytes the
+/// fact's `concat_sha256` was computed over are precisely the bytes just
+/// proved unchanged. Anything else — a size that disagrees, a digest that
+/// does not, a reordered or duplicated sequence — is `Some(false)` at worst
+/// and the read path's verdict stands.
+fn dir_covers_by_fingerprints(
+    entries: &[(u64, PathBuf)],
+    fact: &ShardFact,
+    hash_cache: &mut HashCache,
+) -> anyhow::Result<Option<bool>> {
+    if fact.shard_identities.len() != fact.shard_count {
+        return Ok(None);
+    }
+    if !valid_shard_fact(fact) {
+        return Ok(None);
+    }
+    let mut covered = 0u64;
+    for ((sequence, path), fingerprint) in entries.iter().zip(fact.shard_identities.iter()) {
+        if *sequence != fingerprint.sequence {
+            return Ok(Some(false));
+        }
+        let answer = hash_cache.file_sha256(path, None)?;
+        if answer.size != fingerprint.bytes || answer.sha256 != fingerprint.sha256 {
+            return Ok(Some(false));
+        }
+        covered += fingerprint.bytes;
+    }
+    if covered != fact.concat_bytes {
+        // The fingerprints do not spell the covered prefix (a mid-file cut,
+        // or a fact this composition cannot interpret): the whole
+        // concatenation read answers, as before.
+        return Ok(None);
+    }
+    Ok(Some(true))
 }
 
 /// Check if a stored debt can be discharged locally without consulting the destination archive.
@@ -1154,13 +1393,20 @@ pub(crate) fn debt_settled_locally(
     machine: &str,
     stage: &Path,
     manifest_facts: Option<&BTreeMap<String, ShardFact>>,
+    hash_cache: &mut HashCache,
 ) -> anyhow::Result<Option<DebtVerdict>> {
     if entry.machine != machine {
         return Ok(Some(DebtVerdict::Unverifiable(
             "cursor was written for a different machine partition",
         )));
     }
-    if stage_covers(stage, machine, &entry.session_id, &entry.shards)? {
+    if stage_covers(
+        stage,
+        machine,
+        &entry.session_id,
+        &entry.shards,
+        hash_cache,
+    )? {
         return Ok(Some(DebtVerdict::OwedOnStage));
     }
     let dir = store::session_shard_dir(stage, machine, &entry.session_id);
@@ -1206,8 +1452,9 @@ pub(crate) fn verify_debt(
     stage: &Path,
     remote_facts: Option<&ArchiveFacts>,
     manifest_facts: Option<&BTreeMap<String, ShardFact>>,
+    hash_cache: &mut HashCache,
 ) -> anyhow::Result<DebtVerdict> {
-    if let Some(verdict) = debt_settled_locally(entry, machine, stage, manifest_facts)? {
+    if let Some(verdict) = debt_settled_locally(entry, machine, stage, manifest_facts, hash_cache)? {
         return Ok(verdict);
     }
     let Some(facts) = remote_facts else {
@@ -1536,6 +1783,38 @@ pub struct CollectReport {
     pub sqlite_sessions_queried: u64,
     /// W880: SQLite sessions exported (re-sealed) into the stage.
     pub sqlite_sessions_exported: u64,
+    /// W1083 (S4): SQLite sessions the gate skipped without a sweep — the
+    /// per-session fields compared equal, and (for opencode) the freshest
+    /// signal was quiet past the grace window. Queried sessions minus
+    /// skipped minus exported are sessions this pass swept and sealed
+    /// nothing new for.
+    pub sqlite_sessions_skipped: u64,
+    /// W1083 (S4): opencode sessions whose cursor compared equal but were
+    /// swept anyway because their freshest signal was quieter than the
+    /// grace window (ISSUE-008 ①: parts arrive and rows are rewritten on
+    /// times the session row never reflects, so a session still being
+    /// written must not be trusted when its cursor stands still).
+    pub sqlite_sessions_grace_swept: u64,
+    /// W1083 (S4): opencode sessions swept because this pass is the nightly
+    /// full-sweep round, which ignores the cursor gate deliberately
+    /// (ISSUE-008 B: the gate's residue — an in-place rewrite that bumps no
+    /// timestamp at all — is caught here and nowhere else).
+    pub sqlite_sessions_full_swept: u64,
+    /// W1083 (S4): whether this pass ran as the nightly full sweep.
+    pub opencode_full_sweep: bool,
+    /// W1083 (S3): shard-body bytes read and hashed while proving stage
+    /// coverage and stage shard facts (the `dir_covers` family, at hash-cache
+    /// miss). A quiet pass must keep this near zero: shards that did not
+    /// move answer from the hash cache instead of being re-read.
+    pub stage_covers_bytes_read: u64,
+    /// W1083 (C): hash-cache lookups answered without reading (any site).
+    pub hash_cache_hits: u64,
+    /// W1083 (C): hash-cache lookups that had to read the bytes.
+    pub hash_cache_misses: u64,
+    /// W1083 (C): a failure to persist the hash cache at the pass's end, as
+    /// an I/O error kind word. The cache is a pure optimization — the pass's
+    /// data does not depend on it — so this is reported, never fatal.
+    pub hash_cache_save_error: Option<String>,
     /// ADR-061: whole-file observation shards sealed for snapshot-source
     /// sessions (the pre-increment shape, and the one-pass degrade of an
     /// unknown increment map).
@@ -1609,6 +1888,13 @@ pub struct PassContext {
 struct CollectCounters {
     files_statted: u64,
     sqlite_sessions_queried: u64,
+    /// W1083 (S4): sessions the gate skipped without a sweep.
+    sqlite_sessions_skipped: u64,
+    /// W1083 (S4): opencode sessions swept inside the grace window despite
+    /// an equal cursor.
+    sqlite_sessions_grace_swept: u64,
+    /// W1083 (S4): opencode sessions swept by the nightly full round.
+    sqlite_sessions_full_swept: u64,
     /// ADR-061: whole-file observation shards sealed for snapshot-source
     /// sessions (the pre-increment shape, and the one-pass degrade of an
     /// unknown increment map).
@@ -1864,6 +2150,12 @@ pub fn collect(
             format!("re-walk the {harness_id} roots for a source that vanished mid-pass")
         })
     };
+    // W1083 (ISSUE-008 B): resolve the nightly full-sweep round from the
+    // durable marker and the local clock, before the pass starts, so the
+    // pass itself is told what it is. The marker is written only after a
+    // pass succeeded, so a failed nightly attempt retries the next hour of
+    // the window instead of spending its day's allowance on nothing.
+    let full_sweep = opencode_full_sweep_now(config, state_dir);
     let mut report = collect_scan_report_with_relocation(
         &scan,
         stage,
@@ -1872,12 +2164,44 @@ pub fn collect(
         bucket_cap,
         destination,
         Some(&relocate),
+        full_sweep,
     )?;
+    if full_sweep {
+        let finished_at = crate::manifest::now_unix_seconds().unwrap_or_default();
+        write_opencode_full_sweep_marker(state_dir, finished_at)?;
+    }
     report.scan_ms = scan_ms;
     report.collect_ms = collect_started.elapsed().as_millis() as u64;
     report.source_notices = source_notices;
     report.sources_on = sources_on;
     Ok(report)
+}
+
+/// Whether *this* pass, here and now, is the nightly opencode full-sweep
+/// round: the marker's last completed sweep, the local clock's hour and day,
+/// and the configured window ([`opencode_full_sweep_hours`]), resolved
+/// through [`opencode_full_sweep_due`]. Never fails: a marker that cannot be
+/// read is one that never was.
+pub fn opencode_full_sweep_now(config: &Config, state_dir: &Path) -> bool {
+    use chrono::{Datelike, Timelike};
+    let now = chrono::Local::now();
+    let now_unix = now.timestamp();
+    let last_full = load_opencode_full_sweep_marker(state_dir);
+    let last_full_local_day = last_full.and_then(|last| {
+        use chrono::TimeZone;
+        chrono::Local
+            .timestamp_opt(last, 0)
+            .single()
+            .map(|moment| moment.date_naive())
+    });
+    opencode_full_sweep_due(
+        last_full,
+        now_unix,
+        now.hour(),
+        now.date_naive(),
+        last_full_local_day,
+        opencode_full_sweep_hours(config),
+    )
 }
 
 /// Collection entry point split out for tests: the scanner report is supplied
@@ -1903,6 +2227,9 @@ pub fn collect_scan_report(
         bucket_cap,
         destination,
         None,
+        // W1083: tests drive the nightly round through the flag, so an
+        // ordinary collect call is an incremental pass.
+        false,
     )
 }
 
@@ -1927,6 +2254,7 @@ pub fn collect_scan_report_with_relocation(
     bucket_cap: usize,
     destination: &DestinationView<'_>,
     relocate: Option<RelocationScan<'_>>,
+    opencode_full_sweep: bool,
 ) -> anyhow::Result<CollectReport> {
     store::assert_stage_writer_audited(store::StageWriter::Collect)?;
     fs::create_dir_all(stage).with_context(|| format!("create stage {}", stage.display()))?;
@@ -2011,13 +2339,25 @@ pub fn collect_scan_report_with_relocation(
     // costs one redundant reload), never missed.
     let manifest_stamp = manifest_file_stamp(stage, machine);
     let manifest_facts = load_local_manifest_facts(stage, machine);
+    // W1083 (ISSUE-008 C): the pass's hash cache, loaded once and shared by
+    // the pre-scan below, the per-record proof paths and the JSONL reads,
+    // persisted once at the pass's end.
+    let mut hash_cache = HashCache::load(state_dir);
     let mut records = scan.records.clone();
     records.sort_by(|a, b| a.absolute_path.cmp(&b.absolute_path));
     let mut wanted = BTreeSet::new();
     for record in &records {
         let key = state_key(record);
         if let Some(entry) = debts.get(&key) {
-            if debt_settled_locally(entry, machine, stage, manifest_facts.as_ref())?.is_none() {
+            if debt_settled_locally(
+                entry,
+                machine,
+                stage,
+                manifest_facts.as_ref(),
+                &mut hash_cache,
+            )?
+            .is_none()
+            {
                 wanted.insert((machine.to_string(), entry.session_id.clone()));
             }
         }
@@ -2065,6 +2405,10 @@ pub fn collect_scan_report_with_relocation(
         counters: CollectCounters::default(),
         report,
         debts,
+        hash_cache,
+        probe: OpenCodeProber::default(),
+        debts_dirty: false,
+        opencode_full_sweep,
     };
     // W1049: sessions whose bytes this pass collected, by id → the path
     // the collection read. A vanished source is resolved against this map
@@ -2098,24 +2442,65 @@ pub fn collect_scan_report_with_relocation(
                 }
             }
             // Bookkeeping around the read failed: abort the pass exactly as
-            // this code did when it lived inline.
-            Err(error) => return Err(error),
+            // this code did when it lived inline — after the ledger batch
+            // (W1083) had its chance to persist what this pass already
+            // established, since the self-heal for a lost batch is a
+            // re-verification, never a restore-from-nowhere.
+            Err(error) => {
+                if let Err(save_error) = collector.flush_durables() {
+                    return Err(error.context(format!(
+                        "collector state could not be saved after the failed pass: {save_error:#}"
+                    )));
+                }
+                return Err(error);
+            }
         }
     }
     // W1049: settle every vanished source by identity, before the pass
     // ends — the round either collected the session at its new location
     // already, records the relocation, or keeps today's unknown as an
     // error.
-    collector.resolve_vanished_sources(scan, relocate, vanished_sources, &mut collected_ok)?;
+    if let Err(error) =
+        collector.resolve_vanished_sources(scan, relocate, vanished_sources, &mut collected_ok)
+    {
+        if let Err(save_error) = collector.flush_durables() {
+            return Err(error.context(format!(
+                "collector state could not be saved after the failed pass: {save_error:#}"
+            )));
+        }
+        return Err(error);
+    }
+    // W1083 (ISSUE-008 ②-a): the one ledger write of the pass. The debt map
+    // this pass built is persisted here — in the same write the old code
+    // did per record, which chained one full re-serialization of the debt
+    // file to every changed cursor and cost it again in fsyncs; a batch
+    // loses only a mid-pass crash's progress, and the debt discipline
+    // recovers it from the stage's own bytes, never from thin air.
+    collector.flush_durables()?;
     let PassCollector {
         mut report,
         counters,
         manifest_rows_at_start,
+        hash_cache,
+        opencode_full_sweep,
         ..
     } = collector;
     report.manifest_rows_at_start = manifest_rows_at_start;
     report.files_statted = counters.files_statted;
     report.sqlite_sessions_queried = counters.sqlite_sessions_queried;
+    // W1083 (S4): the gate's own ledger is in the report the round prints
+    // and the run-state keeps.
+    report.sqlite_sessions_skipped = counters.sqlite_sessions_skipped;
+    report.sqlite_sessions_grace_swept = counters.sqlite_sessions_grace_swept;
+    report.sqlite_sessions_full_swept = counters.sqlite_sessions_full_swept;
+    report.opencode_full_sweep = opencode_full_sweep;
+    // W1083 (S3): what the coverage proofs re-read, and what the hash cache
+    // answered for free. A quiet pass keeps both near zero.
+    let cache_stats = hash_cache.stats();
+    let stage_stats = hash_cache.stage_stats();
+    report.stage_covers_bytes_read = stage_stats.bytes_read;
+    report.hash_cache_hits = cache_stats.hits;
+    report.hash_cache_misses = cache_stats.misses;
     // Machine logs are collected after every session, and into their own
     // report fields: a machine log is never a session outcome, never a session
     // shard, and never a session line (ADR-053 D4).
@@ -2297,6 +2682,15 @@ struct PassCollector<'a> {
     counters: CollectCounters,
     report: CollectReport,
     debts: BTreeMap<String, DebtEntry>,
+    /// W1083 (C): the pass's shared hash cache (see its construction).
+    hash_cache: HashCache,
+    /// W1083 (ISSUE-008 ②-b): the pass's reusable opencode probe connection.
+    probe: OpenCodeProber,
+    /// W1083: set by any debt change this pass; the ledger is written once,
+    /// at the pass's end (`flush_durables`), not once per record.
+    debts_dirty: bool,
+    /// W1083 (B): whether this pass is the nightly opencode full sweep.
+    opencode_full_sweep: bool,
 }
 
 impl<'a> PassCollector<'a> {
@@ -2312,6 +2706,37 @@ impl<'a> PassCollector<'a> {
         self.manifest_facts = load_local_manifest_facts(self.stage, self.machine);
         self.report.manifest_reloads += 1;
         true
+    }
+
+    /// W1083: persist the pass's durables — the debt ledger, then the hash
+    /// cache — once. Called at the pass's end on every path (the failed
+    /// paths best-effort before their error; see the record loop). The
+    /// ledger write is the same `save_state` as ever, minus the per-record
+    /// invocation that made its cost quadratic in the archive size; the
+    /// cache write is a pure optimization whose failure is reported on the
+    /// report and never fails the pass.
+    fn flush_durables(&mut self) -> anyhow::Result<()> {
+        if self.debts_dirty {
+            let debts = std::mem::take(&mut self.debts);
+            let saved = save_state(self.state_path, self.state, self.destination_id, &debts);
+            self.debts = debts;
+            saved?;
+            // W880: one durable collector state save — the pass's one.
+            self.report.state_saves += 1;
+            self.debts_dirty = false;
+        }
+        let mut cache = std::mem::take(&mut self.hash_cache);
+        let saved = cache.save();
+        self.hash_cache = cache;
+        if let Err(error) = saved {
+            self.report.hash_cache_save_error = Some(
+                match error.downcast_ref::<std::io::Error>() {
+                    Some(io) => format!("{:?}", io.kind()),
+                    None => "other".to_string(),
+                },
+            );
+        }
+        Ok(())
     }
 
     /// Collect one record, folding the whole read into the report. `Failed`
@@ -2361,6 +2786,7 @@ impl<'a> PassCollector<'a> {
                 stage,
                 self.remote_facts,
                 self.manifest_facts.as_ref(),
+                &mut self.hash_cache,
             )?;
             // W1057: `reclaim-stage` and this pass share no lock. A reclaim
             // that finishes while the pass is in flight deletes the body of
@@ -2377,6 +2803,7 @@ impl<'a> PassCollector<'a> {
                     stage,
                     self.remote_facts,
                     self.manifest_facts.as_ref(),
+                    &mut self.hash_cache,
                 )?;
                 if !matches!(verdict, DebtVerdict::Unverifiable(_)) {
                     self.report.late_manifest_settled += 1;
@@ -2424,6 +2851,7 @@ impl<'a> PassCollector<'a> {
                     machine,
                     &mut self.counters,
                     self.manifest_facts.as_ref(),
+                    &mut self.hash_cache,
                 ) {
                     Ok(position) => Some(position),
                     // W1049: the cursor resolution proves a stage-derived
@@ -2459,7 +2887,14 @@ impl<'a> PassCollector<'a> {
             // destination never pushed must be captured in full
             // (destination scoping, H1) — so its archive receives the body.
             None => {
-                match stage_prefix_entry(record, stage, machine, &mut self.counters, None) {
+                match stage_prefix_entry(
+                    record,
+                    stage,
+                    machine,
+                    &mut self.counters,
+                    None,
+                    &mut self.hash_cache,
+                ) {
                     Ok(position) => position,
                     // W1049: the same vanished-source classification as the
                     // covered-position arm above, for the cursor-less leg —
@@ -2493,6 +2928,9 @@ impl<'a> PassCollector<'a> {
             &mut self.counters,
             self.pass,
             self.manifest_facts.as_ref(),
+            &mut self.hash_cache,
+            &mut self.probe,
+            self.opencode_full_sweep,
         );
         match read {
             Ok(ReadOutcome::Processed(processed)) => {
@@ -2575,7 +3013,7 @@ impl<'a> PassCollector<'a> {
                     Some(previous) if outcome.shard.is_none() && unverifiable.is_none() => {
                         previous.shards.clone()
                     }
-                    _ => stage_shard_fact(stage, machine, &record.id)?,
+                    _ => stage_shard_fact(stage, machine, &record.id, &mut self.hash_cache)?,
                 };
                 let entry = DebtEntry {
                     machine: machine.to_string(),
@@ -2584,15 +3022,14 @@ impl<'a> PassCollector<'a> {
                     shards,
                 };
                 if stored.as_ref() != Some(&entry) {
+                    // W1083 (ISSUE-008 ②-a): the debt map moves first and
+                    // is written once, with the pass's other durables, at
+                    // the pass's end — no per-record re-serialization of a
+                    // ledger the size of the whole archive, no per-record
+                    // fsync of it. The record's shards and provenance rows
+                    // are already durable on their own.
                     self.debts.insert(key, entry);
-                    save_state(
-                        self.state_path,
-                        self.state,
-                        self.destination_id,
-                        &self.debts,
-                    )?;
-                    // W880: one durable collector state save.
-                    self.report.state_saves += 1;
+                    self.debts_dirty = true;
                 }
                 self.report.outcomes.push(outcome);
                 // TICKET-4D-10: stamp what this read observed firsthand into
@@ -2605,7 +3042,8 @@ impl<'a> PassCollector<'a> {
                     crate::provenance::merge(&mut record.provenance, &processed.dimensions);
                 }
                 if !record.provenance.is_empty() {
-                    let body = stage_shard_fact(stage, machine, &record.id)?;
+                    let body =
+                        stage_shard_fact(stage, machine, &record.id, &mut self.hash_cache)?;
                     crate::provenance::append_scan_observation(
                         stage,
                         machine,
@@ -2796,6 +3234,9 @@ fn collect_one(
     counters: &mut CollectCounters,
     pass: &PassContext,
     manifest_facts: Option<&BTreeMap<String, ShardFact>>,
+    hash_cache: &mut HashCache,
+    probe: &mut OpenCodeProber,
+    opencode_full_sweep: bool,
 ) -> anyhow::Result<ReadOutcome> {
     if let Some(layout) = record.sqlite_layout {
         if layout == SqliteSessionLayout::GrokBot {
@@ -2823,6 +3264,9 @@ fn collect_one(
                 bucket_cap,
                 counters,
                 manifest_facts,
+                probe,
+                pass.pass_ts,
+                opencode_full_sweep,
             )
             .map(ReadOutcome::Processed)
         }
@@ -2846,6 +3290,7 @@ fn collect_one(
             bucket_cap,
             counters,
             manifest_facts,
+            hash_cache,
         )?))
     } else if record.source == crate::models::HarnessSource::Codebuff {
         process_codebuff_whole_file(
@@ -3182,6 +3627,9 @@ fn process_sqlite(
     bucket_cap: usize,
     counters: &mut CollectCounters,
     manifest_facts: Option<&BTreeMap<String, ShardFact>>,
+    probe: &mut OpenCodeProber,
+    pass_ts: i64,
+    opencode_full_sweep: bool,
 ) -> anyhow::Result<Processed> {
     // The whole-store fingerprint is a shortcut over the *store*, so it is
     // checked once here, before any per-session query. Equal fingerprint means
@@ -3201,7 +3649,14 @@ fn process_sqlite(
     // W880: the fingerprint stats the store file and its two sidecars.
     counters.files_statted += 3;
     if let Some(entry) = old {
+        // W1083 (full sweep): a pass whose whole point is to re-read what
+        // the gates cannot see must not be stopped by the store-level
+        // shortcut; for the opencode layout the per-session fields — and
+        // per-record digests behind them — must answer even when the store
+        // happens to be quiet for one round.
+        let shortcut_barred = opencode_full_sweep && layout == SqliteSessionLayout::OpenCode;
         if !force_reset
+            && !shortcut_barred
             && entry.opencode.is_some()
             && entry.store_fingerprint.as_deref() == Some(store_fingerprint.as_str())
         {
@@ -3214,6 +3669,7 @@ fn process_sqlite(
                 entry,
                 &store_fingerprint,
                 Default::default(),
+                counters,
             ));
         }
     }
@@ -3233,6 +3689,9 @@ fn process_sqlite(
             &store_fingerprint,
             counters,
             manifest_facts,
+            probe,
+            pass_ts,
+            opencode_full_sweep,
         ),
         SqliteSessionLayout::OpenClaw => process_openclaw(
             record,
@@ -3314,6 +3773,7 @@ fn process_sqlite(
                     old.expect("checked above"),
                     &store_fingerprint,
                     Default::default(),
+                    counters,
                 ));
             }
             let snapshot = read_sqlite_session(&record.absolute_path, &spec, &session_id)
@@ -3343,6 +3803,7 @@ fn process_sqlite(
                     old.expect("checked above"),
                     &store_fingerprint,
                     Default::default(),
+                    counters,
                 ));
             }
             let snapshot = read_sqlite_session(&record.absolute_path, &spec, &session_id)
@@ -3372,6 +3833,7 @@ fn process_sqlite(
                     old.expect("checked above"),
                     &store_fingerprint,
                     Default::default(),
+                    counters,
                 ));
             }
             let snapshot = read_zed_session(&record.absolute_path, &spec, &session_id)
@@ -3663,23 +4125,32 @@ fn unchanged_content_sqlite(
     }
 }
 
-/// The session did not change. The cursor is carried over untouched; only the
-/// whole-store fingerprint is refreshed, because the caller has just observed
-/// the store and compared this session's fields against it. Recording that
-/// observation lets the next pass take the shortcut, and it claims nothing new:
-/// an equal fingerprint means the store file is the same size and mtime, so the
-/// session is still unchanged.
+/// The session did not change; the stored entry is carried over untouched.
+///
+/// The whole-store fingerprint is deliberately **not** refreshed here
+/// (W1083, ISSUE-008 ②-b): the opencode store is written by workers almost
+/// continuously, so a refreshed fingerprint differs on every pass, and the
+/// old refresh made the persisted entry differ from the stored one even
+/// when nothing in the session moved — a pseudo-change that re-serialized
+/// the whole debt file once per unchanged session, every pass (the ~8,000
+/// `state_saves` a round once measured). The fingerprint a *changed* round
+/// wrote still lets the next pass take the whole-store shortcut when the
+/// store really is quiet; an unchanged round claims nothing new, so it
+/// records nothing new.
 ///
 /// `old` is reused rather than rebuilt so a hand-edited or older entry keeps
 /// whatever else it carries.
 fn unchanged_sqlite(
     record: &SessionRecord,
     old: &OffsetEntry,
-    store_fingerprint: &str,
+    _store_fingerprint: &str,
     dimensions: crate::provenance::SessionProvenance,
+    counters: &mut CollectCounters,
 ) -> Processed {
-    let mut state = old.clone();
-    state.store_fingerprint = Some(store_fingerprint.to_string());
+    // W1083 (S4): one session the gate answered "unchanged" for, without a
+    // sweep.
+    counters.sqlite_sessions_skipped += 1;
+    let state = old.clone();
     Processed {
         state,
         outcome: CollectOutcome {
@@ -3695,6 +4166,42 @@ fn unchanged_sqlite(
         },
         dimensions,
     }
+}
+
+/// Is this session's freshest signal younger than the grace window
+/// ([`OPENCODE_GRACE_WINDOW_MS`], W1083 A)?
+///
+/// The cursor carries three clocks — the session row's `time_updated` and
+/// the message and part high-water times, all milliseconds from the store —
+/// and the newest of the three is the session's freshest *observed* signal.
+/// ISSUE-008 ① measured opencode writing parts 2.8–45.5 s after the row
+/// they belong to and leaving the session row's own time untouched on 72%
+/// of in-place rewrites, so "the cursor is equal" means something different
+/// for a session that was active a moment ago: writes are in flight that no
+/// cursor field reflects yet. Such a session is swept rather than skipped —
+/// the sweep's per-record digests answer what the times cannot. A session
+/// with no signal at all (an empty row set and no session time) was never
+/// being written, so nothing is in flight and the window does not hold it.
+fn opencode_gate_in_grace_window(cursor: &OpenCodeCursor, pass_ts_unix: i64) -> bool {
+    let mut newest: Option<i64> = cursor.session_time_updated;
+    for high_water in [cursor.message_high_water.as_ref(), cursor.part_high_water.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        newest = Some(match newest {
+            Some(current) if current >= high_water.time_updated => current,
+            _ => high_water.time_updated,
+        });
+    }
+    let Some(newest) = newest else {
+        return false;
+    };
+    // The store's times are milliseconds (column values observed as such,
+    // ISSUE-008 §2); the pass stamp is seconds.
+    let pass_ts_ms = pass_ts_unix.saturating_mul(1000);
+    // A clock skew (a future-dated row) counts as "writing right now": the
+    // window is a freshness bound, never a staleness proof.
+    pass_ts_ms.saturating_sub(newest) < OPENCODE_GRACE_WINDOW_MS
 }
 
 fn native_session_id(record: &SessionRecord, label: &str) -> anyhow::Result<String> {
@@ -3716,8 +4223,15 @@ fn process_jsonl(
     bucket_cap: usize,
     counters: &mut CollectCounters,
     manifest_facts: Option<&BTreeMap<String, ShardFact>>,
+    hash_cache: &mut HashCache,
 ) -> anyhow::Result<Processed> {
-    let data = read_jsonl_delta(&record.absolute_path, old, force_reset, counters)?;
+    let data = read_jsonl_delta(
+        &record.absolute_path,
+        old,
+        force_reset,
+        counters,
+        hash_cache,
+    )?;
     let (lines, committed_delta) = complete_lines(&data.bytes);
     let new_offset = data.base_offset + committed_delta as u64;
     // A full read whose framed lines equal the retained manifest fact is a
@@ -3740,7 +4254,7 @@ fn process_jsonl(
         && manifest_holds_this_framed(manifest_facts, &record.id, &seal_framed(&lines));
     if matches_manifest {
         return Ok(Processed {
-            state: plain_state(&record.absolute_path, new_offset)?,
+            state: plain_state(&record.absolute_path, new_offset, hash_cache)?,
             outcome: CollectOutcome {
                 session_prefix: id_prefix(&record.id),
                 source_path_sha256: path_digest(&record.absolute_path),
@@ -3768,7 +4282,7 @@ fn process_jsonl(
             opencode_map_digest: None,
         })
     } else {
-        plain_state(&record.absolute_path, new_offset)?
+        plain_state(&record.absolute_path, new_offset, hash_cache)?
     };
     let shard = if lines.is_empty() {
         None
@@ -4092,13 +4606,23 @@ fn process_machine_log(
     bucket_cap: usize,
     counters: &mut CollectCounters,
 ) -> anyhow::Result<ProcessedMachineLog> {
-    let data = read_jsonl_delta(&record.absolute_path, old, force_reset, counters)?;
+    let data = read_jsonl_delta(
+        &record.absolute_path,
+        old,
+        force_reset,
+        counters,
+        &mut HashCache::disabled(),
+    )?;
     let (lines, committed_delta) = complete_lines(&data.bytes);
     let new_offset = data.base_offset + committed_delta as u64;
     let cursor = if lines.is_empty() && !data.reset {
         old.cloned().unwrap_or_else(empty_cursor)
     } else {
-        plain_state(&record.absolute_path, new_offset)?
+        // W1083: machine logs are a handful of files a pass; the pass's
+        // shared cache ends before this step, so this keeps today's
+        // read-everything behaviour rather than holding a second cache
+        // open for a dir listing's worth of bytes.
+        plain_state(&record.absolute_path, new_offset, &mut HashCache::disabled())?
     };
     let shard = if lines.is_empty() {
         None
@@ -4285,7 +4809,9 @@ fn collect_machine_logs(
         }
         report.machine_log_lines_written += processed.lines_written;
 
-        let fact = shard_fact_in_dir(&dir)?;
+        // W1083: the machine-log cursor proof keeps the low-volume
+        // read-everything shape (see `process_machine_log`'s note).
+        let fact = shard_fact_in_dir(&dir, &mut HashCache::disabled())?;
         if let (Some(shard_name), Some(generation)) =
             (processed.shard.as_deref(), processed.generation)
         {
@@ -4654,10 +5180,14 @@ fn opencode_map_matches_entry(records: &BTreeMap<String, String>, entry: &Offset
 
 /// Process one opencode session record (ADR-061, SG-3).
 ///
-/// The cursor fast path is unchanged: a session whose logical cursor still
-/// equals the stored one skips for free. A session the store did move is
-/// read in full (the serialize-and-hash sweep — the saving is on write
-/// bytes, not read bytes), and then one of two write shapes applies:
+/// The cursor fast path is **the increment gate** (W1083 A, ISSUE-008 ①):
+/// a session whose logical cursor still equals the stored one — the cursor
+/// is the session's own `time_updated` **and** the message/part row counts
+/// and `(time_updated, id)` high-water marks, so a write that bumps any of
+/// those opens the gate — is skipped for free, with one exception named
+/// below. A session the store did move is read in full (the
+/// serialize-and-hash sweep — the saving is on write bytes, not read
+/// bytes), and then one of two write shapes applies:
 ///
 /// * a **full observation**: the whole session as one v1 line, exactly the
 ///   pre-increment shape. It is the first sight of a session, the
@@ -4673,6 +5203,20 @@ fn opencode_map_matches_entry(records: &BTreeMap<String, String>, entry: &Offset
 ///   second dedup layer beneath the map); a pass whose cursor moved without
 ///   a single record changing writes nothing at all and only advances the
 ///   cursor.
+///
+/// The exception where an equal cursor does **not** skip:
+///
+/// * the **grace window** (ISSUE-008 ①'s measured defect): opencode writes
+///   parts seconds after the session row they belong to, and an in-place
+///   rewrite of a message row moves none of the session's times at all — a
+///   session whose freshest signal is younger than
+///   [`OPENCODE_GRACE_WINDOW_MS`] is therefore swept even when its cursor
+///   compares equal, so a session still being written cannot be waved
+///   through on a cursor that happens to stand still;
+/// * the **nightly full round** spills over here: when this pass is the
+///   full-sweep pass, every session is swept regardless of the gate, so the
+///   per-record digests catch the residue no timestamp signals — the "worst
+///   case, a day" the issue accepts.
 fn process_opencode(
     record: &SessionRecord,
     old: Option<&OffsetEntry>,
@@ -4685,23 +5229,43 @@ fn process_opencode(
     store_fingerprint: &str,
     counters: &mut CollectCounters,
     manifest_facts: Option<&BTreeMap<String, ShardFact>>,
+    probe: &mut OpenCodeProber,
+    pass_ts: i64,
+    opencode_full_sweep: bool,
 ) -> anyhow::Result<Processed> {
     let session_native = record
         .id
         .splitn(3, '.')
         .nth(2)
         .ok_or_else(|| anyhow!("invalid opencode session id"))?;
-    let cursor = opencode_session_cursor(&record.absolute_path, session_native)
+    // W1083 (ISSUE-008 ②-b): the probe reuses the pass's open read-only
+    // connection instead of paying a fresh connection open per session —
+    // the connection, not the queries, was nearly all of the probe's
+    // measured cost. The per-probe `BEGIN` snapshot inside the prober is
+    // the same freshness contract the per-connection open used to carry.
+    let cursor = probe
+        .cursor(&record.absolute_path, session_native)
         .map_err(|error| anyhow!("failed to read opencode session cursor: {error}"))?;
     // This session's own fields, and nothing else — see
     // `process_sqlite` for why the store-wide fingerprint is not here.
     if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
-        return Ok(unchanged_sqlite(
-            record,
-            old.expect("checked above"),
-            store_fingerprint,
-            Default::default(),
-        ));
+        if opencode_full_sweep {
+            // Counted (S4) and swept below through the ordinary path: the
+            // digests answer whether anything really changed.
+            counters.sqlite_sessions_full_swept += 1;
+        } else if opencode_gate_in_grace_window(&cursor, pass_ts) {
+            // Freshness beats an equal cursor (see the module note); the
+            // sweep costs one read of a session that is live right now.
+            counters.sqlite_sessions_grace_swept += 1;
+        } else {
+            return Ok(unchanged_sqlite(
+                record,
+                old.expect("checked above"),
+                store_fingerprint,
+                Default::default(),
+                counters,
+            ));
+        }
     }
 
     // The serialize-and-hash sweep: one SQLite transaction, every row, and
@@ -5572,9 +6136,11 @@ fn read_jsonl_delta(
     old: Option<&OffsetEntry>,
     force_reset: bool,
     counters: &mut CollectCounters,
+    hash_cache: &mut HashCache,
 ) -> anyhow::Result<ReadData> {
     for _ in 0..READ_RETRIES {
-        let before = fs::metadata(path)?.len();
+        let before_metadata = fs::metadata(path)?;
+        let before = before_metadata.len();
         // W880: one source file stat'ed.
         counters.files_statted += 1;
         let reusable = old.filter(|entry| {
@@ -5584,11 +6150,18 @@ fn read_jsonl_delta(
                 && entry.offset <= before
         });
         if let Some(entry) = reusable {
-            let prefix = read_range(path, 0, entry.offset)?;
             let expected = entry.prefix_sha256.clone();
-            if sha256_hex(&prefix) == expected {
+            // W1083 (ISSUE-008 C): the committed-prefix re-hash — the cost
+            // that made a quiet pass re-read essentially the entire JSONL
+            // corpus every hour. The hash cache answers it from the file's
+            // stat identity when the file did not move (the stat this
+            // read already took, so answering costs nothing); a miss
+            // reads and namespaces the bytes exactly as before.
+            let prefix = hash_cache.prefix_sha256(path, entry.offset, Some(&before_metadata))?;
+            if prefix.sha256 == expected {
                 let delta = read_range(path, entry.offset, before - entry.offset)?;
-                let after = fs::metadata(path)?.len();
+                let after_metadata = fs::metadata(path)?;
+                let after = after_metadata.len();
                 // W880: one source file stat'ed.
                 counters.files_statted += 1;
                 if after != before {
@@ -5597,8 +6170,31 @@ fn read_jsonl_delta(
                 // Re-check the committed prefix after reading the delta. If a
                 // writer rewrote the prefix during this pass, retry instead
                 // of combining bytes from two different file versions.
-                let prefix_after = read_range(path, 0, entry.offset)?;
-                if sha256_hex(&prefix_after) != expected {
+                //
+                // A cached answer re-checks by the same identity rule the
+                // hit was taken under: the post-delta stat still matches
+                // the stat the digest was stored for, so the bytes this
+                // pass never read are the same ones that digest names. A
+                // stat that moved, or a miss, goes through the bytes
+                // exactly as this code always did — a miss is in fact the
+                // shape where the prefix may well have just been rewritten,
+                // and reading it twice is half the point of the no-shortcut
+                // rule.
+                if prefix.from_cache {
+                    if !hashcache::same_file_identity(&before_metadata, &after_metadata) {
+                        continue;
+                    }
+                } else if prefix.bytes_read == entry.offset {
+                    let prefix_after = read_range(path, 0, entry.offset)?;
+                    if sha256_hex(&prefix_after) != expected {
+                        continue;
+                    }
+                    // The miss already stored this (stat, offset, digest)
+                    // pair, so the next pass over an unchanged file answers
+                    // from the cache instead of repeating this re-read.
+                } else {
+                    // The prefix never held the recorded length: the same
+                    // verdict the byte comparison used to reach by reading.
                     continue;
                 }
                 return Ok(ReadData {
@@ -5606,7 +6202,14 @@ fn read_jsonl_delta(
                     base_offset: entry.offset,
                     bytes: delta,
                     bytes_read: before - entry.offset,
-                    prefix_bytes_validated: entry.offset,
+                    // W1083: on a cache hit no prefix byte was re-read, and
+                    // this counter says what it costs, not what it covered —
+                    // the coverage the cursor already proves.
+                    prefix_bytes_validated: if prefix.from_cache {
+                        0
+                    } else {
+                        prefix.bytes_read
+                    },
                     reset: false,
                 });
             }
@@ -5661,12 +6264,31 @@ fn complete_lines(bytes: &[u8]) -> (Vec<Vec<u8>>, usize) {
     (lines, complete_len)
 }
 
-fn plain_state(path: &Path, offset: u64) -> anyhow::Result<OffsetEntry> {
-    let prefix = read_range(path, 0, offset)?;
+fn plain_state(
+    path: &Path,
+    offset: u64,
+    hash_cache: &mut HashCache,
+) -> anyhow::Result<OffsetEntry> {
+    // W1083 (C): the new cursor's own prefix digest runs through the same
+    // cache the next pass will validate it with, so a grown source pays its
+    // change once and the next pass's validation is free — which is what
+    // makes the steady-state pass cost proportional to the hour's change
+    // instead of to the corpus size.
+    let prefix = hash_cache.prefix_sha256(path, offset, None)?;
+    if !prefix.from_cache && prefix.bytes_read != offset {
+        // The streamed read ran short of the cursor's own length: the file
+        // shrank or was promised larger than it is, and the cursor this
+        // function would build would claim a prefix it never observed.
+        bail!(
+            "source prefix ended at {} of the {} bytes the cursor claims",
+            prefix.bytes_read,
+            offset
+        );
+    }
     Ok(OffsetEntry {
         offset,
         prefix_len: offset,
-        prefix_sha256: sha256_hex(&prefix),
+        prefix_sha256: prefix.sha256,
         compressed: false,
         opencode: None,
         store_fingerprint: None,
@@ -6154,10 +6776,21 @@ pub fn import_grok_bot_backups(
 
     // Which sessions need the destination's own archive to prove a stored
     // debt, resolved once for the whole pass (see `DestinationView::facts`).
+    // W1083: a one-shot import leg has no pass cache; the reads this pass
+    // already did keep today's behaviour.
+    let mut no_cache = HashCache::disabled();
     let mut wanted = BTreeSet::new();
     for item in &items {
         if let Some(entry) = debts.get(&grok_bot_session_key(&item.session_id)) {
-            if debt_settled_locally(entry, machine, stage, manifest_facts.as_ref())?.is_none() {
+            if debt_settled_locally(
+                entry,
+                machine,
+                stage,
+                manifest_facts.as_ref(),
+                &mut no_cache,
+            )?
+            .is_none()
+            {
                 wanted.insert((machine.to_string(), entry.session_id.clone()));
             }
         }
@@ -6202,7 +6835,14 @@ pub fn import_grok_bot_backups(
         // or the destination's archive — the same order `collect` checks.
         let mut unverifiable = None;
         if let Some(entry) = stored.as_ref() {
-            match verify_debt(entry, machine, stage, remote_facts, manifest_facts.as_ref())? {
+            match verify_debt(
+                entry,
+                machine,
+                stage,
+                remote_facts,
+                manifest_facts.as_ref(),
+                &mut no_cache,
+            )? {
                 DebtVerdict::OwedOnStage
                 | DebtVerdict::SettledInArchive
                 | DebtVerdict::SettledReclaimed => {}
@@ -6338,7 +6978,7 @@ pub fn import_grok_bot_backups(
             // re-read from the stage here — never swapped for stale memory
             // when nothing was sealed (the `nothing_new` branch above keeps
             // the previous fact instead, like `collect_scan_report`).
-            let shards = stage_shard_fact(stage, machine, &item.session_id)?;
+            let shards = stage_shard_fact(stage, machine, &item.session_id, &mut no_cache)?;
             let entry = DebtEntry {
                 machine: machine.to_string(),
                 session_id: item.session_id.clone(),
