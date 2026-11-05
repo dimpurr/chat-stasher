@@ -1672,11 +1672,7 @@ impl OpenCodeProber {
     /// The cursor of one session in the store at `db`, reusing the
     /// connection when the pass already opened this store.
     pub fn cursor(&mut self, db: &Path, session_id: &str) -> Result<OpenCodeCursor, String> {
-        if !self
-            .conn
-            .as_ref()
-            .is_some_and(|(path, _conn)| path == db)
-        {
+        if !self.conn.as_ref().is_some_and(|(path, _conn)| path == db) {
             let conn =
                 open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
             conn.busy_timeout(Duration::from_secs(2))

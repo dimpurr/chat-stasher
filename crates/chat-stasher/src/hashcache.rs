@@ -107,15 +107,12 @@ struct FileIdentity {
 
 impl FileIdentity {
     fn of(metadata: &fs::Metadata) -> Self {
-        let mtime_ns = metadata
-            .modified()
-            .ok()
-            .and_then(|moment| {
-                moment
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .ok()
-                    .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
-            });
+        let mtime_ns = metadata.modified().ok().and_then(|moment| {
+            moment
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
+        });
         #[cfg(unix)]
         let inode = {
             use std::os::unix::fs::MetadataExt;
@@ -256,7 +253,6 @@ impl HashCache {
             && stored.mtime_ns == current.mtime_ns
             && stored.inode == current.inode
     }
-
 
     /// sha256 of the file's first `offset` bytes — the committed prefix a
     /// stored JSONL cursor re-proves each pass. `stat` is the metadata the
@@ -488,8 +484,8 @@ impl HashCache {
 /// the file actually produced, so callers can tell "the prefix really is
 /// `offset` bytes" from "the file ran out first".
 fn sha256_of_len(path: &Path, wanted: u64) -> anyhow::Result<HashAnswer> {
-    let mut file = fs::File::open(path)
-        .with_context(|| format!("open hashed file {}", path_digest(path)))?;
+    let mut file =
+        fs::File::open(path).with_context(|| format!("open hashed file {}", path_digest(path)))?;
     let mut hasher = Sha256::new();
     let mut chunk = vec![0u8; HASH_CHUNK];
     let mut remaining = wanted;
@@ -657,7 +653,10 @@ mod tests {
 
         let mut second = HashCache::load(dir.path());
         let answer = second.shard_concat_sha256(&shards_dir, &shards, 8).unwrap();
-        assert!(answer.from_cache, "every shard unchanged: the merge is a hit");
+        assert!(
+            answer.from_cache,
+            "every shard unchanged: the merge is a hit"
+        );
         assert_eq!(answer.sha256, sha2_to_hex(b"one\ntwo\n"));
         assert_eq!(second.stage_stats().bytes_read, 0);
 
@@ -670,9 +669,7 @@ mod tests {
             (2u64, second_shard.clone()),
             (3u64, third_shard.clone()),
         ];
-        let answer = second
-            .shard_concat_sha256(&shards_dir, &grown, 14)
-            .unwrap();
+        let answer = second.shard_concat_sha256(&shards_dir, &grown, 14).unwrap();
         assert_eq!(answer.bytes_read, 14);
         assert_eq!(answer.sha256, sha2_to_hex(b"one\ntwo\nthree\n"));
     }
@@ -686,14 +683,21 @@ mod tests {
         fs::write(&shard, b"one\n").unwrap();
         let shards = vec![(1u64, shard.clone())];
         let mut cache = HashCache::load(dir.path());
-        let answer = cache.shard_concat_sha256(&shards_dir, &shards, 100).unwrap();
-        assert_eq!(answer.bytes_read, 4, "the shard holds fewer bytes than asked");
+        let answer = cache
+            .shard_concat_sha256(&shards_dir, &shards, 100)
+            .unwrap();
+        assert_eq!(
+            answer.bytes_read, 4,
+            "the shard holds fewer bytes than asked"
+        );
         assert_ne!(answer.sha256, sha2_to_hex(b"one\n"));
         cache.save().unwrap();
         // Not stored: the next pass re-reads rather than trusting a digest
         // that never covered what a fact claims.
         let mut second = HashCache::load(dir.path());
-        let answer = second.shard_concat_sha256(&shards_dir, &shards, 100).unwrap();
+        let answer = second
+            .shard_concat_sha256(&shards_dir, &shards, 100)
+            .unwrap();
         assert!(!answer.from_cache);
         assert_eq!(answer.bytes_read, 4);
     }

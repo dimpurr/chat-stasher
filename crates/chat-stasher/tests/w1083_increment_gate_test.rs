@@ -199,7 +199,10 @@ impl OpenCodeFixture {
 
     fn scan(&self) -> scanner::ScanReport {
         let mut roots = BTreeMap::new();
-        roots.insert("opencode".to_string(), self.db.to_string_lossy().into_owned());
+        roots.insert(
+            "opencode".to_string(),
+            self.db.to_string_lossy().into_owned(),
+        );
         let config = Config {
             harness_roots: roots,
             ..Config::default()
@@ -476,13 +479,7 @@ fn the_full_sweep_decision_honours_the_window_and_the_catch_up() {
         "already swept this local day: incremental"
     );
     assert!(
-        !due(
-            Some(0),
-            2 * HOUR,
-            12,
-            yesterday,
-            Some(yesterday),
-        ),
+        !due(Some(0), 2 * HOUR, 12, yesterday, Some(yesterday),),
         "a full last night (different day), but midday is outside the window",
     );
 
@@ -586,11 +583,7 @@ fn the_full_sweep_marker_round_trips_and_stays_unknown_when_absent() {
     );
 
     // A corrupt marker is an unknown, never a zero.
-    fs::write(
-        state.join("opencode-full-sweep-v1.json"),
-        b"{not json",
-    )
-    .unwrap();
+    fs::write(state.join("opencode-full-sweep-v1.json"), b"{not json").unwrap();
     assert_eq!(collect::load_opencode_full_sweep_marker(state), None);
 }
 

@@ -1483,13 +1483,9 @@ fn deliver_one(
     .map_err(|error| format!("the shard could not be sealed: {error:#}"))?;
     collector::write_grok_bot_union(&union_path, union.clone())
         .map_err(|error| format!("the union state could not be written: {error:#}"))?;
-    let shards = collector::stage_shard_fact(
-        req.stage,
-        req.machine,
-        session_id,
-        &mut ctx.hash_cache,
-    )
-    .map_err(|error| format!("the sealed shard could not be re-read: {error:#}"))?;
+    let shards =
+        collector::stage_shard_fact(req.stage, req.machine, session_id, &mut ctx.hash_cache)
+            .map_err(|error| format!("the sealed shard could not be re-read: {error:#}"))?;
     let cursor = collector::grok_bot_delivery_cursor(source_bytes, &union, delivered_now)
         .map_err(|error| format!("the delivery cursor could not be built: {error:#}"))?;
     let entry = collector::DebtEntry {

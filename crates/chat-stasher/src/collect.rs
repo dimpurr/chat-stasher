@@ -80,10 +80,10 @@ use crate::hashcache::{self, HashCache};
 use crate::models::{SessionRecord, SqliteSessionLayout};
 use crate::scanner;
 use crate::sqlite_probe::{
-    cursor_global_schema, grok_schema, read_cursor_legacy_session,
-    read_github_copilot_session, read_hermes_session, read_openclaw_session, read_sqlite_session,
-    read_workbuddy_session, read_zed_session, sqlite_session_cursor, sqlite_store_fingerprint,
-    zed_schema, OpenCodeCursor, OpenCodeProber,
+    cursor_global_schema, grok_schema, read_cursor_legacy_session, read_github_copilot_session,
+    read_hermes_session, read_openclaw_session, read_sqlite_session, read_workbuddy_session,
+    read_zed_session, sqlite_session_cursor, sqlite_store_fingerprint, zed_schema, OpenCodeCursor,
+    OpenCodeProber,
 };
 use crate::store;
 use anyhow::{anyhow, bail, Context};
@@ -226,7 +226,6 @@ pub fn opencode_full_sweep_due(
     };
     in_window && last_full_local_day != Some(now_local_day)
 }
-
 
 /// Durable cursor for one source file. `prefix_len` is intentionally repeated
 /// alongside `offset`: the state is self-describing and a partially written
@@ -925,11 +924,8 @@ fn stage_prefix_entry(
                     // hash cache already remembers, so a reclaimed body
                     // whose source is quiet is proved without re-reading
                     // it.
-                    let prefix = hash_cache.prefix_sha256(
-                        &record.absolute_path,
-                        fact.concat_bytes,
-                        None,
-                    )?;
+                    let prefix =
+                        hash_cache.prefix_sha256(&record.absolute_path, fact.concat_bytes, None)?;
                     if prefix.sha256 == fact.concat_sha256 {
                         let offset = fact.concat_bytes;
                         return Ok(Some(OffsetEntry {
@@ -1146,16 +1142,14 @@ fn cursor_or_stage_covered_position(
     if stage_len <= entry.cursor.offset {
         if let Some(fact) = manifest_facts.and_then(|m| m.get(&record.id)) {
             if fact.concat_bytes > entry.cursor.offset {
-                if let Some(covered) =
-                    stage_prefix_entry(
-                        record,
-                        stage,
-                        machine,
-                        counters,
-                        manifest_facts,
-                        hash_cache,
-                    )?
-                {
+                if let Some(covered) = stage_prefix_entry(
+                    record,
+                    stage,
+                    machine,
+                    counters,
+                    manifest_facts,
+                    hash_cache,
+                )? {
                     if covered.offset > entry.cursor.offset {
                         return Ok(covered);
                     }
@@ -1165,14 +1159,7 @@ fn cursor_or_stage_covered_position(
         return Ok(entry.cursor.clone());
     }
     Ok(
-        match stage_prefix_entry(
-            record,
-            stage,
-            machine,
-            counters,
-            manifest_facts,
-            hash_cache,
-        )? {
+        match stage_prefix_entry(record, stage, machine, counters, manifest_facts, hash_cache)? {
             Some(covered) if covered.offset > entry.cursor.offset => covered,
             _ => entry.cursor.clone(),
         },
@@ -1400,13 +1387,7 @@ pub(crate) fn debt_settled_locally(
             "cursor was written for a different machine partition",
         )));
     }
-    if stage_covers(
-        stage,
-        machine,
-        &entry.session_id,
-        &entry.shards,
-        hash_cache,
-    )? {
+    if stage_covers(stage, machine, &entry.session_id, &entry.shards, hash_cache)? {
         return Ok(Some(DebtVerdict::OwedOnStage));
     }
     let dir = store::session_shard_dir(stage, machine, &entry.session_id);
@@ -1454,7 +1435,8 @@ pub(crate) fn verify_debt(
     manifest_facts: Option<&BTreeMap<String, ShardFact>>,
     hash_cache: &mut HashCache,
 ) -> anyhow::Result<DebtVerdict> {
-    if let Some(verdict) = debt_settled_locally(entry, machine, stage, manifest_facts, hash_cache)? {
+    if let Some(verdict) = debt_settled_locally(entry, machine, stage, manifest_facts, hash_cache)?
+    {
         return Ok(verdict);
     }
     let Some(facts) = remote_facts else {
@@ -2729,12 +2711,11 @@ impl<'a> PassCollector<'a> {
         let saved = cache.save();
         self.hash_cache = cache;
         if let Err(error) = saved {
-            self.report.hash_cache_save_error = Some(
-                match error.downcast_ref::<std::io::Error>() {
+            self.report.hash_cache_save_error =
+                Some(match error.downcast_ref::<std::io::Error>() {
                     Some(io) => format!("{:?}", io.kind()),
                     None => "other".to_string(),
-                },
-            );
+                });
         }
         Ok(())
     }
@@ -3042,8 +3023,7 @@ impl<'a> PassCollector<'a> {
                     crate::provenance::merge(&mut record.provenance, &processed.dimensions);
                 }
                 if !record.provenance.is_empty() {
-                    let body =
-                        stage_shard_fact(stage, machine, &record.id, &mut self.hash_cache)?;
+                    let body = stage_shard_fact(stage, machine, &record.id, &mut self.hash_cache)?;
                     crate::provenance::append_scan_observation(
                         stage,
                         machine,
@@ -4196,9 +4176,12 @@ fn unchanged_sqlite(
 /// being written, so nothing is in flight and the window does not hold it.
 fn opencode_gate_in_grace_window(cursor: &OpenCodeCursor, pass_ts_unix: i64) -> bool {
     let mut newest: Option<i64> = cursor.session_time_updated;
-    for high_water in [cursor.message_high_water.as_ref(), cursor.part_high_water.as_ref()]
-        .into_iter()
-        .flatten()
+    for high_water in [
+        cursor.message_high_water.as_ref(),
+        cursor.part_high_water.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
     {
         newest = Some(match newest {
             Some(current) if current >= high_water.time_updated => current,
@@ -4634,7 +4617,11 @@ fn process_machine_log(
         // shared cache ends before this step, so this keeps today's
         // read-everything behaviour rather than holding a second cache
         // open for a dir listing's worth of bytes.
-        plain_state(&record.absolute_path, new_offset, &mut HashCache::disabled())?
+        plain_state(
+            &record.absolute_path,
+            new_offset,
+            &mut HashCache::disabled(),
+        )?
     };
     let shard = if lines.is_empty() {
         None
