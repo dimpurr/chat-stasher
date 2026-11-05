@@ -690,7 +690,10 @@ mod tests {
             answer.bytes_read, 4,
             "the shard holds fewer bytes than asked"
         );
-        assert_ne!(answer.sha256, sha2_to_hex(b"one\n"));
+        // The digest names the bytes the files really produced — streaming
+        // past EOF adds nothing — and it must not be stored under a "covered
+        // 100" key it never honestly computed.
+        assert_eq!(answer.sha256, sha2_to_hex(b"one\n"));
         cache.save().unwrap();
         // Not stored: the next pass re-reads rather than trusting a digest
         // that never covered what a fact claims.
