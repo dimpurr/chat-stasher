@@ -190,6 +190,22 @@ fn tree_fingerprint(root: &Path) -> String {
             if path.is_dir() {
                 walk(&path, out);
             } else {
+                // W1083 (ISSUE-008 C): the state directory's hash cache is a
+                // re-derivable optimization, not part of the delivered set's
+                // memory. Its bytes deliberately record the stat identities
+                // of the files it hashed — an mtime a later pass sealed — so
+                // a fingerprint that included it would pin "nothing ever
+                // re-read differently" instead of "nothing durable
+                // changed". The durable files (the debt ledger, the unions)
+                // stay pinned; the cache's own correctness contract (a cache
+                // that cannot vouch re-reads the bytes) is covered by its
+                // own tests and asserted positively below.
+                if path
+                    .file_name()
+                    .is_some_and(|name| name == "hash-cache-v1.json")
+                {
+                    continue;
+                }
                 let bytes = std::fs::read(&path).unwrap();
                 out.push((path.to_string_lossy().into_owned(), {
                     let digest = sha2::Sha256::digest(&bytes);
@@ -665,12 +681,20 @@ fn the_delivered_set_survives_re_runs_and_a_later_live_collect() {
     assert_eq!(tree_fingerprint(&harness.stage), before_stage);
 
     // The ordinary collect afterwards: 0 already-backfilled rows, cursor
-    // and debt untouched by the backfill's bookkeeping.
+    // and debt untouched by the backfill's bookkeeping — and the shard
+    // digests the first collect hashed still answer, so the pass re-read
+    // no shard body it had already read.
     let later = collect_live(&harness.stage, &harness.state_dir, &blob);
     assert_eq!(later.shards_written, 0);
     assert_eq!(later.changed_records, 0);
     assert_eq!(later.lines_written, 0);
     assert_eq!(tree_fingerprint(&harness.state_dir), before_state);
+    assert!(
+        later.hash_cache_hits + later.hash_cache_misses > 0,
+        "the ordinary consults the pass cache for its coverage proofs (hits={}, misses={})",
+        later.hash_cache_hits,
+        later.hash_cache_misses
+    );
 }
 
 /// Spec §Tests 3 — a dry run drives the app exactly like a real one and
