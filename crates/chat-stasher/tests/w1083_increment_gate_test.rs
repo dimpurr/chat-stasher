@@ -512,17 +512,9 @@ fn the_full_sweep_decision_honours_the_window_and_the_catch_up() {
     // An empty window turns the nightly off, but never the catch-up: a
     // marker ~28 h old full-sweeps immediately, whatever the hour, so the
     // residue bound holds on a machine that sleeps through its window;
-    // 27 h old does not.
+    // 27 h old does not. The catch-up fires regardless of the day fields
+    // the caller passes.
     let empty = window(3, 3);
-    assert!(!collect::opencode_full_sweep_due(
-        Some(0),
-        28 * HOUR + 60,
-        12,
-        today,
-        None,
-        empty,
-    ));
-    // The catch-up fires regardless of the day fields the caller passes.
     assert!(collect::opencode_full_sweep_due(
         Some(0),
         28 * HOUR + 60,
