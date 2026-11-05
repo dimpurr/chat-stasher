@@ -2183,7 +2183,7 @@ pub fn collect(
 /// through [`opencode_full_sweep_due`]. Never fails: a marker that cannot be
 /// read is one that never was.
 pub fn opencode_full_sweep_now(config: &Config, state_dir: &Path) -> bool {
-    use chrono::{Datelike, Timelike};
+    use chrono::Timelike;
     let now = chrono::Local::now();
     let now_unix = now.timestamp();
     let last_full = load_opencode_full_sweep_marker(state_dir);
@@ -3702,6 +3702,7 @@ fn process_sqlite(
             bucket_cap,
             &store_fingerprint,
             manifest_facts,
+            counters,
         ),
         SqliteSessionLayout::HermesAgent => {
             let session_id = native_session_id(record, "Hermes Agent")?;
@@ -3719,6 +3720,7 @@ fn process_sqlite(
                 &store_fingerprint,
                 Default::default(),
                 manifest_facts,
+                counters,
             )
         }
         SqliteSessionLayout::WorkBuddy => {
@@ -3741,6 +3743,7 @@ fn process_sqlite(
                 &store_fingerprint,
                 Default::default(),
                 manifest_facts,
+                counters,
             )
         }
         SqliteSessionLayout::CursorLegacy => {
@@ -3760,6 +3763,7 @@ fn process_sqlite(
                 &store_fingerprint,
                 Default::default(),
                 manifest_facts,
+                counters,
             )
         }
         SqliteSessionLayout::CursorGlobal => {
@@ -3790,6 +3794,7 @@ fn process_sqlite(
                 &store_fingerprint,
                 Default::default(),
                 manifest_facts,
+                counters,
             )
         }
         SqliteSessionLayout::Grok => {
@@ -3820,6 +3825,7 @@ fn process_sqlite(
                 &store_fingerprint,
                 Default::default(),
                 manifest_facts,
+                counters,
             )
         }
         SqliteSessionLayout::Zed => {
@@ -3850,6 +3856,7 @@ fn process_sqlite(
                 &store_fingerprint,
                 Default::default(),
                 manifest_facts,
+                counters,
             )
         }
         SqliteSessionLayout::GitHubCopilotCli => {
@@ -3868,6 +3875,7 @@ fn process_sqlite(
                 &store_fingerprint,
                 snapshot.dimensions,
                 manifest_facts,
+                counters,
             )
         }
         SqliteSessionLayout::GrokBot => {
@@ -3885,6 +3893,7 @@ fn process_openclaw(
     bucket_cap: usize,
     store_fingerprint: &str,
     manifest_facts: Option<&BTreeMap<String, ShardFact>>,
+    counters: &mut CollectCounters,
 ) -> anyhow::Result<Processed> {
     let native = record
         .id
@@ -3931,6 +3940,7 @@ fn process_openclaw(
         store_fingerprint,
         snapshot.dimensions,
         manifest_facts,
+        counters,
     )
 }
 
@@ -3961,6 +3971,7 @@ fn process_sqlite_snapshot(
     store_fingerprint: &str,
     dimensions: crate::provenance::SessionProvenance,
     manifest_facts: Option<&BTreeMap<String, ShardFact>>,
+    counters: &mut CollectCounters,
 ) -> anyhow::Result<Processed> {
     // This session's own fields, and nothing else. The whole-store fingerprint
     // was removed from `OpenCodeCursor` precisely so that this comparison
@@ -3971,6 +3982,7 @@ fn process_sqlite_snapshot(
             old.expect("checked above"),
             store_fingerprint,
             dimensions,
+            counters,
         ));
     }
     let source_bytes = json_line.len() as u64;

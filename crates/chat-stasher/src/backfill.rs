@@ -609,7 +609,7 @@ struct RunContext {
     /// W1083: the backfill leg has one cache instance for its whole run so
     /// per-conversation proofs share stage-shard digests; disabled, never
     /// persisted — see the `wanted` loop above.
-    hash_cache: collector::HashCache,
+    hash_cache: crate::hashcache::HashCache,
 }
 
 struct DeliveryOutcome {
@@ -1078,7 +1078,7 @@ fn prepare_traversal(
     };
     // W1083: the backfill leg has no pass-wide hash cache; its proofs keep
     // today's read-everything behaviour.
-    let mut no_hash_cache = collector::HashCache::disabled();
+    let mut no_hash_cache = crate::hashcache::HashCache::disabled();
     let mut wanted: BTreeSet<(String, String)> = BTreeSet::new();
     for agent in &selected {
         let session_id = session_id_for(req.machine, agent);
@@ -1120,8 +1120,8 @@ fn prepare_traversal(
 
 /// W1083: the disabled cache instance a `RunContext` carries; one helper so
 /// the both constructions of the context say the same thing.
-fn no_hash_cache_for_ctx() -> collector::HashCache {
-    collector::HashCache::disabled()
+fn no_hash_cache_for_ctx() -> crate::hashcache::HashCache {
+    crate::hashcache::HashCache::disabled()
 }
 
 fn session_id_for(machine: &str, agent: &str) -> String {
@@ -1355,7 +1355,7 @@ fn deliver_one(
             req.stage,
             ctx.remote_facts.as_ref(),
             ctx.manifest_facts.as_ref(),
-            ctx.hash_cache.as_mut(),
+            &mut ctx.hash_cache,
         ) {
             Ok(collector::DebtVerdict::OwedOnStage)
             | Ok(collector::DebtVerdict::SettledInArchive)
@@ -1487,7 +1487,7 @@ fn deliver_one(
         req.stage,
         req.machine,
         session_id,
-        ctx.hash_cache.as_mut(),
+        &mut ctx.hash_cache,
     )
     .map_err(|error| format!("the sealed shard could not be re-read: {error:#}"))?;
     let cursor = collector::grok_bot_delivery_cursor(source_bytes, &union, delivered_now)
