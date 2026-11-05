@@ -1311,7 +1311,7 @@ fn dir_covers_with_cache(
     // concat digest is a constant, and a `covered: 0` entry would churn the
     // dir's real entry on every empty pass (the reclaimed-directory case).
     if fact.concat_bytes == 0 {
-        return Ok(sha256_hex(&[]) == fact.concat_sha256 || fact.concat_sha256.is_empty());
+        return Ok(sha256_hex(&[]) == fact.concat_sha256);
     }
     entries.sort_by_key(|(sequence, _)| *sequence);
     // The per-shard facts compose into the same prefix conclusion without
