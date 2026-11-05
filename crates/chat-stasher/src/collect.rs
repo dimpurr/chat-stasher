@@ -1194,6 +1194,18 @@ pub(crate) fn stage_shard_fact(
 fn shard_fact_in_dir(dir: &Path, hash_cache: &mut HashCache) -> anyhow::Result<ShardFact> {
     let mut entries = store::sealed_shard_entries(dir)?;
     entries.sort_by_key(|(sequence, _)| *sequence);
+    // An empty directory's fact is constants all the way down; answering it
+    // through the cache would both store and then evict a `covered: 0`
+    // entry over whatever real entry the directory used to have — the
+    // reclaimed-body shape this collector walks every pass (W1083).
+    if entries.is_empty() {
+        return Ok(ShardFact {
+            shard_count: 0,
+            concat_bytes: 0,
+            concat_sha256: sha256_hex(&[]),
+            shard_identities: Vec::new(),
+        });
+    }
     let shard_count = entries.len();
     let mut shard_identities = Vec::with_capacity(entries.len());
     let mut concat_bytes = 0u64;
@@ -1294,6 +1306,12 @@ fn dir_covers_with_cache(
     let mut entries = store::sealed_shard_entries(dir)?;
     if entries.len() < fact.shard_count {
         return Ok(false);
+    }
+    // A fact that covers no bytes is answered without the cache: an empty
+    // concat digest is a constant, and a `covered: 0` entry would churn the
+    // dir's real entry on every empty pass (the reclaimed-directory case).
+    if fact.concat_bytes == 0 {
+        return Ok(sha256_hex(&[]) == fact.concat_sha256 || fact.concat_sha256.is_empty());
     }
     entries.sort_by_key(|(sequence, _)| *sequence);
     // The per-shard facts compose into the same prefix conclusion without
