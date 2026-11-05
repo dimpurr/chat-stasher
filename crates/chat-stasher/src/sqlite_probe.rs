@@ -1694,10 +1694,12 @@ impl OpenCodeProber {
                 Ok(cursor)
             }
             Err(error) => {
-                // reason: a read-only transaction holds no changes; rollback
-                // failure leaves the transaction open, and the next BEGIN on
-                // this connection reports that failure as its own error
-                let _ = conn.execute_batch("ROLLBACK");
+                // reason: a read-only transaction holds no changes, so the
+                // rollback's own outcome is not the failure that matters —
+                // a rollback that fails leaves the transaction open, and
+                // the next BEGIN on this connection reports that failure
+                // as its own error
+                conn.execute_batch("ROLLBACK").ok();
                 Err(error)
             }
         }
