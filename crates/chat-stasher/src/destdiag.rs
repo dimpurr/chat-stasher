@@ -1427,7 +1427,7 @@ fn missing_before(variables: &[String]) -> String {
         .join(" and ")
 }
 
-/// The "改用 {other}" half: naming every other available destination, with
+/// The "use another destination instead" half: naming every other available destination, with
 /// the same command the user can copy — or the honest sentence that there
 /// is none, which is itself the answer to "what do I do next".
 fn alternatives(others: &[String]) -> String {
