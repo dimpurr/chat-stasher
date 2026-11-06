@@ -1,8 +1,3 @@
 {
-  "holds": {
-    "web:deepseek": {
-      "reason": "its only recorded run (2026-09-24, extension 0.1.0.18) verified the broad route the row had then; the row was narrowed on 2026-10-06 (git ca220d8c, authored 2026-10-05, landed 2026-10-06; refined by 16abacd8) and the narrowed route has not been live-verified",
-      "status": "verified end-to-end on the earlier broad route (2026-09-24); the narrowed route of 2026-10-06 is not live-verified"
-    }
-  }
+  "holds": {}
 }
