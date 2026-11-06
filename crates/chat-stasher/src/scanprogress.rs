@@ -40,8 +40,11 @@ pub struct ScanHeartbeat {
     interval: Duration,
     /// When the scan started (for the elapsed figure).
     start: Instant,
-    /// When the last line was printed, or `None` before the first falls due.
-    last_emitted: Option<Instant>,
+    /// When the last line was printed, or the scan's start — so a scan that
+    /// finishes inside one interval prints **nothing**: ISSUE-007 S3 asks
+    /// for a line only from a run that outlives the interval, and a warm
+    /// cache answering in milliseconds must not grow extra output.
+    last_emitted: Instant,
     /// The `[export]` / `[search]` prefix family the lines join.
     prefix: String,
     now: Box<dyn Fn() -> Instant + Send + Sync>,
@@ -86,7 +89,7 @@ impl ScanHeartbeat {
         ScanHeartbeat {
             interval,
             start,
-            last_emitted: None,
+            last_emitted: start,
             prefix: format!("[{prefix}]"),
             now: Box::new(now),
             sink: Box::new(sink),
@@ -94,8 +97,10 @@ impl ScanHeartbeat {
     }
 
     /// One snapshot finished. Prints when the interval since the last line
-    /// has elapsed (or immediately when this heartbeat was built with a
-    /// zero interval — the fixture shape, one line per event).
+    /// has elapsed — never for the first event at the scan's own start, so
+    /// a warm run that answers inside one interval prints no heartbeat at
+    /// all (and a `Duration::ZERO` interval, the fixture shape, prints
+    /// every event — zero never gates a zero).
     ///
     /// The counters are the walk's own, passed by the caller rather than
     /// accumulated here, so the line can never disagree with the report the
@@ -105,14 +110,10 @@ impl ScanHeartbeat {
     /// machine's.
     pub fn beat(&mut self, scanned: usize, from_cache: usize, in_repo: usize) {
         let now = (self.now)();
-        let due = match self.last_emitted {
-            None => true,
-            Some(last) => now.duration_since(last) >= self.interval,
-        };
-        if !due {
+        if now.duration_since(self.last_emitted) < self.interval {
             return;
         }
-        self.last_emitted = Some(now);
+        self.last_emitted = now;
         let elapsed = now.duration_since(self.start).as_secs();
         (self.sink)(&format!(
             "{} scan         : scanned {} of {} snapshots ({} from cache), {elapsed}s",
@@ -185,8 +186,10 @@ mod tests {
     }
 
     /// S3's own sentence: a long scan prints at least one line per interval,
-    /// and not one per event. With a 5 s interval, events at 1 s spacing
-    /// line out at 0 s and every 5 s after.
+    /// and not one per event. With a 5 s interval, events at 1 s spacing first
+    /// print when the interval has elapsed (no line at the scan's own
+    /// start), then every 5 s after — and a scan that ends inside the first
+    /// interval prints nothing at all.
     #[test]
     fn a_long_scan_lines_out_once_per_interval_not_per_event() {
         let harness = Harness::new();
@@ -198,8 +201,8 @@ mod tests {
         let lines = harness.lines();
         assert_eq!(
             lines.len(),
-            3,
-            "12 one-second events under a five-second interval print at 0s, 5s, 10s: {lines:?}"
+            2,
+            "12 one-second events under a five-second interval print at ~5s and ~10s: {lines:?}"
         );
         assert!(
             lines[0].starts_with("[export] scan         : scanned "),
@@ -212,6 +215,19 @@ mod tests {
             lines[0]
         );
         assert!(lines[1].contains("(0 from cache)"), "{}", lines[1]);
+        // And nothing in the first five seconds: the pre-interval events
+        // printed no line at all, which is what the next test pins on its own.
+        let harness = Harness::new();
+        let mut beat = harness.heartbeat(5);
+        for _ in 0..4 {
+            beat.beat(0, 0, 3);
+            harness.advance(1);
+        }
+        assert!(
+            harness.lines().is_empty(),
+            "four seconds of walking under a five-second interval stays quiet: {:?}",
+            harness.lines()
+        );
     }
 
     /// The zero interval is the fixture shape (a line per event), and the
