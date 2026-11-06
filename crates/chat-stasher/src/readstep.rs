@@ -170,6 +170,26 @@ where
     run_deadline_body(step, default_budget_secs, f)
 }
 
+/// The deadline with **no trace at all** — the spelling for a read whose
+/// observability lives elsewhere than the local channel: ISSUE-007 P0's
+/// `--help` epilogue and the availability preflight read the config file,
+/// and help text and a one-line refusal must not grow a step-trace of
+/// their own. The bound is the part that matters there: a wedged or
+/// slow-mount config file must not hang `--help` or any command's refusal
+/// (W1043's finding — the one unbounded read nobody watched), and the
+/// answer on timeout is whichever side the caller words, never silence.
+pub fn run_behind_deadline_silent<T, F>(
+    step: &str,
+    default_budget_secs: u64,
+    f: F,
+) -> Result<T, StepTimedOut>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    run_deadline_body(step, default_budget_secs, f)
+}
+
 /// The deadline body the two public spellings share: everything after the
 /// trace line, split out so the trace channel is the only difference
 /// between them and neither can drift from the other's mechanics.

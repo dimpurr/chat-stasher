@@ -1114,18 +1114,49 @@ pub enum AvailabilityUnavailable {
     Unparsed { why: String },
 }
 
+/// The budget the availability read runs behind — deliberately smaller than
+/// [`crate::readstep::CONFIG_FILE_BUDGET_SECS`]: this listing is computed at
+/// argument-parse time (`--help` renders it; every destination preflight
+/// reads it), so its bound is the time "print help / print one refusal
+/// line" may take, not the time a command may tolerate its whole config.
+pub const AVAILABILITY_READ_BUDGET_SECS: u64 = 5;
+
 /// Every declared destination's availability, read out of the config file's
 /// own text — the live config's reference values are gone by the time this
 /// runs, so the re-read is where the machine's *configured* credential
 /// shapes are still visible (the same reason [`raw_env_option_refs`]
 /// re-reads). Parameterised by the config path so a test points the whole
 /// computation at a throwaway file.
+///
+/// The file read runs behind [`AVAILABILITY_READ_BUDGET_SECS`]: a wedged or
+/// slow-mount config file must not hang `--help`, `status` or any command's
+/// refusal — the W1043 lesson, applied to the one read this module adds —
+/// and a read that outlives the budget is worded as an unknown, never as an
+/// empty list.
 pub fn availability_from_config(
     path: &Path,
 ) -> Result<Vec<AvailabilityRow>, AvailabilityUnavailable> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(_) => return Err(AvailabilityUnavailable::NoConfig),
+    let read_path = path.to_path_buf();
+    let read = crate::readstep::run_behind_deadline_silent(
+        "reading the configuration for the destination availability listing",
+        AVAILABILITY_READ_BUDGET_SECS,
+        move || std::fs::read_to_string(read_path),
+    );
+    let text = match read {
+        Ok(Ok(text)) => text,
+        // reason: the file is not there at all — the new-first-run normal
+        // state, the same answer the plain read used to give, never a claim
+        // that no destination is declared.
+        Ok(Err(_)) => return Err(AvailabilityUnavailable::NoConfig),
+        Err(timed_out) => {
+            return Err(AvailabilityUnavailable::Unparsed {
+                why: format!(
+                    "the configuration file did not answer within {} when read for this \
+                     listing, so which destinations are declared is unknown — never none",
+                    timed_out.budget_word(),
+                ),
+            })
+        }
     };
     let rows = availability_from_text(&text)?;
     if rows.is_empty() {
