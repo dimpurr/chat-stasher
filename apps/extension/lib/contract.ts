@@ -448,19 +448,24 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
     // the default, so that "did anyone turn this on?" is one grep away.
     webSocketCapture: false,
     devPriority: 'normal',
-    // Live acceptance of the 2026-09-24 build (main e71eb33, extension
-    // 0.1.0.18): real conversations were archived end to end on a real
-    // machine on all five stable-channel platforms. Perplexity and kimi were
-    // inert in that stable build, so they carry no lastVerified record.
-    // That record verified the row as it stood then — the BROAD row
-    // ('/api/v0/chat' + '/chat/session', GET or POST, requiredAnyPaths) —
-    // so it is true as a dated fact about build 0.1.0.18 and NOT a
-    // verification of the narrowed route above, which postdates it and has
-    // never been live-verified.
+    // Two dated runs, one record. The first (2026-09-24, extension 0.1.0.18,
+    // main e71eb33) archived real conversations end to end on all five
+    // stable-channel platforms, but against the BROAD row this row was then
+    // ('/api/v0/chat' + '/chat/session', GET or POST, requiredAnyPaths); it
+    // remains true as a fact about that build and said nothing about the
+    // narrowed route above, which postdates it. The record below is the second
+    // run (2026-11-06, extension 0.2.0, main 757a4764), and it ran against this
+    // narrowed row: the live leg fired on the narrowed GET
+    // '/api/v0/chat/history_messages' for a conversation opened in the logged-in
+    // tab and that conversation reached the archive, and the conversations the
+    // backfill leg staged without anyone opening them read back from the archive
+    // byte-identical to their staged source. Counts, digests and session ids were
+    // the whole comparison — no message text, title or account identity was read
+    // on the way to writing this record.
     lastVerified: {
-      date: '2026-09-24',
-      version: 'extension 0.1.0.18',
-      scope: 'live acceptance: real conversations archived end to end on a real machine (main e71eb33)',
+      date: '2026-11-06',
+      version: 'extension 0.2.0',
+      scope: 'live acceptance on the narrowed route: a synthetic probe conversation captured live in a logged-in tab was archived end to end, and real sessions the backfill leg staged read back byte-identical (main 757a4764)',
     },
     knownIssue: 'an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4)',
   },

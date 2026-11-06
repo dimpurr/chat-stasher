@@ -197,7 +197,7 @@ stays in the count. See [Codex](sources/codex.md).
 | Local | Codebuff / Freebuff | - | normal | attachment bytes are not archived and per-message times stay unknown; sessions render through the reader, attachments stay in the raw transcript only |
 | Agent platform | WorkBuddy | - | normal | no official transcript schema exists, only third-party reverse-engineering; every read censuses the top-level event types and a new or vanished type is named as drift, never silently folded away |
 | Agent platform | CodeBuddy | - | normal | the transcript event core is shared with the WorkBuddy desktop app and read by that same reader, so the no-official-schema caveat is shared too: every read censuses the top-level event types, and version drift between the two surfaces' builds is named as census drift, never silently folded away |
-| Web | DeepSeek | 2026-09-24 | normal | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
+| Web | DeepSeek | 2026-11-06 | normal | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | Perplexity | - | low | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | ChatGPT | 2026-09-24 | high | a workspace switch is not yet pinned to the run scope: the new workspace list ids can land in the old scope (see issue #4) |
 | Web | Gemini | 2026-09-24 | normal | a conversation needing more than 20 detail pages is refused and not archived in part (see docs-dev/privacy.md); an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |

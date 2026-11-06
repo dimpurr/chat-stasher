@@ -9,7 +9,7 @@
 | Channel | stable |
 | Capture credibility | from-source |
 | Status | verified end-to-end on the earlier broad route (2026-09-24); the narrowed route of 2026-10-06 is not live-verified |
-| Last verified end to end | 2026-09-24 (extension 0.1.0.18): live acceptance: real conversations archived end to end on a real machine (main e71eb33) |
+| Last verified end to end | 2026-11-06 (extension 0.2.0): live acceptance on the narrowed route: a synthetic probe conversation captured live in a logged-in tab was archived end to end, and real sessions the backfill leg staged read back byte-identical (main 757a4764) |
 
 OS availability comes from the browser registration table, not from this row: see the browser grid in [the support tables](../support.md).
 <!-- END GENERATED -->
