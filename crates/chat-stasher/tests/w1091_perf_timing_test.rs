@@ -242,7 +242,7 @@ fn the_view_reports_its_own_probe_timings() {
         .machine_log_facts()
         .expect("the machine-log probe answered");
     assert!(logs.is_empty(), "the fixture archive holds no log facts");
-    assert!(*logs_seen.get(), "the machine-log probe ran");
+    assert!(logs_seen.get(), "the machine-log probe ran");
     // A run probe's wall time may honestly be zero on a fast fixture, so
     // the extractor contract checked here is "the run asked implies the
     // timing is readable" — both extractors return after the runs above
