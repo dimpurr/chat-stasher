@@ -1198,14 +1198,32 @@ fn availability_from_text(text: &str) -> Result<Vec<AvailabilityRow>, Availabili
         }
     };
     let mut rows = Vec::new();
-    for (name, dest) in file.destinations.unwrap_or_default() {
+    for (name, dest) in file
+        .destinations
+        // reason: an absent `[destinations]` table is the configuration
+        // fact "nothing is declared", which `availability_from_config`
+        // already reports as `NoConfig` — the empty iteration here only
+        // covers the parse succeeding, so it enumerates a real table, and
+        // turning absence into an unknown would restate the answer one
+        // level up.
+        .unwrap_or_default()
+    {
         // The names, verbatim, not the values: a reference's *name* is what
         // the user has to set or rewrite, and a mistyped one is itself the
         // finding (`Option<String>` because a non-string option is a shape
         // this scan cannot see, not a credential that is absent).
         let mut missing = Vec::new();
         let mut shapes_unreadable = false;
-        for value in dest.options.unwrap_or_default().values().flatten() {
+        for value in dest
+            .options
+            // reason: a destination section without an `[destinations.<name>.options]`
+            // table carries no `env:` references at all — "no option names a
+            // credential" is a real zero (the credential-bearing shapes are
+            // opt-in), not an unknown, which is exactly the `Ok` state.
+            .unwrap_or_default()
+            .values()
+            .flatten()
+        {
             let Some(name) = value.strip_prefix("env:") else {
                 continue;
             };
@@ -1241,7 +1259,14 @@ fn availability_from_text(text: &str) -> Result<Vec<AvailabilityRow>, Availabili
 /// The destination availability rows for the real config file. Empty when
 /// there is nothing to list (no config, or no declared destination).
 pub fn availability_rows() -> Vec<AvailabilityRow> {
-    availability_from_config(&crate::config::config_path()).unwrap_or_default()
+    availability_from_config(&crate::config::config_path())
+        // reason: `NoConfig` is the nothing-to-list state the doc above names,
+        // and `Unparsed` cannot reach a caller that already loaded the
+        // config (the product's own loader is the stricter of the two
+        // parses, and `status`'s line of sight starts behind it) — so both
+        // empty-tail onto the documented "prints nothing" behaviour rather
+        // than inventing a third refusal the listing has no words for.
+        .unwrap_or_default()
 }
 
 /// One status line per declared destination, the wording every prose
