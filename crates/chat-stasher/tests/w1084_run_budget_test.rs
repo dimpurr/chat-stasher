@@ -64,13 +64,18 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
 }
 
 /// Write a `config.toml` with the budget keys under test. `extra` carries
-/// the budget lines themselves so each test states its own semantics.
+/// the budget lines themselves so each test states its own semantics; the
+/// top-level keys come **before** `[sources]`, because a key written
+/// inside a `[section]` belongs to that table (`sources.backup_interval_secs`
+/// is not a cadence — the TOML the fixture wrote had to state its numbers
+/// before the first section opens, or the loader reads them as source
+/// entries and refuses).
 fn write_config(sandbox: &Path, budget_lines: &str) {
     let config_dir = sandbox.join("config").join("chat-stasher");
     fs::create_dir_all(&config_dir).unwrap();
     fs::write(
         config_dir.join("config.toml"),
-        format!("push_only_if_changed = false\n\n[sources]\n{budget_lines}"),
+        format!("push_only_if_changed = false\n{budget_lines}\n[sources]\n"),
     )
     .unwrap();
 }
