@@ -875,9 +875,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:11684-11689`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:11723-11728`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:11533-11549`).
+  (`crates/chat-stasher/src/main.rs:11572-11588`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -939,7 +939,7 @@ a real limitation of the current code.
    back into a harness's own directories does not exist**. `read` reports
    **one session at a time** with its length and SHA-256, without printing
    conversation content
-   (`crates/chat-stasher/src/main.rs:596-599,12696-12728`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:596-599,12735-12767`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:906-1010`) — see exposure 5

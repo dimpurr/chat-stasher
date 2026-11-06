@@ -816,6 +816,22 @@ impl BackupStore {
         shard_policy: DuplicateShardPolicy,
         apply_control_policy: bool,
     ) -> anyhow::Result<ReadAllReport> {
+        // W1091 (PERF-NEXT ①): one stderr line per cumulative read, saying
+        // how many sessions this read was asked to resolve. The walk itself
+        // lists every snapshot of every host whatever the set is — only the
+        // data-blob downloads below are filtered — so a collect pass that
+        // needs one session and a `read --all-machines` that needs them all
+        // cost a comparable amount of tree walking, and this line is what
+        // makes that visible per round in the scheduled logs (stdout is not
+        // used: `--json` consumers own stdout; stderr is the log channel
+        // `docs/cli.md`'s "Where output goes" gives diagnostics).
+        eprintln!(
+            "[readback] cumulative read: wanted={}",
+            match wanted {
+                Some(wanted) => wanted.len().to_string(),
+                None => "all".to_string(),
+            }
+        );
         reread_once_on_index_race(move || {
             self.read_cumulative_sessions_attempt(mk, wanted, shard_policy, apply_control_policy)
         })

@@ -9266,6 +9266,33 @@ fn print_collect_report(
         "[collect] read bytes      : delta_or_full={} prefix_validated={}",
         report.delta_bytes_read, report.prefix_bytes_validated
     );
+    // W1091 / PERF-NEXT ①: the prefix-validation ledger, one line per pass —
+    // how many committed-prefix validations ran, how many the hash cache
+    // answered without reading, and the bytes the rest physically read
+    // (including the post-delta re-check read). `prefix_validated` above
+    // says what validation covered; this says what it cost and how it was
+    // paid for, so a round still in gigabytes shows whether every check
+    // missed the cache or only the hour's changed sessions did.
+    println!(
+        "[collect] prefix check    : checked={} cache_hits={} cache_misses={} bytes_read={}",
+        report.prefix_checks,
+        report.prefix_check_cache_hits,
+        report.prefix_check_cache_misses,
+        report.prefix_check_bytes_read
+    );
+    // W1091 / PERF-NEXT ①: the destination read this pass paid for — the
+    // sessions it actually needed remote facts for (wanted), whether the
+    // archive was asked at all (asked; a failed probe counts as asked), and
+    // the two probes' wall times. A pass whose wanted is small but
+    // facts_ms is large is the whole-wanted-read shape PERF-NEXT ② acts
+    // on; a pass whose wanted is zero shows the archive was never opened.
+    println!(
+        "[collect] destination     : wanted={} asked={} facts_ms={} machine_log_ms={}",
+        report.destination_facts_wanted,
+        report.destination_facts_asked,
+        report.destination_facts_ms,
+        report.machine_log_facts_ms
+    );
     // W1083 / ISSUE-008 S4: the gate's own ledger, one line per round —
     // checked (sessions whose rows were probed), skipped (gate answered
     // unchanged), exported (re-sealed), and the two reasons an equal cursor
@@ -9946,6 +9973,18 @@ fn run_once_pass_with(
     state.phases.stage_covers_bytes_read = report.stage_covers_bytes_read;
     state.phases.hash_cache_hits = report.hash_cache_hits;
     state.phases.hash_cache_misses = report.hash_cache_misses;
+    // W1091 (PERF-NEXT ①): the destination archives' probes and the
+    // prefix-validation ledger, durable in the run state — the numbers the
+    // next production round is read against to confirm where a slow pass's
+    // minutes went.
+    state.phases.destination_facts_ms = report.destination_facts_ms;
+    state.phases.destination_facts_asked = report.destination_facts_asked;
+    state.phases.destination_facts_wanted = report.destination_facts_wanted as u64;
+    state.phases.machine_log_facts_ms = report.machine_log_facts_ms;
+    state.phases.prefix_checks = report.prefix_checks;
+    state.phases.prefix_check_cache_hits = report.prefix_check_cache_hits;
+    state.phases.prefix_check_cache_misses = report.prefix_check_cache_misses;
+    state.phases.prefix_check_bytes_read = report.prefix_check_bytes_read;
     // ADR-061 (SG-3): the increment era's own counters, into the durable
     // run-state the live-day gate reads (D6's written-vs-growth rule).
     state.phases.sqlite_full_exports = report.sqlite_full_exports;
