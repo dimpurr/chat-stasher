@@ -34,7 +34,7 @@ There is no coverage to state, because no import of a DeepSeek export can run in
 
 ## Quirks
 
-The import module's notes describe a development gate for this platform: the takeout is meant to validate the extension's capture before it is poured into the archive being measured. The extension side, for its part, was verified end to end on 2026-09-24 for live capture; see [the web page](web-deepseek.md).
+The import module's notes describe a development gate for this platform: the takeout is meant to validate the extension's capture before it is poured into the archive being measured. The extension side, for its part, carries its own dated live-capture verification — most recently 2026-11-06; see [the web page](web-deepseek.md).
 
 ## Known issues
 

@@ -185,7 +185,7 @@ These tables are generated from the registry that ships inside the CLI and from 
 | Local | Codebuff / Freebuff | supported | - |
 | Agent platform | WorkBuddy | supported | - |
 | Agent platform | CodeBuddy | supported | - |
-| Web | DeepSeek | verified end-to-end on the earlier broad route (2026-09-24); the narrowed route of 2026-10-06 is not live-verified | 2026-09-24 |
+| Web | DeepSeek | verified end-to-end | 2026-11-06 |
 | Web | Perplexity | experimental | - |
 | Web | ChatGPT | verified end-to-end | 2026-09-24 |
 | Web | Gemini | verified end-to-end | 2026-09-24 |

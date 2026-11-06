@@ -8,8 +8,8 @@
 | Origins | https://chat.deepseek.com |
 | Channel | stable |
 | Capture credibility | from-source |
-| Status | verified end-to-end on the earlier broad route (2026-09-24); the narrowed route of 2026-10-06 is not live-verified |
-| Last verified end to end | 2026-09-24 (extension 0.1.0.18): live acceptance: real conversations archived end to end on a real machine (main e71eb33) |
+| Status | verified end-to-end |
+| Last verified end to end | 2026-11-06 (extension 0.2.0): live acceptance on the narrowed route: a synthetic probe conversation captured live in a logged-in tab was archived end to end, and real sessions the backfill leg staged read back byte-identical (main 757a4764) |
 
 OS availability comes from the browser registration table, not from this row: see the browser grid in [the support tables](../support.md).
 <!-- END GENERATED -->
@@ -24,7 +24,7 @@ Exactly one route is captured: the content request the page makes to load a conv
 
 ## Coverage and completeness
 
-The live leg captures a conversation when somebody opens it on chat.deepseek.com while the extension is active, and what it observes it archives whole. The route and the response shape were measured in a live logged-in session (2026-09-13): the page loads a past conversation over exactly this request. The dated acceptance on the generated block above — 2026-09-24, extension 0.1.0.18 — ran against that build's then-broader match (any GET or POST under `/api/v0/chat` or `/chat/session`), so it is a true fact about that build and not a verification of the narrowed route above, which postdates it (2026-10-06) and has not been live-verified since.
+The live leg captures a conversation when somebody opens it on chat.deepseek.com while the extension is active, and what it observes it archives whole. The route and the response shape were measured in a live logged-in session (2026-09-13): the page loads a past conversation over exactly this request. Two dated acceptances stand behind this row. The earlier one (2026-09-24, extension 0.1.0.18) ran against that build's then-broader match (any GET or POST under `/api/v0/chat` or `/chat/session`), so it is a true fact about that build and says nothing about the narrowed route above, which postdates it (2026-10-06). The later one (2026-11-06, extension 0.2.0) is the record the generated block now carries, and it ran against this narrowed row: a synthetic probe conversation, sent once into a fresh chat in a logged-in tab, was captured on exactly this request and archived end to end, and the real conversations the backfill leg staged afterwards — none of them opened by anyone — read back from the destination byte-identical to their staged shards. Counts, digests and session ids were the whole comparison; no message text, title or account identity was read on the way to recording it.
 
 The designed path for history nobody opened is the backfill leg: it lists conversations from `/api/v0/chat_session/fetch_page` (pages of `count=`, cursor `before_seq_id`, continuation decided only by the envelope's `has_more`), then fetches each conversation's body through your open, logged-in tab — one request per conversation. Before a body is stored, its own tree is walked: `chat_session.current_message_id` back along each message's `parent_id` must close at a root, and a walk that leaves the messages the response carries refuses that whole conversation (`detail-tree-incomplete`) rather than archiving a partial one. A completed backfill has not yet been observed in a real browser ([the threat model](../../docs-dev/threat-model.md) records the list-and-body legs as implemented but unobserved on all five platforms that have them). Historical conversations can also be imported from a DeepSeek offline export once the parser is offered by the CLI (see [the DeepSeek export page](import-deepseek.md)).
 
@@ -50,3 +50,4 @@ Load the extension in a Chromium browser, log into `https://chat.deepseek.com`, 
 2026-09-23 — the platform's in-band refusals (HTTP 200 with an envelope code) recognized and named as auth refusals, never read as zero conversations.
 2026-09-24 — live acceptance: real conversations archived end to end on a real machine by extension build 0.1.0.18 (main e71eb33), against that build's broader match.
 2026-10-06 — the capture row narrowed to the one measured route: GET-only, the body's id bound to the query's id, and the old broad `/api/v0/chat` and `/chat/session` shapes no longer matching.
+2026-11-06 — the narrowed route live-verified: a synthetic probe conversation captured in a logged-in tab was archived end to end, and the sessions the backfill leg staged without anyone opening them read back byte-identical to their staged shards (extension 0.2.0, main 757a4764); counts, digests and session ids only.
