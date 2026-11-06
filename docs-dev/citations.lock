@@ -333,78 +333,78 @@ apps/extension/lib/contract.ts:97-99  212496897aef  lines=3
   <- docs-dev/threat-model.md:568  :: export const PAGE_HOOK_VERSION = 'v1';
 apps/extension/lib/contract.ts:305-373  a33341b7107e  lines=69
   <- SECURITY.md:65, docs-dev/threat-model.md:26  :: export interface ChatPlatform {
-apps/extension/lib/contract.ts:385-918  34f6264bb31d  lines=534
+apps/extension/lib/contract.ts:385-918  cd8461a4a906  lines=534
   <- docs-dev/install.md:83, docs-dev/install.md:220, docs-dev/privacy.md:126, docs-dev/privacy.md:1085, docs-dev/privacy.md:1156  :: export const ALL_PLATFORMS: readonly ChatPlatform[] = [
 apps/extension/lib/contract.ts:388  65cef6a544ee  lines=1
   <- docs-dev/privacy.md:1028  :: origins: ['https://chat.deepseek.com'],
 apps/extension/lib/contract.ts:443-449  90fc5f0d7b4a  lines=7
   <- docs-dev/install.md:32  :: // The external API route/shape differences may represent d…
-apps/extension/lib/contract.ts:469-534  85d95a112633  lines=66
-  <- docs-dev/install.md:87  :: origins: ['https://www.perplexity.ai'],
-apps/extension/lib/contract.ts:469  779465350317  lines=1
-  <- docs-dev/privacy.md:1029  :: origins: ['https://www.perplexity.ai'],
-apps/extension/lib/contract.ts:486-501  6ff6670d0810  lines=16
-  <- docs-dev/threat-model.md:337  :: pathHints: ['/rest/thread/'],
-apps/extension/lib/contract.ts:521-526  1631eb0ed4f9  lines=6
-  <- docs-dev/install.md:89  :: sessionIdPatterns: [
-apps/extension/lib/contract.ts:528-534  748b3e6fe537  lines=7
-  <- docs-dev/install.md:32  :: // 'from-source': nobody on either change opened a logged-i…
-apps/extension/lib/contract.ts:539-553  3c2febd21c22  lines=15
-  <- docs-dev/install.md:32  :: id: 'chatgpt',
-apps/extension/lib/contract.ts:540  4eda2e856655  lines=1
-  <- docs-dev/privacy.md:1030  :: origins: ['https://chatgpt.com', 'https://chat.openai.com'],
-apps/extension/lib/contract.ts:564  586fc9c878ac  lines=1
-  <- docs-dev/privacy.md:1031  :: origins: ['https://gemini.google.com'],
-apps/extension/lib/contract.ts:590-602  ffbeb3d9ba7d  lines=13
-  <- docs-dev/install.md:32  :: //    `WIZ_global_data` — an XSRF token in the body's `at` …
-apps/extension/lib/contract.ts:622  1f7678ac6786  lines=1
-  <- docs-dev/privacy.md:1032  :: origins: ['https://claude.ai'],
-apps/extension/lib/contract.ts:673-677  d3006384d2f5  lines=5
-  <- docs-dev/install.md:32  :: credibility: 'from-source',
-apps/extension/lib/contract.ts:696  047cc8b8ab4e  lines=1
-  <- docs-dev/privacy.md:1033  :: origins: ['https://www.kimi.com'],
-apps/extension/lib/contract.ts:807-812  81d80c1cc585  lines=6
-  <- docs-dev/install.md:32  :: // '/api/chat/...' route family, which is why that origin i…
-apps/extension/lib/contract.ts:821  23c99a148fbc  lines=1
-  <- docs-dev/privacy.md:1034  :: origins: ['https://grok.com'],
-apps/extension/lib/contract.ts:892-902  757ff261970a  lines=11
-  <- docs-dev/install.md:32  :: credibility: 'from-source',
-apps/extension/lib/contract.ts:944-979  ebba5d56a375  lines=36
-  <- docs-dev/privacy.md:1037, docs-dev/threat-model.md:26  :: export function platformsForChannel(channel: ReleaseChannel…
-apps/extension/lib/contract.ts:966-979  ee0db2699c92  lines=14
-  <- SECURITY.md:65  :: export function contentMatchesForChannel(channel: ReleaseCh…
-apps/extension/lib/contract.ts:999  93f15da49cac  lines=1
-  <- docs-dev/privacy.md:1082  :: export const MAX_RAW_BYTES = 16 * 1024 * 1024;
-apps/extension/lib/contract.ts:1220-1241  6ada7641acdc  lines=22
-  <- docs-dev/privacy.md:1080  :: }
-apps/extension/lib/contract.ts:1232-1297  91703b02cfc9  lines=66
-  <- docs-dev/privacy.md:126, docs-dev/privacy.md:1080  :: } catch {
-apps/extension/lib/contract.ts:1241-1325  3100d2efea99  lines=85
-  <- docs-dev/threat-model.md:577  :: (requiredAnyPaths.length === 0 || requiredAnyPaths.some((pa…
-apps/extension/lib/contract.ts:1280-1281  d72720cd403e  lines=2
-  <- docs-dev/privacy.md:477  :: //    **reject on sight** — a payload from a page should ne…
-apps/extension/lib/contract.ts:1337-1347  51bbe8d456a4  lines=11
-  <- docs-dev/threat-model.md:576  :: pageOrigin: string,
-apps/extension/lib/contract.ts:1361-1366  643e6c9dc88c  lines=6
-  <- docs-dev/threat-model.md:379  :: * Degradation chain (weakest protection for the CLI is 'def…
-apps/extension/lib/contract.ts:1434-1445  1e11e46c5e13  lines=12
-  <- docs-dev/threat-model.md:450  :: /**
-apps/extension/lib/contract.ts:1437-1445  be2ec6035f37  lines=9
-  <- docs-dev/threat-model.md:435  :: *  · 'platform-not-recognized'          — the capture's URL…
-apps/extension/lib/contract.ts:1466-1475  e68fd0d3425c  lines=10
-  <- docs-dev/privacy.md:310, docs-dev/threat-model.md:423  :: *                                         Deliberately **no…
-apps/extension/lib/contract.ts:1495-1499  91a5d6065664  lines=5
-  <- docs-dev/privacy.md:731, docs-dev/threat-model.md:380, docs-dev/threat-model.md:420  :: *    readable: a `@1` bundle has no `account` key at all, a…
-apps/extension/lib/contract.ts:1503-1512  b3b4db645114  lines=10
-  <- docs-dev/privacy.md:306  :: *    `cs_account_salt_v1` all produce incomparable values, …
-apps/extension/lib/contract.ts:1526-1529  e5fee418c5c8  lines=4
-  <- docs-dev/threat-model.md:707  :: * the two kinds — see `AccountFingerprint`. An `@1` bundle …
-apps/extension/lib/contract.ts:1610-1689  74df7cf45831  lines=80
-  <- docs-dev/install.md:101  :: /**
-apps/extension/lib/contract.ts:1706-1709  5fd0f4ad0c7d  lines=4
-  <- docs-dev/threat-model.md:362  :: * logged-in DeepSeek page during this spike (no live login …
-apps/extension/lib/contract.ts:1759-1775  10951d8dcdcd  lines=17
-  <- docs-dev/privacy.md:769, docs-dev/threat-model.md:362  :: out.push(val);
+apps/extension/lib/contract.ts:469-534  45baf84e6b64  lines=66
+  <- docs-dev/install.md:87  :: },
+apps/extension/lib/contract.ts:469  e52a1813c460  lines=1
+  <- docs-dev/privacy.md:1029  :: },
+apps/extension/lib/contract.ts:486-501  feeda2b9cc14  lines=16
+  <- docs-dev/threat-model.md:337  :: // routes the page posts to (list, mark-viewed, set-title, …
+apps/extension/lib/contract.ts:521-526  d23a06c5cb09  lines=6
+  <- docs-dev/install.md:89  :: // named sibling routes from being read as ids: without it …
+apps/extension/lib/contract.ts:528-534  3bcd3dec4a9c  lines=7
+  <- docs-dev/install.md:32  :: '/rest/thread/(?!(?:list_ask_threads|list_recent|list_threa…
+apps/extension/lib/contract.ts:539-553  3b925ddda8d4  lines=15
+  <- docs-dev/install.md:32  :: webSocketCapture: false,
+apps/extension/lib/contract.ts:540  d4df7c2b6d5f  lines=1
+  <- docs-dev/privacy.md:1030  :: devPriority: 'low',
+apps/extension/lib/contract.ts:564  e52a1813c460  lines=1
+  <- docs-dev/privacy.md:1031  :: },
+apps/extension/lib/contract.ts:590-602  f5ba4d71832c  lines=13
+  <- docs-dev/install.md:32  :: // The measured route, and the only method that carries it:…
+apps/extension/lib/contract.ts:622  82ec9233d3e6  lines=1
+  <- docs-dev/privacy.md:1032  :: // ACCOUNT_LEASE_PLATFORMS cannot fire — it names no accoun…
+apps/extension/lib/contract.ts:673-677  109fa15339df  lines=5
+  <- docs-dev/install.md:32  :: //    and never inspecting the body, so it cannot tell drif…
+apps/extension/lib/contract.ts:696  91b58a1f164d  lines=1
+  <- docs-dev/privacy.md:1033  :: // is the LEGACY origin (it still appears in a 2026-02 reve…
+apps/extension/lib/contract.ts:807-812  5417f2ba1be4  lines=6
+  <- docs-dev/install.md:32  :: //    https://www.kimi.com and the same
+apps/extension/lib/contract.ts:821  021fb596db81  lines=1
+  <- docs-dev/privacy.md:1034  :: {
+apps/extension/lib/contract.ts:892-902  0feed4302714  lines=11
+  <- docs-dev/install.md:32  :: //    shapes. It also shows that the page posts to the same
+apps/extension/lib/contract.ts:944-979  1c52ad5ca26d  lines=36
+  <- docs-dev/privacy.md:1037, docs-dev/threat-model.md:26  :: /**
+apps/extension/lib/contract.ts:966-979  882afc7a98ff  lines=14
+  <- SECURITY.md:65  :: }
+apps/extension/lib/contract.ts:999  981a55fe6c2f  lines=1
+  <- docs-dev/privacy.md:1082  :: * 16 MiB because the body travels as a string inside a bund…
+apps/extension/lib/contract.ts:1220-1241  dc4c1591ed52  lines=22
+  <- docs-dev/privacy.md:1080  :: try {
+apps/extension/lib/contract.ts:1232-1297  40de2612ea5e  lines=66
+  <- docs-dev/privacy.md:126, docs-dev/privacy.md:1080  :: }
+apps/extension/lib/contract.ts:1241-1325  aa13e8e275d6  lines=85
+  <- docs-dev/threat-model.md:577  :: const requiredArrayPaths = shape.requiredArrayPaths ?? [];
+apps/extension/lib/contract.ts:1280-1281  ac73b5b700bf  lines=2
+  <- docs-dev/privacy.md:477  :: if (value.pageUrl !== undefined && typeof value.pageUrl !==…
+apps/extension/lib/contract.ts:1337-1347  5cc05fdffc22  lines=11
+  <- docs-dev/threat-model.md:576  :: /** The real page→content capture gate: source, origin, and…
+apps/extension/lib/contract.ts:1361-1366  eb16b76a32b9  lines=6
+  <- docs-dev/threat-model.md:379  :: export const SCHEMA = 'chat-stasher/inbox@2';
+apps/extension/lib/contract.ts:1434-1445  c0565e7d3873  lines=12
+  <- docs-dev/threat-model.md:450  :: 'request-header-chatgpt-account-id',
+apps/extension/lib/contract.ts:1437-1445  69e87aaa5e88  lines=9
+  <- docs-dev/threat-model.md:435  :: ];
+apps/extension/lib/contract.ts:1466-1475  262e67136dab  lines=10
+  <- docs-dev/privacy.md:310, docs-dev/threat-model.md:423  :: *                                         not an id and it …
+apps/extension/lib/contract.ts:1495-1499  caf44aba8ea4  lines=5
+  <- docs-dev/privacy.md:731, docs-dev/threat-model.md:380, docs-dev/threat-model.md:420  :: * in the archive can be turned back into either id.
+apps/extension/lib/contract.ts:1503-1512  0155c932060a  lines=10
+  <- docs-dev/privacy.md:306  :: *    platform-separated message, keyed with this install's …
+apps/extension/lib/contract.ts:1526-1529  be80082f5b80  lines=4
+  <- docs-dev/threat-model.md:707  :: platform: PlatformId;
+apps/extension/lib/contract.ts:1610-1689  1ba96e9c1e0b  lines=80
+  <- docs-dev/install.md:101  :: } catch {
+apps/extension/lib/contract.ts:1706-1709  66f532fb5e15  lines=4
+  <- docs-dev/threat-model.md:362  :: * a captured chat/session response BODY, then fall down the…
+apps/extension/lib/contract.ts:1759-1775  b173d7625eff  lines=17
+  <- docs-dev/privacy.md:769, docs-dev/threat-model.md:362  :: if (!node || typeof node !== 'object') return;
 apps/extension/lib/gemini-capture.ts:150-238  5f5cbc771ff4  lines=89
   <- docs-dev/privacy.md:940, docs-dev/privacy.md:1001, docs-dev/threat-model.md:265  :: export async function completeGeminiLiveCapture(
 apps/extension/lib/hook-status.ts:79-134  21b4eb249512  lines=56
