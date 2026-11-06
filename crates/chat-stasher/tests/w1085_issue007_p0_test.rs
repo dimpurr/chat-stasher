@@ -161,20 +161,18 @@ fn assert_no_body_mark(stdout: &str, stderr: &str, what: &str) {
 fn a_destination_without_credentials_refuses_in_one_line_of_three_facts() {
     let (dir, _repo, _key) = sandbox_with_archive();
     let sandbox = dir.path();
-    let (code, stdout, stderr) = run(bin(sandbox).args([
-        "export",
-        "--destination",
-        COLD,
-        "--out",
-        "wont-happen",
-    ]));
+    let (code, stdout, stderr) =
+        run(bin(sandbox).args(["export", "--destination", COLD, "--out", "wont-happen"]));
     assert_eq!(code, 3, "refused, in the did-not-finish family");
     assert!(
         stdout.is_empty(),
         "stdout never reached its header — nothing was read: {stdout}"
     );
     assert!(stderr.contains(UNSET_KEY), "the first variable: {stderr}");
-    assert!(stderr.contains(UNSET_SECRET), "the second variable: {stderr}");
+    assert!(
+        stderr.contains(UNSET_SECRET),
+        "the second variable: {stderr}"
+    );
     assert!(stderr.contains(GOOD), "the usable alternative: {stderr}");
     assert!(
         stderr.contains("`file:PATH`"),
@@ -247,7 +245,10 @@ fn status_and_help_list_destinations_with_two_state_availability() {
     ];
     for (surface, _args, text) in &runs {
         assert!(text.contains(GOOD), "{surface} lists the good destination");
-        assert!(text.contains(COLD), "{surface} lists the broken destination");
+        assert!(
+            text.contains(COLD),
+            "{surface} lists the broken destination"
+        );
         assert!(
             text.contains("missing credentials"),
             "{surface} carries the failure state's words: {text}"
@@ -403,5 +404,7 @@ fn scan_total(line: &str) -> usize {
 }
 
 fn head_number(text: &str) -> usize {
-    text.split(' ').find_map(|word| word.parse().ok()).unwrap_or_default()
+    text.split(' ')
+        .find_map(|word| word.parse().ok())
+        .unwrap_or_default()
 }

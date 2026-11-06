@@ -173,11 +173,7 @@ where
 /// The deadline body the two public spellings share: everything after the
 /// trace line, split out so the trace channel is the only difference
 /// between them and neither can drift from the other's mechanics.
-fn run_deadline_body<T, F>(
-    step: &str,
-    default_budget_secs: u64,
-    f: F,
-) -> Result<T, StepTimedOut>
+fn run_deadline_body<T, F>(step: &str, default_budget_secs: u64, f: F) -> Result<T, StepTimedOut>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,

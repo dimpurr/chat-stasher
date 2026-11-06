@@ -2251,8 +2251,9 @@ fn parse_with_destination_availability_help() -> Cli {
         command = command.after_help(section.clone());
         // The commands a user picks a destination name for; nested
         // subcommand groups (`schedule`, `sources`, …) keep plain help.
-        const DESTINATION_COMMANDS: &[&str] =
-            &["search", "export", "read", "overview", "ui", "push", "status"];
+        const DESTINATION_COMMANDS: &[&str] = &[
+            "search", "export", "read", "overview", "ui", "push", "status",
+        ];
         command = command.mut_subcommands(|sub| {
             if DESTINATION_COMMANDS.contains(&sub.get_name()) {
                 sub.after_help(section.clone())
@@ -6620,10 +6621,8 @@ fn cmd_export(
             eprintln!("{line}");
         }
     };
-    let mut scan_heartbeat = chat_stasher::scanprogress::ScanHeartbeat::for_command_with_sink(
-        "export",
-        heartbeat_sink,
-    );
+    let mut scan_heartbeat =
+        chat_stasher::scanprogress::ScanHeartbeat::for_command_with_sink("export", heartbeat_sink);
     let scan_store = store.owned_twin();
     let scan_mk = mk.clone();
     let scan_selector = selector.clone();
@@ -13293,9 +13292,7 @@ fn credentials_preflight(command: &str, destination: Option<&str>) -> Option<Exi
     let name = destination?;
     let rows = chat_stasher::destdiag::availability_rows();
     let row = rows.iter().find(|row| row.name == name)?;
-    if let chat_stasher::destdiag::DestinationAvailability::MissingEnv { variables } =
-        &row.state
-    {
+    if let chat_stasher::destdiag::DestinationAvailability::MissingEnv { variables } = &row.state {
         let others: Vec<String> = rows
             .iter()
             .filter(|other| other.state == chat_stasher::destdiag::DestinationAvailability::Ok)

@@ -1141,9 +1141,7 @@ pub fn availability_from_config(
 /// The computation over config text the caller already read — split from
 /// [`availability_from_config`] so the parse failure and the file read stay
 /// separately assertable states.
-fn availability_from_text(
-    text: &str,
-) -> Result<Vec<AvailabilityRow>, AvailabilityUnavailable> {
+fn availability_from_text(text: &str) -> Result<Vec<AvailabilityRow>, AvailabilityUnavailable> {
     #[derive(Deserialize)]
     struct RawOption {
         // reason: a key whose table is a non-string value cannot answer a
@@ -1202,14 +1200,9 @@ fn availability_from_text(
         } else if missing.is_empty() {
             DestinationAvailability::Ok
         } else {
-            DestinationAvailability::MissingEnv {
-                variables: missing,
-            }
+            DestinationAvailability::MissingEnv { variables: missing }
         };
-        rows.push(AvailabilityRow {
-            name,
-            state,
-        });
+        rows.push(AvailabilityRow { name, state });
     }
     Ok(rows)
 }
@@ -1324,16 +1317,15 @@ fn availability_help_section_rows(rows: &[AvailabilityRow]) -> Option<String> {
             DestinationAvailability::Ok => {
                 section.push_str(&format!("    {}  available\n", row.name))
             }
-            DestinationAvailability::MissingEnv { variables } => {
-                section.push_str(&format!(
-                    "    {}  missing credentials: env {} not set in this process\n",
-                    row.name,
-                    variables.join(", env "),
-                ))
-            }
-            DestinationAvailability::Unknown { why } => {
-                section.push_str(&format!("    {}  availability unknown: {}\n", row.name, why))
-            }
+            DestinationAvailability::MissingEnv { variables } => section.push_str(&format!(
+                "    {}  missing credentials: env {} not set in this process\n",
+                row.name,
+                variables.join(", env "),
+            )),
+            DestinationAvailability::Unknown { why } => section.push_str(&format!(
+                "    {}  availability unknown: {}\n",
+                row.name, why
+            )),
         }
     }
     Some(section)
@@ -1384,7 +1376,8 @@ fn missing_before(variables: &[String]) -> String {
 /// is none, which is itself the answer to "what do I do next".
 fn alternatives(others: &[String]) -> String {
     if others.is_empty() {
-        return " — no other declared destination's credentials resolve in this process".to_string();
+        return " — no other declared destination's credentials resolve in this process"
+            .to_string();
     }
     format!(
         "; destination(s) available here to use instead: {}",
@@ -5284,7 +5277,10 @@ mod tests {
         assert!(line.contains("env W1085_UNSET_KEY"), "{line}");
         assert!(line.contains("env W1085_ALSO_UNSET"), "{line}");
         assert!(line.contains("[destinations.r2shaped.options]"), "{line}");
-        assert!(line.contains("`storagebox`"), "the alternative is named: {line}");
+        assert!(
+            line.contains("`storagebox`"),
+            "the alternative is named: {line}"
+        );
         assert!(line.contains("nothing was read"), "{line}");
         assert!(!line.contains("reqsign"), "no third-party renderer: {line}");
         let lone = missing_credentials_line("search", "only", &["X_Y".to_string()], &[]);
@@ -5310,10 +5306,7 @@ mod tests {
                 },
             },
         ];
-        for (row, word) in [
-            (&rows[0], "available"),
-            (&rows[1], "missing credentials"),
-        ] {
+        for (row, word) in [(&rows[0], "available"), (&rows[1], "missing credentials")] {
             let line = availability_line(row);
             assert!(line.contains(&row.name), "{line}");
             assert!(line.contains(word), "{line}");
