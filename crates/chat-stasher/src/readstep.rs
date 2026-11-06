@@ -143,8 +143,46 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let budget = Duration::from_secs(budget_secs(default_budget_secs));
     println!("{trace}");
+    run_deadline_body(step, default_budget_secs, f)
+}
+
+/// The same deadline with the trace on **stderr** — ISSUE-007 S3's shape for
+/// the commands whose stdout is a machine-parsed surface (`search --json`
+/// promises one JSON object and nothing else, `export`'s stdout carries the
+/// plan and report a user pipes onward), so "every step announces itself
+/// before it runs" keeps holding there without a step-trace line landing in
+/// the wrong channel.
+///
+/// Identical contract to [`run_behind_deadline`] in every other way — same
+/// budget override, same abandonment on timeout, same panic propagation.
+pub fn run_behind_deadline_quiet<T, F>(
+    trace: &str,
+    step: &str,
+    default_budget_secs: u64,
+    f: F,
+) -> Result<T, StepTimedOut>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    eprintln!("{trace}");
+    run_deadline_body(step, default_budget_secs, f)
+}
+
+/// The deadline body the two public spellings share: everything after the
+/// trace line, split out so the trace channel is the only difference
+/// between them and neither can drift from the other's mechanics.
+fn run_deadline_body<T, F>(
+    step: &str,
+    default_budget_secs: u64,
+    f: F,
+) -> Result<T, StepTimedOut>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let budget = Duration::from_secs(budget_secs(default_budget_secs));
     // The carrier keeps the closure reachable from this thread even if
     // `Builder::spawn` refuses to create a worker, so a machine out of
     // threads still answers the question instead of dropping it.
@@ -277,6 +315,23 @@ mod tests {
     /// through this lock — the same discipline the W1043 fixtures established
     /// for the one in-process env swap a suite needs.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The stderr-trace spelling (ISSUE-007 S3): same pass-through, same
+    /// timeout shape, same budget — the only difference this test can see
+    /// from the outside is the step verdict, which must be identical.
+    #[test]
+    fn the_quiet_spelling_passes_answers_and_times_out_the_same() {
+        let answer: Result<u64, StepTimedOut> =
+            run_behind_deadline_quiet("trace line", "fast-quiet-step", 30, || 7);
+        assert_eq!(answer.expect("a fast quiet step answers"), 7);
+        let outcome: Result<(), StepTimedOut> =
+            run_behind_deadline_quiet("trace line", "wedged-quiet-step", 1, || {
+                std::thread::sleep(Duration::from_secs(300));
+            });
+        let timed_out = outcome.expect_err("a wedged quiet step must not answer");
+        assert_eq!(timed_out.step, "wedged-quiet-step");
+        assert_eq!(timed_out.budget_secs, 1);
+    }
 
     /// The override the fixtures rely on: `CHAT_STASHER_READ_STEP_BUDGET_SECS`
     /// replaces the default only while it parses — every malformed shape keeps

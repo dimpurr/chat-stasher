@@ -855,12 +855,48 @@ impl SessionHit {
 /// empty export. A failure to write one session is not an `Err` — the rest of
 /// the export is still worth having — it is a [`FailedSession`], and it makes
 /// the exit status 3.
+///
+/// This spelling runs the destination scan itself. The CLI does not use it
+/// any more: `cmd_export` scans once — behind its own deadline and progress
+/// heartbeat — and hands the result to [`export_selected_sessions`], because
+/// one `export --dry-run` must pay for exactly one scan. Tests and any other
+/// caller that has not already scanned keep this entry, with the same
+/// behaviour it always had.
 pub fn export_sessions(
     store: &BackupStore,
     mk: &MasterKey,
     selector: &Selector,
     opts: &ExportOptions,
     on_plan: &dyn Fn(&ExportPlan),
+) -> anyhow::Result<ExportReport> {
+    let report = search_sessions(store, mk, selector)?;
+    export_selected_sessions(store, mk, selector, opts, on_plan, report)
+}
+
+/// Export from a destination scan the caller already ran — the one-scan
+/// shape (ISSUE-007 F3 direction 1).
+///
+/// The `report` came from [`crate::search::search_sessions`] with the very
+/// same selector, in the same process, against the same store; everything
+/// the export does downstream reads its rows and never re-walks the
+/// destination. Passing it here is what makes `export --dry-run` cost the
+/// same single cumulative scan `search` pays — ISSUE-007 F3 measured the
+/// previous shape (a scan in `cmd_export`, then a second one inside the
+/// export itself) at two full tree walks over 1,159 snapshots with no
+/// output until both had finished. With one scan, `search` remains the dry
+/// run of `export` exactly as `--help` promises.
+///
+/// Every other contract matches [`export_sessions`]: the plan callback
+/// fires before any session byte is fetched, `--dry-run` stops there, a
+/// repository failure was the caller's scan failure (already reported
+/// there), and a write failure is a [`FailedSession`], never an `Err`.
+pub fn export_selected_sessions(
+    store: &BackupStore,
+    mk: &MasterKey,
+    selector: &Selector,
+    opts: &ExportOptions,
+    on_plan: &dyn Fn(&ExportPlan),
+    report: crate::search::SearchReport,
 ) -> anyhow::Result<ExportReport> {
     if opts.trim_to_window && selector.window.is_none() {
         // A no-op flag is a lie about what the run did. Same family as an
@@ -877,7 +913,6 @@ pub fn export_sessions(
     // directory that looks like an output.
     check_out(&opts.out, opts.force).map_err(anyhow::Error::new)?;
 
-    let report = search_sessions(store, mk, selector)?;
     let cost = report.fulltext_cost();
     let plan = ExportPlan {
         sessions: cost.sessions,
