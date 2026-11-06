@@ -2229,6 +2229,49 @@ fn main() -> ExitCode {
     }
 }
 
+/// The argument parse, with the ISSUE-007 F1 destination epilogue attached.
+///
+/// F1's filed shape: an agent (or a person) reading only `--help` could not
+/// learn which destinations exist — the names had to be guessed out of
+/// `status`'s `[keys]` lines. The epilogue appends the declared destinations
+/// and their two-state credential availability to the root help and to the
+/// help of the commands that need a destination name, from the same
+/// computation `status`'s block prints (`destdiag::availability_rows`,
+/// read-only — nothing is dialed to render help). A machine with no
+/// config file, or none that declares a destination, gets `None` and keeps
+/// byte-identical help text; the epilogue reads only config text and the
+/// process environment, so it cannot make `--help` fail or hang on a broken
+/// destination — that is why the availability computation deliberately does
+/// not resolve `keychain:`/`file:` references (the config's own fail-closed
+/// load owns those).
+fn parse_with_destination_availability_help() -> Cli {
+    use clap::CommandFactory;
+    let mut command = Cli::command();
+    if let Some(section) = chat_stasher::destdiag::availability_help_section() {
+        command = command.after_help(section.clone());
+        // The commands a user picks a destination name for; nested
+        // subcommand groups (`schedule`, `sources`, …) keep plain help.
+        const DESTINATION_COMMANDS: &[&str] =
+            &["search", "export", "read", "overview", "ui", "push", "status"];
+        command = command.mut_subcommands(|sub| {
+            if DESTINATION_COMMANDS.contains(&sub.get_name()) {
+                sub.after_help(section.clone())
+            } else {
+                sub
+            }
+        });
+    }
+    let matches = command.get_matches();
+    Cli::from_arg_matches(&matches).unwrap_or_else(|error| {
+        // Not reachable with an epilogue attached: the section is
+        // help-only text appended to `--help`, it introduces no argument
+        // the derive could disagree with. Handled rather than unwrapped so
+        // the impossible case still speaks in the CLI's own voice.
+        eprintln!("chat-stasher: internal argument mismatch after parsing: {error}");
+        std::process::exit(2);
+    })
+}
+
 fn run() -> ExitCode {
     // Snapshot the live ssh masters before any remote operation so the
     // end-of-run reap only shuts down masters this process created (reap.rs).
@@ -2255,7 +2298,7 @@ fn run() -> ExitCode {
         nativehost::Launch::CommandLine => {}
     }
 
-    let cli = Cli::parse();
+    let cli = parse_with_destination_availability_help();
     match cli.command {
         Command::Init => cmd_init(),
         Command::InboxInit { name, locator } => cmd_inbox_init(&name, &locator),
@@ -5805,6 +5848,15 @@ fn cmd_search(
         );
         return ExitCode::from(2);
     }
+    // ISSUE-007 F2/S2: refuse a destination whose credentials cannot resolve
+    // in this process *before* anything is dialed — one line naming the
+    // variables, the fix, and the destinations that are usable instead. The
+    // probe is read-only (config text + the process environment, no
+    // connection); `--repo` overrides it because a raw repo path carries no
+    // declared destination at all.
+    if let Some(code) = credentials_preflight("search", destination.as_deref()) {
+        return code;
+    }
     let cfg = resolve_store_config(
         &config,
         destination.as_deref(),
@@ -5853,13 +5905,56 @@ fn cmd_search(
         }
     };
 
-    let report = match chat_stasher::search::search_sessions(&store, &mk, &selector) {
-        Ok(r) => r,
-        Err(e) => {
+    // ISSUE-007 S3 (F3's neighbour on the same walk): the scan announces
+    // itself before it runs and a heartbeat lines out progress while it
+    // walks, both on stderr — `search`'s stdout can be a machine-parsed
+    // surface (`--json`, a text hit-list), so a step-trace line there would
+    // be pollution exactly the way the ssh-reap line was (W253 C1). The
+    // scan also runs behind its own deadline like `read`'s steps (W1052),
+    // because a wedged backend must not outlive a bounded run: F3 measured
+    // this very walk at ten minutes with no output, and a scan that hangs
+    // must end with a named "did not finish", not silence.
+    let step_store = store.owned_twin();
+    let step_mk = mk.clone();
+    let step_selector = selector.clone();
+    let mut scan_heartbeat = chat_stasher::scanprogress::ScanHeartbeat::for_command("search");
+    let report = match chat_stasher::readstep::run_behind_deadline_quiet(
+        "[search] scan         : enumerating the destination's snapshots, cumulatively, newest first",
+        "scanning the destination's snapshots",
+        chat_stasher::readstep::ARCHIVE_READ_BUDGET_SECS,
+        move || {
+            chat_stasher::search::search_sessions_with_progress(
+                &step_store,
+                &step_mk,
+                &step_selector,
+                |event| {
+                    scan_heartbeat.beat(
+                        event.host,
+                        event.snapshots_scanned,
+                        event.snapshots_from_cache,
+                        event.snapshots_in_repo,
+                    )
+                },
+            )
+        },
+    ) {
+        Ok(Ok(report)) => report,
+        Ok(Err(e)) => {
             // Could not open the repository at all. This is the case that must
             // never be rendered as "nothing matched".
             eprintln!("search: cannot read `{}`: {e}", cfg.repo_root);
             eprintln!("search: this is not an empty destination — the archive was not read");
+            reap_remote(&cfg, keep_ssh_masters);
+            return ExitCode::from(3);
+        }
+        Err(timed_out) => {
+            eprintln!(
+                "search: {} did not answer within {} — the scan was abandoned, so nothing \
+                 proves what `{}` holds; this is not an empty result",
+                timed_out.step,
+                timed_out.budget_word(),
+                cfg.repo_root
+            );
             reap_remote(&cfg, keep_ssh_masters);
             return ExitCode::from(3);
         }
@@ -6387,10 +6482,17 @@ fn cmd_export(
         );
         return ExitCode::from(2);
     }
+    // ISSUE-007 F2/S2: the same read-only preflight `search` gets — one line
+    // naming the missing variables, the fix and the usable alternatives, and
+    // nothing dialed. `--repo` overrides it: a raw repo path is not a declared
+    // destination whose credential shape anyone recorded.
+    if let Some(code) = credentials_preflight("export", destination.as_deref()) {
+        return code;
+    }
     let cfg = resolve_store_config(
         &config,
         destination.as_deref(),
-        repo,
+        repo.clone(),
         key_file,
         connections,
         options,
@@ -6441,7 +6543,20 @@ fn cmd_export(
         eprintln!("[export] mirror         : {line}");
     }
     let store = {
-        let store = BackupStore::for_metadata_query(cfg.clone()).with_shard_policy(shard_policy);
+        // ISSUE-007 F3 direction 2: `export`'s scan is the same cumulative
+        // tree walk `search` does, so it reads through the same per-destination
+        // snapshot cache (`with_snapshot_cache`, one identity per
+        // destination/repo, the same one the full-text index is keyed by in
+        // `search` and `ui`). F3 measured the uncached double walk at ten
+        // minutes against 1,159 snapshots; with the cache the repeated walk
+        // is the snapshot's own "once walked, never changed" (the contract in
+        // `snapshot_cache.rs`), and a cold or damaged cache is a miss, never
+        // a wrong answer.
+        let store = BackupStore::for_metadata_query(cfg.clone())
+            .with_shard_policy(shard_policy)
+            .with_snapshot_cache(chat_stasher::snapshot_cache::SnapshotCache::for_identity(
+                &index_identity(destination.as_deref(), repo.as_deref(), &cfg.repo_root),
+            ));
         match (&mirror_decision, offline) {
             (chat_stasher::mirror_read::MirrorReadDecision::Serving(reads), true) => {
                 store.with_offline_mirror(Arc::clone(reads))
@@ -6472,18 +6587,6 @@ fn cmd_export(
         return ExitCode::from(2);
     }
 
-    let recall = match chat_stasher::search::search_sessions(&store, &mk, &selector) {
-        Ok(report) => report,
-        Err(error) => {
-            eprintln!("export: destination scan failed before planning: {error:#}");
-            reap_once(offline);
-            return ExitCode::from(3);
-        }
-    };
-    for warning in recall.machine_recall_warnings() {
-        eprintln!("{warning}");
-    }
-
     let opts = chat_stasher::export::ExportOptions {
         out: out.to_path_buf(),
         turns: turns.to_turns(),
@@ -6492,33 +6595,154 @@ fn cmd_export(
         force,
         dry_run,
     };
+    // ISSUE-007 S3 / F3 direction 4: the header prints **before** the scan,
+    // not after it. The first line the user sees names the destination, the
+    // output directory and the window, and the scan trace says the
+    // enumeration has started — F3's nonzero-stdout-for-ten-minutes shape
+    // came precisely from everything waiting for the walk to finish.
     for line in chat_stasher::export::print_header(&cfg.repo_root, &opts, selector.window.as_ref())
     {
         println!("{line}");
     }
+
+    // The one scan this run pays for (ISSUE-007 F3 direction 1): priced
+    // behind its own deadline like `read`'s steps (W1052 — a wedged backend
+    // must not outlive a bounded run), with a heartbeat on stderr while it
+    // walks (S3), and with its last progress line shared back so a timeout
+    // can say how far the walk had reached when its budget expired.
+    let last_scan_progress: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let heartbeat_sink = {
+        let last_scan_progress = std::sync::Arc::clone(&last_scan_progress);
+        move |line: &str| {
+            if let Ok(mut slot) = last_scan_progress.lock() {
+                *slot = Some(line.to_string());
+            }
+            eprintln!("{line}");
+        }
+    };
+    let mut scan_heartbeat = chat_stasher::scanprogress::ScanHeartbeat::for_command_with_sink(
+        "export",
+        heartbeat_sink,
+    );
+    let scan_store = store.owned_twin();
+    let scan_mk = mk.clone();
+    let scan_selector = selector.clone();
+    let recall = match chat_stasher::readstep::run_behind_deadline_quiet(
+        "[export] scan         : enumerating the destination's snapshots, cumulatively, newest first",
+        "scanning the destination's snapshots",
+        chat_stasher::readstep::ARCHIVE_READ_BUDGET_SECS,
+        move || {
+            chat_stasher::search::search_sessions_with_progress(
+                &scan_store,
+                &scan_mk,
+                &scan_selector,
+                |event| {
+                    scan_heartbeat.beat(
+                        event.host,
+                        event.snapshots_scanned,
+                        event.snapshots_from_cache,
+                        event.snapshots_in_repo,
+                    )
+                },
+            )
+        },
+    ) {
+        Ok(Ok(report)) => report,
+        Ok(Err(error)) => {
+            eprintln!("export: destination scan failed before planning: {error:#}");
+            // ADR-023: the classified advice `read` and `push` already put
+            // around live remote failures — the scan error's raw chain is
+            // rustic's own renderer, and F2 filed it as exactly the noise a
+            // user cannot act on.
+            chat_stasher::remote_err::eprint_remote_error("export", &error, &cfg);
+            reap_once(offline);
+            return ExitCode::from(3);
+        }
+        Err(timed_out) => {
+            let last = match last_scan_progress.lock() {
+                Ok(slot) => slot
+                    .clone()
+                    .unwrap_or_else(|| "no snapshot's walk had completed yet".to_string()),
+                Err(poisoned) => poisoned
+                    .into_inner()
+                    .clone()
+                    .unwrap_or_else(|| "no snapshot's walk had completed yet".to_string()),
+            };
+            eprintln!(
+                "export: {} did not answer within {} — last progress: {last}; the scan was \
+                 abandoned, so nothing proves what `{}` holds, and this is not an empty selection",
+                timed_out.step,
+                timed_out.budget_word(),
+                cfg.repo_root
+            );
+            reap_once(offline);
+            return ExitCode::from(3);
+        }
+    };
+    for warning in recall.machine_recall_warnings() {
+        eprintln!("{warning}");
+    }
+
     let on_plan = |plan: &chat_stasher::export::ExportPlan| {
         println!("{}", chat_stasher::export::print_plan(plan));
     };
-    let report =
-        match chat_stasher::export::export_sessions(&store, &mk, &selector, &opts, &on_plan) {
-            Ok(r) => r,
-            Err(e) => {
-                let code = chat_stasher::export::exit_status_for_error(&e);
-                if let Some(usage) = e.downcast_ref::<chat_stasher::selector::UsageError>() {
-                    eprintln!("export: {usage}");
-                } else {
-                    eprintln!("export: {e:#}");
-                    if code == 3 {
-                        eprintln!(
+    // The scan's `SearchReport` is handed straight to the export (F3
+    // direction 1): the plan and every downstream fact read it, and the
+    // destination is never walked twice in one run. The body fetch runs
+    // behind its own deadline too — it is the step that dials the
+    // destination on a real run, and a timeout there says what had already
+    // printed (the plan) and that files may be on disk without their
+    // manifest. A dry run stops inside the priced plan, before any of this.
+    let body_store = store.owned_twin();
+    let body_mk = mk.clone();
+    let body_selector = selector.clone();
+    let body_opts = opts.clone();
+    let report = match chat_stasher::readstep::run_behind_deadline_quiet(
+        "[export] bodies       : reading the selected sessions' archived bytes (the plan above)",
+        "reading the selected sessions' archived bytes",
+        chat_stasher::readstep::ARCHIVE_READ_BUDGET_SECS,
+        move || {
+            chat_stasher::export::export_selected_sessions(
+                &body_store,
+                &body_mk,
+                &body_selector,
+                &body_opts,
+                &on_plan,
+                recall,
+            )
+        },
+    ) {
+        Ok(Ok(report)) => report,
+        Ok(Err(e)) => {
+            let code = chat_stasher::export::exit_status_for_error(&e);
+            if let Some(usage) = e.downcast_ref::<chat_stasher::selector::UsageError>() {
+                eprintln!("export: {usage}");
+            } else {
+                eprintln!("export: {e:#}");
+                if code == 3 {
+                    eprintln!(
                         "export: `{}` was not read to the end — nothing here proves what it holds",
                         cfg.repo_root
                     );
-                    }
                 }
-                reap_once(offline);
-                return ExitCode::from(code);
             }
-        };
+            reap_once(offline);
+            return ExitCode::from(code);
+        }
+        Err(timed_out) => {
+            eprintln!(
+                "export: {} did not answer within {} — the plan above already printed, so the \
+                 sessions it listed are the ones in flight when the budget expired; the \
+                 background read was abandoned mid-step, so `--out` may hold files without \
+                 their manifest, nothing was deleted, and this is not an empty export",
+                timed_out.step,
+                timed_out.budget_word()
+            );
+            reap_once(offline);
+            return ExitCode::from(3);
+        }
+    };
 
     for line in chat_stasher::export::print_report(&report) {
         println!("{line}");
@@ -11307,6 +11531,15 @@ fn cmd_push(
         Ok(machine) => machine,
         Err(code) => return code,
     };
+    // ISSUE-007 F2/S2, the scheduled shape: a per-destination timer names
+    // this destination every hour, and a destination whose `env:` credentials
+    // the timer's process cannot resolve must fail there with the one
+    // actionable line, not the signer's error chain — so the config's own
+    // per-load warnings are gone (see `config.rs`), this is the loud home.
+    // Nothing has been dialed while saying it, and the stage is untouched.
+    if let Some(code) = credentials_preflight("push", destination.as_deref()) {
+        return code;
+    }
     let state_dir = chat_stasher::collect::default_state_dir();
     let pushed_destination = destination
         .clone()
@@ -13043,6 +13276,42 @@ fn index_identity(
             .map(str::to_owned)
             .unwrap_or_else(|| repo_root.to_owned()),
     }
+}
+
+/// ISSUE-007 F2/S2 — the read/write credential preflight for a named
+/// destination: if the destination's `env:` references cannot resolve in
+/// *this process*, print the one actionable line (variables, fix, usable
+/// alternatives) and refuse with `3` ("did not finish — nothing was read")
+/// **before anything is dialed**.
+///
+/// Returns `None` when the run may proceed: no destination named (`--repo`),
+/// a destination whose credentials resolve, an unknown name (the config
+/// resolver's own refusal covers it), or an availability the read-only scan
+/// could not decide — the destination gets the existing error family, and no
+/// command is refused on a guess. The probe is read-only (`--help`, `status`
+/// and this preflight all read the config's text and the process
+/// environment; no connection is opened).
+fn credentials_preflight(command: &str, destination: Option<&str>) -> Option<ExitCode> {
+    let name = destination?;
+    let rows = chat_stasher::destdiag::availability_rows();
+    let row = rows.iter().find(|row| row.name == name)?;
+    if let chat_stasher::destdiag::DestinationAvailability::MissingEnv { variables } =
+        &row.state
+    {
+        let others: Vec<String> = rows
+            .iter()
+            .filter(|other| other.state == chat_stasher::destdiag::DestinationAvailability::Ok)
+            .map(|other| other.name.clone())
+            .collect();
+        eprintln!(
+            "{}",
+            chat_stasher::destdiag::missing_credentials_line(command, name, variables, &others)
+        );
+        // 3, not 1: nothing was read, which is the "could not finish" family
+        // everywhere else a destination cannot be consulted.
+        return Some(ExitCode::from(3));
+    }
+    None
 }
 
 fn unresolved_index_sessions<'a>(
@@ -22203,6 +22472,11 @@ fn cmd_status(
         // Built once: the same declaration file and the same config back both
         // the human lines above and this object.
         let keys_value = chat_stasher::doctor::keys_json(&config);
+        // ISSUE-007 F1/F2: the destinations' two-state availability, the same
+        // computation the prose lines print and `--help` appends — `[]
+        // ` reads "nothing declared", the object's own `state` field carries
+        // an unknown when the config text could not answer.
+        let availability_value = chat_stasher::destdiag::availability_json();
         match &scan {
             Ok(report) => {
                 println!(
@@ -22218,6 +22492,7 @@ fn cmd_status(
                             writer_version_error.as_deref(),
                             &keys_value,
                             display_consent.as_ref(),
+                            &availability_value,
                         ),
                         &inboxes
                     )
@@ -22236,6 +22511,7 @@ fn cmd_status(
                         writer_version_error.as_deref(),
                         &keys_value,
                         display_consent.as_ref(),
+                        &availability_value,
                     ),
                     &inboxes
                 )
@@ -22273,6 +22549,16 @@ fn cmd_status(
         if let Some(fix) = &alert.fix {
             eprintln!("    fix: {fix}");
         }
+    }
+    // ISSUE-007 F1/F2 (P0 item 2): the declared destinations and their
+    // two-state availability — the list an agent (or a person) reading
+    // only `status` needs in order to pick a usable destination, the thing
+    // F1 recorded as "dimlife guessed the names out of the `[keys]` lines".
+    // One heading line plus one line per declared destination, read-only
+    // (nothing is dialed), silent on a machine that declares none — and it
+    // does not move the exit code any more than the alerts above do.
+    for line in chat_stasher::destdiag::availability_lines() {
+        eprintln!("{line}");
     }
     // ADR-062 (LM-2/LM-4) / C2: the mirror's rows — first-fill progress
     // phrased as progress, never as red, and the steady row (size, last
@@ -22640,6 +22926,7 @@ fn status_json(
     writer_version_error: Option<&str>,
     keys_value: &serde_json::Value,
     consent: Option<&chat_stasher::sources::Consent>,
+    availability_value: &serde_json::Value,
 ) -> String {
     let mut scanner_value = match scan {
         Ok(report) => scanner::scan_report_json(report),
@@ -22683,6 +22970,11 @@ fn status_json(
         "scanner": scanner_value,
         "sources": sources_value,
         "keys": keys_value,
+        // ISSUE-007 F1/F2: the declared destinations and whether their
+        // credential references resolve in this process — the list a
+        // wrapper needs to pick a destination it can use. Derived from the
+        // config's own text, never a reachability probe.
+        "destinations": availability_value,
     });
     json_string(&value)
 }
