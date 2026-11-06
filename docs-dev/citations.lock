@@ -997,7 +997,7 @@ crates/chat-stasher/src/remote_err.rs:597-630  c531f63130e8  lines=34
   <- docs-dev/install.md:699  :: pub fn trust_host(cfg: &StoreConfig, known_hosts: &Path) ->…
 crates/chat-stasher/src/runstate.rs:1-11  04391d8ccc80  lines=11
   <- docs-dev/install.md:1345  :: //! Timer-visibility state: what happened on the last `run-…
-crates/chat-stasher/src/runstate.rs:670-821  58000e667140  lines=152
+crates/chat-stasher/src/runstate.rs:670-821  a85589a7fe45  lines=152
   <- docs-dev/install.md:1034  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:684-692  109067636f30  lines=9
   <- docs-dev/install.md:1348  :: }

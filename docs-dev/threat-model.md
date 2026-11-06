@@ -43,10 +43,10 @@ Understanding the roles below requires knowing the path the content takes.
    (`apps/extension/lib/native-host.ts:1134-1143`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
    from a directory by hand (`ingest --inbox`)
-   (`crates/chat-stasher/src/main.rs:1049-1157`).
+   (`crates/chat-stasher/src/main.rs:1064-1172`).
 4. `push` writes the stage into a rustic repository — encrypted — at a
    destination you configure, local or remote
-   (`crates/chat-stasher/src/main.rs:487-524`).
+   (`crates/chat-stasher/src/main.rs:494-531`).
 
 Steps 1–3 are plaintext on your own machine. Step 4 is the only encrypted
 boundary. Two steps can involve a network: step 4, and an **API pull** —
@@ -64,7 +64,7 @@ providers you configure yourself.
 |---|---|
 | **Can see** | Nothing. |
 | **Cannot see** | Your conversation content, your session ids, your account identity, your destination address, whether you run this at all. |
-| **Evidence** | The repository contains no project-operated endpoint. The CLI's network capabilities are exactly two, both user-configured: the rustic/opendal backend you point `push` at (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:115-120,193-202`), and the declared Letta API a `pull letta` command or a `[pull.letta]` scheduled pass reads (`crates/chat-stasher/src/letta.rs:236-246`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:161-164`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's exact paths (a plan may name three: the list, the body, and a body's optional second step), or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:442-468,470-481`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:33`, `:747-754`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:125`). |
+| **Evidence** | The repository contains no project-operated endpoint. The CLI's network capabilities are exactly two, both user-configured: the rustic/opendal backend you point `push` at (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:115-120,217-226`), and the declared Letta API a `pull letta` command or a `[pull.letta]` scheduled pass reads (`crates/chat-stasher/src/letta.rs:236-246`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:161-164`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's exact paths (a plan may name three: the list, the body, and a body's optional second step), or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:442-468,470-481`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:33`, `:747-754`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:125`). |
 
 **Why this is worth stating precisely:** this is not a promise we are keeping.
 It is a property of there being no such link in the code. We could not read your
@@ -82,7 +82,7 @@ build you did not compile yourself, or a dependency (see
 |---|---|
 | **Can see** | That encrypted objects exist; their **sizes**; their **timestamps**; how many there are and how that changes over time. From the SFTP/SSH case specifically, also your source IP and connection times, as with any SSH server. Your account with them, obviously. |
 | **Cannot see** | Conversation text, session ids, platform names, which harness a session came from — all of it is inside the encrypted rustic repository. |
-| **Evidence** | Content is written through `rustic_core` into a repository whose master key never leaves your machine (`crates/chat-stasher/src/store.rs:374-614,3126-3128,3168-3178`). The backend is `rustic_backend` with the opendal feature and the options you supply (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:193-202`). SSH connection handling: `crates/chat-stasher/src/reap.rs:1-12`. |
+| **Evidence** | Content is written through `rustic_core` into a repository whose master key never leaves your machine (`crates/chat-stasher/src/store.rs:374-614,3126-3128,3168-3178`). The backend is `rustic_backend` with the opendal feature and the options you supply (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:217-226`). SSH connection handling: `crates/chat-stasher/src/reap.rs:1-12`. |
 
 **This is a real metadata leak and we are stating it plainly.** A destination
 provider learns your **backup rhythm and volume**: how often you archive, how
@@ -133,7 +133,7 @@ Concretely, five separate plaintext exposures:
 
 3. **The stage directory.** Sealed shards are ordinary files on disk before
    `push` encrypts them into the repository
-   (`crates/chat-stasher/src/main.rs:487-491`).
+   (`crates/chat-stasher/src/main.rs:494-498`).
 
 4. **The download-history entry for an export file.** If you press the popup's
    export button, the browser records an ordinary download whose file name is
@@ -148,7 +148,7 @@ Concretely, five separate plaintext exposures:
 
 5. **A directory you exported to.** `chat-stasher export --out <dir>` writes the
    archived sessions it selected back out **decrypted**, one file per session,
-   into a directory you name (`crates/chat-stasher/src/main.rs:891-995`). Unlike
+   into a directory you name (`crates/chat-stasher/src/main.rs:906-1010`). Unlike
    the stage, nothing here is sealed and nothing moves it on: the files stay
    exactly as written until you delete them, and the command keeps no record of
    where they went. Name a directory you would be willing to lose, and delete it
@@ -684,7 +684,7 @@ registered browser can reach the host, deliver into the stage, and ask the three
 read-only questions above, and the manifest's allowlist, which is what stops a
 different extension, is pinned to our extension id and is identical in all of
 them (`crates/chat-stasher/src/nativehost.rs:499-612`, `:488-491`;
-`crates/chat-stasher/src/main.rs:2878-2893`). The host's `summary` answer is
+`crates/chat-stasher/src/main.rs:2893-2908`). The host's `summary` answer is
 therefore a count over the stage the whole machine shares, not over the asking
 install's own captures.
 
@@ -852,12 +852,12 @@ machine:
   store without the `-shm` and proves the uncheckpointed rows still read and
   no sidecar appears beside the original (`crates/chat-stasher/tests/workbuddy_scanner_test.rs:689-726`).
   `status` and `doctor` are likewise declared read-only
-  (`crates/chat-stasher/src/main.rs:551,662-663`).
+  (`crates/chat-stasher/src/main.rs:566,677-678`).
 - **`seal` refuses to rename files it cannot justify renaming.** It is gated by
   the registry's `seal_policy`, an evidence line, and a platform-confidence
   cell; a harness that holds an open file descriptor (Codex) is refused with
   the active file untouched, because renaming it would strand later writes in
-  the old inode (`crates/chat-stasher/src/main.rs:1158-1190`).
+  the old inode (`crates/chat-stasher/src/main.rs:1173-1205`).
 
 ## Integrity: unknown is never treated as empty
 
@@ -875,9 +875,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:11606-11611`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:11684-11689`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:11455-11471`).
+  (`crates/chat-stasher/src/main.rs:11533-11549`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -888,7 +888,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:7997-8005`).
+  as many words (`crates/chat-stasher/src/main.rs:8012-8020`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -935,14 +935,14 @@ a real limitation of the current code.
    Grok's `prod-grok-backend.json` have parsers in this build, and its second
    mode reads copied Grok Bot cache backups in — read-only — as sealed rows,
    never writing anything back into the harness)
-   (`crates/chat-stasher/src/main.rs:256-1979`); **a command that puts sessions
+   (`crates/chat-stasher/src/main.rs:256-1994`); **a command that puts sessions
    back into a harness's own directories does not exist**. `read` reports
    **one session at a time** with its length and SHA-256, without printing
    conversation content
-   (`crates/chat-stasher/src/main.rs:581-584,12618-12650`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:596-599,12696-12728`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
-   **plaintext** (`crates/chat-stasher/src/main.rs:891-995`) — see exposure 5
+   **plaintext** (`crates/chat-stasher/src/main.rs:906-1010`) — see exposure 5
    above. Bulk retrieval of the sessions a time window selects is therefore
    possible; what remains missing is restoring them into a harness's own
    directories.
@@ -970,7 +970,7 @@ a real limitation of the current code.
    It also distinguishes "nothing matched" from "could not finish reading"
    **and** from "read it all but could not place every session in time", which
    is the same unknown-is-not-empty discipline as above
-   (`crates/chat-stasher/src/main.rs:849-853`).
+   (`crates/chat-stasher/src/main.rs:864-868`).
 
 6. **Session enumeration is incomplete for some harnesses**, which means the
    archive can be incomplete in ways this document does not enumerate. See the
@@ -1096,5 +1096,5 @@ Not a promise, just the honest best case with the current code:
 4. On a platform without Unix file modes, check the key file's permissions
    yourself after first run — the tool can only set them where the platform can
    express them (weakness 2).
-5. Run `verify` (`crates/chat-stasher/src/main.rs:674-727`) rather than assuming
+5. Run `verify` (`crates/chat-stasher/src/main.rs:689-742`) rather than assuming
    the archive is intact.

@@ -807,7 +807,7 @@ fn budget_line_of(state: &RunState) -> String {
     if state.duration_ms > budget_ms {
         format!(
             "Last round took {} ms against a budget of {budget_ms} ms — over budget \
-             ({}% of the budget; the pass's error log carries a WARN from {}).",
+             ({}% of the budget; the pass's error log carries a WARN from {}%).",
             state.duration_ms,
             percent_of_budget_text(state.duration_ms, budget_ms),
             100 + OVER_BUDGET_WARN_PCT,
