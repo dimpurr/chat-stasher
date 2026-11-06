@@ -1171,6 +1171,7 @@ where
     // single-threaded walk does not need.
     P: FnMut(&ScanProgress),
 {
+    let mut progress = progress;
     let backends = store.backends()?;
     let (repo, _adoption) = crate::orphans::open_adopting(&store.cfg, &backends, mk)
         .context("open repository for search")?;
