@@ -291,19 +291,19 @@ chat-stasher init
 `init` writes a commented default config only when the config does **not**
 already exist; it is non-destructive (`crates/chat-stasher/src/main.rs:257-258`).
 The config file lives at `~/.config/chat-stasher/config.toml`, or under
-`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:22-24,1743-1764`).
+`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:22-24,1756-1777`).
 
 🔴 **A config file that exists has to be valid, and the tool will not pretend
 otherwise.** If it does not parse, if a value has the wrong type, or if a path in
 it cannot be resolved, every command that reads it stops with **exit code `3`**
 and prints the file, the position and the reason
-(`crates/chat-stasher/src/config.rs:567-583,1208-1215`). It does **not** warn
+(`crates/chat-stasher/src/config.rs:567-583,1221-1228`). It does **not** warn
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
 (`crates/chat-stasher/src/config.rs:193-202`, and the refusal that stops every
 command that reads the config rather than falling back to those defaults,
-`crates/chat-stasher/src/main.rs:17471-17522`).
+`crates/chat-stasher/src/main.rs:17747-17798`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
@@ -467,13 +467,13 @@ sentence the surrounding documents have to get right:
 - **All of them point at the same binary and the same stage.** The manifest
   records this executable's absolute path, and the stage lives in your one config
   as `[native_host] stage`, which the host resolves on every launch
-  (`crates/chat-stasher/src/main.rs:2834-2849`;
+  (`crates/chat-stasher/src/main.rs:2878-2893`;
   `crates/chat-stasher/src/nativehost.rs:2086-2161`). So several installs deliver
   into one stage, which is what keeps the archive one archive.
 - **The default browser set is "whatever is installed here", sampled now.** With
   no `--browser`, the command walks every browser it knows a path for and skips
   the ones whose data directory is absent, saying so per browser
-  (`crates/chat-stasher/src/main.rs:2714-2724`;
+  (`crates/chat-stasher/src/main.rs:2758-2768`;
   `crates/chat-stasher/src/nativehost.rs:770-772`). A browser you install later
   is therefore not registered until the command is run again.
 - **`--uninstall` is the whole registration, not one profile's share of it.** It
@@ -481,7 +481,7 @@ sentence the surrounding documents have to get right:
   chrome` limits it to the ones named, and `--stage` cannot be combined with it
   at all, exit 2), and it leaves the config, the stage, the sealed captures and
   every other vendor's manifest untouched
-  (`crates/chat-stasher/src/main.rs:2652-2658`, `:2885-2923`, `:2992-2998`).
+  (`crates/chat-stasher/src/main.rs:2696-2702`, `:2929-2967`, `:3036-3042`).
   "It is per-user" does **not** mean "it is per profile": removing the extension
   from one profile is done on that profile's own extension page, and doing it
   with `--uninstall` takes the channel away from the profiles you kept, whose
@@ -608,7 +608,7 @@ each declared destination has its own, defaulting to
 `~/.local/share/chat-stasher/masterkey-<destination>.json` and settable with that
 destination's `key_file` (`crates/chat-stasher/src/config.rs:445-474`, and the
 per-destination default that synthesises that path rather than reusing the local
-one, `crates/chat-stasher/src/main.rs:10997-11000`). A second
+one, `crates/chat-stasher/src/main.rs:11230-11233`). A second
 machine reads a destination with **that destination's** key and does not use the
 local one at all — so a backup that copies only the local key cannot read the
 off-site copies. Measured on a real second machine: restoring only the local key
@@ -626,8 +626,8 @@ does not exist yet — so a headless run that owes nothing but
 (`steps.local_save` is `not_attempted`) creates every key it will ask about,
 reports them in `masterkey.keys` (`masterkey.path` is the local one), and stops
 before the local archive pass and the timer
-(`crates/chat-stasher/src/main.rs:17996-17997`; the refusal's own wording is
-`crates/chat-stasher/src/main.rs:18368-18382`). Nothing is archived on that run,
+(`crates/chat-stasher/src/main.rs:18272-18273`; the refusal's own wording is
+`crates/chat-stasher/src/main.rs:18644-18658`). Nothing is archived on that run,
 and every other missing parameter still refuses before the first write.
 
 The `steps.local_save` half is what tells that bootstrap apart from a run that
@@ -659,11 +659,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:7636-7651`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:7869-7884`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:7641-7666`). An
+it does anything else (`crates/chat-stasher/src/main.rs:7874-7899`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -695,10 +695,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:7650-7662`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:7883-7895`;
 `crates/chat-stasher/src/remote_err.rs:597-630`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:7641-7649`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:7874-7882`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -820,14 +820,26 @@ owner-only-readable (`chmod 600`). That is the shape most S3 clients document,
 and nothing about it is wrong — it is a secret on a disk.
 
 A value spelled `env:NAME` is instead resolved at config load, out of the
-process environment (`crates/chat-stasher/src/config.rs:1346`). The four ways
+process environment (`crates/chat-stasher/src/config.rs:1359`). The four ways
 that can fail — the name is not a legal variable name, the variable is set but
 empty, it is set to a value that is not valid Unicode, it is not set at all —
 are four different messages, and none of them quotes the value
-(`crates/chat-stasher/src/config.rs:1265-1282`; the warning is printed at `:1186`).
-A reference that cannot be resolved **removes that option** rather than
-substituting an empty string, so the failure is a credential error, not a
-silently-empty one.
+(`crates/chat-stasher/src/config.rs:1278-1295`; today the failures are
+collected silently, and the destination's availability is reported where it
+belongs instead). A reference that cannot be resolved **removes that option**
+rather than substituting an empty string, so the failure is a credential
+error, not a silently-empty one.
+
+**Where an unresolved `env:` destination is reported.** The removal itself is
+quiet — re-announcing it on every config load meant a declared-but-unconfigured
+destination alarmed every scheduled run, twice an hour, in the launchd log.
+The failure surfaces in its three proper homes instead: `status`'s destination
+availability block and the `--help` epilogue name the destination and the
+missing variables, and a command that actually reads or writes that
+destination refuses with one line before contacting anything — the variables
+that are missing, the persistent forms to rewrite them in, and which other
+destinations are usable right now
+(`crates/chat-stasher/src/destdiag.rs::missing_credentials_line`).
 
 **Without a login shell: `file:`, `env-file:` and `keychain:`.** A value may
 also be one of three persistent references, which resolve from a file or the
@@ -963,7 +975,7 @@ and the refusal points at the manual Task Scheduler steps in
 `docs/schedule.md`, which carry a copy-pasteable `schtasks /Create` command and
 the logon caveat that keeps a per-user task from looking scheduled while it
 sleeps, and cites the refusal and its exit code where the build decides them
-(`crates/chat-stasher/src/main.rs:10154-10184`).
+(`crates/chat-stasher/src/main.rs:10387-10417`).
 
 `run-once` is one complete collect-and-push pass; it exits when done, and
 repeated invocation is safe (`crates/chat-stasher/src/main.rs:368-409`).
@@ -991,12 +1003,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:22554-22555`). This is the
+does not (`crates/chat-stasher/src/main.rs:23010-23011`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its timer and scan output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:22038-22039`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:22354`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:471-557`):
 
 - No timer installed / never run successfully:
@@ -1012,7 +1024,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:471-557`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:22660-22667`):
+(`crates/chat-stasher/src/main.rs:23001-23005`, the *fixed-size* rule):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -1025,7 +1037,8 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:22013-22020`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:22435-22442`, the `0`/`1`/`3` decision).
+So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -1035,7 +1048,7 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 or a requested destination; unavailable counts remain unknown) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:17471-17482`, the shared refusal that stops
+(`crates/chat-stasher/src/main.rs:17747-17758`, the shared refusal that stops
 every command that reads the config rather than falling back to defaults).
 **Note:** the human-readable report goes to **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.

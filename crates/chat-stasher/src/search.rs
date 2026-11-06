@@ -81,6 +81,26 @@ use crate::sidecar::{activity_index_machine, infer_harness};
 use crate::snapshot_cache::{CachedIndexFile, CachedSession, SnapshotEntry};
 use crate::store::BackupStore;
 
+/// One snapshot's worth of walk progress for
+/// [`search_sessions_with_progress`] — ISSUE-007 S3. Host names, snapshot
+/// counters and cache counters only: this tier (and therefore its progress
+/// seam) never carries conversation content, ids beyond the host, or any
+/// credential material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanProgress<'a> {
+    /// The host whose snapshots the walk is currently working through.
+    pub host: &'a str,
+    /// Snapshots whose tree (or cache entry) has been accounted for so far,
+    /// readably or not — the same counter the report's `snapshots_scanned`
+    /// keeps.
+    pub snapshots_scanned: usize,
+    /// Of those, how many were answered from the snapshot session cache.
+    pub snapshots_from_cache: usize,
+    /// Every snapshot the repository lists, across every host — the
+    /// denominator the heartbeat prints against.
+    pub snapshots_in_repo: usize,
+}
+
 /// One matched session. Every field comes from snapshot/tree metadata or the
 /// activity sidecar — never from a shard.
 #[derive(Debug, Clone)]
@@ -1109,11 +1129,49 @@ impl TreeAvailability {
 /// "this machine has no sessions". A failure to open the repository at all is
 /// returned as `Err`: "I cannot read this destination" must never be rendered
 /// as "empty".
+///
+/// ISSUE-007 S3: the over-5-seconds-no-output shape (§2 F3 — ten minutes, one
+/// stderr line, zero stdout) is fixed by the [`ScanProgress`] events
+/// [`search_sessions_with_progress`] emits per snapshot; this no-progress
+/// spelling is exactly that walk with no listener, so the two functions cannot
+/// drift apart.
 pub fn search_sessions(
     store: &BackupStore,
     mk: &MasterKey,
     selector: &Selector,
 ) -> anyhow::Result<SearchReport> {
+    search_sessions_with_progress(store, mk, selector, |_| {})
+}
+
+/// Metadata-tier search with a per-snapshot progress listener.
+///
+/// The listener is called each time the walk has finished one snapshot —
+/// whether the result came from the snapshot cache, a fresh tree walk, or an
+/// unreadable tree the walk could not list at all — with the counts the walk
+/// itself maintains. Its cadence (what to do with the events, and how often to
+/// print a line) belongs to the caller; the events carry no conversation
+/// content, only hosts, snapshot counters and cache counters, which keeps the
+/// search-tier privacy line (ids and counts, never body) intact on this seam.
+///
+/// A snapshot whose tree cannot be read still emits: the walk's own counters
+/// do not advance for it, and a run of unreadables must not read as a wedged
+/// scan — the event says the walk is alive and how far it has reached, and the
+/// inventory of failures stays in the report, as before.
+pub fn search_sessions_with_progress<P>(
+    store: &BackupStore,
+    mk: &MasterKey,
+    selector: &Selector,
+    progress: P,
+) -> anyhow::Result<SearchReport>
+where
+    // `FnMut`, not `Fn`: the listener calls back once per finished snapshot
+    // from the single thread the walk runs on, and a heartbeat that keeps
+    // mutable state (the throttle) needs exactly this bound — a plain `Fn`
+    // would force every listener to move its own state behind a lock the
+    // single-threaded walk does not need.
+    P: FnMut(&ScanProgress),
+{
+    let mut progress = progress;
     let backends = store.backends()?;
     let (repo, _adoption) = crate::orphans::open_adopting(&store.cfg, &backends, mk)
         .context("open repository for search")?;
@@ -1307,6 +1365,12 @@ pub fn search_sessions(
                         if usable {
                             report.snapshots_scanned += 1;
                             report.snapshots_from_cache += 1;
+                            progress(&ScanProgress {
+                                host: &host,
+                                snapshots_scanned: report.snapshots_scanned,
+                                snapshots_from_cache: report.snapshots_from_cache,
+                                snapshots_in_repo,
+                            });
                             index_nodes.extend(index_nodes_from_cache);
                             for row in cached.sessions {
                                 if control_policy.omitted_from_readers(&row.machine, &row.session) {
@@ -1335,6 +1399,12 @@ pub fn search_sessions(
                         "host `{host}`: snapshot {} tree root unreadable: {e}",
                         &snap_id[..8.min(snap_id.len())]
                     ));
+                    progress(&ScanProgress {
+                        host: &host,
+                        snapshots_scanned: report.snapshots_scanned,
+                        snapshots_from_cache: report.snapshots_from_cache,
+                        snapshots_in_repo,
+                    });
                     continue;
                 }
             };
@@ -1348,10 +1418,22 @@ pub fn search_sessions(
                         "host `{host}`: snapshot {} tree walk failed: {e}",
                         &snap_id[..8.min(snap_id.len())]
                     ));
+                    progress(&ScanProgress {
+                        host: &host,
+                        snapshots_scanned: report.snapshots_scanned,
+                        snapshots_from_cache: report.snapshots_from_cache,
+                        snapshots_in_repo,
+                    });
                     continue;
                 }
             };
             report.snapshots_scanned += 1;
+            progress(&ScanProgress {
+                host: &host,
+                snapshots_scanned: report.snapshots_scanned,
+                snapshots_from_cache: report.snapshots_from_cache,
+                snapshots_in_repo,
+            });
 
             // One pass over this snapshot's tree collects both halves: the
             // shard paths that say which sessions it holds, and — in the newest

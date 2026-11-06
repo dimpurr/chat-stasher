@@ -64,6 +64,7 @@ pub mod remote_inbox_archive;
 pub mod resetledger;
 pub mod runstate;
 pub mod scanner;
+pub mod scanprogress;
 pub mod schedule;
 pub mod seal;
 pub mod search;

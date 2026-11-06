@@ -684,7 +684,7 @@ registered browser can reach the host, deliver into the stage, and ask the three
 read-only questions above, and the manifest's allowlist, which is what stops a
 different extension, is pinned to our extension id and is identical in all of
 them (`crates/chat-stasher/src/nativehost.rs:499-612`, `:488-491`;
-`crates/chat-stasher/src/main.rs:2834-2849`). The host's `summary` answer is
+`crates/chat-stasher/src/main.rs:2878-2893`). The host's `summary` answer is
 therefore a count over the stage the whole machine shares, not over the asking
 install's own captures.
 
@@ -875,9 +875,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:11364-11369`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:11606-11611`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:11222-11238`).
+  (`crates/chat-stasher/src/main.rs:11455-11471`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -888,7 +888,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:7764-7772`).
+  as many words (`crates/chat-stasher/src/main.rs:7997-8005`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -939,7 +939,7 @@ a real limitation of the current code.
    back into a harness's own directories does not exist**. `read` reports
    **one session at a time** with its length and SHA-256, without printing
    conversation content
-   (`crates/chat-stasher/src/main.rs:581-584,12376-12408`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:581-584,12618-12650`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:891-995`) — see exposure 5

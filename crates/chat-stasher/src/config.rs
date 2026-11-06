@@ -1162,10 +1162,16 @@ impl Config {
 ///
 /// [`resolve_option_env_refs`] runs in the same pass, and its failures are
 /// deliberately not part of this refusal: an `env:NAME` reference that cannot be
-/// resolved **removes** the option instead of substituting a value, and the
-/// reason is printed. Removing a key cannot silently point a destination at a
-/// value the file did not write — the destination is left without the option its
-/// author named, and the run that needs it fails loudly — which is not the
+/// resolved **removes** the option instead of substituting a value, and the run
+/// that needs it fails loudly. Removing a key cannot silently point a
+/// destination at a value the file did not write — the destination is left
+/// without the option its author named. The reason is **not printed per load**
+/// (ISSUE-007 P0: a declared-but-unconfigured destination alarmed every
+/// scheduled run, two lines an hour, while `status` said nothing a user could
+/// act on); it is visible where it belongs instead — in `status`'s destination
+/// availability list, in the `--help` epilogue, and as the one-line refusal
+/// the destination's own use prints (`destdiag::missing_credentials_line`) —
+/// which is not the
 /// "act on a default nobody asked for" failure this function exists to refuse.
 /// See `docs-dev/install.md` §4.5 for the operator-facing contract.
 fn expand_config_paths(cfg: &mut Config) -> anyhow::Result<()> {
@@ -1180,11 +1186,18 @@ fn expand_config_paths(cfg: &mut Config) -> anyhow::Result<()> {
             ),
         ));
     }
-    let mut env_problems: Vec<String> = Vec::new();
-    resolve_option_env_refs(cfg, &mut env_problems);
-    for problem in &env_problems {
-        eprintln!("warning: backend option environment reference was omitted: {problem}");
-    }
+    // Deliberately silent (ISSUE-007 P0 · the quiet hourly run): a destination
+    // whose `env:NAME` references this process cannot see is a *steady state*
+    // of the machine, not an event of this run, so it must not be re-announced
+    // on every config load — the hourly timer logs showed it twice per run,
+    // every run. The finding keeps its proper homes instead: `status`'s
+    // availability rows and the `--help` epilogue name the destination and
+    // the variables, and a command that actually reads or writes that
+    // destination refuses with `destdiag::missing_credentials_line` before
+    // dialing anything. Dropping the option stays fail-visible *to the
+    // destination's own run*, exactly as before.
+    let mut _env_problems: Vec<String> = Vec::new();
+    resolve_option_env_refs(cfg, &mut _env_problems);
     // The persistent credential references are fail-closed, unlike `env:NAME`:
     // a `file:` / `env-file:` / `keychain:` reference that cannot be resolved
     // refuses the config, naming the option and the missing credential. This is

@@ -454,6 +454,58 @@ and destination names — no repository paths, and no raw error chains.
 
 ## Getting your conversations back
 
+### Three questions, two commands each
+
+These are the acceptance steps a fresh agent (a person or a script working only
+from `--help`) must be able to do first try. They work present-tense; where a
+step has a known honest limit, the limit is written beside it.
+
+1. **"Export today's Grok Bot conversations."**
+
+   ```sh
+   chat-stasher --help                                  # lists destinations + availability
+   chat-stasher export --destination <name> --day $(date +%F) --harness grok-bot --out <dir> --dry-run
+   ```
+
+   `--day` takes a local calendar date, written `YYYY-MM-DD` — a word like
+   `today` is a usage error, so spell the date out (`$(date +%F)` prints it).
+   The export's output starts with the destination and an
+   "enumerating" line before any scanning happens, then a cost line; drop
+   `--dry-run` to write the `.jsonl` files and the manifest. Exit `1` means the
+   whole destination was read and nothing matched; exit `3` means the run did
+   not finish or a session could not be placed in time — Grok Bot sessions are
+   the known case (their conversation-time parsing is not implemented yet),
+   and the report says so rather than calling them empty.
+
+2. **"What did I say in Claude Code yesterday?"**
+
+   ```sh
+   chat-stasher search --destination <name> --day <yesterday, as YYYY-MM-DD> --harness claude-code
+   chat-stasher export  --destination <name> --day <yesterday, as YYYY-MM-DD> --harness claude-code --out <dir>
+   ```
+
+   `search` lists the matching sessions — ids, shard counts, byte sizes and
+   times, never content; `export` with the same flags writes the sessions'
+   files. `search` is the dry run of `export`: same selector, same flags, same
+   price.
+
+3. **"Which session contains this sentence?"**
+
+   ```sh
+   chat-stasher index --destination <name>              # once, or after new snapshots
+   chat-stasher search --destination <name> --text "the sentence"
+   ```
+
+   `--text` queries the local full-text index; add `--scan` to read the
+   selected sessions instead of the index (slower, no index needed). Hits
+   print the session ids and their bounds, not the surrounding text.
+
+On any of these: a destination whose `env:` credentials are missing in the
+current shell answers with one line naming the variables and the other
+destinations that are usable, and a scan that takes longer than 5 seconds
+prints its progress — how many snapshots it has covered — roughly every 5
+seconds, on stderr.
+
 ### `ui`
 
 A dashboard on `127.0.0.1`, on a port the system picks, with a random token in the URL. It serves GET requests only and closes after 5 idle minutes. Pages: an overview (totals, machine × source matrix, weekly heatmap, drill-down), session lists, a reader that decrypts one session on request, `/search` over the [local index](#index), a download of one session as a file, and **Extensions** (one row per browser install, grouped by machine).

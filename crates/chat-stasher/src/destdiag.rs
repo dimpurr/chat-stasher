@@ -1039,13 +1039,419 @@ fn credentials_of(
     }
 }
 
+// ---- ISSUE-007 P0 · per-destination availability (F1/F2, S2) -----------
+//
+// The ② fact above answers "would a **timer** resolve this destination's
+// shell-only credentials". This second computation answers the question the
+// agent in ISSUE-007 §2 actually hit: "can **this process** use this
+// destination at all, and if not, what do I do next" — the same question twice
+// an hour for `run-once`, once per `--destination` a user types, once per
+// agent that reads `--help` and has to guess a name. Two states are demanded
+// (available / missing credentials), computed from read-only local facts:
+// the config file's own text re-read from disk (the loaded [`Config`] has
+// already replaced or dropped the `env:` references, so it cannot answer),
+// and the process environment. **No destination is ever dialed** — this is
+// credential availability, not reachability, and the section's wording must
+// not let a reader mistake one for the other.
+//
+// What it deliberately does not check: the persistent reference forms
+// (`file:`, `env-file:`, `keychain:`). They fail-closed at `Config::load`,
+// naming the option and the missing credential, and every command that
+// reaches this listing has already passed that load — so a destination whose
+// persistent references resolve is *proven* available the moment the loaded
+// config exists, and one that does not can never appear here with a claim at
+// all. Only `env:NAME` is per-destination uncertain, because its resolution
+// depends on the process doing the reading.
+
+/// One destination's two-state availability, as this process can see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DestinationAvailability {
+    /// Every `env:NAME` option reference this destination carries is set
+    /// (and non-empty) in this process. Not a reachability claim: nothing
+    /// was dialed to learn this.
+    Ok,
+    /// At least one `env:NAME` reference names a variable this process
+    /// does not carry. `variables` holds the names, in the order the
+    /// declared options mention them — names only, never values.
+    MissingEnv { variables: Vec<String> },
+    /// The config file's text could not be re-read to answer. An unknown,
+    /// never "available": the two states this module reports must not
+    /// launder an unreadable read into a green row (invariant 1).
+    Unknown { why: String },
+}
+
+impl DestinationAvailability {
+    /// The `--help` / `status --json` slug, one word per state so a wrapper
+    /// can compare it without reproducing the display convention.
+    pub fn slug(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::MissingEnv { .. } => "missing-credentials",
+            Self::Unknown { .. } => "unknown",
+        }
+    }
+}
+
+/// One declared destination and its availability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailabilityRow {
+    pub name: String,
+    pub state: DestinationAvailability,
+}
+
+/// Why the availability list cannot be computed: the pair the surfaces
+/// print instead of inventing an answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AvailabilityUnavailable {
+    /// No config file is there at all — the normal first-run state, and
+    /// not a failure the listing should describe.
+    NoConfig,
+    /// The text exists but this scan's own narrow parse of it failed, so
+    /// which destinations are declared — let alone which resolve — is
+    /// unknown. The reason is this scan's, never a claim the loaded config
+    /// contradicts (the product's loader is more permissive than this
+    /// second read).
+    Unparsed { why: String },
+}
+
+/// The budget the availability read runs behind — deliberately smaller than
+/// [`crate::readstep::CONFIG_FILE_BUDGET_SECS`]: this listing is computed at
+/// argument-parse time (`--help` renders it; every destination preflight
+/// reads it), so its bound is the time "print help / print one refusal
+/// line" may take, not the time a command may tolerate its whole config.
+pub const AVAILABILITY_READ_BUDGET_SECS: u64 = 5;
+
+/// Every declared destination's availability, read out of the config file's
+/// own text — the live config's reference values are gone by the time this
+/// runs, so the re-read is where the machine's *configured* credential
+/// shapes are still visible (the same reason [`raw_env_option_refs`]
+/// re-reads). Parameterised by the config path so a test points the whole
+/// computation at a throwaway file.
+///
+/// The file read runs behind [`AVAILABILITY_READ_BUDGET_SECS`]: a wedged or
+/// slow-mount config file must not hang `--help`, `status` or any command's
+/// refusal — the W1043 lesson, applied to the one read this module adds —
+/// and a read that outlives the budget is worded as an unknown, never as an
+/// empty list.
+pub fn availability_from_config(
+    path: &Path,
+) -> Result<Vec<AvailabilityRow>, AvailabilityUnavailable> {
+    let read_path = path.to_path_buf();
+    let read = crate::readstep::run_behind_deadline_silent(
+        "reading the configuration for the destination availability listing",
+        AVAILABILITY_READ_BUDGET_SECS,
+        move || std::fs::read_to_string(read_path),
+    );
+    let text = match read {
+        Ok(Ok(text)) => text,
+        // reason: the file is not there at all — the new-first-run normal
+        // state, the same answer the plain read used to give, never a claim
+        // that no destination is declared.
+        Ok(Err(_)) => return Err(AvailabilityUnavailable::NoConfig),
+        Err(timed_out) => {
+            return Err(AvailabilityUnavailable::Unparsed {
+                why: format!(
+                    "the configuration file did not answer within {} when read for this \
+                     listing, so which destinations are declared is unknown — never none",
+                    timed_out.budget_word(),
+                ),
+            })
+        }
+    };
+    let rows = availability_from_text(&text)?;
+    if rows.is_empty() {
+        // reason: an absent `[destinations]` table is the new-first-run
+        // normal state, not an unreadable one — the caller sees an empty
+        // list and prints nothing, rather than a refusal about a machine
+        // that has declared nothing yet.
+        return Err(AvailabilityUnavailable::NoConfig);
+    }
+    Ok(rows)
+}
+
+/// The computation over config text the caller already read — split from
+/// [`availability_from_config`] so the parse failure and the file read stay
+/// separately assertable states.
+fn availability_from_text(text: &str) -> Result<Vec<AvailabilityRow>, AvailabilityUnavailable> {
+    #[derive(Deserialize)]
+    struct RawOption {
+        // reason: a key whose table is a non-string value cannot answer a
+        // credential question at all; the whole destination's availability
+        // is then the Unknown of this scan, never "none set", which would
+        // read as credentials missing out of a shape this narrow parse
+        // cannot see.
+        #[serde(default)]
+        options: Option<std::collections::BTreeMap<String, Option<String>>>,
+    }
+    #[derive(Deserialize)]
+    struct RawFile {
+        destinations: Option<BTreeMap<String, RawOption>>,
+    }
+    let file = match toml::from_str::<RawFile>(text) {
+        Ok(file) => file,
+        Err(_) => {
+            return Err(AvailabilityUnavailable::Unparsed {
+                why: "the config file's text exists but could not be re-read for the \
+                      destination availability listing"
+                    .to_string(),
+            })
+        }
+    };
+    let mut rows = Vec::new();
+    for (name, dest) in file
+        .destinations
+        // reason: an absent `[destinations]` table is the configuration
+        // fact "nothing is declared", which `availability_from_config`
+        // already reports as `NoConfig` — the empty iteration here only
+        // covers the parse succeeding, so it enumerates a real table, and
+        // turning absence into an unknown would restate the answer one
+        // level up.
+        .unwrap_or_default()
+    {
+        // The names, verbatim, not the values: a reference's *name* is what
+        // the user has to set or rewrite, and a mistyped one is itself the
+        // finding (`Option<String>` because a non-string option is a shape
+        // this scan cannot see, not a credential that is absent).
+        let mut missing = Vec::new();
+        let mut shapes_unreadable = false;
+        for value in dest
+            .options
+            // reason: a destination section without an `[destinations.<name>.options]`
+            // table carries no `env:` references at all — "no option names a
+            // credential" is a real zero (the credential-bearing shapes are
+            // opt-in), not an unknown, which is exactly the `Ok` state.
+            .unwrap_or_default()
+            .values()
+            .flatten()
+        {
+            let Some(name) = value.strip_prefix("env:") else {
+                continue;
+            };
+            if name.is_empty() {
+                shapes_unreadable = true;
+                continue;
+            }
+            match std::env::var_os(name) {
+                Some(value) if !value.is_empty() => {}
+                _ => missing.push(name.to_string()),
+            }
+        }
+        let state = if shapes_unreadable {
+            // reason: an `env:` value this scan cannot spell ("env:" with
+            // no name, a table where a string should be) leaves the
+            // question open for this destination; the empty-string check
+            // above only covers literals it could see.
+            DestinationAvailability::Unknown {
+                why: "the destination carries an `env:` reference this scan cannot \
+                      spell, so its availability here is unknown"
+                    .to_string(),
+            }
+        } else if missing.is_empty() {
+            DestinationAvailability::Ok
+        } else {
+            DestinationAvailability::MissingEnv { variables: missing }
+        };
+        rows.push(AvailabilityRow { name, state });
+    }
+    Ok(rows)
+}
+
+/// The destination availability rows for the real config file. Empty when
+/// there is nothing to list (no config, or no declared destination).
+pub fn availability_rows() -> Vec<AvailabilityRow> {
+    availability_from_config(&crate::config::config_path())
+        // reason: `NoConfig` is the nothing-to-list state the doc above names,
+        // and `Unparsed` cannot reach a caller that already loaded the
+        // config (the product's own loader is the stricter of the two
+        // parses, and `status`'s line of sight starts behind it) — so both
+        // empty-tail onto the documented "prints nothing" behaviour rather
+        // than inventing a third refusal the listing has no words for.
+        .unwrap_or_default()
+}
+
+/// One status line per declared destination, the wording every prose
+/// surface shares — `status`'s availability block. Empty when there is
+/// nothing to list, so a machine with no declared destinations prints
+/// nothing new.
+pub fn availability_lines() -> Vec<String> {
+    let rows = availability_rows();
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(rows.len() + 1);
+    out.push(
+        "[dest] availability   : whether each destination's `env:` credential references \
+         resolve in this process — read-only, nothing is dialed; persistent references \
+         (`file:`/`env-file:`/`keychain:`) were resolved by loading this config"
+            .to_string(),
+    );
+    for row in rows {
+        out.push(availability_line(&row));
+    }
+    out
+}
+
+/// The one `status` line for one destination. Public so the timeout and
+/// error sentences of other commands cannot disagree with `status` about
+/// the same state.
+pub fn availability_line(row: &AvailabilityRow) -> String {
+    match &row.state {
+        DestinationAvailability::Ok => format!(
+            "[dest] {:<16} : available — its credential references resolve in this process",
+            row.name
+        ),
+        DestinationAvailability::MissingEnv { variables } => format!(
+            "[dest] {:<16} : missing credentials in this process — {} not set here; using this \
+             destination from a shell that has them, or rewriting the values under \
+             `[destinations.{}.options]` as `file:PATH` / `env-file:PATH:NAME` / \
+             `keychain:ACCOUNT`, is the fix",
+            row.name,
+            missing_before(variables),
+            row.name,
+        ),
+        DestinationAvailability::Unknown { why } => {
+            format!("[dest] {:<16} : availability unknown — {why}", row.name)
+        }
+    }
+}
+
+/// The `status --json` object for the availability rows: one entry per
+/// declared destination, in declaration (sorted) order, each with the slug
+/// and — for the missing state — the variable names a wrapper has to tell
+/// its user to set.
+pub fn availability_json() -> serde_json::Value {
+    serde_json::json!(availability_rows()
+        .iter()
+        .map(|row| match &row.state {
+            DestinationAvailability::Ok => serde_json::json!({
+                "name": row.name,
+                "state": row.state.slug(),
+            }),
+            DestinationAvailability::MissingEnv { variables } => serde_json::json!({
+                "name": row.name,
+                "state": row.state.slug(),
+                "missing": variables,
+            }),
+            DestinationAvailability::Unknown { why } => serde_json::json!({
+                "name": row.name,
+                "state": row.state.slug(),
+                "why": why,
+            }),
+        })
+        .collect::<Vec<_>>())
+}
+
+/// The `--help` epilogue section that lists the declared destinations and
+/// their availability — ISSUE-007 F1: an agent (or a person) reading only
+/// `--help` sees the names it may pass to `--destination` and which of them
+/// this process can actually use.
+///
+/// `None` when there is nothing to print (no config, or no declared
+/// destination), so an unconfigured machine's `--help` is byte-identical to
+/// today's. The section is the same computation, the same states and the
+/// same wording discipline as `status`'s block: one line per destination,
+/// never a reachability claim (nothing is dialed), never an unknown worded
+/// as `ok`.
+pub fn availability_help_section() -> Option<String> {
+    availability_help_section_rows(&availability_rows())
+}
+
+/// The section for already-computed rows — split out so a test can pin the
+/// shape without planting a config, and so the rows→text rendering this
+/// surface shares is visible in one place.
+fn availability_help_section_rows(rows: &[AvailabilityRow]) -> Option<String> {
+    if rows.is_empty() {
+        return None;
+    }
+    let mut section = String::from(
+        "Declared destinations, with credential availability in this process (read-only — \
+         nothing is dialed):\n  use one of these names with `--destination <name>`;\n  \
+         `chat-stasher status` carries the same list\n",
+    );
+    for row in rows {
+        match &row.state {
+            DestinationAvailability::Ok => {
+                section.push_str(&format!("    {}  available\n", row.name))
+            }
+            DestinationAvailability::MissingEnv { variables } => section.push_str(&format!(
+                "    {}  missing credentials: env {} not set in this process\n",
+                row.name,
+                variables.join(", env "),
+            )),
+            DestinationAvailability::Unknown { why } => section.push_str(&format!(
+                "    {}  availability unknown: {}\n",
+                row.name, why
+            )),
+        }
+    }
+    Some(section)
+}
+
+/// The one-line refusal a command prints when the destination it was told
+/// to read has no usable credentials in this process — ISSUE-007 F2/S2: one
+/// line, naming the variables that are missing, the fix (set them in the
+/// shell that runs the command, or rewrite the options in a persistent
+/// reference form a timer or another shell can read), and every other
+/// destination that is available to use instead.
+///
+/// `command` prefixes the line (`search:` / `export:` / `push:`, the
+/// caller's own spelling, so the one refusal cannot name a command it was
+/// not printed by). `others` is the destinations the same availability
+/// computation reports ok, in declaration order — never guessed from
+/// reachability, which nothing here dialed to learn.
+pub fn missing_credentials_line(
+    command: &str,
+    name: &str,
+    variables: &[String],
+    others: &[String],
+) -> String {
+    // The one-line shape is the acceptance (ISSUE-007 §4 S2): a refusal
+    // that spans five lines is the bug F2 filed.
+    format!(
+        "{command}: destination `{name}` has no usable credentials in this process — {} — \
+         nothing was read. Set them in the shell that runs chat-stasher, or rewrite the \
+         values under `[destinations.{name}.options]` as `file:PATH`, `env-file:PATH:NAME` \
+         or `keychain:ACCOUNT` (the forms a timer can read; `chat-stasher setup \
+         --destination {name}` then verifies the entry as it stands){}",
+        missing_before(variables),
+        alternatives(others),
+    )
+}
+
+/// The variables, spelled the way the user must set them.
+fn missing_before(variables: &[String]) -> String {
+    variables
+        .iter()
+        .map(|name| format!("env {name}"))
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
+/// The "use another destination instead" half: naming every other available destination, with
+/// the same command the user can copy — or the honest sentence that there
+/// is none, which is itself the answer to "what do I do next".
+fn alternatives(others: &[String]) -> String {
+    if others.is_empty() {
+        return " — no other declared destination's credentials resolve in this process"
+            .to_string();
+    }
+    format!(
+        "; destination(s) available here to use instead: {}",
+        others
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 /// The scheduler the unit files were read from, in the two words a claim
 /// about them names: what was read and where. A "nothing pushes it"
 /// finding worded against the reader's own scope states its limits — a
 /// user with system-scope units (`/Library/LaunchDaemons`,
 /// `/etc/systemd/system`) or a hand-installed
-/// timer (`schedule --output`) can read what was *not* looked at, instead
-/// of being told no timer exists.
+/// timer (`schedule --output`) can read what was *not* looked at, instead of
+/// being told no timer exists.
 fn scheduler_scope(format: Format) -> (&'static str, &'static str) {
     match format {
         Format::Launchd => ("launchd agent", "~/Library/LaunchAgents"),
@@ -4794,6 +5200,182 @@ mod tests {
         assert!(
             alert.fix.is_some(),
             "the mounted destination keeps its repair command"
+        );
+    }
+
+    // ---- ISSUE-007 P0 · availability (F1/F2, S2) ---------------------------
+
+    /// The two states the issue demands, decided per destination from the
+    /// config's own text and the process environment: a destination with no
+    /// references is `ok`, one whose `env:` variable is set here is `ok`, and
+    /// one whose variable is missing names exactly that variable.
+    #[test]
+    fn availability_answers_two_states_per_destination() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[destinations.boxel]\nrepo = \"local box\"\n\
+             \n[destinations.warm]\nrepo = \"local\"\n\
+             \n[destinations.warm.options]\naccess_key_id = \"env:W1085_SET_KEY\"\n\
+             \n[destinations.coldly]\nrepo = \"local\"\n\
+             \n[destinations.coldly.options]\naccess_key_id = \"env:W1085_UNSET_KEY\"\nsecret = \"env:W1085_ALSO_UNSET\"\n",
+        )
+        .unwrap();
+        // The env half is process-global; plant the one variable, remove the
+        // rest — the lock keeps concurrent tests from seeing this window.
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var("W1085_SET_KEY", "synthetic-not-a-secret");
+        std::env::remove_var("W1085_UNSET_KEY");
+        std::env::remove_var("W1085_ALSO_UNSET");
+
+        let rows = availability_from_config(&path).expect("the config parses");
+        let state_of = |name: &str| {
+            rows.iter()
+                .find(|row| row.name == name)
+                .unwrap_or_else(|| panic!("no row for {name}"))
+                .state
+                .clone()
+        };
+        assert_eq!(state_of("boxel"), DestinationAvailability::Ok);
+        assert_eq!(state_of("warm"), DestinationAvailability::Ok);
+        assert_eq!(
+            state_of("coldly"),
+            DestinationAvailability::MissingEnv {
+                variables: vec![
+                    "W1085_UNSET_KEY".to_string(),
+                    "W1085_ALSO_UNSET".to_string(),
+                ],
+            },
+            "the missing state names exactly the unset variables, in option order"
+        );
+        assert_eq!(state_of("coldly").slug(), "missing-credentials");
+        std::env::remove_var("W1085_SET_KEY");
+    }
+
+    /// An empty (set but blank) variable is as unusable as an absent one —
+    /// the backend would refuse it just the same, so the availability must
+    /// not read it as `ok`.
+    #[test]
+    fn an_empty_set_variable_is_missing_not_ok() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[destinations.blankly]\nrepo = \"local\"\n\
+             \n[destinations.blankly.options]\nkey = \"env:W1085_EMPTY\"\n",
+        )
+        .unwrap();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var("W1085_EMPTY", "");
+        let rows = availability_from_config(&path).expect("the config parses");
+        assert_eq!(
+            rows[0].state,
+            DestinationAvailability::MissingEnv {
+                variables: vec!["W1085_EMPTY".to_string()],
+            },
+            "an empty variable authenticates nothing"
+        );
+        std::env::remove_var("W1085_EMPTY");
+    }
+
+    /// No config file, and text this scan's narrow parse cannot read, stay
+    /// distinguishable: absence is the first-run normal, an unparseable file
+    /// is an unknown that must never be worded as a list of `ok` rows.
+    #[test]
+    fn absence_and_an_unparseable_config_are_different_answers() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(
+            availability_from_config(&dir.path().join("not-there.toml")),
+            Err(AvailabilityUnavailable::NoConfig),
+            "a machine with no config has nothing to list — not a failure"
+        );
+        let path = dir.path().join("broken.toml");
+        std::fs::write(&path, "this is not = toml").unwrap();
+        assert!(
+            matches!(
+                availability_from_config(&path),
+                Err(AvailabilityUnavailable::Unparsed { .. })
+            ),
+            "text that does not parse is unknown, not empty"
+        );
+        // And a parsed file with no destinations section is the same
+        // nothing-to-list state, never an unknown or an empty-with-a-claim.
+        let empty = dir.path().join("empty.toml");
+        std::fs::write(&empty, "[native_host]\nstage = \"/tmp\"\n").unwrap();
+        assert_eq!(
+            availability_from_config(&empty),
+            Err(AvailabilityUnavailable::NoConfig),
+            "no declared destination means nothing to list"
+        );
+    }
+
+    /// The F2/S2 one-line refusal: the variables, the fix, and the other
+    /// usable destination are all named — the acceptance is one line, so a
+    /// helper returns it without newlines by construction.
+    #[test]
+    fn the_one_line_refusal_names_variables_fix_and_alternative() {
+        let line = missing_credentials_line(
+            "export",
+            "r2shaped",
+            &[
+                "W1085_UNSET_KEY".to_string(),
+                "W1085_ALSO_UNSET".to_string(),
+            ],
+            &["storagebox".to_string()],
+        );
+        assert!(!line.contains('\n'), "one line, not a paragraph: {line}");
+        assert!(line.starts_with("export: "), "carries the caller's command");
+        assert!(line.contains("env W1085_UNSET_KEY"), "{line}");
+        assert!(line.contains("env W1085_ALSO_UNSET"), "{line}");
+        assert!(line.contains("[destinations.r2shaped.options]"), "{line}");
+        assert!(
+            line.contains("`storagebox`"),
+            "the alternative is named: {line}"
+        );
+        assert!(line.contains("nothing was read"), "{line}");
+        assert!(!line.contains("reqsign"), "no third-party renderer: {line}");
+        let lone = missing_credentials_line("search", "only", &["X_Y".to_string()], &[]);
+        assert!(
+            lone.contains("no other declared destination's credentials resolve"),
+            "the no-alternative case says so instead of nothing: {lone}"
+        );
+    }
+
+    /// `status`'s lines and the `--help` section come from the same rows, so
+    /// the two surfaces cannot disagree about the same destination.
+    #[test]
+    fn the_help_section_and_status_lines_come_from_the_rows() {
+        let rows = vec![
+            AvailabilityRow {
+                name: "bixby".to_string(),
+                state: DestinationAvailability::Ok,
+            },
+            AvailabilityRow {
+                name: "coldly".to_string(),
+                state: DestinationAvailability::MissingEnv {
+                    variables: vec!["W1085_UNSET_KEY".to_string()],
+                },
+            },
+        ];
+        for (row, word) in [(&rows[0], "available"), (&rows[1], "missing credentials")] {
+            let line = availability_line(row);
+            assert!(line.contains(&row.name), "{line}");
+            assert!(line.contains(word), "{line}");
+        }
+        // The section shape: names for `--destination`, states, and the
+        // read-only claim — pinned so it cannot silently start dialing.
+        let section = availability_help_section_rows(&rows).expect("rows exist");
+        assert!(section.contains("`--destination <name>`"), "{section}");
+        assert!(section.contains("nothing is dialed"), "{section}");
+        assert!(section.contains("bixby  available"), "{section}");
+        assert!(
+            section.contains("coldly  missing credentials: env W1085_UNSET_KEY not set"),
+            "{section}"
         );
     }
 }
