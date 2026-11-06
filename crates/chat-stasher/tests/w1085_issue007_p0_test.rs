@@ -91,14 +91,21 @@ fn sandbox_with_archive() -> (tempfile::TempDir, PathBuf, PathBuf) {
     fs::create_dir_all(&config_dir).unwrap();
     fs::write(
         config_dir.join("config.toml"),
+        // The two paths go in as `{:?}` (Rust's own escaping, which is a
+        // valid TOML basic string for any path either CI platform names):
+        // a Windows temp root carries `\`, and the bare `\"{}"` spelling
+        // would be invalid TOML there — the loader salvages it with the
+        // unescaped-backslash warning, but the availability scan and the
+        // credential preflight re-read this file strictly and would turn
+        // both destinations into "unknown", never "missing credentials".
         format!(
-            "[destinations.{GOOD}]\nrepo = \"{}\"\nkey_file = \"{}\"\nno_cache = true\n\n\
+            "[destinations.{GOOD}]\nrepo = {:?}\nkey_file = {:?}\nno_cache = true\n\n\
              [destinations.{COLD}]\nrepo = \"opendal:s3\"\n\n\
              [destinations.{COLD}.options]\n\
              access_key_id = \"env:{UNSET_KEY}\"\n\
              secret_access_key = \"env:{UNSET_SECRET}\"\n",
-            repo.display(),
-            key.display(),
+            repo.to_string_lossy(),
+            key.to_string_lossy(),
         ),
     )
     .unwrap();
