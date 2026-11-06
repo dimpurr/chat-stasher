@@ -374,6 +374,13 @@ enum Command {
     /// Normal outcomes return 0: `result: NOOP` means no snapshot was created,
     /// while `result: COMPLETED` means a snapshot was created. Non-zero means a
     /// real error. The command is safe to invoke again.
+    ///
+    /// W1084 (ISSUE-008 ②): every pass runs against a time budget — the
+    /// scheduling interval it is scheduled at, unless `run_budget_secs`
+    /// states another — records its duration against it in
+    /// `run-state.json`, and a pass more than 50% over budget writes a
+    /// WARN to stderr (the scheduled log's error half) naming the duration,
+    /// the budget and the slowest phase.
     RunOnce {
         /// Stage directory that holds the sealed session shard tree.
         #[arg(long)]
@@ -538,6 +545,14 @@ enum Command {
     ///   is the only thing that catches it.
     ///
     /// Never prints session content: counts, timestamps and digests only.
+    ///
+    /// W1084 (ISSUE-008 ②): beside the verdict, one budget line reads the
+    /// same record for the last round's cost — its duration, the time
+    /// budget it ran against (the scheduling interval, unless
+    /// `run_budget_secs` states another), and whether it was over. A pass
+    /// that ran more than 50% over budget is the one the pass itself
+    /// WARNed about in the scheduled log; this line is how a human sees
+    /// the same fact without opening that log.
     ///
     /// Default output is a handful of lines and nothing more: the verdict
     /// above, then aggregate scan counts (per-harness session totals, skipped
@@ -9396,13 +9411,37 @@ fn print_collect_report(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The post-pass half of `cmd_run_once` (W1084, ISSUE-008 ②, GO-1105 ②):
+/// stamp the finished duration on the record — the legacy `duration_ms`,
+/// the heartbeat's `last_duration_ms` twin and the over-budget judgment,
+/// all inside `RunState::record_duration` so they cannot drift — and
+/// compose the WARN line for the scheduled unit's error log when the
+/// pass ran more than 50% over its budget. The line is returned rather
+/// than printed so the pass-seam tests assert the exact string the
+/// scheduled binary writes to `run-once.err.log`.
+fn finish_run_once_pass(
+    mut state: chat_stasher::runstate::RunState,
+    duration_ms: u64,
+) -> (chat_stasher::runstate::RunState, Option<String>) {
+    state.record_duration(duration_ms);
+    let warn = state.budget_ms.and_then(|budget_ms| {
+        chat_stasher::runstate::over_budget_warn_line(duration_ms, budget_ms, &state.phases)
+    });
+    (state, warn)
+}
+
 /// One scheduled pass. Wraps [`run_once_pass`] with the durable record the
 /// timer-visibility feature needs: whatever happened — success, no-op or
 /// failure — one `run-state.json` is written before we return.
 ///
 /// The record itself stays off stdout except for the one W880 phase
 /// summary line, which is printed on every outcome; a write failure is
-/// reported on stderr only.
+/// reported on stderr only. W1084 adds one more stderr line, a WARN:
+/// a pass that ran more than 50% over its time budget (the cadence, or
+/// `run_budget_secs` when set) is named here, because the 2026-11-05
+/// incident was a timer whose rounds ran 44–98 minutes against an hourly
+/// cadence with nothing anywhere saying that was over — this line is
+/// the check that was missing.
 fn cmd_run_once(
     stage: &Path,
     machine: Option<String>,
@@ -9428,7 +9467,18 @@ fn cmd_run_once(
         verify,
         keep_ssh_masters,
     );
-    state.duration_ms = started.elapsed().as_millis() as u64;
+    // W1084: the three budget fields and the WARN judgment pass through
+    // `finish_run_once_pass`, the one place the finished duration meets
+    // the budget, so the pass-level seam tests exercise exactly what the
+    // scheduled binary records and prints.
+    let (mut state, over_budget_warn) =
+        finish_run_once_pass(state, started.elapsed().as_millis() as u64);
+    // The WARN goes to stderr, which the scheduled unit redirects to
+    // `run-once.err.log` (docs/schedule.md): the log a sleeping operator
+    // or a heartbeat greps, not the pass's stdout.
+    if let Some(warn) = over_budget_warn {
+        eprintln!("{warn}");
+    }
     // The record was built when the pass began; `finished_at_unix` promises
     // the moment it ended, and this is the last point where that is known.
     state.mark_finished();
@@ -9672,6 +9722,26 @@ fn run_once_pass_with(
 ) -> (ExitCode, chat_stasher::runstate::RunState) {
     use chat_stasher::runstate::{RunOutcome, RunState};
 
+    // W1084 (ISSUE-008 ②, GO-1105 ②): the pass's time budget, decided
+    // before the pass starts so the record carries it whichever step
+    // fails. An explicit `run_budget_secs = 0` refuses the pass the way
+    // any declared-but-unusable config does, with the key named — the
+    // alternative would be a budget every round is over; with no
+    // override, a cadence the scheduler already refuses
+    // (`backup_interval_secs = 0`) leaves the budget unknown (`None`)
+    // rather than invented, the pass still archives, and `status` keeps
+    // reporting the invalid cadence as its own verdict.
+    let time_budget_ms = match chat_stasher::runstate::run_budget_ms(config) {
+        Ok(budget_ms) => budget_ms,
+        Err(e) => {
+            eprintln!("[run-once] result: ERROR exit_code=3 config={e:#}");
+            return (
+                ExitCode::from(3),
+                RunState::new(RunOutcome::Error, Some("config"), UNRESOLVED_MACHINE, 0),
+            );
+        }
+    };
+
     // W964's budget anchor (applied to the mirror step by ADR-062 C2): the
     // pass is one round and the wall clock starts here, at the first line,
     // so every step — including the post-push mirror — spends out of the
@@ -9680,18 +9750,26 @@ fn run_once_pass_with(
     let machine_name = match resolve_machine("run-once", config, machine.as_deref()) {
         Ok(machine) => machine,
         Err(code) => {
-            let state = RunState::new(
+            let mut state = RunState::new(
                 RunOutcome::Error,
                 Some("machine-identity"),
                 UNRESOLVED_MACHINE,
                 0,
             );
+            // W1084: the budget was knowable before the pass failed this
+            // early, so the record keeps it even here.
+            state.budget_ms = time_budget_ms;
             return (code, state);
         }
     };
     // Pessimistic starting point: until a step proves otherwise this pass is
     // recorded as a failure, so an unexpected exit can never be read as "ok".
     let mut state = RunState::new(RunOutcome::Error, Some("start"), &machine_name, 0);
+    // W1084 (ISSUE-008 ②): the record carries the budget the pass runs
+    // under, so the heartbeat fields exist whichever step fails next —
+    // the finished duration and the over-budget judgment join it at the
+    // pass's own end.
+    state.budget_ms = time_budget_ms;
     // ADR-065 D5: a pass with no recorded source consent refuses before it
     // pulls, collects or pushes anything, rather than collecting everything it
     // can find. Checked first so that nothing a later step does can read as the
@@ -22352,6 +22430,16 @@ fn cmd_status(
     };
     let info = run_state_info(&config);
     eprintln!("[run-once] {}", info.verdict.line);
+    // W1084 (ISSUE-008 ②, GO-1105 ②): the budget line — the last round's
+    // duration and the budget it ran against, plus whether it was over,
+    // answered from the same run-state record the verdict above was
+    // built from. The run-once log itself is never opened for this: the
+    // record is the durable surface, the one the deputy heartbeat also
+    // reads. It never moves the exit code — a slow round is a cost
+    // line, not a timer verdict (`cmd_status`'s B84 reasoning).
+    if let Some(budget) = &info.verdict.budget {
+        eprintln!("[run-once] {budget}");
+    }
     // The second line of the two-line split: the archive cycle's health is
     // the verdict above; when the last pass left the declared Letta producer
     // unread, the producer's own sentence and its fix print here instead of
@@ -22657,6 +22745,7 @@ fn run_state_info(config: &Config) -> RunStateInfo {
                 ),
                 healthy: false,
                 letta: None,
+                budget: None,
             },
             read,
             now_unix: now,
@@ -24980,8 +25069,10 @@ mod run_once_letta_tests {
     /// `home_redaction_covers_the_windows_home_spelling` mutates under its
     /// own lock), so this lock protects exactly the variables above, and
     /// the claim is scoped to them, not to the process environment as a
-    /// whole.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// whole. `run_once_budget_tests` mutates the same variables through
+    /// the same `Redirected`, so it shares this lock too — two locks
+    /// over one environment would be two tests racing each other.
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// One synthetic claude-code line with an RFC 3339 timestamp, the same
     /// shape [run_once_activity_index_test] seals.
@@ -24992,7 +25083,7 @@ mod run_once_letta_tests {
     }
 
     /// Write one sealed shard for `session` under `machine`, bucketed layout.
-    fn write_shard(stage: &Path, machine: &str, session: &str) {
+    pub(crate) fn write_shard(stage: &Path, machine: &str, session: &str) {
         let dir = stage
             .join(store::SESSIONS_DIR)
             .join(machine)
@@ -25008,13 +25099,14 @@ mod run_once_letta_tests {
 
     /// Points every ambient path the pass resolves — data, state, cache
     /// roots, the harness registry, the rustic metadata cache — into the
-    /// sandbox, restoring what it replaced on drop.
-    struct Redirected {
+    /// sandbox, restoring what it replaced on drop. Shared with
+    /// [`run_once_budget_tests`], which exercises the same pass seam.
+    pub(crate) struct Redirected {
         saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
         restored: bool,
     }
     impl Redirected {
-        fn install(
+        pub(crate) fn install(
             sandbox: &test_support::Sandbox,
             registry: &Path,
             letta_key: Option<&'static str>,
@@ -25084,7 +25176,7 @@ mod run_once_letta_tests {
 
     /// An empty-harness registry, so the collect step has nothing real to
     /// read and the pass's own behaviour is the only thing under test.
-    fn empty_registry(sandbox: &test_support::Sandbox) -> PathBuf {
+    pub(crate) fn empty_registry(sandbox: &test_support::Sandbox) -> PathBuf {
         let registry = sandbox.root().join("registry.json");
         fs::write(
             &registry,
@@ -25122,7 +25214,7 @@ mod run_once_letta_tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn one_pass(
+    pub(crate) fn one_pass(
         sandbox: &test_support::Sandbox,
         config: &Config,
         hook: &dyn Fn(
@@ -25507,6 +25599,319 @@ mod run_once_letta_tests {
         assert!(
             !sandbox.root().join("letta-state").exists(),
             "no credential means no producer state was created"
+        );
+    }
+}
+
+/// W1084 (ISSUE-008 ②, GO-1105 ②): the pass time budget at the seams the
+/// scheduled binary runs — `run_once_pass_with` for the pass, then
+/// `finish_run_once_pass` for exactly the tail `cmd_run_once` adds (the
+/// duration stamp, the over-budget judgment, the WARN line), then the
+/// real `run-state.json` round trip with `summarize`'s budget sentence
+/// read back from disk. Two rounds against a seconds-scale budget, in the
+/// shape the fixture contract asks for: one round that fits and one that
+/// overruns by more than half, both with artificial durations (a sleeping
+/// producer step) and no real collection (the empty-harness registry),
+/// no credential and no network.
+#[cfg(test)]
+mod run_once_budget_tests {
+    use super::*;
+    use crate::run_once_letta_tests::{
+        empty_registry, one_pass, write_shard, Redirected, ENV_LOCK,
+    };
+
+    /// A seconds-scale cadence with no budget override, plus the pieces a
+    /// completed pass needs: an empty `[sources]` choice for the consent
+    /// gate, `push_only_if_changed = false` so a stage with content
+    /// publishes, and the rustic cache under the sandbox.
+    fn budget_config(
+        sandbox: &test_support::Sandbox,
+        interval_secs: Option<u64>,
+        run_budget_secs: Option<u64>,
+    ) -> Config {
+        Config {
+            sources: Some(Default::default()),
+            push_only_if_changed: Some(false),
+            backup_interval_secs: interval_secs,
+            run_budget_secs,
+            rustic_cache_dir: Some(sandbox.rustic_cache_dir().display().to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// The same config plus a declared `[pull.letta]` producer whose pull
+    /// step the test hook controls, so a round can spend seconds in one
+    /// phase on purpose — the artificial duration of the over-budget
+    /// round, and the largest phase the WARN line has to name.
+    fn budget_config_with_producer(
+        sandbox: &test_support::Sandbox,
+        interval_secs: Option<u64>,
+        run_budget_secs: Option<u64>,
+    ) -> Config {
+        let mut config = budget_config(sandbox, interval_secs, run_budget_secs);
+        config.pull = Some(config::PullSectionConfig {
+            letta: Some(config::LettaPullConfig {
+                account_id: Some("synthetic-account".to_string()),
+                inbox: Some(sandbox.root().join("inbox").display().to_string()),
+                state: Some(sandbox.root().join("letta-state").display().to_string()),
+                api_key: None,
+                pace_ms: None,
+                budget_seconds: None,
+                page_size: None,
+            }),
+        });
+        config
+    }
+
+    /// The persisted record of one finished round: written the way
+    /// `cmd_run_once` writes it, through the real atomic save, and read
+    /// back from the same place `status` reads (from the record alone —
+    /// here that is proven by never touching the log).
+    fn round_trip(state: &chat_stasher::runstate::RunState) -> chat_stasher::runstate::RunState {
+        let state_dir = chat_stasher::collect::default_state_dir();
+        chat_stasher::runstate::save(&state_dir, state).unwrap();
+        match chat_stasher::runstate::load(&state_dir) {
+            chat_stasher::runstate::RunStateRead::Present(read) => read,
+            other => panic!("the finished round must persist, got {other:?}"),
+        }
+    }
+
+    fn now_unix() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_secs()
+    }
+
+    /// Round 1 fits its budget. The record the pass leaves names the
+    /// budget — the cadence, in milliseconds, when no override is set —
+    /// the finished duration under both of its names, and an explicit
+    /// "not over"; the WARN stays absent; and `status`'s budget sentence,
+    /// read back from the real `run-state.json`, says "within budget"
+    /// beside the two numbers. The cadence is seconds-scale so the
+    /// verdict's stale threshold stays out of the way (its one-hour
+    /// floor), not to make the pass fast — the same pass runs in the
+    /// over-budget round below.
+    #[test]
+    fn a_round_that_fits_its_budget_records_it_and_warns_nothing() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sandbox = test_support::Sandbox::new();
+        let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
+        let stage = sandbox.root().join("stage");
+        write_shard(
+            &stage,
+            "synthetic-machine",
+            "claude-code.synthetic-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+        );
+        let never = |_pull: &chat_stasher::letta::PassPull,
+                     _pull_destinations: &[StoreConfig],
+                     _machine: &str,
+                     _stage: &Path|
+         -> anyhow::Result<chat_stasher::letta::Report> {
+            panic!("no producer is declared in this config; the pull step cannot run")
+        };
+        let started = std::time::Instant::now();
+        let (code, state) = one_pass(&sandbox, &budget_config(&sandbox, Some(4), None), &never);
+        assert_eq!(
+            code,
+            ExitCode::SUCCESS,
+            "the pass itself is healthy: state={state:?}"
+        );
+        let (state, warn) = finish_run_once_pass(state, started.elapsed().as_millis() as u64);
+        assert_eq!(
+            state.budget_ms,
+            Some(4_000),
+            "with no override the budget is the cadence, in milliseconds"
+        );
+        assert!(
+            state.duration_ms > 0,
+            "the round spent real, measured wall time"
+        );
+        assert_eq!(
+            state.last_duration_ms,
+            Some(state.duration_ms),
+            "the heartbeat twin carries the same number as duration_ms"
+        );
+        assert_eq!(
+            state.over_budget,
+            Some(false),
+            "a round inside its budget is an explicit not-over, never an unknown"
+        );
+        assert!(
+            warn.is_none(),
+            "a round inside its budget warns nothing, got: {warn:?}"
+        );
+
+        let read = round_trip(&state);
+        let verdict = chat_stasher::runstate::summarize(
+            &chat_stasher::runstate::RunStateRead::Present(read.clone()),
+            now_unix(),
+            chat_stasher::runstate::stale_after_secs(4),
+        );
+        let budget = verdict
+            .budget
+            .as_deref()
+            .expect("a record with a budget renders the budget line beside the verdict");
+        assert!(
+            budget.contains("against a budget of 4000 ms")
+                && budget.contains("within budget")
+                && budget.contains("Last round took"),
+            "the status budget line names both numbers and the judgment: {budget}"
+        );
+        let json = chat_stasher::runstate::run_state_json(
+            &chat_stasher::runstate::RunStateRead::Present(read),
+            now_unix(),
+            chat_stasher::runstate::stale_after_secs(4),
+        );
+        assert_eq!(json["budget_ms"], serde_json::json!(4_000));
+        assert_eq!(json["over_budget"], serde_json::json!(false));
+        assert_eq!(
+            json["last_duration_ms"],
+            serde_json::json!(state.duration_ms)
+        );
+    }
+
+    /// Round 2 overruns by more than half: a producer step that spends
+    /// ~2.2 s against a one-second budget — artificial duration, real
+    /// measurement. The record flips to an honest over; the WARN line for
+    /// the scheduled unit's error log names every fact the incident kept
+    /// silent — the round's own time, the budget it ran against, both as
+    /// a percentage and the phase the seconds went to (the sleeping pull
+    /// step, attributed by name); and the `status` sentence read back
+    /// from disk says "over budget". The gap between the sleeping step
+    /// and any other phase is deliberate: the WARN's largest-phase
+    /// attribution is asserted, so the phase that spent the time has to
+    /// be the sleeper by a margin, not by luck.
+    #[test]
+    fn a_round_over_its_budget_by_more_than_half_warns_and_records_the_overrun() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sandbox = test_support::Sandbox::new();
+        let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
+        let stage = sandbox.root().join("stage");
+        write_shard(
+            &stage,
+            "synthetic-machine",
+            "claude-code.synthetic-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+        );
+        let slow_producer = |_pull: &chat_stasher::letta::PassPull,
+                             _pull_destinations: &[StoreConfig],
+                             _machine: &str,
+                             _stage: &Path|
+         -> anyhow::Result<chat_stasher::letta::Report> {
+            std::thread::sleep(std::time::Duration::from_millis(2_200));
+            Ok(chat_stasher::letta::Report::default())
+        };
+        let started = std::time::Instant::now();
+        let (code, state) = one_pass(
+            &sandbox,
+            &budget_config_with_producer(&sandbox, Some(1), None),
+            &slow_producer,
+        );
+        assert_eq!(
+            code,
+            ExitCode::SUCCESS,
+            "a slow round is still a healthy round; the budget is a cost line, \
+             not a failure: state={state:?}"
+        );
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let (state, warn) = finish_run_once_pass(state, duration_ms);
+        assert_eq!(state.budget_ms, Some(1_000));
+        assert_eq!(
+            state.over_budget,
+            Some(true),
+            "a round past its budget is an explicit over"
+        );
+        let warn = warn.expect("a round more than 50% over its budget WARNs");
+        assert!(
+            warn.contains("[run-once] WARN: this pass overran its time budget:"),
+            "the warn line carries the stable prefix a log reader greps for: {warn}"
+        );
+        assert!(
+            warn.contains(&format!("took {duration_ms} ms")),
+            "the warn names this round's own measured time: {warn}"
+        );
+        assert!(
+            warn.contains("against a budget of 1000 ms"),
+            "the warn names the budget it ran against: {warn}"
+        );
+        assert!(
+            warn.contains("% of the budget, past the warn line at 150%"),
+            "the warn states the over-run as a percentage of the budget, and \
+             the threshold it crossed: {warn}"
+        );
+        assert!(
+            warn.contains("largest phase letta_pull at"),
+            "the warn attributes the time to the phase that spent it — the \
+             sleeping pull step, by name: {warn}"
+        );
+
+        let read = round_trip(&state);
+        let verdict = chat_stasher::runstate::summarize(
+            &chat_stasher::runstate::RunStateRead::Present(read.clone()),
+            now_unix(),
+            chat_stasher::runstate::stale_after_secs(1),
+        );
+        let budget = verdict
+            .budget
+            .as_deref()
+            .expect("an over-budget round renders its budget line");
+        assert!(
+            budget.contains("over budget") && budget.contains("against a budget of 1000 ms"),
+            "the status budget line names both numbers and the over: {budget}"
+        );
+        assert!(
+            !budget.contains("within budget"),
+            "an over round is never worded within: {budget}"
+        );
+        assert!(
+            verdict.healthy,
+            "the budget line describes the cost; the verdict stays healthy"
+        );
+        let json = chat_stasher::runstate::run_state_json(
+            &chat_stasher::runstate::RunStateRead::Present(read),
+            now_unix(),
+            chat_stasher::runstate::stale_after_secs(1),
+        );
+        assert_eq!(json["budget_ms"], serde_json::json!(1_000));
+        assert_eq!(json["over_budget"], serde_json::json!(true));
+    }
+
+    /// A `run_budget_secs = 0` is a budget every round would be over: the
+    /// pass refuses it before anything runs, the way it refuses any
+    /// declared-but-unusable value (W964's page-size precedent), and the
+    /// record carries no budget at all rather than a fabricated zero.
+    #[test]
+    fn a_zero_run_budget_secs_refuses_the_pass_without_a_budget() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sandbox = test_support::Sandbox::new();
+        let _env = Redirected::install(&sandbox, &empty_registry(&sandbox), None);
+        let never = |_pull: &chat_stasher::letta::PassPull,
+                     _pull_destinations: &[StoreConfig],
+                     _machine: &str,
+                     _stage: &Path|
+         -> anyhow::Result<chat_stasher::letta::Report> {
+            panic!("a refused pass must not reach the pull step")
+        };
+        let (code, state) = one_pass(&sandbox, &budget_config(&sandbox, Some(1), Some(0)), &never);
+        assert_eq!(
+            code,
+            ExitCode::from(3),
+            "an unusable budget refuses the pass: state={state:?}"
+        );
+        assert_eq!(state.failed_step.as_deref(), Some("config"));
+        assert_eq!(
+            state.budget_ms, None,
+            "the refused pass records no budget, never the zero that refused it"
+        );
+        assert_eq!(
+            state.over_budget, None,
+            "without a budget there is no over-budget judgment to make"
         );
     }
 }

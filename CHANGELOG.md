@@ -15,6 +15,23 @@ under its own heading below.
 
 #### Added
 
+- **Every pass runs against a time budget (ISSUE-008 ②, W1084).** `run-once` measures
+  each round against an explicit budget — the scheduling interval it is scheduled at,
+  or `run_budget_secs` when the machine wants a different line — and records it in
+  `run-state.json` as `budget_ms` beside `last_duration_ms` and an explicit
+  `over_budget` judgment, the three fields a heartbeat can read without parsing prose
+  (an absent budget, on a record from before this change, is `null`: unknown, never
+  "not over"). `status` shows the two numbers beside its verdict — "Last round took N ms
+  against a budget of M ms — within budget." / "— over budget (P% of the budget; the
+  pass's error log carries a WARN from 150%)." — without opening the log, and the
+  budget line never moves the exit code: a slow-but-successful round is a cost line,
+  not a timer verdict. A pass that runs more than 50% over its budget (strictly past
+  150%) writes a WARN line to stderr, which the scheduled unit redirects to
+  `run-once.err.log`, naming the round's duration, the budget, the over-run as a
+  percentage and the phase that spent the most time (with the harness inside collect
+  when collect was the slow one). This is the cost line the 2026-11-05 incident was
+  missing: 46 consecutive rounds of 44–98 minutes against an hourly cadence, none of
+  them flagged, because no check anywhere said how long a round should take.
 - **Destination availability, progress and one-line credential failures (ISSUE-007 P0).** `--help` and `status` list every declared destination with its two-state availability — `available` or `missing credentials` naming the unset `env:` variables — computed from the config file and the process environment only (nothing is dialed), and `status --json` carries the same rows under `destinations`. `search`, `export` and `push` against a destination whose credentials cannot resolve in the current process refuse with **one line** before contacting anything: the missing variables, the persistent forms to rewrite them in (`file:PATH`, `env-file:PATH:NAME`, `keychain:ACCOUNT`), and every other destination usable right now. The config load no longer re-announces an unresolved `env:` reference on every run, so a declared-but-unconfigured destination no longer alarms the hourly log twice a pass; the finding lives in `status`, `--help`, and the destination's own failure. Long archive scans changed too: `export` prints its header (destination, `--out`, window) and an "enumerating" line **before** the scan starts, `search` and `export` line out "scanned N of M snapshots (K from cache)" roughly every 5 seconds on stderr while the walk runs (interval override: `CHAT_STASHER_SCAN_PROGRESS_SECS=SECONDS`, `0` = a line per snapshot), and both the scan and the body fetch run behind their own deadline, so a wedged backend ends with a named "did not finish" that says how far the scan had reached — ten silent minutes was the shape this replaces (ISSUE-007 §2 F3). `export` also reads through the snapshot session cache like `search` does, and one `export --dry-run` now pays exactly one destination scan.
 - **You choose which tools are collected (ADR-065).** Every tool on a machine
   is `on`, `off` or `pending`, and only `on` is collected. `setup` now scans
