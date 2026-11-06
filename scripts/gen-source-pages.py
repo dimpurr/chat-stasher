@@ -723,9 +723,9 @@ def render_index(sources: list[dict[str, Any]], as_of: date | None = None) -> st
         "## Local harnesses and agent platforms",
         local_rows,
         "The Status column uses exactly the words and rules of "
-        "[docs/support.md](../support.md): `verified end-to-end (DATE)` is a real session "
-        "archived on a real machine with the date recorded, `supported` claims the path "
-        "or route and not the end to end run.",
+        "[docs/support.md](../support.md): `verified end-to-end` is a real session "
+        "archived on a real machine, with its date shown only in the Last verified "
+        "column, while `supported` claims the path or route and not the end to end run.",
     )
     section(
         "## Web AI chats (browser extension)",

@@ -5,12 +5,12 @@
 |---|---|
 | Id | `grok-bot` |
 | Surface | desktop app |
-| Status | verified end-to-end (2026-10-13) |
+| Status | verified end-to-end |
 | Last verified end to end | 2026-10-13 (macOS): macOS: all 8 real replica sessions in the desktop app's local persistence were collected into an isolated stage, pushed to a throwaway local destination, and read back; five independent SHA-256 digests agreed for every session, and two earlier runs a day apart repeated the same cycle identically. Linux and Windows remain unverified. |
 
 | OS | Session path template | Format | Confidence | Status |
 |---|---|---|---|---|
-| macOS | `~/Library/Application Support/Grok Bot/` | json | measured-locally | verified end-to-end (2026-10-13) |
+| macOS | `~/Library/Application Support/Grok Bot/` | json | measured-locally | verified end-to-end |
 | Linux | - | - | - | not supported |
 | Windows | - | - | - | not supported |
 <!-- END GENERATED -->

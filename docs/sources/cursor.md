@@ -5,14 +5,14 @@
 |---|---|
 | Id | `cursor` |
 | Surface | ide |
-| Status | verified end-to-end (2026-09-25) |
+| Status | verified end-to-end |
 | Last verified end to end | 2026-09-25: all real sessions of this store are held by the real archive and read back and rendered by the reader (git 41db2bf) |
 
 | OS | Session path template | Format | Confidence | Status |
 |---|---|---|---|---|
-| macOS | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | sqlite | measured-locally | verified end-to-end (2026-09-25) |
-| Linux | `$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb` | sqlite | community-claim-unverified | verified end-to-end (2026-09-25) |
-| Windows | `%APPDATA%\Cursor\User\globalStorage\state.vscdb` | sqlite | community-claim-unverified | verified end-to-end (2026-09-25) |
+| macOS | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | sqlite | measured-locally | verified end-to-end |
+| Linux | `$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb` | sqlite | community-claim-unverified | verified end-to-end |
+| Windows | `%APPDATA%\Cursor\User\globalStorage\state.vscdb` | sqlite | community-claim-unverified | verified end-to-end |
 <!-- END GENERATED -->
 
 ## What it is

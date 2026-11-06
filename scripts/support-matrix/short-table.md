@@ -1,34 +1,34 @@
-**5+ platforms.** Local AI tools, agent platforms, and web chats.
+**27 platforms.** Local AI tools, agent platforms, and web chats.
 
 | Surface | Platform | Status | Last verified |
 |---|---|---|---|
-| Local | Claude Code | verified end-to-end (2026-09-25) | 2026-09-25 |
-| Local | OpenAI Codex CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
-| Local | Gemini CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
-| Local | Google Antigravity | verified end-to-end (2026-10-03) | 2026-10-03 |
-| Local | opencode | verified end-to-end (2026-09-25) | 2026-09-25 |
+| Local | Claude Code | verified end-to-end | 2026-09-25 |
+| Local | OpenAI Codex CLI | verified end-to-end | 2026-09-25 |
+| Local | Gemini CLI | verified end-to-end | 2026-09-25 |
+| Local | Google Antigravity | verified end-to-end | 2026-10-03 |
+| Local | opencode | verified end-to-end | 2026-09-25 |
 | Agent platform | OpenClaw | supported | - |
-| Agent platform | Hermes Agent | verified end-to-end (2026-10-06) | 2026-10-06 |
-| Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
-| Agent platform | Grok Bot (desktop) | verified end-to-end (2026-10-13) | 2026-10-13 |
-| Local | Grok (xAI CLI) | verified end-to-end (2026-10-03) | 2026-10-03 |
-| Local | GitHub Copilot CLI | verified end-to-end (2026-10-06) | 2026-10-06 |
+| Agent platform | Hermes Agent | verified end-to-end | 2026-10-06 |
+| Local | Cursor | verified end-to-end | 2026-09-25 |
+| Agent platform | Grok Bot (desktop) | verified end-to-end | 2026-10-13 |
+| Local | Grok (xAI CLI) | verified end-to-end | 2026-10-03 |
+| Local | GitHub Copilot CLI | verified end-to-end | 2026-10-06 |
 | Local | aider | supported | - |
 | Local | crush | not supported | - |
-| Local | Zed | verified end-to-end (2026-10-03) | 2026-10-03 |
+| Local | Zed | verified end-to-end | 2026-10-03 |
 | Local | Continue | supported | - |
-| Local | Kimi Code | verified end-to-end (2026-10-03) | 2026-10-03 |
-| Local | DeepSeek Harness | verified end-to-end (2026-10-06) | 2026-10-06 |
+| Local | Kimi Code | verified end-to-end | 2026-10-03 |
+| Local | DeepSeek Harness | verified end-to-end | 2026-10-06 |
 | Local | Codebuff / Freebuff | supported | - |
 | Agent platform | WorkBuddy | supported | - |
 | Agent platform | CodeBuddy | supported | - |
-| Web | deepseek | verified end-to-end on the earlier broad route (2026-09-24); the narrowed route of 2026-10-06 is not live-verified | 2026-09-24 |
-| Web | perplexity | experimental | - |
-| Web | chatgpt | verified end-to-end (2026-09-24) | 2026-09-24 |
-| Web | gemini | verified end-to-end (2026-09-24) | 2026-09-24 |
-| Web | claude | verified end-to-end (2026-09-24) | 2026-09-24 |
-| Web | kimi | experimental | - |
-| Web | grok | verified end-to-end (2026-09-24) | 2026-09-24 |
+| Web | DeepSeek | verified end-to-end on the earlier broad route (2026-09-24); the narrowed route of 2026-10-06 is not live-verified | 2026-09-24 |
+| Web | Perplexity | experimental | - |
+| Web | ChatGPT | verified end-to-end | 2026-09-24 |
+| Web | Gemini | verified end-to-end | 2026-09-24 |
+| Web | Claude | verified end-to-end | 2026-09-24 |
+| Web | Kimi | experimental | - |
+| Web | Grok | verified end-to-end | 2026-09-24 |
 
 Verified means a maintainer archived a real session end to end on their own machine. Formats change, so a date is recorded instead of a permanent check; a date older than 90 days is shown as needs re-check (DATE).
 

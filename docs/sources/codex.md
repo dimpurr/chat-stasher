@@ -5,14 +5,14 @@
 |---|---|
 | Id | `codex` |
 | Surface | cli |
-| Status | verified end-to-end (2026-09-25) |
+| Status | verified end-to-end |
 | Last verified end to end | 2026-09-25: real sessions read back and rendered from the real archive on a real machine (git 41db2bf); the founding pass sealed 91 real claude-code and codex sessions and matched the read-back hash (git 52c2e00) |
 
 | Source root | OS | Session path template | Format | Confidence | Status |
 |---|---|---|---|---|---|
-| primary | macOS | `~/.codex/sessions/` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) |
-| primary | Linux | `$HOME/.codex/sessions/` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) |
-| primary | Windows | `%USERPROFILE%\.codex\sessions\` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) |
+| primary | macOS | `~/.codex/sessions/` | jsonl / jsonl.zst | source-confirmed | verified end-to-end |
+| primary | Linux | `$HOME/.codex/sessions/` | jsonl / jsonl.zst | source-confirmed | verified end-to-end |
+| primary | Windows | `%USERPROFILE%\.codex\sessions\` | jsonl / jsonl.zst | source-confirmed | verified end-to-end |
 | codex-archived | macOS | `~/.codex/archived_sessions/` | jsonl / jsonl.zst | measured-locally | supported |
 | codex-archived | Linux | `$HOME/.codex/archived_sessions/` | jsonl / jsonl.zst | source-confirmed | supported |
 | codex-archived | Windows | `%USERPROFILE%\.codex\archived_sessions\` | jsonl / jsonl.zst | source-confirmed | supported |

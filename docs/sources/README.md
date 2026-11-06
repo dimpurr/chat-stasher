@@ -8,28 +8,28 @@ One page per source chat-stasher can archive: what it is, what we collect from i
 
 | Page | Surface | Status | Last verified |
 |---|---|---|---|
-| [Claude Code](claude-code.md) | cli, desktop app (Cowork) | verified end-to-end (2026-09-25) | 2026-09-25 |
-| [OpenAI Codex CLI](codex.md) | cli | verified end-to-end (2026-09-25) | 2026-09-25 |
-| [Gemini CLI](gemini-cli.md) | cli | verified end-to-end (2026-09-25) | 2026-09-25 |
-| [Google Antigravity](google-antigravity.md) | cli, ide, desktop app | verified end-to-end (2026-10-03) | 2026-10-03 (macOS) |
-| [opencode](opencode.md) | cli | verified end-to-end (2026-09-25) | 2026-09-25 |
+| [Claude Code](claude-code.md) | cli, desktop app (Cowork) | verified end-to-end | 2026-09-25 |
+| [OpenAI Codex CLI](codex.md) | cli | verified end-to-end | 2026-09-25 |
+| [Gemini CLI](gemini-cli.md) | cli | verified end-to-end | 2026-09-25 |
+| [Google Antigravity](google-antigravity.md) | cli, ide, desktop app | verified end-to-end | 2026-10-03 (macOS) |
+| [opencode](opencode.md) | cli | verified end-to-end | 2026-09-25 |
 | [OpenClaw](openclaw.md) | cli | supported | not yet verified end to end |
-| [Hermes Agent](hermes-agent.md) | cli | verified end-to-end (2026-10-06) | 2026-10-06 (macOS) |
-| [Cursor](cursor.md) | ide | verified end-to-end (2026-09-25) | 2026-09-25 |
-| [Grok Bot (desktop)](grok-bot.md) | desktop app | verified end-to-end (2026-10-13) | 2026-10-13 (macOS) |
-| [Grok (xAI CLI)](grok.md) | cli | verified end-to-end (2026-10-03) | 2026-10-03 (macOS) |
-| [GitHub Copilot CLI](github-copilot-cli.md) | cli | verified end-to-end (2026-10-06) | 2026-10-06 (macOS) |
+| [Hermes Agent](hermes-agent.md) | cli | verified end-to-end | 2026-10-06 (macOS) |
+| [Cursor](cursor.md) | ide | verified end-to-end | 2026-09-25 |
+| [Grok Bot (desktop)](grok-bot.md) | desktop app | verified end-to-end | 2026-10-13 (macOS) |
+| [Grok (xAI CLI)](grok.md) | cli | verified end-to-end | 2026-10-03 (macOS) |
+| [GitHub Copilot CLI](github-copilot-cli.md) | cli | verified end-to-end | 2026-10-06 (macOS) |
 | [aider](aider.md) | cli | supported | not yet verified end to end |
 | [crush](crush.md) | cli | not supported | not yet verified end to end |
-| [Zed](zed.md) | ide | verified end-to-end (2026-10-03) | 2026-10-03 (macOS) |
+| [Zed](zed.md) | ide | verified end-to-end | 2026-10-03 (macOS) |
 | [Continue](continue.md) | ide extension | supported | not yet verified end to end |
-| [Kimi Code](kimi-code.md) | cli | verified end-to-end (2026-10-03) | 2026-10-03 (macOS) |
-| [DeepSeek Harness](deepseek-harness.md) | cli, desktop app, web | verified end-to-end (2026-10-06) | 2026-10-06 (macOS) |
+| [Kimi Code](kimi-code.md) | cli | verified end-to-end | 2026-10-03 (macOS) |
+| [DeepSeek Harness](deepseek-harness.md) | cli, desktop app, web | verified end-to-end | 2026-10-06 (macOS) |
 | [Codebuff / Freebuff](codebuff.md) | cli | supported | not yet verified end to end |
 | [WorkBuddy](workbuddy.md) | desktop app | supported | not yet verified end to end |
 | [CodeBuddy](codebuddy.md) | cli | supported | not yet verified end to end |
 
-The Status column uses exactly the words and rules of [docs/support.md](../support.md): `verified end-to-end (DATE)` is a real session archived on a real machine with the date recorded, `supported` claims the path or route and not the end to end run.
+The Status column uses exactly the words and rules of [docs/support.md](../support.md): `verified end-to-end` is a real session archived on a real machine, with its date shown only in the Last verified column, while `supported` claims the path or route and not the end to end run.
 
 ## Web AI chats (browser extension)
 
@@ -37,11 +37,11 @@ The Status column uses exactly the words and rules of [docs/support.md](../suppo
 |---|---|---|---|
 | [chat.deepseek.com (web)](web-deepseek.md) | web | verified end-to-end on the earlier broad route (2026-09-24); the narrowed route of 2026-10-06 is not live-verified | 2026-09-24 |
 | [perplexity.ai (web)](web-perplexity.md) | web | experimental | not yet verified end to end |
-| [chatgpt.com (web)](web-chatgpt.md) | web | verified end-to-end (2026-09-24) | 2026-09-24 |
-| [gemini.google.com (web)](web-gemini.md) | web | verified end-to-end (2026-09-24) | 2026-09-24 |
-| [claude.ai (web)](web-claude.md) | web | verified end-to-end (2026-09-24) | 2026-09-24 |
+| [chatgpt.com (web)](web-chatgpt.md) | web | verified end-to-end | 2026-09-24 |
+| [gemini.google.com (web)](web-gemini.md) | web | verified end-to-end | 2026-09-24 |
+| [claude.ai (web)](web-claude.md) | web | verified end-to-end | 2026-09-24 |
 | [kimi.com (web)](web-kimi.md) | web | experimental | not yet verified end to end |
-| [grok.com (web)](web-grok.md) | web | verified end-to-end (2026-09-24) | 2026-09-24 |
+| [grok.com (web)](web-grok.md) | web | verified end-to-end | 2026-09-24 |
 
 These are the platforms the browser extension captures; the row for each is read from the extension's own platform table. `Last verified` for a platform is the date of a live acceptance run of the build the record names.
 
