@@ -89,7 +89,7 @@ use crate::store;
 use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -531,6 +531,32 @@ pub struct DestinationView<'a> {
     /// then fall back to the local proof, and an unproved cursor is reread.
     machine_log_probe: Option<Box<dyn Fn() -> anyhow::Result<MachineLogFacts> + 'a>>,
     machine_log_cache: OnceCell<Option<MachineLogFacts>>,
+    /// W1091 (PERF-NEXT ①): what the session-facts probe cost the pass that
+    /// asked it. Measured inside [`Self::facts`] so every caller — the collect
+    /// pass, the grok-bot import leg, backfill — pays the same instrumentation,
+    /// and read back once after the pass through [`Self::session_facts_ms`].
+    session_timing: Cell<DestinationProbeTiming>,
+    /// W1091 (PERF-NEXT ①): the same measurement for the machine-log probe.
+    machine_log_timing: Cell<DestinationProbeTiming>,
+}
+
+/// W1091 (PERF-NEXT ①): one destination probe's wall time and the size of the
+/// wanted set it was asked with. Counts and durations only — the timing never
+/// names a session, a path or a backend, the same boundary the surrounding
+/// report fields hold.
+#[derive(Debug, Default, Clone, Copy)]
+struct DestinationProbeTiming {
+    /// Wall time the probe call took, in milliseconds. Zero never stands in
+    /// for "did not run": a probe that ran and finished inside a millisecond
+    /// records an honest zero here, and `asked` below is what says it ran.
+    ms: u64,
+    /// Whether the probe ran at all in this view's life. A failed probe is
+    /// still a run: its `Err` is an answer the collector acts on, and the time
+    /// it took to fail is exactly what a slow-pass diagnosis needs to see.
+    asked: bool,
+    /// The size of the wanted set the probe was asked with (the machine-log
+    /// probe takes no set; its timing keeps `None` there).
+    wanted: Option<usize>,
 }
 
 impl<'a> DestinationView<'a> {
@@ -544,6 +570,8 @@ impl<'a> DestinationView<'a> {
             cache: OnceCell::new(),
             machine_log_probe: None,
             machine_log_cache: OnceCell::new(),
+            session_timing: Cell::default(),
+            machine_log_timing: Cell::default(),
         }
     }
 
@@ -561,6 +589,8 @@ impl<'a> DestinationView<'a> {
             cache: OnceCell::new(),
             machine_log_probe: Some(Box::new(machine_log_probe)),
             machine_log_cache: OnceCell::new(),
+            session_timing: Cell::default(),
+            machine_log_timing: Cell::default(),
         }
     }
 
@@ -584,7 +614,22 @@ impl<'a> DestinationView<'a> {
     /// how already-archived content ends up re-staged.
     pub fn facts(&self, wanted: &BTreeSet<(String, String)>) -> Option<&ArchiveFacts> {
         self.cache
-            .get_or_init(|| (self.probe)(wanted).ok())
+            .get_or_init(|| {
+                // W1091 (PERF-NEXT ①): the probe call is the destination's
+                // whole cumulative archive read in every real configuration
+                // (`destination_view` in main.rs: open the repository, walk
+                // every snapshot, download what `wanted` resolves to), so its
+                // wall time is measured here — whatever the outcome — and
+                // reported beside the collect timings it sits inside.
+                let started = std::time::Instant::now();
+                let facts = (self.probe)(wanted).ok();
+                self.session_timing.set(DestinationProbeTiming {
+                    ms: started.elapsed().as_millis() as u64,
+                    asked: true,
+                    wanted: Some(wanted.len()),
+                });
+                facts
+            })
             .as_ref()
     }
 
@@ -596,7 +641,42 @@ impl<'a> DestinationView<'a> {
     /// still owed on the stage never opens the archive a second time.
     pub fn machine_log_facts(&self) -> Option<&MachineLogFacts> {
         let probe = self.machine_log_probe.as_ref()?;
-        self.machine_log_cache.get_or_init(|| probe().ok()).as_ref()
+        self.machine_log_cache
+            .get_or_init(|| {
+                // W1091 (PERF-NEXT ①): the same measurement as [`Self::facts`]
+                // for the second, machine-log-shaped read of the same archive.
+                // The probe takes no wanted set, so its timing records `None`
+                // for one: the machine-log answer is never scoped.
+                let started = std::time::Instant::now();
+                let facts = probe().ok();
+                self.machine_log_timing.set(DestinationProbeTiming {
+                    ms: started.elapsed().as_millis() as u64,
+                    asked: true,
+                    wanted: None,
+                });
+                facts
+            })
+            .as_ref()
+    }
+
+    /// W1091 (PERF-NEXT ①): the session-facts probe's wall time, in
+    /// milliseconds. Zero when the pass never asked the archive — that zero
+    /// is a measurement too, and the wanted-side counter beside it says the
+    /// same pass had nothing it needed remote proof for.
+    pub fn session_facts_ms(&self) -> u64 {
+        self.session_timing.get().ms
+    }
+
+    /// W1091 (PERF-NEXT ①): whether [`Self::facts`] ran at all in this
+    /// view's life — asked-and-failed included.
+    pub fn session_facts_asked(&self) -> bool {
+        self.session_timing.get().asked
+    }
+
+    /// W1091 (PERF-NEXT ①): the machine-log probe's wall time, in
+    /// milliseconds, zero when the pass never asked the machine-log question.
+    pub fn machine_log_facts_ms(&self) -> u64 {
+        self.machine_log_timing.get().ms
     }
 }
 
@@ -1811,6 +1891,45 @@ pub struct CollectReport {
     pub hash_cache_hits: u64,
     /// W1083 (C): hash-cache lookups that had to read the bytes.
     pub hash_cache_misses: u64,
+    /// W1091 (PERF-NEXT ①): the session-facts probe's wall time this pass,
+    /// in milliseconds — the destination archive read the pass paid for when
+    /// a stored debt could not be proved locally. A failed probe is timed
+    /// too: the time it took to fail is a fact of the pass. Zero when the
+    /// pass never asked ([`Self::destination_facts_wanted`] beside it says
+    /// whether it had anything to ask about).
+    pub destination_facts_ms: u64,
+    /// W1091 (PERF-NEXT ①): whether this pass asked the destination's
+    /// archive for session facts at all — asked-and-failed included. The
+    /// flag keeps a probe that failed inside one millisecond honest: `ms`
+    /// alone could not tell it from a pass that never asked.
+    pub destination_facts_asked: bool,
+    /// W1091 (PERF-NEXT ①): sessions this pass actually needed the remote
+    /// archive's facts for — the size of the `wanted` set `collect` built
+    /// before asking, whether or not the probe ran. A pass that proves
+    /// every debt locally measures zero here, and that zero is the number
+    /// that makes a slow-but-empty archive read visible as such.
+    pub destination_facts_wanted: usize,
+    /// W1091 (PERF-NEXT ①): the machine-log probe's wall time this pass, in
+    /// milliseconds — the second, machine-log-shaped read of the same
+    /// archive (ADR-053 D4), as distinct from the session-facts read above
+    /// because the two probes walk the same snapshots for different answers.
+    /// Zero when the pass never asked the machine-log question.
+    pub machine_log_facts_ms: u64,
+    /// W1091 (PERF-NEXT ①): committed-prefix validations the pass attempted
+    /// — the re-hash of the prefix a stored cursor claims, the cost that
+    /// prints as `prefix_validated` when it reads real bytes. Counted
+    /// whether the hash cache answered or the bytes were read.
+    pub prefix_checks: u64,
+    /// W1091 (PERF-NEXT ①): those validations the hash cache answered
+    /// without reading (the validated bytes were zero by the same answer).
+    pub prefix_check_cache_hits: u64,
+    /// W1091 (PERF-NEXT ①): those validations that had to read the bytes.
+    pub prefix_check_cache_misses: u64,
+    /// W1091 (PERF-NEXT ①): bytes those validations physically read: the
+    /// streamed digest read at cache miss, plus the post-delta re-check read
+    /// of the same prefix the no-shortcut rule takes. On a hit the read is
+    /// zero — the counter says what validation *cost*, not what it covered.
+    pub prefix_check_bytes_read: u64,
     /// W1083 (C): a failure to persist the hash cache at the pass's end, as
     /// an I/O error kind word. The cache is a pure optimization — the pass's
     /// data does not depend on it — so this is reported, never fatal.
@@ -1911,6 +2030,12 @@ struct CollectCounters {
     /// bytes of new and changed records (Δ in D6's hourly rule,
     /// `written ≤ max(1.2 × Δ, 64 KiB)`).
     sqlite_growth_bytes: u64,
+    /// W1091 (PERF-NEXT ①): committed-prefix validations attempted in the
+    /// read paths below, each split by how the answer was paid for.
+    prefix_checks: u64,
+    prefix_check_cache_hits: u64,
+    prefix_check_cache_misses: u64,
+    prefix_check_bytes_read: u64,
 }
 
 /// Default private state directory. It is owned by chat-stasher, never a
@@ -2504,6 +2629,22 @@ pub fn collect_scan_report_with_relocation(
     report.stage_covers_bytes_read = stage_stats.bytes_read;
     report.hash_cache_hits = cache_stats.hits;
     report.hash_cache_misses = cache_stats.misses;
+    // W1091 (PERF-NEXT ①): the prefix-validation ledger of the read paths
+    // — how many validations ran, how many the cache answered without
+    // reading, and what the ones that read cost. Printed per pass beside
+    // `read bytes` and kept in the run-state, so a round whose
+    // `prefix_validated` stays gigabytes while this says `misses≈checks`
+    // shows the cache not being consulted, and one whose misses are
+    // proportional to the hour's change shows it working.
+    report.prefix_checks = counters.prefix_checks;
+    report.prefix_check_cache_hits = counters.prefix_check_cache_hits;
+    report.prefix_check_cache_misses = counters.prefix_check_cache_misses;
+    report.prefix_check_bytes_read = counters.prefix_check_bytes_read;
+    // W1091 (PERF-NEXT ①): the sessions this pass actually needed remote
+    // facts for — recorded whether or not the probe ran, because the size
+    // of the set is the pass's own measurement and the number PERF-NEXT ②
+    // decides on (zero means the archive never had to be opened this round).
+    report.destination_facts_wanted = wanted.len();
     // Machine logs are collected after every session, and into their own
     // report fields: a machine log is never a session outcome, never a session
     // shard, and never a session line (ADR-053 D4).
@@ -2516,6 +2657,13 @@ pub fn collect_scan_report_with_relocation(
         destination,
         &mut report,
     )?;
+    // W1091 (PERF-NEXT ①): the destination probes' wall times, read out
+    // after every code path that may have asked (machine-log collection
+    // above is the last of them) so the report carries the probes' final
+    // numbers — timings, not behavior, are the only thing taken here.
+    report.destination_facts_ms = destination.session_facts_ms();
+    report.destination_facts_asked = destination.session_facts_asked();
+    report.machine_log_facts_ms = destination.machine_log_facts_ms();
     // W1057: a round that reset or could not prove a cursor, or that had to
     // re-read the manifest, is recorded durably beside the state files. The
     // run log is overwritten by the next round; this row is not. A quiet
@@ -6191,6 +6339,20 @@ fn read_jsonl_delta(
             // read already took, so answering costs nothing); a miss
             // reads and namespaces the bytes exactly as before.
             let prefix = hash_cache.prefix_sha256(path, entry.offset, Some(&before_metadata))?;
+            // W1091 (PERF-NEXT ①): one counter row per validation, split by
+            // how the answer was paid for — the hash cache read nothing, or
+            // the bytes were streamed. This measures only the validation
+            // itself: the cursor's digest the pass then *stores* (the
+            // `plain_state` call below) is a different question with its own
+            // cache accounting, and counting both here would double every
+            // number the line tries to report.
+            counters.prefix_checks += 1;
+            if prefix.from_cache {
+                counters.prefix_check_cache_hits += 1;
+            } else {
+                counters.prefix_check_cache_misses += 1;
+                counters.prefix_check_bytes_read += prefix.bytes_read;
+            }
             if prefix.sha256 == expected {
                 let delta = read_range(path, entry.offset, before - entry.offset)?;
                 let after_metadata = fs::metadata(path)?;
@@ -6219,6 +6381,11 @@ fn read_jsonl_delta(
                     }
                 } else if prefix.bytes_read == entry.offset {
                     let prefix_after = read_range(path, 0, entry.offset)?;
+                    // W1091 (PERF-NEXT ①): this re-check is the second read
+                    // of the same prefix the no-shortcut rule takes at a
+                    // cache miss, so its bytes belong to what validation
+                    // cost this pass.
+                    counters.prefix_check_bytes_read += prefix_after.len() as u64;
                     if sha256_hex(&prefix_after) != expected {
                         continue;
                     }

@@ -201,6 +201,55 @@ pub struct PassMetrics {
     /// W1083 (C): hash-cache lookups that had to read the bytes.
     #[serde(default)]
     pub hash_cache_misses: u64,
+    /// W1091 (PERF-NEXT ①): wall time the session-facts probe spent reading
+    /// the destination's archive this pass, in milliseconds — the lazy
+    /// `DestinationView::facts` call, whose real work is one cumulative
+    /// archive read. It sits *inside* the collect phase, so `collect` minus
+    /// this field is the collect work the probes did not pay for; recorded
+    /// beside it rather than subtracted, so both numbers stay raw. Zero when
+    /// the pass never asked the archive.
+    #[serde(default)]
+    pub destination_facts_ms: u64,
+    /// W1091 (PERF-NEXT ①): whether this pass asked the destination's
+    /// archive for session facts at all — a probe that ran **and failed**
+    /// counts as asked (its wall time is in `destination_facts_ms`, and an
+    /// unanswered question must not read as "never asked" when the pass
+    /// spends its milliseconds on a failing backend).
+    #[serde(default)]
+    pub destination_facts_asked: bool,
+    /// W1091 (PERF-NEXT ①): sessions this pass actually needed the remote
+    /// archive's facts for — the size of the `wanted` set the pass built,
+    /// whether or not the probe ran. Zero is a measurement: every stored
+    /// debt proved itself locally (or no debt asked), so the slow-round
+    /// question "was the archive read worth it" has its denominator here.
+    #[serde(default)]
+    pub destination_facts_wanted: u64,
+    /// W1091 (PERF-NEXT ①): wall time the machine-log probe spent on the
+    /// same archive this pass, in milliseconds (ADR-053 D4's second,
+    /// machine-log-shaped read). Inside the collect phase the way
+    /// `destination_facts_ms` is; zero when the pass never asked the
+    /// machine-log question.
+    #[serde(default)]
+    pub machine_log_facts_ms: u64,
+    /// W1091 (PERF-NEXT ①): committed-prefix validations the pass attempted
+    /// (the re-hash of the prefix a stored JSONL cursor claims), counted
+    /// whether the hash cache answered or the bytes were read. The
+    /// per-validation split below is what shows a `shard_bytes_read_hashed`
+    /// still in gigabytes *why*: every check missing means each one read.
+    #[serde(default)]
+    pub prefix_checks: u64,
+    /// W1091 (PERF-NEXT ①): those validations the hash cache answered
+    /// without reading a byte.
+    #[serde(default)]
+    pub prefix_check_cache_hits: u64,
+    /// W1091 (PERF-NEXT ①): those validations that had to read the bytes.
+    #[serde(default)]
+    pub prefix_check_cache_misses: u64,
+    /// W1091 (PERF-NEXT ①): bytes the validations physically read — the
+    /// streamed digest read at cache miss plus the post-delta re-check read
+    /// of the same prefix. The cost of validation, not what it covered.
+    #[serde(default)]
+    pub prefix_check_bytes_read: u64,
 }
 
 impl PassMetrics {
@@ -255,6 +304,15 @@ impl PassMetrics {
     /// not run the step, and a zero standing in for "did not run" is the
     /// shape this module never prints). A pass with the mirror unconfigured
     /// or off therefore changes no output at all.
+    ///
+    /// W1091 (PERF-NEXT ①) adds two sections, both printed on every pass —
+    /// their zeros are measurements, not placeholders: `prefix:` carries
+    /// the committed-prefix validation ledger (checked / answered by the
+    /// hash cache / read for real / bytes read) and `dest:` carries the
+    /// destination probes (sessions the pass actually needed remote facts
+    /// for, whether the archive was asked at all, and the two probes' wall
+    /// times) — the numbers a slow round is attributed with, kept on the one
+    /// line the scheduled pass is guaranteed to print.
     pub fn summary_line(&self) -> String {
         let harness_ms = self
             .collect_harness_ms
@@ -276,6 +334,8 @@ impl PassMetrics {
              state_saves={} activity_index_sessions_carried={}; \
              gate: skipped={} grace_swept={} full_swept={} full_sweep={} \
              stage_covers_bytes_read={} hash_cache_hits={} hash_cache_misses={}; \
+             prefix: checked={} cache_hits={} cache_misses={} bytes_read={}; \
+             dest: wanted={} asked={} facts_ms={} machine_log_ms={}; \
              sg3: full_exports={} incr_passes={} incr_records={} incr_bytes={} growth_bytes={}",
             self.letta_pull_ms,
             self.scan_ms,
@@ -303,6 +363,14 @@ impl PassMetrics {
             self.stage_covers_bytes_read,
             self.hash_cache_hits,
             self.hash_cache_misses,
+            self.prefix_checks,
+            self.prefix_check_cache_hits,
+            self.prefix_check_cache_misses,
+            self.prefix_check_bytes_read,
+            self.destination_facts_wanted,
+            self.destination_facts_asked,
+            self.destination_facts_ms,
+            self.machine_log_facts_ms,
             self.sqlite_full_exports,
             self.sqlite_increment_passes,
             self.sqlite_increment_records,
