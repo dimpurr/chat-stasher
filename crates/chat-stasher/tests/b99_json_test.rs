@@ -269,6 +269,12 @@ fn status_json_unreadable_run_state_is_unreadable() {
 /// `keys` (W281 BUG-2) is one of those additions: every archive copy has its own
 /// key file, so "which keys does this machine hold, and which has the user
 /// declared saved" is a question the existing fields cannot answer.
+///
+/// `destinations` (ISSUE-007 P0) is the next one: the declared destinations
+/// with their two-state credential availability — the list a tray app needs
+/// before it can tell its user which `-destination` values would work from
+/// this process at all. Consumers that only decode the fields they declare
+/// (the menubar's Decodable structs) are unaffected.
 #[test]
 fn status_json_top_level_schema_is_stable() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -283,6 +289,7 @@ fn status_json_top_level_schema_is_stable() {
             "cli_version",
             "command",
             "config_source",
+            "destinations",
             "exit_code",
             "exit_semantics",
             "healthy",
@@ -295,6 +302,11 @@ fn status_json_top_level_schema_is_stable() {
             "sources",
         ]
     );
+    // The new field's own contract: an array of rows from the read-only
+    // availability computation, one per declared destination — and `[]`
+    // on a machine that declares none, because an empty declaration list
+    // is a fact, not a failure to look.
+    assert_eq!(v["destinations"], serde_json::json!([]));
     assert_eq!(
         v["remote_inboxes"],
         serde_json::json!({"state": "known", "inboxes": []})
