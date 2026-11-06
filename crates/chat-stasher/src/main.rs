@@ -6552,11 +6552,16 @@ fn cmd_export(
         // is the snapshot's own "once walked, never changed" (the contract in
         // `snapshot_cache.rs`), and a cold or damaged cache is a miss, never
         // a wrong answer.
-        let store = BackupStore::for_metadata_query(cfg.clone())
-            .with_shard_policy(shard_policy)
-            .with_snapshot_cache(chat_stasher::snapshot_cache::SnapshotCache::for_identity(
-                &index_identity(destination.as_deref(), repo.as_deref(), &cfg.repo_root),
-            ));
+        //
+        // The cache attaches to the scan's own twin, below — deliberately
+        // after every refusal point that precedes a read (`check_out`, the
+        // masterkey): `SnapshotCache::for_identity` creates its root on
+        // attach, and a refused run must leave the filesystem exactly as it
+        // found it (the export suite pins a byte-level `--out` refusal to
+        // write nothing anywhere), while a run that actually scans is the
+        // run the cache exists to serve. The main store stays cache-less:
+        // its remaining duties are mirror narration, and the offline twin.
+        let store = BackupStore::for_metadata_query(cfg.clone()).with_shard_policy(shard_policy);
         match (&mirror_decision, offline) {
             (chat_stasher::mirror_read::MirrorReadDecision::Serving(reads), true) => {
                 store.with_offline_mirror(Arc::clone(reads))
@@ -6623,7 +6628,14 @@ fn cmd_export(
     };
     let mut scan_heartbeat =
         chat_stasher::scanprogress::ScanHeartbeat::for_command_with_sink("export", heartbeat_sink);
-    let scan_store = store.owned_twin();
+    let scan_store = store
+        .owned_twin()
+        // SRCH-1b for `export` (ISSUE-007 F3 direction 2): the scan twin
+        // carries the destination's snapshot cache; see the store block above
+        // for why it attaches here and not there.
+        .with_snapshot_cache(chat_stasher::snapshot_cache::SnapshotCache::for_identity(
+            &index_identity(destination.as_deref(), repo.as_deref(), &cfg.repo_root),
+        ));
     let scan_mk = mk.clone();
     let scan_selector = selector.clone();
     let recall = match chat_stasher::readstep::run_behind_deadline_quiet(
