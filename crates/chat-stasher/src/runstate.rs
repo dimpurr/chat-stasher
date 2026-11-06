@@ -10,6 +10,15 @@
 //! one sentence in plain language. The write itself is silent; the only
 //! stdout this feature adds is the one W880 phase summary line.
 //!
+//! W1084 (ISSUE-008 ②, GO-1105 ②) adds the cost line that was missing when
+//! the 2026-11-05 incident happened: every pass also records the time
+//! budget it ran under, its finished duration under the heartbeat's name
+//! for it, and whether it ran over — so `status` can show the two numbers
+//! beside its verdict and the scheduled unit's error log can WARN on a
+//! round that overran the budget by half. All of that travels in this same
+//! file, read back only from here; the run-once log itself is never
+//! re-opened to answer it.
+//!
 //! Privacy: this file holds counts, byte-free timestamps and a machine
 //! *digest* only. No session content, no session id, no hostname.
 
@@ -36,6 +45,16 @@ pub const STALE_INTERVAL_MULTIPLIER: u64 = 4;
 /// Floor for the overdue threshold, so a tiny `backup_interval_secs` cannot
 /// make `status` cry wolf every few minutes.
 pub const STALE_FLOOR_SECS: u64 = 3600;
+
+/// W1084 (ISSUE-008 ②): how far past its budget a pass may run before the
+/// scheduled unit's error log gets a WARN line, as a percentage. 50 means
+/// strictly past 150% of the budget — GO-1105 ② decided the warn threshold
+/// as "a pass over its budget by 50%" (the full statement, with the
+/// reasoning, lives on [`over_budget_warn_line`]). A single round past
+/// the budget can be a one-off (a nightly full sweep, a loaded hour); a
+/// round that also burns half the interval again on top is the one
+/// nobody is watching.
+pub const OVER_BUDGET_WARN_PCT: u64 = 50;
 
 /// How this pass ended. `Noop` is a success: nothing changed, so no snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +204,49 @@ pub struct PassMetrics {
 }
 
 impl PassMetrics {
+    /// The phase that spent the most wall time, as `(summary-line key,
+    /// milliseconds)` plus — when that phase is collect — the harness
+    /// inside it that spent the most, because "collect" alone is the sum
+    /// across harnesses and cannot say which source was the slow one.
+    ///
+    /// `None` when no phase recorded any time: zero means "did not run",
+    /// and a phase that did not run is not the largest anything. The
+    /// harness names are the registry's public ids, the same labels the
+    /// summary line and `status` print, never a path.
+    pub fn largest_phase(&self) -> Option<(String, u64, Option<(String, u64)>)> {
+        // `mirror_sync` takes part only when it ran (non-zero), the same
+        // rule its summary-line rendering follows; every other phase is
+        // plain "0 = did not run" too, which the `ms > 0` guard holds for
+        // all of them.
+        let mut largest: Option<(&'static str, u64)> = None;
+        for (name, ms) in [
+            ("letta_pull", self.letta_pull_ms),
+            ("scan", self.scan_ms),
+            ("collect", self.collect_ms),
+            ("stage_audit", self.stage_audit_ms),
+            ("metadata_hash", self.metadata_hash_ms),
+            ("activity_index", self.activity_index_ms),
+            ("push_preflight", self.push_preflight_ms),
+            ("backup", self.backup_ms),
+            ("run_state_write", self.run_state_write_ms),
+            ("mirror_sync", self.mirror_sync_ms),
+        ] {
+            if ms > 0 && largest.map_or(true, |(_, largest_ms)| ms > largest_ms) {
+                largest = Some((name, ms));
+            }
+        }
+        let (phase, phase_ms) = largest?;
+        let harness = (phase == "collect")
+            .then(|| {
+                self.collect_harness_ms
+                    .iter()
+                    .max_by_key(|(_, ms)| **ms)
+                    .map(|(harness, ms)| (harness.clone(), *ms))
+            })
+            .flatten();
+        Some((phase.to_string(), phase_ms, harness))
+    }
+
     /// One line of `key=value` pairs, for the run-once summary line.
     /// Counts and durations only — no names, paths or content.
     ///
@@ -322,6 +384,29 @@ pub struct RunState {
     /// before it existed, so it defaults rather than failing the read.
     #[serde(default)]
     pub phases: PassMetrics,
+    /// W1084 (ISSUE-008 ②): the time budget this pass ran under, in
+    /// milliseconds — the default is the scheduling cadence, unless
+    /// `run_budget_secs` states a different line ([`run_budget_ms`] says
+    /// which and why). `None` when no honest budget number existed at pass
+    /// time: a record written before W1084, a pass whose config could not
+    /// be read, or a machine whose cadence itself is unusable. `status`
+    /// renders that as unknown, never as a number it invented.
+    #[serde(default)]
+    pub budget_ms: Option<u64>,
+    /// W1084 (ISSUE-008 ②): the finished pass's wall time under the name
+    /// the deputy heartbeat reads. `duration_ms` carries the same value
+    /// for every older reader; the two are written in one place only,
+    /// [`RunState::record_duration`], so they cannot drift apart.
+    /// `None` on records written before W1084.
+    #[serde(default)]
+    pub last_duration_ms: Option<u64>,
+    /// W1084 (ISSUE-008 ②): whether the finished pass ran longer than the
+    /// budget in [`Self::budget_ms`]. `None` whenever the budget is `None`
+    /// — a heartbeat must not read "unknown" as "not over": the honest
+    /// report for a budgetless round is that over-budget cannot be told,
+    /// and it reports that instead of counting the round as within.
+    #[serde(default)]
+    pub over_budget: Option<bool>,
 }
 
 impl RunState {
@@ -356,7 +441,28 @@ impl RunState {
             torn_skips: 0,
             machine_digest: machine_digest(machine),
             phases: PassMetrics::default(),
+            budget_ms: None,
+            last_duration_ms: None,
+            over_budget: None,
         }
+    }
+
+    /// Stamp the finished pass's wall time on the record: the legacy
+    /// `duration_ms`, the heartbeat's `last_duration_ms` twin, and the
+    /// over-budget judgment, all in this one method so no pass can write
+    /// them apart (W1084, ISSUE-008 ②). The judgment is `None` whenever
+    /// the record holds no usable budget — never a false "not over".
+    pub fn record_duration(&mut self, duration_ms: u64) {
+        self.duration_ms = duration_ms;
+        self.last_duration_ms = Some(duration_ms);
+        self.over_budget = self
+            .budget_ms
+            // A zero budget would divide the percentage below and judge
+            // every round over; nothing produces it (an explicit zero
+            // refuses the pass), but a hand-crafted record must not
+            // upgrade it into a judgment either.
+            .filter(|budget_ms| *budget_ms > 0)
+            .map(|budget_ms| duration_ms > budget_ms);
     }
 
     /// Restamp `finished_at_unix` with the current second, immediately before
@@ -446,6 +552,99 @@ pub fn stale_after_secs(interval_secs: u64) -> u64 {
         .max(STALE_FLOOR_SECS)
 }
 
+/// The time budget one `run-once` pass runs against, in milliseconds
+/// (W1084, ISSUE-008 ②).
+///
+/// The default is the scheduling cadence itself: a pass is expected to
+/// fit inside the interval it is scheduled at, because the 2026-11-05
+/// incident was exactly rounds that ran 44–98 minutes against an hourly
+/// cadence — the next round started as the last one finished, and no
+/// check anywhere said how long a round "should" take. `run_budget_secs`
+/// overrides the cadence as the budget when a machine wants a line other
+/// than its cadence (a 600 s budget on a 3600 s cadence keeps the noise
+/// line tighter than the schedule).
+///
+/// The two ways this returns `[Ok(None)]` are both honest "cannot tell":
+///
+/// * an explicit `run_budget_secs = 0` is refused with an error before
+///   that, naming the key — the alternative would be a budget every
+///   pass is over, WARN spam every interval;
+/// * with no override, a cadence the scheduler already refuses
+///   (`backup_interval_secs = 0`) leaves the budget unknown: the pass
+///   still archives, `status` still reports the invalid cadence as its
+///   own verdict, and neither is turned into a fabricated budget.
+pub fn run_budget_ms(config: &crate::config::Config) -> anyhow::Result<Option<u64>> {
+    if let Some(explicit) = config.run_budget_secs {
+        if explicit == 0 {
+            anyhow::bail!("run_budget_secs must be greater than zero");
+        }
+        return Ok(Some(explicit.saturating_mul(1000)));
+    }
+    match crate::schedule::interval_secs(config) {
+        Ok(interval_secs) => Ok(Some(interval_secs.saturating_mul(1000))),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The WARN line a pass over its budget leaves in the scheduled unit's
+/// error log (W1084, ISSUE-008 ②, GO-1105 ②).
+///
+/// The threshold is *strictly past* 150% of the budget — a pass landing
+/// exactly on the line is at the line, not over it — chosen by GO-1105 ②
+/// because a single over-budget round can be a one-off while a round that
+/// burns the whole interval and half of another is the shape that was
+/// silently accepted every hour during the incident.
+///
+/// Every fact the line names is stated so the log entry stands on its own:
+/// the round's own wall time, the budget it ran against, the over-run as a
+/// percentage of that budget, and the phase that spent the most wall time
+/// (naming the harness inside collect when collect is the slow phase, and
+/// saying so in words when no timer recorded anything). Durations and
+/// percentages only — the line cannot name a session, a path or a title,
+/// the same boundary the rest of this record holds.
+pub fn over_budget_warn_line(
+    duration_ms: u64,
+    budget_ms: u64,
+    phases: &PassMetrics,
+) -> Option<String> {
+    if budget_ms == 0 {
+        return None;
+    }
+    if duration_ms.saturating_mul(100) <= budget_ms.saturating_mul(100 + OVER_BUDGET_WARN_PCT) {
+        return None;
+    }
+    let attribution = match phases.largest_phase() {
+        Some((phase, phase_ms, Some((harness, harness_ms)))) => format!(
+            "; largest phase {phase} at {phase_ms} ms, of which the {harness} \
+             harness alone spent {harness_ms} ms"
+        ),
+        Some((phase, phase_ms, None)) => {
+            format!("; largest phase {phase} at {phase_ms} ms")
+        }
+        // A round long enough to trip the warn with every phase timer at
+        // zero is a record that did not measure where its time went —
+        // named in words rather than papered over with a plain zero.
+        None => "; the phase timers record no time in any phase".to_string(),
+    };
+    Some(format!(
+        "[run-once] WARN: this pass overran its time budget: took {duration_ms} ms \
+         against a budget of {budget_ms} ms ({}% of the budget, past the warn \
+         line at {}%){attribution}",
+        percent_of_budget_text(duration_ms, budget_ms),
+        100 + OVER_BUDGET_WARN_PCT,
+    ))
+}
+
+/// `duration_ms` as a percentage of `budget_ms`, with one decimal, because
+/// the round bytes vary: the incident's own numbers were 163.9%, and a
+/// whole-number rounding would print the boundary round as "150% of the
+/// budget, past the warn line at 150%" — a sentence that contradicts
+/// itself. `budget_ms` must be non-zero; every caller checks first.
+fn percent_of_budget_text(duration_ms: u64, budget_ms: u64) -> String {
+    let per_mille = duration_ms.saturating_mul(1000) / budget_ms;
+    format!("{}.{}", per_mille / 10, per_mille % 10)
+}
+
 /// The declared Letta producer's own line in `status`'s answer, when the
 /// last pass leaves the producer worth a separate sentence. This is the
 /// second line of the two-line split: the archive cycle's health is
@@ -475,6 +674,13 @@ pub struct Verdict {
     /// progress with the next-round promise. `None` when no producer was
     /// declared or it completed.
     pub letta: Option<LettaLine>,
+    /// W1084 (ISSUE-008 ②): the budget line, the last round's two numbers
+    /// — its duration and the budget it ran against — plus the
+    /// over-budget judgment, answered from the record alone (the run-once
+    /// log is never opened for it). `None` when there is no record at
+    /// all: a missing or unreadable record has no duration to compare,
+    /// and its verdict line already says what it is.
+    pub budget: Option<String>,
 }
 
 /// Turn a read into one sentence. `now_unix` is a parameter, never read from
@@ -489,6 +695,7 @@ pub fn summarize(read: &RunStateRead, now_unix: u64, stale_after_secs: u64) -> V
                 .to_string(),
             healthy: false,
             letta: None,
+            budget: None,
         },
         RunStateRead::Unreadable(why) => Verdict {
             line: format!(
@@ -496,10 +703,18 @@ pub fn summarize(read: &RunStateRead, now_unix: u64, stale_after_secs: u64) -> V
             ),
             healthy: false,
             letta: None,
+            budget: None,
         },
         RunStateRead::Present(state) => {
             let age = now_unix.saturating_sub(state.finished_at_unix);
             let ago = human_age(age);
+            // W1084 (ISSUE-008 ②): the budget line is rendered beside
+            // every verdict a record can support — the timer's health and
+            // the round's cost are different questions, and an overdue or
+            // failed round is exactly the one whose numbers a reader most
+            // wants named. It never moves `healthy`: a slow round is a
+            // cost line, not a timer verdict.
+            let budget = Some(budget_line_of(state));
             // Overdue is checked before outcome on purpose: a timer that
             // stopped firing leaves a *successful* last run behind, so
             // looking only at the outcome would call it healthy forever.
@@ -513,6 +728,7 @@ pub fn summarize(read: &RunStateRead, now_unix: u64, stale_after_secs: u64) -> V
                     ),
                     healthy: false,
                     letta: letta_line_of(state),
+                    budget,
                 };
             }
             if state.outcome.is_failure() {
@@ -548,6 +764,7 @@ pub fn summarize(read: &RunStateRead, now_unix: u64, stale_after_secs: u64) -> V
                     },
                     healthy: false,
                     letta: letta_line_of(state),
+                    budget,
                 };
             }
             // The healthy first line can still carry a producer line: a
@@ -567,8 +784,39 @@ pub fn summarize(read: &RunStateRead, now_unix: u64, stale_after_secs: u64) -> V
                 ),
                 healthy: true,
                 letta: letta_line_of(state),
+                budget,
             }
         }
+    }
+}
+
+/// W1084 (ISSUE-008 ②): the budget sentence the record can answer with —
+/// the two numbers `status` shows beside its verdict and the over-budget
+/// judgment on the same line. Rendered from the record alone, so a record
+/// without a usable budget says "unknown", never a number it invented; and
+/// the over wording names the warn line so a reader can tell "over but
+/// under 150%" from "over, and the error log has the WARN".
+fn budget_line_of(state: &RunState) -> String {
+    let Some(budget_ms) = state.budget_ms.filter(|budget_ms| *budget_ms > 0) else {
+        return format!(
+            "Last round took {} ms; that pass recorded no time budget, so whether it \
+             ran over one is unknown (not \"within budget\").",
+            state.duration_ms
+        );
+    };
+    if state.duration_ms > budget_ms {
+        format!(
+            "Last round took {} ms against a budget of {budget_ms} ms — over budget \
+             ({}% of the budget; the pass's error log carries a WARN from {}%).",
+            state.duration_ms,
+            percent_of_budget_text(state.duration_ms, budget_ms),
+            100 + OVER_BUDGET_WARN_PCT,
+        )
+    } else {
+        format!(
+            "Last round took {} ms against a budget of {budget_ms} ms — within budget.",
+            state.duration_ms
+        )
     }
 }
 
@@ -676,6 +924,9 @@ pub fn run_state_json(
                 "stale_after_secs": stale_after_secs,
                 "outcome": outcome,
                 "duration_ms": state.duration_ms,
+                "last_duration_ms": state.last_duration_ms,
+                "budget_ms": state.budget_ms,
+                "over_budget": state.over_budget,
                 "failed_step": state.failed_step,
                 "pull_letta_unread": state.pull_letta_unread,
                 "pull_letta_deferred": state.pull_letta_deferred,
@@ -765,6 +1016,280 @@ mod tests {
             }
             other => panic!("pre-W880 record must load, got {other:?}"),
         }
+    }
+
+    /// W1084 (ISSUE-008 ②): a record written before the budget fields
+    /// existed still loads, with the budget unknown rather than
+    /// fabricated — the heartbeat reads `over_budget: null`, which is
+    /// "cannot tell", and `status` words it that way, never "within".
+    #[test]
+    fn a_pre_budget_record_loads_with_the_budget_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            run_state_path(&state_dir),
+            r#"{ "version": 1, "finished_at_unix": 100, "duration_ms": 5901000,
+                 "outcome": "completed", "failed_step": null, "shards_written": 0,
+                 "stage_shards": 0, "snapshot_created": false,
+                 "collect_errors": 0, "archive_gaps": 0,
+                 "machine_digest": "aaaaaaaaaaaa" }"#,
+        )
+        .unwrap();
+        match load(&state_dir) {
+            RunStateRead::Present(state) => {
+                assert_eq!(state.budget_ms, None, "no budget in an old record");
+                assert_eq!(state.last_duration_ms, None);
+                assert_eq!(
+                    state.over_budget, None,
+                    "unknown is never a false \"not over\""
+                );
+                let verdict = summarize(
+                    &RunStateRead::Present(state),
+                    100 + 60,
+                    stale_after_secs(3600),
+                );
+                let budget = verdict
+                    .budget
+                    .as_deref()
+                    .expect("the record renders its (unknown) budget line");
+                assert!(
+                    budget.contains("recorded no time budget") && budget.contains("unknown"),
+                    "the status line says unknown, in words: {budget}"
+                );
+            }
+            other => panic!("pre-W1084 record must load, got {other:?}"),
+        }
+    }
+
+    /// W1084 (ISSUE-008 ②, GO-1105 ②): the WARN is strictly past 150% of
+    /// the budget — a round that lands exactly on the line is at the line,
+    /// not over it — and the line names every fact the incident kept
+    /// silent: the round's own time, the budget, the percentage and the
+    /// phase that spent the seconds.
+    #[test]
+    fn the_warn_needs_strictly_more_than_half_over_and_names_every_fact() {
+        let mut phases = PassMetrics::default();
+        phases.collect_ms = 3_100;
+        phases.backup_ms = 600;
+        // At exactly +50% there is no warn: the threshold is strictly past.
+        assert!(over_budget_warn_line(1_500, 1_000, &phases).is_none());
+        // A hair past it warns (150.1%, the one decimal that keeps the
+        // from-150% sentence honest at the boundary).
+        let warn = over_budget_warn_line(1_501, 1_000, &phases)
+            .expect("a round 50.1% over its budget warns");
+        assert!(
+            warn.contains("[run-once] WARN: this pass overran its time budget:"),
+            "stable grep prefix first: {warn}"
+        );
+        assert!(
+            warn.contains("took 1501 ms") && warn.contains("against a budget of 1000 ms"),
+            "the round's own time and the budget, both named: {warn}"
+        );
+        assert!(
+            warn.contains("(150.1% of the budget, past the warn line at 150%)"),
+            "the over-run as a percentage of the budget, and the line it crossed: {warn}"
+        );
+        assert!(
+            warn.contains("largest phase collect at 3100 ms"),
+            "the largest phase by its summary-line name: {warn}"
+        );
+        // Within the budget: no line, no matter the shape of the phase record.
+        assert!(over_budget_warn_line(999, 1_000, &phases).is_none());
+        // A zero budget never warns: nothing produces one (an explicit zero
+        // refuses the pass), and a hand-crafted record must not upgrade it.
+        assert!(over_budget_warn_line(5_901_000, 0, &phases).is_none());
+    }
+
+    /// W1084 (ISSUE-008 ②): when collect is the slow phase, the WARN
+    /// attributes the time to the harness inside it — "collect" is a sum,
+    /// and the incident's own 31 minutes were one harness's scan — and a
+    /// record with no phase timers at all names that in words instead of
+    /// attributing the time to a zero.
+    #[test]
+    fn the_warn_names_the_harness_inside_a_slow_collect() {
+        let mut phases = PassMetrics::default();
+        phases.collect_ms = 3_100;
+        phases.collect_harness_ms.insert("chatgpt".to_string(), 300);
+        phases
+            .collect_harness_ms
+            .insert("opencode".to_string(), 2_700);
+        phases.backup_ms = 600;
+        let warn = over_budget_warn_line(4_200, 1_000, &phases).unwrap();
+        assert!(
+            warn.contains(
+                "largest phase collect at 3100 ms, of which the \
+                           opencode harness alone spent 2700 ms"
+            ),
+            "attribution continues into the harness that was slow: {warn}"
+        );
+
+        // No timer recorded anything: the warn says so rather than
+        // attributing the over-run to a zero phase.
+        let bare = over_budget_warn_line(4_200, 1_000, &PassMetrics::default()).unwrap();
+        assert!(
+            bare.contains("the phase timers record no time in any phase"),
+            "an unmeasured over-run is named as unmeasured: {bare}"
+        );
+    }
+
+    /// W1084 (ISSUE-008 ②): `record_duration` is the one place the
+    /// duration twins and the over-budget judgment are written, so they
+    /// stay in lockstep — and a record with no usable budget gets `None`
+    /// for the judgment, never a false "not over".
+    #[test]
+    fn record_duration_writes_the_twins_and_the_judgment_in_one_place() {
+        let mut state = RunState::new(RunOutcome::Completed, None, "machine", 0);
+        state.budget_ms = Some(2_000);
+        state.record_duration(1_999);
+        assert_eq!(state.duration_ms, 1_999, "the legacy field keeps its value");
+        assert_eq!(
+            state.last_duration_ms,
+            Some(1_999),
+            "the twin is the same number"
+        );
+        assert_eq!(
+            state.over_budget,
+            Some(false),
+            "one millisecond under is not over"
+        );
+        state.record_duration(2_000);
+        assert_eq!(
+            state.over_budget,
+            Some(false),
+            "over is strictly past the budget, the same strictness the warn \
+             threshold uses: at the line is not past it"
+        );
+        state.record_duration(2_001);
+        assert_eq!(
+            state.over_budget,
+            Some(true),
+            "one millisecond past is an explicit over — it ate into the next \
+             round's interval"
+        );
+        // No budget: the judgment is unknown, not "not over".
+        state.budget_ms = None;
+        state.record_duration(5_901);
+        assert_eq!(state.over_budget, None, "unknown is never a verdict");
+        // A zero budget — nothing produces one, but a hand-crafted record
+        // must not turn it into "over a zero budget".
+        state.budget_ms = Some(0);
+        state.record_duration(1);
+        assert_eq!(state.over_budget, None);
+
+        // The trio survives the real atomic write/read round trip.
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        state.budget_ms = Some(2_000);
+        state.record_duration(5_901_000);
+        save(&state_dir, &state).unwrap();
+        match load(&state_dir) {
+            RunStateRead::Present(read) => {
+                assert_eq!(read.budget_ms, Some(2_000));
+                assert_eq!(read.last_duration_ms, Some(5_901_000));
+                assert_eq!(read.over_budget, Some(true));
+            }
+            other => panic!("the W1084 trio must round-trip, got {other:?}"),
+        }
+    }
+
+    /// W1084 (ISSUE-008 ②): the budget line beside the `status` verdict —
+    /// both numbers plus the judgment, from the record alone — and the
+    /// wording never lets an over-round read as healthy budgeting or an
+    /// unknown read as "within".
+    #[test]
+    fn summarize_renders_the_budget_line_with_both_numbers_and_the_judgment() {
+        let mut over = RunState::new(RunOutcome::Completed, None, "machine", 5_901_000);
+        over.finished_at_unix = 1_760_000_000;
+        over.budget_ms = Some(3_600_000);
+        over.record_duration(5_901_000);
+        let verdict = summarize(
+            &RunStateRead::Present(over),
+            1_760_000_060,
+            stale_after_secs(3600),
+        );
+        let budget = verdict.budget.as_deref().unwrap();
+        assert!(
+            budget.contains("Last round took 5901000 ms against a budget of 3600000 ms"),
+            "both numbers, plain: {budget}"
+        );
+        assert!(
+            budget.contains(
+                "over budget (163.9% of the budget; the pass's error log \
+                             carries a WARN from 150%)"
+            ),
+            "the over judgment, the percentage, and where the WARN lives: {budget}"
+        );
+
+        let mut within = RunState::new(RunOutcome::Noop, None, "machine", 412_000);
+        within.finished_at_unix = 1_760_000_000;
+        within.budget_ms = Some(3_600_000);
+        within.record_duration(412_000);
+        let verdict = summarize(
+            &RunStateRead::Present(within),
+            1_760_000_060,
+            stale_after_secs(3600),
+        );
+        assert!(
+            verdict
+                .budget
+                .as_deref()
+                .unwrap()
+                .ends_with("within budget."),
+            "a fitting round says so: {:?}",
+            verdict.budget
+        );
+        assert!(verdict.healthy, "the budget line never moves the verdict");
+    }
+
+    /// W1084 (ISSUE-008 ②): the three heartbeat fields reach
+    /// `status --json`'s `run_state` object, and an unknown stays
+    /// `null` — which for this trio is its own honest shape: the record
+    /// is present, the budget is not, and neither is invented.
+    #[test]
+    fn status_json_carries_the_budget_trio() {
+        let mut state = RunState::new(RunOutcome::Noop, None, "machine", 5);
+        state.budget_ms = Some(2_000);
+        state.record_duration(100);
+        let json = run_state_json(&RunStateRead::Present(state), 1_000, 4 * 3600);
+        assert_eq!(json["last_duration_ms"], serde_json::json!(100));
+        assert_eq!(json["budget_ms"], serde_json::json!(2_000));
+        assert_eq!(json["over_budget"], serde_json::json!(false));
+
+        let unknown = RunState::new(RunOutcome::Noop, None, "machine", 5);
+        let json = run_state_json(&RunStateRead::Present(unknown), 1_000, 4 * 3600);
+        assert_eq!(json["last_duration_ms"], serde_json::Value::Null);
+        assert_eq!(json["budget_ms"], serde_json::Value::Null);
+        assert_eq!(json["over_budget"], serde_json::Value::Null);
+    }
+
+    /// W1084 (ISSUE-008 ②): the default budget is the cadence and an
+    /// explicit `run_budget_secs` overrides only the budget — a tighter
+    /// line does not re-write the schedule — while a zero override is an
+    /// error naming its key and an unusable cadence leaves no budget
+    /// rather than inventing one.
+    #[test]
+    fn run_budget_ms_defaults_to_the_cadence_and_refuses_a_zero_override() {
+        let mut config = crate::config::Config::default();
+        config.backup_interval_secs = Some(600);
+        assert_eq!(run_budget_ms(&config).unwrap(), Some(600_000));
+        config.run_budget_secs = Some(90);
+        assert_eq!(
+            run_budget_ms(&config).unwrap(),
+            Some(90_000),
+            "an explicit budget overrides the cadence as the line, not as the schedule"
+        );
+        config.run_budget_secs = Some(0);
+        let refusal = run_budget_ms(&config).unwrap_err().to_string();
+        assert!(
+            refusal.contains("run_budget_secs must be greater than zero"),
+            "the refusal names the key at fault: {refusal}"
+        );
+        // A cadence the scheduler already refuses leaves the budget
+        // unknown: the pass still archives, and this stays "cannot tell".
+        config.run_budget_secs = None;
+        config.backup_interval_secs = Some(0);
+        assert_eq!(run_budget_ms(&config).unwrap(), None);
     }
 
     /// W880: the per-phase record survives the atomic write/read

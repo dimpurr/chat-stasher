@@ -158,6 +158,8 @@ One pass: collect new session data into the stage, then push to the archive if a
 
 Ends with `result: COMPLETED` (a snapshot was created) or `result: NOOP` (nothing changed). Both exit `0`. Non-zero is a real error; `3` includes the case where a declared pull producer did not finish reading. Safe to run again at any time.
 
+Every pass also runs against a time budget (ISSUE-008 ②): the interval it is scheduled at, unless `run_budget_secs` states another line. The pass records `budget_ms`, `last_duration_ms` and `over_budget` in `run-state.json`, and a pass more than 50% over budget writes a WARN to stderr — where the timer's error log redirects — naming the duration, the budget, the over-run percentage and the slowest phase. See [schedule.md](schedule.md#logs).
+
 ### `schedule`
 
 Renders the hourly timer, or installs and removes it. See [schedule.md](schedule.md).
@@ -192,6 +194,8 @@ Is the scheduled archive working? The first line is the verdict, read from the r
 | `No run for … (threshold …)`: nothing for more than 4 intervals, and at least 1 hour | `1` |
 
 `3` means the scan itself did not complete.
+
+Beside the verdict, a budget line shows the last round's cost (ISSUE-008 ②): `Last round took N ms against a budget of M ms — within budget.` when it fits, `— over budget (P% of the budget; the pass's error log carries a WARN from 150%).` when it does not, and "no time budget was recorded" for a record written before the budget existed. It is read from the same `run-state.json` as the verdict, moves no exit code, and `status --json`'s `run_state` carries the same facts as `budget_ms` / `last_duration_ms` / `over_budget` for a heartbeat.
 
 A `[keys]` line is added for each **destination** whose key needs attention: one that is not on this machine, or one that is here with no declared backup. Each archive copy has its own key and another machine reads it with that one, so an off-site copy whose key nobody backed up is a copy that a lost machine loses. A machine whose destination keys are all present and declared prints no such line, and the local key is never one of them — it is the wizard's step and `doctor`'s first key row.
 

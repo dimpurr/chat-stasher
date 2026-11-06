@@ -160,6 +160,30 @@ pub struct Config {
     /// push 200. Hourly is therefore only viable *because* buckets are capped.
     pub backup_interval_secs: Option<u64>,
 
+    /// The wall-time budget one `run-once` pass should fit inside, in
+    /// seconds (ISSUE-008 ②, W1084).
+    ///
+    /// Default `backup_interval_secs`: a scheduled pass is expected to
+    /// finish well inside the interval it is scheduled at — the 2026-11-05
+    /// incident was rounds of 44–98 minutes against an hourly cadence, none
+    /// of them flagged anywhere because no check said how long a round
+    /// should take. Set this when the line you want differs from your
+    /// cadence (a 600 s budget on a 3600 s cadence is the tight line
+    /// ISSUE-008 promises; the cadence can stay hourly).
+    ///
+    /// The pass records the budget in `run-state.json` as
+    /// `budget_ms` beside its `last_duration_ms` and an `over_budget`
+    /// judgment, so `status` shows the round's cost against its budget
+    /// and a heartbeat can report a machine whose rounds keep running
+    /// over. A pass that runs more than 50% over (strictly past 150% of
+    /// the budget) writes a WARN line to the scheduled unit's error log
+    /// naming the duration, the budget, the over-run percentage and the
+    /// slowest phase.
+    ///
+    /// Zero is invalid and the pass refuses it with this key named — the
+    /// alternative would be a budget every round is over.
+    pub run_budget_secs: Option<u64>,
+
     /// Skip the archive run when no source file changed since the last one.
     ///
     /// Default `true`. A no-change push still writes a snapshot, and each
@@ -2021,6 +2045,17 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # How often an unattended run should archive, in seconds. Default 3600 (hourly).
 # The scheduler template reads this value; it is not installed automatically.
 # backup_interval_secs = 3600
+
+# The wall-time budget one run-once pass should fit inside, in seconds.
+# Default: the interval above — a pass is expected to finish well inside the
+# cadence it is scheduled at; the 2026-11-05 incident was rounds of 44–98
+# minutes against an hourly cadence with nothing anywhere saying that was
+# over budget. The pass records the budget in run-state.json beside its own
+# duration (`status` shows both, plus whether the round ran over), and a
+# pass more than 50% over the budget writes a WARN to the scheduler's error
+# log naming the duration, the budget and the slowest phase. Zero is
+# refused: that would be a budget every round is over.
+# run_budget_secs = 3600
 
 # Skip the run when nothing changed since the last one. Default true.
 # A no-change push still writes a snapshot, which is not free.
