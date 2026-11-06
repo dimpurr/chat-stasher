@@ -27,6 +27,7 @@ use serde_json::json;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::rc::Rc;
@@ -224,7 +225,7 @@ fn the_view_reports_its_own_probe_timings() {
         "the fixture archive holds nothing for the asked set"
     );
     assert!(
-        facts_seen.borrow(),
+        *facts_seen.borrow(),
         "the session probe ran with the wanted set"
     );
     assert!(view.session_facts_asked());
