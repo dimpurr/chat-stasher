@@ -5,14 +5,14 @@
 |---|---|
 | Id | `claude-code` |
 | Surface | cli, desktop app (Cowork) |
-| Status | verified end-to-end (2026-09-25) |
+| Status | verified end-to-end |
 | Last verified end to end | 2026-09-25: real sessions read back and rendered from the real archive on a real machine (git 41db2bf); the founding pass sealed 91 real sessions and matched the read-back hash (git 52c2e00) |
 
 | Source root | OS | Session path template | Format | Confidence | Status |
 |---|---|---|---|---|---|
-| primary | macOS | `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl` | jsonl | source-confirmed | verified end-to-end (2026-09-25) |
-| primary | Linux | `~/.claude/projects/<sanitized-cwd>/<session-uuid>.jsonl` | jsonl | official-docs | verified end-to-end (2026-09-25) |
-| primary | Windows | `%USERPROFILE%\.claude\projects\<sanitized-cwd>\<session-uuid>.jsonl` | jsonl | official-docs | verified end-to-end (2026-09-25) |
+| primary | macOS | `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl` | jsonl | source-confirmed | verified end-to-end |
+| primary | Linux | `~/.claude/projects/<sanitized-cwd>/<session-uuid>.jsonl` | jsonl | official-docs | verified end-to-end |
+| primary | Windows | `%USERPROFILE%\.claude\projects\<sanitized-cwd>\<session-uuid>.jsonl` | jsonl | official-docs | verified end-to-end |
 | claude-desktop-cowork | macOS | `~/Library/Application Support/Claude/local-agent-mode-sessions/` | jsonl | measured-locally | supported |
 | claude-desktop-cowork | Linux | - | - | - | not supported |
 | claude-desktop-cowork | Windows | `%APPDATA%\Claude\local-agent-mode-sessions\` | jsonl | unascertained | not supported |

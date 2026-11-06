@@ -5,12 +5,12 @@
 |---|---|
 | Id | `grok` |
 | Surface | cli |
-| Status | verified end-to-end (2026-10-03) |
+| Status | verified end-to-end |
 | Last verified end to end | 2026-10-03 (macOS): real sessions read back and rendered from the real archive on a real machine; 9 session_docs rows matched read-back SHA-256s, FTS indexed all 9, activity matched all 9 updated_at values and 8 titles, and the remaining empty title stayed unlabeled (reader/render implementation commit 7e7ef29) |
 
 | OS | Session path template | Format | Confidence | Status |
 |---|---|---|---|---|
-| macOS | `~/.grok/sessions/session_search.sqlite` | sqlite | measured-locally | verified end-to-end (2026-10-03) |
+| macOS | `~/.grok/sessions/session_search.sqlite` | sqlite | measured-locally | verified end-to-end |
 | Linux | `$HOME/.grok/sessions/session_search.sqlite` | sqlite | unascertained | not supported |
 | Windows | `%USERPROFILE%\.grok\sessions\session_search.sqlite` | sqlite | unascertained | not supported |
 <!-- END GENERATED -->

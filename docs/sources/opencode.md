@@ -5,14 +5,14 @@
 |---|---|
 | Id | `opencode` |
 | Surface | cli |
-| Status | verified end-to-end (2026-09-25) |
+| Status | verified end-to-end |
 | Last verified end to end | 2026-09-25: the whole real store was exported into shards in one measured pass (git 1595419, git a908a00) and real sessions read back and rendered from the real archive (git 41db2bf) |
 
 | OS | Session path template | Format | Confidence | Status |
 |---|---|---|---|---|
-| macOS | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end (2026-09-25) |
-| Linux | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end (2026-09-25) |
-| Windows | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end (2026-09-25) |
+| macOS | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end |
+| Linux | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end |
+| Windows | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end |
 <!-- END GENERATED -->
 
 ## What it is

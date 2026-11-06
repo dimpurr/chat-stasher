@@ -31,7 +31,7 @@ Status vocabulary. The whole point of this script is that "we have a source for
 the path" and "a real session was archived end to end" are TWO different facts
 and must not collapse into one glyph:
 
-    verified end-to-end (DATE)   an explicit `verified: {date, version?, scope}`
+    verified end-to-end          an explicit `verified: {date, version?, scope}`
                                  record on the harness — a human archived a real
                                  session on a real machine and wrote down when.
                                  Optional `platform` scopes the claim to one OS
@@ -54,6 +54,15 @@ and must not collapse into one glyph:
                                  Scanned/attempted, but the evidence is weaker.
     not supported                no scannable cell at all (every OS cell is
                                  `unascertained`), or the platform has no cell.
+
+Where the date lives (BR-3). A status word is the word and nothing else: no
+status cell repeats the recorded date, which renders exactly once, in the
+`Last verified` column (the site layer's `Verified end to end` column is that
+column). Dates a status cell does carry are one held source's hand-written
+`status` sentence (see `top-layer-holds.json`): the DeepSeek web row says its
+recorded run verified the earlier broad route and the narrowed route is not
+live-verified, and that explanation of the run stays — it is the row's status,
+not a repeated date.
 
 Editorial overlay (SB-1). Both sources also carry three hand-written fields
 per row — one vocabulary under each spelling — and all three are validated by
@@ -675,7 +684,7 @@ def cell_status(
         and verified is not None
         and verified.get("platform") in (None, platform)
     ):
-        return f"{STATUS_VERIFIED} ({verified['date']})"
+        return STATUS_VERIFIED
     if cell is None:
         return STATUS_UNSUPPORTED
     confidence = cell.get("confidence", "")
@@ -703,7 +712,7 @@ def status_rank(status: str) -> int:
 def harness_status(h: dict[str, Any]) -> str:
     verified = harness_verified(h)
     if verified is not None and verified.get("platform") is None:
-        return f"{STATUS_VERIFIED} ({verified['date']})"
+        return STATUS_VERIFIED
     roots = harness_root_entries(h)
     # For one OS, all roots are required and the weakest root decides. Across
     # OSes, any supported platform keeps the harness available, as before.
@@ -766,16 +775,18 @@ def root_verified_record(
 def web_status(p: dict[str, Any]) -> str:
     # A recorded verification outranks the channel and credibility readings,
     # exactly as a `verified` record outranks them for a harness: it is the
-    # strongest fact the row carries. The date travels inside the status as the
-    # historical fact; the freshness judgement on it is rendered separately in
-    # the Last verified column.
+    # strongest fact the row carries. The date stays out of the word — it
+    # renders once, in the Last verified column (BR-3) — and the one wording
+    # that names dates inside a status cell is a held source's hand-written
+    # `status` sentence, which explains what the recorded run does and does
+    # not cover and replaces the cell verbatim (top-layer-holds.json).
     if p.get("lastVerified") is not None:
         if p.get("hold_status"):
             # A held row's record does not cover the current path (see
             # top-layer-holds.json): the hand-written wording replaces the
             # plain verified claim everywhere the status is printed.
             return p["hold_status"]
-        return f"{STATUS_VERIFIED} ({p['lastVerified']['date']})"
+        return STATUS_VERIFIED
     if p["channel"] == "experimental":
         return STATUS_EXPERIMENTAL
     if p["credibility"] == "unverified":
@@ -833,6 +844,28 @@ def code(text: Any) -> str:
     return "`" + str(text).replace("`", "'") + "`"
 
 
+# The web chats' product display names (BR-3): a web row renders under its
+# product's own name, exactly as a local row renders under the registry's
+# `display_name`, so one table reads one way. Keyed by the contract's platform
+# id; an id with no entry falls back to the slug itself — the same fallback a
+# harness row without `display_name` has — so a platform added to the contract
+# never breaks the gate, its row simply renders under its id until a display
+# name is recorded here.
+WEB_DISPLAY_NAME = {
+    "deepseek": "DeepSeek",
+    "perplexity": "Perplexity",
+    "chatgpt": "ChatGPT",
+    "gemini": "Gemini",
+    "claude": "Claude",
+    "kimi": "Kimi",
+    "grok": "Grok",
+}
+
+
+def web_display_name(p: dict[str, Any]) -> str:
+    return WEB_DISPLAY_NAME.get(p["id"], p["id"])
+
+
 def browser_legend_short() -> str:
     return (
         "`supported` is the promised tier: the discovery path, and on Windows the registry "
@@ -864,7 +897,15 @@ def render_short(
 ) -> str:
     as_of = resolve_as_of(as_of)
     out: list[str] = []
-    out.append("**5+ platforms.** Local AI tools, agent platforms, and web chats.")
+    # The headline count is generated (BR-3): every row this table renders
+    # contributes one, from both data sources, so a platform added to the
+    # registry or the extension contract re-derives the number instead of a
+    # hand-written "5+" drifting away from the table under it.
+    platform_count = len(harnesses) + len(platforms)
+    out.append(
+        f"**{platform_count} platform{'s' if platform_count != 1 else ''}.** "
+        "Local AI tools, agent platforms, and web chats."
+    )
     out.append("")
     out.append("| Surface | Platform | Status | Last verified |")
     out.append("|---|---|---|---|")
@@ -878,7 +919,7 @@ def render_short(
     for p in platforms:
         st = web_status(p)
         cell = last_verified_cell(p.get("lastVerified"), as_of)
-        out.append(f"| Web | {esc(p['id'])} | {esc(st)} | {esc(cell)} |")
+        out.append(f"| Web | {esc(web_display_name(p))} | {esc(st)} | {esc(cell)} |")
     out.append("")
     out.append(
         "Verified means a maintainer archived a real session end to end on their own machine. "
@@ -949,7 +990,7 @@ def render_full(
     for p in platforms:
         out.append(
             "| {id} | {origins} | {channel} | {cred} | {status} |".format(
-                id=esc(p["id"]),
+                id=esc(web_display_name(p)),
                 origins=esc(", ".join(p["origins"])),
                 channel=esc(p["channel"]),
                 cred=esc(p["credibility"]),
@@ -979,7 +1020,7 @@ def render_full(
     for p in platforms:
         out.append(
             "| Web | {name} | {when} | {prio} | {issue} |".format(
-                name=esc(p["id"]),
+                name=esc(web_display_name(p)),
                 when=esc(last_verified_cell(p.get("lastVerified"), as_of)),
                 prio=esc(p.get("devPriority") or ABSENT),
                 issue=esc(known_issue_cell(p) or ABSENT),
@@ -1116,12 +1157,12 @@ def top_layer_rows(
         record = p.get("lastVerified")
         why = top_layer_exclusion(record, as_of, holds.get(f"web:{p['id']}"))
         if why is not None:
-            excluded.append(("Web", p["id"], why))
+            excluded.append(("Web", web_display_name(p), why))
             continue
         assert record is not None
         on = (record.get("version") or "browser extension") + "; OS not recorded"
         included.append({
-            "name": p["id"],
+            "name": web_display_name(p),
             "surface": "Web",
             "date": record["date"],
             "on": on,
@@ -1585,8 +1626,8 @@ def selftest() -> int:
         probe("all-unascertained cell is not supported", harness_status(by_id["gamma"]) == STATUS_UNSUPPORTED)
         probe("unascertained agent platform is not supported", harness_status(by_id["agent-fixture"]) == STATUS_UNSUPPORTED)
         probe(
-            "verified record wins and carries its date",
-            harness_status(by_id["delta"]) == f"{STATUS_VERIFIED} (2026-09-15)",
+            "a verified record wins the status without repeating its date",
+            harness_status(by_id["delta"]) == STATUS_VERIFIED,
         )
         probe(
             "OS-scoped verification does not promote an unascertained cell",
@@ -1618,14 +1659,14 @@ def selftest() -> int:
         probe(
             "platform verification is limited to its declared OS",
             cell_status({"confidence": "source-confirmed"}, platform_verified, "macos")
-            == f"{STATUS_VERIFIED} (2026-09-15)"
+            == STATUS_VERIFIED
             and cell_status({"confidence": "source-confirmed"}, platform_verified, "linux")
             == STATUS_SUPPORTED,
         )
         web = {p["id"]: p for p in platforms}
         probe(
             "a platform with a recorded verification outranks its channel and credibility",
-            web_status(web["p-stable"]) == f"{STATUS_VERIFIED} (2026-09-15)",
+            web_status(web["p-stable"]) == STATUS_VERIFIED,
         )
         probe(
             "a stable from-source platform without a verified record stays supported",
@@ -1771,12 +1812,13 @@ def selftest() -> int:
         stale_short = render_short([], [stale_platform], [], SELFTEST_AS_OF)
         probe(
             "a stale record is flagged in the short table's Last verified column",
-            f"| p-stale | {STATUS_VERIFIED} ({SELFTEST_STALE_91}) "
+            f"| p-stale | {STATUS_VERIFIED} "
             f"| {RECHECK_LABEL} ({SELFTEST_STALE_91}) |" in stale_short,
         )
         probe(
-            "the status keeps the historical fact while the column carries the flag",
-            f"{STATUS_VERIFIED} ({SELFTEST_STALE_91})" in stale_short,
+            "the status keeps the historical fact while only the Last verified column carries the flag",
+            f"| p-stale | {STATUS_VERIFIED} |" in stale_short
+            and f"{STATUS_VERIFIED} (" not in stale_short,
         )
         stale_full = render_full([], [stale_platform], [], SELFTEST_AS_OF)
         probe(
@@ -1795,18 +1837,69 @@ def selftest() -> int:
 
         short = render_short(harnesses, platforms, browsers, SELFTEST_AS_OF)
         full = render_full(harnesses, platforms, browsers, SELFTEST_AS_OF)
-        probe("short table carries the fixed 5+ platforms headline", "5+ platforms" in short)
-        probe("short table has no generated count in prose", not re.search(r"\b\d+ (?:platform|harness|tool)", short))
+        # BR-3: the headline count is generated from the two sources, never a
+        # hand-written "5+", and it is the only platform count the table carries.
+        probe(
+            "the short headline counts the rows the table renders",
+            short.startswith(f"**{len(harnesses) + len(platforms)} platforms.** "),
+        )
+        probe(
+            "the headline count follows the sources, not a hand-written number",
+            f"**{len(harnesses) + len(platforms) + 1} platforms.**" in render_short(
+                harnesses,
+                platforms
+                + [{
+                    "id": "p-more",
+                    "origins": ["https://more.example"],
+                    "channel": "stable",
+                    "credibility": "from-source",
+                }],
+                [],
+                SELFTEST_AS_OF,
+            ),
+        )
+        probe(
+            "a table of one renders the singular headline",
+            render_short([], [web["p-stable"]], [], SELFTEST_AS_OF).startswith("**1 platform.** "),
+        )
+        probe(
+            "the generated count is the only platform count in the table",
+            len(re.findall(r"\b\d+ platform", short)) == 1,
+        )
+        # BR-3: a web row renders under its product's display name, the way a
+        # local row renders its registry `display_name`, and an id with no
+        # recorded display name falls back to the id itself.
+        probe(
+            "a web row with a recorded display name renders it",
+            "| Web | DeepSeek |" in render_short(
+                [],
+                [{
+                    "id": "deepseek",
+                    "origins": ["https://chat.deepseek.com"],
+                    "channel": "stable",
+                    "credibility": "from-source",
+                }],
+                [],
+                SELFTEST_AS_OF,
+            ),
+        )
+        probe(
+            "a web id without a display name falls back to its id",
+            "| Web | p-stable |" in render_short([], platforms, [], SELFTEST_AS_OF),
+        )
         probe("short table renders every status word", all(
             s in short for s in (STATUS_SUPPORTED, STATUS_UNCERTAIN, STATUS_UNSUPPORTED, STATUS_EXPERIMENTAL)
         ))
         probe("full table carries a path template", "~/.alpha/<uuid>.jsonl" in full)
-        probe("full table carries the verified date", "(2026-09-15)" in full)
+        probe(
+            "no status cell repeats its date in either rendering",
+            f"{STATUS_VERIFIED} (" not in short and f"{STATUS_VERIFIED} (" not in full,
+        )
         probe("agent platform path remains explicitly unascertained", "| Agent fixture | macOS | `~/Library/Application Support/Agent fixture/` | json | unascertained | not supported | - |" in full)
         verified_agent = {**by_id["agent-fixture"], "verified": {"date": "2026-09-25", "scope": "synthetic probe"}}
         probe(
             "agent-platform verification still requires dated evidence",
-            harness_status(verified_agent) == f"{STATUS_VERIFIED} (2026-09-25)",
+            harness_status(verified_agent) == STATUS_VERIFIED,
         )
         probe(
             "the short legend names the re-check rule beside its threshold",
