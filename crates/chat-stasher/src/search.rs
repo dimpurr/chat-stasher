@@ -1164,7 +1164,12 @@ pub fn search_sessions_with_progress<P>(
     progress: P,
 ) -> anyhow::Result<SearchReport>
 where
-    P: Fn(&ScanProgress),
+    // `FnMut`, not `Fn`: the listener calls back once per finished snapshot
+    // from the single thread the walk runs on, and a heartbeat that keeps
+    // mutable state (the throttle) needs exactly this bound — a plain `Fn`
+    // would force every listener to move its own state behind a lock the
+    // single-threaded walk does not need.
+    P: FnMut(&ScanProgress),
 {
     let backends = store.backends()?;
     let (repo, _adoption) = crate::orphans::open_adopting(&store.cfg, &backends, mk)

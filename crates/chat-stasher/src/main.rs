@@ -2245,7 +2245,7 @@ fn main() -> ExitCode {
 /// not resolve `keychain:`/`file:` references (the config's own fail-closed
 /// load owns those).
 fn parse_with_destination_availability_help() -> Cli {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, FromArgMatches};
     let mut command = Cli::command();
     if let Some(section) = chat_stasher::destdiag::availability_help_section() {
         command = command.after_help(section.clone());
@@ -5929,7 +5929,6 @@ fn cmd_search(
                 &step_selector,
                 |event| {
                     scan_heartbeat.beat(
-                        event.host,
                         event.snapshots_scanned,
                         event.snapshots_from_cache,
                         event.snapshots_in_repo,
@@ -6639,7 +6638,6 @@ fn cmd_export(
                 &scan_selector,
                 |event| {
                     scan_heartbeat.beat(
-                        event.host,
                         event.snapshots_scanned,
                         event.snapshots_from_cache,
                         event.snapshots_in_repo,

@@ -99,8 +99,11 @@ impl ScanHeartbeat {
     ///
     /// The counters are the walk's own, passed by the caller rather than
     /// accumulated here, so the line can never disagree with the report the
-    /// same walk is building.
-    pub fn beat(&mut self, host: &str, scanned: usize, from_cache: usize, in_repo: usize) {
+    /// same walk is building. The host is deliberately absent from the line:
+    /// the walk is cumulative over every host's snapshots, and the line's
+    /// `scanned N of M` is the whole destination's progress, not one
+    /// machine's.
+    pub fn beat(&mut self, scanned: usize, from_cache: usize, in_repo: usize) {
         let now = (self.now)();
         let due = match self.last_emitted {
             None => true,
@@ -121,41 +124,62 @@ impl ScanHeartbeat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
-    /// A clock a test advances by hand, plus a sink that collects lines.
-    #[derive(Clone)]
+    /// A clock a test advances by hand, plus a sink that collects lines —
+    /// both behind `Arc<Mutex>` because the heartbeat's clock and sink are
+    /// `Send + Sync` by design (the production heartbeat lives inside the
+    /// deadline worker thread), so the fixtures need thread-safe handles too.
     struct Harness {
-        now: Rc<RefCell<Instant>>,
-        lines: Rc<RefCell<Vec<String>>>,
+        now: Arc<Mutex<Instant>>,
+        lines: Arc<Mutex<Vec<String>>>,
+        advanced: Arc<Mutex<u64>>,
     }
 
     impl Harness {
         fn new() -> Self {
-            let base = Instant::now();
             Harness {
-                now: Rc::new(RefCell::new(base)),
-                lines: Rc::new(RefCell::new(Vec::new())),
+                now: Arc::new(Mutex::new(Instant::now())),
+                lines: Arc::new(Mutex::new(Vec::new())),
+                advanced: Arc::new(Mutex::new(0)),
             }
         }
 
+        /// Queue `secs` of fake time; the injectable clock consumes the queue
+        /// on its next read and moves its base forward, so every read of the
+        /// clock sees one monotonic hand.
         fn advance(&self, secs: u64) {
-            *self.now.borrow_mut() += Duration::from_secs(secs);
+            let mut advanced = self.advanced.lock().unwrap_or_else(|p| p.into_inner());
+            *advanced += secs;
         }
 
         fn lines(&self) -> Vec<String> {
-            self.lines.borrow().clone()
+            self.lines.lock().unwrap_or_else(|p| p.into_inner()).clone()
         }
 
         fn heartbeat(&self, interval_secs: u64) -> ScanHeartbeat {
-            let now = Rc::clone(&self.now);
-            let lines = Rc::clone(&self.lines);
+            let now = Arc::clone(&self.now);
+            let lines = Arc::clone(&self.lines);
+            let advanced = Arc::clone(&self.advanced);
             ScanHeartbeat::with_parts(
                 "export",
                 Duration::from_secs(interval_secs),
-                move || *now.borrow(),
-                move |line| lines.borrow_mut().push(line.to_string()),
+                move || {
+                    let mut moved = advanced.lock().unwrap_or_else(|p| p.into_inner());
+                    if *moved > 0 {
+                        let step = Duration::from_secs(*moved);
+                        *moved = 0;
+                        let mut slot = now.lock().unwrap_or_else(|p| p.into_inner());
+                        *slot += step;
+                    }
+                    *now.lock().unwrap_or_else(|p| p.into_inner())
+                },
+                move |line| {
+                    lines
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .push(line.to_string())
+                },
             )
         }
     }
@@ -168,34 +192,46 @@ mod tests {
         let harness = Harness::new();
         let mut beat = harness.heartbeat(5);
         for _ in 0..12 {
-            beat.beat("host-a", 1, 0, 12);
+            beat.beat(1, 0, 12);
             harness.advance(1);
         }
         let lines = harness.lines();
         assert_eq!(
             lines.len(),
             3,
-            "12 one-second events under a 5-second interval: lines at 0s, 5s, 10s — {lines:?}"
+            "12 one-second events under a five-second interval print at 0s, 5s, 10s: {lines:?}"
         );
-        assert!(lines[0].starts_with("[export] scan         : scanned "));
-        assert!(lines[0].contains("scanned 1 of 12"), "counts include in_repo: {}", lines[0]);
+        assert!(
+            lines[0].starts_with("[export] scan         : scanned "),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("scanned 1 of 12"),
+            "counts include the repo listing: {}",
+            lines[0]
+        );
         assert!(lines[1].contains("(0 from cache)"), "{}", lines[1]);
     }
 
-    /// The zero interval is the fixture shape (one line per event), and the
+    /// The zero interval is the fixture shape (a line per event), and the
     /// counts on each line are the caller's own at that moment — a walk that
     /// has finished 3 of 4 snapshots says 3, cache hits included.
     #[test]
     fn a_zero_interval_lines_every_event_with_the_caller_counts() {
         let harness = Harness::new();
         let mut beat = harness.heartbeat(0);
-        beat.beat("host-a", 1, 0, 4);
-        beat.beat("host-a", 2, 1, 4);
-        beat.beat("host-b", 3, 1, 4);
-        beat.beat("host-b", 4, 2, 4);
+        beat.beat(1, 0, 4);
+        beat.beat(2, 1, 4);
+        beat.beat(3, 1, 4);
+        beat.beat(4, 2, 4);
         let lines = harness.lines();
-        assert_eq!(lines.len(), 4);
-        assert!(lines[3].contains("scanned 4 of 4 snapshots (2 from cache)"), "{}", lines[3]);
+        assert_eq!(lines.len(), 4, "one line per finished snapshot: {lines:?}");
+        assert!(
+            lines[3].contains("scanned 4 of 4 snapshots (2 from cache)"),
+            "{}",
+            lines[3]
+        );
     }
 
     /// A scan that finishes inside one interval prints no intermediate line
@@ -205,7 +241,7 @@ mod tests {
         let harness = Harness::new();
         let mut beat = harness.heartbeat(5);
         for _ in 0..3 {
-            beat.beat("host-a", 0, 0, 3);
+            beat.beat(0, 0, 3);
             harness.advance(1);
         }
         assert!(
