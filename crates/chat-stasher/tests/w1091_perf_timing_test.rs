@@ -195,19 +195,26 @@ fn a_debt_that_needs_remote_facts_asked_once_with_its_wanted_set() {
 /// machine-log probe a destination that cannot answer never had.
 #[test]
 fn the_view_reports_its_own_probe_timings() {
-    let wanted_set: BTreeSet<(String, String)> = [(MACHINE.to_string(), "session-x".to_string())]
-        .into_iter()
-        .collect();
-    let facts_seen = RefCell::new(false);
-    let logs_seen = Cell::new(false);
+    let wanted_set: Rc<BTreeSet<(String, String)>> = Rc::new(
+        [(MACHINE.to_string(), "session-x".to_string())]
+            .into_iter()
+            .collect(),
+    );
+    // The probes are `Fn` closures and own what they capture, so the test
+    // and the closures share each capture through an `Rc` clone.
+    let facts_seen = Rc::new(RefCell::new(false));
+    let logs_seen = Rc::new(Cell::new(false));
+    let probe_facts_seen = Rc::clone(&facts_seen);
+    let probe_wanted = Rc::clone(&wanted_set);
+    let probe_logs_seen = Rc::clone(&logs_seen);
     let view = DestinationView::with_machine_logs(
         "dest-a",
         move |wanted| {
-            *facts_seen.borrow_mut() = wanted == &wanted_set;
+            *probe_facts_seen.borrow_mut() = wanted == probe_wanted.as_ref();
             Ok(ArchiveFacts::new())
         },
         move || {
-            logs_seen.set(true);
+            probe_logs_seen.set(true);
             Ok(std::collections::BTreeMap::new())
         },
     );
@@ -218,7 +225,7 @@ fn the_view_reports_its_own_probe_timings() {
     assert_eq!(view.machine_log_facts_ms(), 0);
 
     let facts = view
-        .facts(&wanted_set)
+        .facts(wanted_set.as_ref())
         .expect("the session probe answered with facts");
     assert!(
         facts.is_empty(),
@@ -235,7 +242,7 @@ fn the_view_reports_its_own_probe_timings() {
         .machine_log_facts()
         .expect("the machine-log probe answered");
     assert!(logs.is_empty(), "the fixture archive holds no log facts");
-    assert!(logs_seen.get(), "the machine-log probe ran");
+    assert!(*logs_seen.get(), "the machine-log probe ran");
     // A run probe's wall time may honestly be zero on a fast fixture, so
     // the extractor contract checked here is "the run asked implies the
     // timing is readable" — both extractors return after the runs above
