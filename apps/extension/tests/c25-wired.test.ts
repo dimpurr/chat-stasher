@@ -31,7 +31,14 @@ vi.mock('../lib/backfill/engine', async (importOriginal) => {
 });
 
 const ORIGIN = 'https://chatgpt.com';
-const ENABLED_KEY = 'cs_backfill_enabled_v1';
+const CONSENT_KEY = 'cs_platform_consent_v1';
+
+function consentRecord(on: boolean): Record<string, unknown> {
+  const platforms: Record<string, { state: 'on' | 'off'; updatedAt: number }> = {};
+  for (const id of ['chatgpt', 'claude', 'deepseek', 'gemini', 'grok', 'kimi', 'perplexity']) platforms[id] = { state: on ? 'on' : 'off', updatedAt: 1 };
+  return { version: 1, platforms };
+}
+
 const TARGETS_KEY = 'cs_backfill_targets_v1';
 const TABS_KEY = 'cs_backfill_tabs_v1';
 
@@ -185,21 +192,30 @@ describe('C25 · background wiring', () => {
     await mod.backgroundSetupSettled();
   });
 
-  it('starting with the default (off) creates no alarm, and an alarm event runs no backfill either', async () => {
+  it('ADR-066: the default is on, so boot creates the alarm; all-off creates none and the tick reports platform-disabled', async () => {
     const mod = await boot();
     const { BACKFILL_ALARM_NAME } = await import('../lib/backfill/alarm');
 
-    expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(false);
-    expect(alarmCreates).toEqual([]);
+    expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(true);
 
+    const { setBackfillEnabled } = await import('../lib/backfill/schedule');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    await setBackfillEnabled(browserLocalStore(), false);
+    // A registered target, so the tick reaches the platform gate (not the
+    // empty-registry 'no-targets' branch).
+    await browserLocalStore()!.save('cs_backfill_targets_v1', [{ platform: 'chatgpt', origin: ORIGIN, scope: 'fixture', at: 1 }]);
+    alarmBook.clear();
+    alarmCreates.length = 0;
+
+    expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(false);
     alarmListeners[0]!({ name: BACKFILL_ALARM_NAME });
     await mod.backfillTickSettled();
     expect(runBackfillSpy).not.toHaveBeenCalled();
-    expect(mod.lastBackfillTick()?.reason).toBe('disabled');
+    expect(mod.lastBackfillTick()?.reason).toBe('platform-disabled');
   });
 
   it('a matching onAlarm walks from the production entry point through one backfill tick, without any real network', async () => {
-    stored[ENABLED_KEY] = true;
+    stored[CONSENT_KEY] = consentRecord(true);
     seedTargetAndLiveTab();
     const mod = await boot();
     const { BACKFILL_ALARM_NAME } = await import('../lib/backfill/alarm');
@@ -213,7 +229,7 @@ describe('C25 · background wiring', () => {
   });
 
   it('switch on but no port available returns no-http-port explicitly, without calling the engine or throwing', async () => {
-    stored[ENABLED_KEY] = true;
+    stored[CONSENT_KEY] = consentRecord(true);
     stored[TARGETS_KEY] = [{ platform: 'chatgpt', origin: ORIGIN, scope: 'fixture', at: 1 }];
     const mod = await boot();
     const { BACKFILL_ALARM_NAME } = await import('../lib/backfill/alarm');

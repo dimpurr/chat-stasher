@@ -539,12 +539,15 @@ describe('W76b-2 · the cursor', () => {
 // ===========================================================================
 
 describe('W76b-3 · the tick-global gates are recorded even when every tabbed target is held', () => {
-  it('🔴 the switch being off is reported as disabled, not as "nothing could run"', async () => {
+  it('🔴 every platform off is reported as disabled, not as "nothing could run"', async () => {
     const rows = [chatgpt(A), chatgpt(B)];
     seedTargets(rows);
-    // 🔴 Deliberately NOT enabled: the switch is off, and both targets have a live
-    //    tab and a stop that holds. The walk alone would find nothing to run and
-    //    say so; that answer hides the switch.
+    // 🔴 ADR-066: the default is on, so all-off is written explicitly. Both
+    //    targets have a live tab and a stop that holds. The walk alone would
+    //    find nothing to run and say so; that answer hides the switch.
+    const { setBackfillEnabled } = await import('../lib/backfill/schedule');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    await setBackfillEnabled(browserLocalStore(), false);
     await openTab(11, ORIGIN);
     await writeHalt(rows[0]!, 'unsupported-platform');
     await writeHalt(rows[1]!, 'unsupported-platform');
@@ -553,7 +556,10 @@ describe('W76b-3 · the tick-global gates are recorded even when every tabbed ta
     await tick(mod);
     const rec = await trace();
     console.log('[W76b-3a] reason:', rec?.reason, '· schedule:', JSON.stringify(rec?.schedule));
-    expect(rec?.reason).toBe('disabled');
+    // ADR-066: the per-platform gate reports under its own name (and the
+    // persisted trace accepts it — see TICK_REASONS), so a fully-off tick says
+    // 'platform-disabled', not the legacy global 'disabled'.
+    expect(rec?.reason).toBe('platform-disabled');
     expect(rows.length).toBe(2);
   });
 

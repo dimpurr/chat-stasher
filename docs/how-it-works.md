@@ -136,7 +136,7 @@ Consequences:
 
 ### Backfill
 
-Capturing the conversations you open costs little or nothing extra. **Backfill**, archiving your past conversations, is opt-in per platform. It runs from inside an open, logged-in tab of that platform, in small batches spread through the day.
+Capturing the conversations you open costs little or nothing extra. **Backfill**, archiving your past conversations, follows the popup's per-platform switch (on by default, per browser profile). It runs from inside an open, logged-in tab of that platform, in small batches spread through the day.
 
 (next release) Backfill is coordinated per machine through the host: when several installs on one machine backfill the same account on the same platform, one runs at a time, and a rate limit one install receives pauses that platform for all of them. Nothing is coordinated across machines, because there is no server between them.
 

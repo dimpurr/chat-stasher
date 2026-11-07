@@ -353,14 +353,28 @@ beforeEach(async () => {
 });
 
 describe('C19 task 1 · the alarm: on ⇒ created, off ⇒ cleared', () => {
-  it('🔴 with the default (off), an SW start **does not** create an alarm; it only makes sure none exists', async () => {
+  it('🔴 ADR-066: the default is on, so an SW start with nothing set creates the alarms; all-off clears them', async () => {
     const { BACKFILL_DEFAULT_ENABLED } = await import('../lib/backfill/schedule');
-    expect(BACKFILL_DEFAULT_ENABLED).toBe(false);   // 🔴 the default did not change a character
+    expect(BACKFILL_DEFAULT_ENABLED).toBe(true);   // 🔴 ADR-066 D1: default-on, no wizard
 
-    await bootBackground();
+    const mod0 = await bootBackground();
+    await mod0.backgroundSetupSettled();
     console.log('[C19-1] alarm operations after an SW start in the default state:', alarmLog, 'alarms now:', [...alarmBook.keys()]);
+    expect([...alarmBook.keys()].length).toBeGreaterThan(0);
+
+    const { setBackfillEnabled } = await import('../lib/backfill/schedule');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    await setBackfillEnabled(browserLocalStore(), false);
+    // A reclaimed worker starts with no listeners: clear boot 1's so the
+    // second boot registers and runs its own async setup (the switch sync).
+    runtimeListeners.length = 0;
+    const mod1 = await bootBackground();
+    await mod1.backgroundSetupSettled();
+    // Diagnostic: the all-off reboot is the one place this suite must end clear,
+    // so the boot's consent read and the alarm log are both on the record.
+    console.log('[C19-1] all-off reboot: alarms now:', [...alarmBook.keys()], 'alarm ops:', alarmLog,
+      'consent:', JSON.stringify(store['cs_platform_consent_v1']));
     expect([...alarmBook.keys()]).toEqual([]);
-    expect(alarmLog.every((l) => l.startsWith('clear'))).toBe(true);
   });
 
   it('switch on ⇒ both alarms are created; off ⇒ both are cleared', async () => {
@@ -496,9 +510,15 @@ describe('C19 task 1 · the alarm: on ⇒ created, off ⇒ cleared', () => {
    *    second sync observes the first one's alarm and leaves it alone.
    */
   it('🔴 two overlapping syncs with the switch on arm the tick once, not twice', async () => {
+    // ADR-066: the default is on, so the boot already armed the tick; start
+    // from all-off so this case measures the sync itself, not the boot.
+    const { setBackfillEnabled } = await import('../lib/backfill/schedule');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    await setBackfillEnabled(browserLocalStore(), false);
     const mod = await bootBackground();
     await mod.backgroundSetupSettled();
     alarmLog.length = 0;
+    alarmBook.clear();
 
     const { BACKFILL_ALARM_NAME } = await import('../lib/backfill/alarm');
     await enableBackfill();
@@ -607,13 +627,19 @@ describe('C19 task 2 · the http port: really injected in production code', () =
     expect(contentFetches).toEqual([]);        // 🔴 fetch was not even called
   });
 
-  it('🔴 with the switch off, an open page still fetches nothing at all', async () => {
+  it('🔴 ADR-066: with every platform off, an open page still fetches nothing at all', async () => {
+    const { setBackfillEnabled } = await import('../lib/backfill/schedule');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    await setBackfillEnabled(browserLocalStore(), false);
+    const { browserLocalStore: freshStore } = await import('../lib/backfill/store');
+    await freshStore()!.save('cs_backfill_targets_v1', [{ platform: 'chatgpt', origin: ORIGIN, scope: 'fixture', at: 1 }]);
     liveTabs.set(42, ORIGIN);
     const mod = await bootBackground();
     await dispatch({ type: 'chat-captured', payload: liveCapture() }, 42);
     await mod.backfillTickSettled();
-    console.log('[C19-2] default (off) + a page open ->', mod.lastBackfillTick()?.reason, 'URLs sent:', contentFetches);
-    expect(mod.lastBackfillTick()?.reason).toBe('disabled');
+    console.log('[C19-2] all-off + a page open ->', mod.lastBackfillTick()?.reason, 'URLs sent:', contentFetches);
+    // ADR-066: the per-platform gate reports under its own name.
+    expect(mod.lastBackfillTick()?.reason).toBe('platform-disabled');
     expect(contentFetches).toEqual([]);
   });
 });

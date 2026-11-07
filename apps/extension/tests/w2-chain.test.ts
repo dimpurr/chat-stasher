@@ -27,6 +27,8 @@ import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import { HOOK_STATUS_MESSAGE, type CapturedFetch } from '../lib/contract';
+import { resetOutboxConnectionForTest } from '../lib/outbox';
+import { resetDebtDbConnectionForTest } from '../lib/backfill/debt-store';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
 
 const runtimeListeners: Array<{
@@ -80,6 +82,11 @@ let host: SyntheticHost;
 function resetMocks() {
   runtimeListeners.length = 0;
   for (const key of Object.keys(localValues)) delete localValues[key];
+  // The outbox and debt set live in IndexedDB behind a memoised connection:
+  // without a reset the next case reads the previous case's rows and the
+  // failure looks like a logic bug (consent gate bypassed by a leftover row).
+  resetOutboxConnectionForTest();
+  resetDebtDbConnectionForTest();
   // A counter left over from a previous case would make every later drain wait
   // for work that no longer exists, so it is cleared with the rest of the state.
   messagesInFlight = 0;
@@ -484,5 +491,26 @@ describe('W2 · synthetic chain: page → bridge → background → outbox → h
     expect(doc.sessionId).toBe('aaaa1111-bbbb-4000-8000-00000000ffff');
     // The name is already settled in the outbox — the host will store it as a shard under that name when it returns.
     expect(entries[0]!.name).toBe('deepseek-aaaa1111-bbbb-4000-8000-00000000ffff.json');
+  });
+
+  it('an off platform refuses live capture before outbox or host writes', async () => {
+    host = createSyntheticHost({ up: true });
+    localValues.cs_platform_consent_v1 = {
+      version: 1,
+      platforms: { deepseek: { state: 'off', updatedAt: 1234 } },
+    };
+    const { handleCaptured } = await import('../entrypoints/background');
+    const result = await handleCaptured({
+      url: 'https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=aaaa1111-bbbb-4000-8000-00000000ffff',
+      method: 'GET',
+      status: 200,
+      text: JSON.stringify({ code: 0, data: { biz_data: { chat_session: { id: 'aaaa1111-bbbb-4000-8000-00000000ffff' }, chat_messages: [] } } }),
+      capturedAt: 1234,
+    });
+    expect(result).toMatchObject({ saved: false, status: 'refused', reason: 'platform-disabled' });
+    expect(host.deliveries).toEqual([]);
+    const { listEntries } = await import('../lib/outbox');
+    expect(await listEntries()).toEqual([]);
+    expect(localValues['cs_consent_refusals_v1:deepseek']).toMatchObject({ count: 1 });
   });
 });

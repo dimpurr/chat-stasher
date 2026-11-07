@@ -688,6 +688,7 @@ export async function saveTickCursor(
  *    **not** skip-able are written down and why.
  */
 export type TickSkipReason =
+  | 'platform-disabled'
   | 'no-http-port'
   | 'halted'
   | 'waiting-retry'
@@ -1780,6 +1781,11 @@ const TICK_REASONS = new Set<TickReason>([
   'already-running',
   'no-store',
   'disabled',
+  // ADR-066 · The per-platform gate reports under its own name so the trace
+  // says which refusal stopped the tick; without this entry the write validates
+  // but the read fails and the trace vanishes (the tick "ran nothing" with no
+  // record of why).
+  'platform-disabled',
   'host-paused',
   'outbox-near-full',
   'no-targets',

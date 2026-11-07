@@ -154,8 +154,11 @@ describe('C29-NOENUM · reproducing the real machine: opening a tab but never ha
     const helloReply = await dispatch({ type: 'cs-backfill-tab-hello', origin: ORIGIN }, 101);
     expect(helloReply).toEqual({ ok: true });
 
-    // At this point storage holds only the switch and the tabs registry (matching the real machine's 298-byte snapshot)
-    expect(store).toHaveProperty('cs_backfill_enabled_v1', true);
+    // At this point storage holds only the consent record and the tabs registry.
+    // (The real machine's 298-byte snapshot named the old single switch key;
+    // ADR-066 replaced it with the per-platform consent record.)
+    const { CONSENT_KEY } = await import('../lib/platform-consent');
+    expect(Object.values(((store as Record<string, { platforms?: Record<string, { state?: unknown }> }>)[CONSENT_KEY])?.platforms ?? {}).every((e) => e?.state === 'on')).toBe(true);
     expect(store).toHaveProperty('cs_backfill_tabs_v1');
     expect(store).not.toHaveProperty('cs_backfill_targets_v1');
 

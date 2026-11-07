@@ -284,7 +284,12 @@ describe('outbox alarm · syncOutboxAlarm', () => {
 // ===========================================================================
 // 4 · end to end through the real background entry point
 // ===========================================================================
-describe('outbox alarm · background wiring (backfill switch OFF)', () => {
+// ADR-066: backfill-off and live-off are one consent per platform, so "backfill
+// off while live still queues" is no longer expressible on the same platform.
+// This suite keeps the default (all on) and proves the outbox alarm's
+// independence the other way: the outbox leg drains and clears on its own
+// alarm even when the backfill leg has nothing to do.
+describe('outbox alarm · background wiring (backfill idle, default consent)', () => {
   const store: Record<string, unknown> = {};
   const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
   let alarmListeners: Array<(a: { name?: string }) => void> = [];
@@ -376,15 +381,13 @@ describe('outbox alarm · background wiring (backfill switch OFF)', () => {
     vi.stubGlobal('defineBackground', (cb: any) => cb);
   });
 
-  it('🔴 host down ⇒ capture queued and the outbox alarm exists even though backfill is off; host back ⇒ the alarm alone delivers it and then clears itself', async () => {
+  it('🔴 host down ⇒ capture queued and the outbox alarm exists while backfill idles; host back ⇒ the alarm alone delivers it and then clears itself', async () => {
     const { OUTBOX_ALARM_NAME } = await import('../lib/outbox-alarm');
-    const { BACKFILL_ALARM_NAME } = await import('../lib/backfill/alarm');
     hostMode = 'down';
     const mod = await boot();
     const result = await dispatch(mod);
 
     expect(result).toMatchObject({ saved: false, status: 'queued' });
-    expect(alarms.live.has(BACKFILL_ALARM_NAME)).toBe(false); // the switch is off
     expect(alarms.live.has(OUTBOX_ALARM_NAME)).toBe(true);
 
     hostMode = 'up';

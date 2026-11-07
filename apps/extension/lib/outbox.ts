@@ -324,6 +324,51 @@ export async function undeliveredEntries(): Promise<OutboxEntry[] | null> {
 }
 
 /**
+ * True when this queued row names the platform. A payload that explicitly names
+ * a platform is authoritative: a row whose payload says chatgpt is never
+ * claude's, even when its filename says otherwise (deleting it under claude's
+ * name would drop another platform's data). Only when the payload names no
+ * platform does the exact filename prefix speak.
+ */
+export function outboxEntryBelongsToPlatform(
+  entry: Pick<OutboxEntry, 'name' | 'payload'>,
+  platform: string,
+): boolean {
+  try {
+    const payload = JSON.parse(entry.payload) as { platform?: unknown };
+    if (payload && typeof payload.platform === 'string') return payload.platform === platform;
+  } catch { /* the delivery name remains an independently recorded witness */ }
+  return entry.name.startsWith(`${platform}-`);
+}
+
+/** Remove only queued rows whose platform is explicitly identified. */
+export async function removeOutboxEntriesForPlatform(
+  platform: string,
+): Promise<{ ok: true; removed: number } | { ok: false; reason: 'outbox-unavailable' }> {
+  const db = await openDb();
+  if (!db) return { ok: false, reason: 'outbox-unavailable' };
+  const tx = db.transaction([OUTBOX_STORE, OUTBOX_META_STORE], 'readwrite');
+  const done = txDone(tx);
+  const entries = tx.objectStore(OUTBOX_STORE);
+  const meta = tx.objectStore(OUTBOX_META_STORE);
+  const rows = await requestToPromise(entries.getAll() as IDBRequest<OutboxEntry[]>);
+  const matches = rows.filter((entry) => outboxEntryBelongsToPlatform(entry, platform));
+  if (matches.length === 0) {
+    await done;
+    return { ok: true, removed: 0 };
+  }
+  const current = await requestToPromise(meta.get(OUTBOX_META_BYTES_KEY) as IDBRequest<number | undefined>);
+  let removedBytes = 0;
+  for (const entry of matches) {
+    entries.delete(entry.sha256);
+    removedBytes += entry.bytes + (entry.accountId ? new TextEncoder().encode(entry.accountId).byteLength : 0);
+  }
+  meta.put(Math.max(0, (typeof current === 'number' ? current : 0) - removedBytes), OUTBOX_META_BYTES_KEY);
+  await done;
+  return { ok: true, removed: matches.length };
+}
+
+/**
  * 🔴 Is this value a summary this module could have written?
  *
  * It lives beside `summary()` rather than in a caller because it re-derives

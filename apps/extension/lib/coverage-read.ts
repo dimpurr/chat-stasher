@@ -21,7 +21,7 @@
  * | debt rows | IndexedDB `chat-stasher-backfill` / `debts_by_platform` | **the authority** on what is owed vs settled (`lib/backfill/ledger.ts`) |
  * | debt times | the same store, row field `at` (W113) | the platform's own time for a conversation, when its list gave one |
  * | targets | `storage.local` `cs_backfill_targets_v1` | distinguishes "nothing owed" from "no target, so nothing runs" |
- * | switch | `storage.local` `cs_backfill_enabled_v1` | off means nothing runs, whatever else is on disk |
+ * | consent | `storage.local` `cs_platform_consent_v1` | per-platform live and backfill gate |
  * | host pause | `storage.local` `cs_native_host_pause_v1` | the delivery exit is unreachable |
  * | tick trace | `storage.local` `cs_backfill_lasttick_v1` | which platform the last wake passed over, and why |
  *
@@ -33,7 +33,7 @@
 import { BACKFILL_TARGETS_KEY, loadLastTick, type BackfillTarget, type BackfillTickRecord, type TickSkipReason } from './backfill/alarm';
 import { readDebtSet } from './backfill/debt-store';
 import { migrateChatGptWorkspaceScopes } from './backfill/chatgpt-scope-migration';
-import { isBackfillEnabled } from './backfill/schedule';
+import { loadPlatformConsent } from './platform-consent';
 import { readSpeedPreset } from './backfill/speed';
 import { browserLocalSnapshot, type BackfillStore } from './backfill/store';
 import {
@@ -225,9 +225,15 @@ export async function readCoverageInputs(
     });
   }
 
+  const consent = store ? await loadPlatformConsent(store) : null;
+  const platformConsent = consent
+    ? Object.fromEntries(Object.entries(consent.platforms).map(([id, entry]) => [id, entry.state === 'on']))
+    : undefined;
+
   return {
     scopes,
-    enabled: await isBackfillEnabled(store),
+    enabled: store !== null,
+    ...(platformConsent ? { platformConsent } : {}),
     hostPaused: store ? (await loadHostPause(store)) !== null : false,
     presetRaw: await readSpeedPreset(store),
     tick,

@@ -24,6 +24,13 @@
       #install-label { margin: -6px 0 8px; font-size: 12px; opacity: .85; }
       #other-installs { margin: -4px 0 10px; font-size: 12px; opacity: .85; }
       #install-profile-label { width: 190px; font: inherit; }
+      #consent-scope { margin: 0 0 8px; font-size: 12px; opacity: .8; }
+      #platform-consent { border-top: 1px solid rgba(128,128,128,.35); padding-top: 4px; }
+      #platform-consent .row { margin: 5px 0; font-size: 12px; }
+      #platform-consent .row label { min-width: 76px; font-weight: 600; }
+      #platform-consent .row span { margin-left: auto; opacity: .85; }
+      #consent-dialog { max-width: 300px; border-radius: 8px; }
+      #consent-dialog::backdrop { background: rgba(0,0,0,.45); }
       #channel { margin: 6px 0; font-size: 12px; opacity: .9; }
       /* W2: backfill paused because the host is unreachable. It is the reason
          "nothing is happening", so it has to be prominent. */
@@ -212,6 +219,7 @@
       <button type="button" id="save-install-profile-label"></button>
     </div>
     <div id="install-profile-label-save-status" role="status" aria-live="polite" aria-atomic="true"></div>
+    <p id="consent-scope">This browser · profile</p>
     <div id="status"></div>
     <div id="channel"></div>
     <!-- 🔴 EXT-12 · "delivered N when the host connected". Quiet: it is a fact, not an alert.
@@ -273,10 +281,16 @@
     <!-- ADR-032 §1 · The summary card and the entry link into the standalone coverage page. -->
     <div id="coverage-card" hidden></div>
     <button type="button" id="open-coverage" hidden></button>
-    <div class="row">
-      <input type="checkbox" id="toggle" />
-      <label for="toggle" id="toggle-label"></label>
-    </div>
+    <section id="platform-consent" aria-label="Platform capture settings"></section>
+    <dialog id="consent-dialog">
+      <p id="consent-dialog-copy"></p>
+      <p id="consent-dialog-retention"></p>
+      <div class="row">
+        <button type="button" data-consent-choice="pause"></button>
+        <button type="button" data-consent-choice="clear"></button>
+        <button type="button" data-consent-choice="cancel"></button>
+      </div>
+    </dialog>
     <div class="notes" id="notes"></div>
     <!-- The language selector. Its options are built by main.ts from the
          catalog, each option labelled in its own language script. -->

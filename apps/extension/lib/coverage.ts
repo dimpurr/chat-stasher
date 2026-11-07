@@ -105,7 +105,9 @@ export interface CoverageInput {
   /** Identity of the browser profile that produced this snapshot. */
   install?: { install_id: string; browser: string; profile_label: string };
   scopes: readonly CoverageScopeInput[];
-  /** The explicit switch (`cs_backfill_enabled_v1`). Off by default and off means nothing runs. */
+  /** Per-platform consent; a missing entry follows the default-on rule. */
+  platformConsent?: Readonly<Record<string, boolean>>;
+  /** Legacy report field kept for pure model compatibility; production supplies true. */
   enabled: boolean;
   /** Whether the archive's local host is currently unreachable (the delivery exit). */
   hostPaused: boolean;
@@ -395,9 +397,9 @@ function enumStateOf(header: BackfillHeader): CoverageEnumState {
   return header.enumCursor.complete ? 'complete' : 'in-progress';
 }
 
-function stateOf(input: CoverageScopeInput, enabled: boolean, hostPaused: boolean, speed: CoverageSpeed, now: number): CoverageState {
+function stateOf(input: CoverageScopeInput, enabled: boolean, platformConsent: Readonly<Record<string, boolean>> | undefined, hostPaused: boolean, speed: CoverageSpeed, now: number): CoverageState {
   const { header, debt, registered } = input;
-  if (!enabled) return 'off';
+  if (!enabled || platformConsent?.[input.platform] === false) return 'off';
   if (hostPaused) return 'host-paused';
   // 🔴 The stop is checked before the count, and that order is deliberate: a halted scope that happens to
   //    owe nothing right now is still halted, and reporting it as `done` would turn a named stop into a
@@ -438,6 +440,7 @@ function stateOf(input: CoverageScopeInput, enabled: boolean, hostPaused: boolea
 
 function rowOf(input: CoverageScopeInput, opts: {
   enabled: boolean;
+  platformConsent?: Readonly<Record<string, boolean>>;
   hostPaused: boolean;
   presetRaw: unknown;
   now: number;
@@ -499,7 +502,7 @@ function rowOf(input: CoverageScopeInput, opts: {
     months,
     unknownTime: { archived: archivedMonths?.unknown ?? 0, pending: pendingMonths?.unknown ?? 0 },
     timed: { archived: archivedMonths?.timed ?? 0, pending: pendingMonths?.timed ?? 0 },
-    state: stateOf(input, opts.enabled, opts.hostPaused, speed, opts.now),
+    state: stateOf(input, opts.enabled, opts.platformConsent, opts.hostPaused, speed, opts.now),
     halt: header.halted,
     // 🔴 W199 · Read through the validators, so a record of unknown shape becomes `null`
     //    ("we cannot read one") rather than a half-built lease a comparison would act on.
@@ -531,6 +534,7 @@ export function buildCoverage(input: CoverageInput): CoverageReport {
   const monthKey = input.monthKey ?? localMonthKey;
   const opts = {
     enabled: input.enabled,
+    ...(input.platformConsent ? { platformConsent: input.platformConsent } : {}),
     hostPaused: input.hostPaused,
     presetRaw: input.presetRaw,
     now: input.now,
@@ -595,6 +599,11 @@ export function describeSkipReason(reason: string | null): string {
       return t('tick.skip.stateUnreadable');
     case 'account-suspended':
       return t('tick.skip.accountSuspended');
+    // 🔴 ADR-066 D3 · The user's per-platform stop differs from every code above:
+    // nobody has to fix anything, and the sentence must send the reader to the
+    // popup's switch rather than to a failure.
+    case 'platform-disabled':
+      return t('tick.skip.platformDisabled');
     default:
       return t('tick.skip.unknown', { reason: reason ?? t('common.unknownShort') });
   }

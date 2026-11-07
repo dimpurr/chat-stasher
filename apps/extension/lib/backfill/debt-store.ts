@@ -504,6 +504,33 @@ export async function rekeyDebtScope(platform: string, from: string, to: string)
   }
 }
 
+/** Remove this platform's debt records and legacy rows for scopes proven by its local headers. */
+export async function clearPlatformDebts(platform: string, legacyScopes: readonly string[]): Promise<boolean> {
+  const db = await openDb();
+  if (!db) return false;
+  try {
+    // A database that never held the pre-W45 layout has no legacy store at
+    // all (it is deliberately not created on upgrade): opening a transaction
+    // over a missing store throws, so it is scoped out rather than failed.
+    const names = [DEBTS_STORE, ...(db.objectStoreNames.contains(DEBTS_LEGACY_STORE) ? [DEBTS_LEGACY_STORE] as const : [])];
+    const tx = db.transaction(names, 'readwrite');
+    const done = txDone(tx);
+    const current = tx.objectStore(DEBTS_STORE);
+    const rows = await requestToPromise(current.getAll() as IDBRequest<DebtRecord[]>);
+    for (const row of rows) if (row.platform === platform) current.delete([row.platform, row.scope, row.id]);
+    if (db.objectStoreNames.contains(DEBTS_LEGACY_STORE)) {
+      const legacy = tx.objectStore(DEBTS_LEGACY_STORE);
+      const oldRows = await requestToPromise(legacy.getAll() as IDBRequest<Array<{ scope: string; id: string }>>);
+      const scopes = new Set(legacyScopes);
+      for (const row of oldRows) if (scopes.has(row.scope)) legacy.delete([row.scope, row.id]);
+    }
+    await done;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isChatGptProvenance(value: unknown): value is import('./types').ChatGptDebtProvenance {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const row = value as Record<string, unknown>;

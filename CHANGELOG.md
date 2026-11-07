@@ -1034,6 +1034,7 @@ under its own heading below.
 
 #### Added
 
+- **Per-platform browser consent.** Each browser profile has a switch for every platform, on by default. Turning one off stops its live captures and backfill. You can keep its local queue and progress or clear them; this does not alter the shared stage. The popup directs users to `chat-stasher hide <session>` for reversible, one-session-at-a-time hiding. Permanent deletion (`purge`) is not available in this version.
 - **The extension without any CLI is a supported state, not a breakage.** The
   popup now shows a first-run card: what this is, why the half that writes
   files has to be a separate program on this machine, a one-line installer

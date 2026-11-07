@@ -880,6 +880,7 @@ export async function reportInstallStatus(status: {
    * is "this extension predates the field".
    */
   build_stamp: string | null;
+  consent?: { version: 1; platforms: Record<string, { state: 'on' | 'off'; updatedAt: number }> };
   platforms: Array<{ platform: string; captured_by_this_browser: number; pending: number; paused_reason: string | null; account_fingerprint?: string }>;
 }): Promise<boolean> {
   const requestId = newRequestId();

@@ -19,8 +19,8 @@
  * own labels, because those are shown in each language's own script.
  *
  * 🔴 This file **never** issues a network request and **never** triggers a
- *    backfill. Flipping the switch writes one boolean; the real tick is still
- *    only woken by the two heartbeats.
+ *    backfill. A platform choice writes profile-local consent; the worker's
+ *    periodic alarm remains the only backfill runner.
  */
 
 import {
@@ -31,11 +31,7 @@ import { buildCoverage } from '../../lib/coverage';
 import { readCoverageInputs } from '../../lib/coverage-read';
 import { barGeometry } from '../../lib/coverage-charts';
 import { coverageCard, coverageCardTitle, openCoverageLabel } from '../../lib/coverage-view';
-import {
-  isBackfillEnabled,
-  setBackfillEnabled,
-  tickBlockReason,
-} from '../../lib/backfill/schedule';
+import { tickBlockReason } from '../../lib/backfill/schedule';
 import {
   evictionLogOf,
   loadLastTick,
@@ -72,15 +68,18 @@ import {
   loadLastExport,
   recordExport,
   undeliveredEntries,
+  type OutboxEntry,
 } from '../../lib/outbox';
 import { getInstallIdentity } from '../../lib/install-identity';
 import { loadHostPause, loadHostStatus } from '../../lib/host-status';
 import { loadHookDecline, pruneStaleHookStatus } from '../../lib/hook-status';
 import { liveCaptureOf } from '../../lib/live-capture';
-import { currentReleaseChannel, isPlatformActiveInChannel } from '../../lib/contract';
+import { currentReleaseChannel, isPlatformActiveInChannel, platformsForChannel } from '../../lib/contract';
 import { copiedLabel, exportNoHistory, exportNoUniqueName, exportNothingQueued, exportUnreadable, installerCommand } from '../../lib/ui-strings';
 import { initUiLocale, normalizeUiLocale, setUiLocale, t, type UiLocale } from '../../lib/i18n';
 import { attachInstallIdentityToConsole } from '../../lib/install-identity';
+import { anyPlatformConsented, loadPlatformConsent, setPlatformConsent, type PlatformConsentRecord } from '../../lib/platform-consent';
+import { clearPlatformLocalData } from '../../lib/platform-cleanup';
 
 /**
  * Ask background for the runtime facts. When the answer does not come (the SW
@@ -130,7 +129,7 @@ async function collect(): Promise<PopupModel> {
   const store = browserLocalStore();
   const runtime = await askBackground();
 
-  const enabled = await isBackfillEnabled(store);
+  const enabled = await anyPlatformConsented(store);
 
   // 🔴 W36b · **The migration runs on the first state load, not only on a tick.**
   //
@@ -184,7 +183,7 @@ async function collect(): Promise<PopupModel> {
   // 🔴 The one predicate shared with tickBackfill, so the ordering is identical by construction.
   const block = await tickBlockReason({
     hasStore: store !== null,
-    isEnabled: () => enabled,
+    isEnabled: async () => true,
     isHostPaused: async () => hostPause !== null,
     // 🔴 EXT-12 · The near-full outbox pauses backfill. The outbox is read above;
     // an unreadable one is not near-full (we cannot say it is) — same rule the
@@ -494,14 +493,6 @@ function paint(view: PopupView): void {
   setDashboardNote(view.dashboard.reason ?? '');
   // 🔴 C22: which platforms can have their history backfilled and which cannot. Always shown.
   text('coverage', view.coverage);
-  text('toggle-label', view.toggle.label);
-
-  const toggle = document.getElementById('toggle') as HTMLInputElement | null;
-  if (toggle) {
-    toggle.checked = view.toggle.checked;
-    toggle.disabled = view.toggle.disabled;
-  }
-
   const notes = document.getElementById('notes');
   if (notes) {
     notes.textContent = '';
@@ -613,12 +604,134 @@ async function refresh(): Promise<void> {
   lastModel = previous === undefined ? model : { ...model, summary: previous };
   paint(renderPopup(lastModel));
   paintInstallIdentity(lastModel.install);
+  void refreshConsentSettings();
   // 🔴 ADR-032 · The coverage card is refreshed with every repaint, because the two things that change
-  //    what it says — the switch and the stored progress — are both things the user can change from this
+  //    what it says — platform consent and stored progress — are both things the user can change from this
   //    popup. It is deliberately *not* fetched on a timer: the popup is opened, read and closed, and a
   //    card that aged while nobody was looking would be the one thing it must not be.
   void refreshCoverageCard();
 }
+
+async function refreshConsentSettings(): Promise<void> {
+  const section = document.getElementById('platform-consent');
+  if (!section) return;
+  const store = browserLocalStore();
+  section.textContent = '';
+  if (!store) {
+    section.textContent = t('consent.unavailable');
+    return;
+  }
+  let consent: PlatformConsentRecord;
+  let snapshot: Record<string, unknown> | null;
+  let entries: OutboxEntry[] | null;
+  try {
+    [consent, snapshot, entries] = await Promise.all([
+      loadPlatformConsent(store), browserLocalSnapshot(), listEntries(),
+    ]);
+  } catch {
+    section.textContent = t('consent.unavailable');
+    return;
+  }
+  const liveRows = liveCaptureOf(snapshot);
+  for (const platform of platformsForChannel(currentReleaseChannel())) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.dataset.platform = platform.id;
+    checkbox.checked = consent.platforms[platform.id]?.state !== 'off';
+    const label = document.createElement('label');
+    label.textContent = platform.id;
+    label.htmlFor = `consent-${platform.id}`;
+    checkbox.id = `consent-${platform.id}`;
+    const saved = liveRows.find((item) => item.platform === platform.id)?.count;
+    const pending = entries === null ? null : entries.filter((entry) => {
+      try { return (JSON.parse(entry.payload) as { platform?: unknown }).platform === platform.id && entry.state === 'pending'; }
+      catch { return entry.name.startsWith(`${platform.id}-`) && entry.state === 'pending'; }
+    }).length;
+    const status = document.createElement('span');
+    const refusalRecord = snapshot?.[`cs_consent_refusals_v1:${platform.id}`];
+    const refused = refusalRecord && typeof refusalRecord === 'object'
+      && Number.isSafeInteger((refusalRecord as { count?: unknown }).count)
+      ? (refusalRecord as { count: number }).count : 0;
+    status.textContent = checkbox.checked
+      ? t('consent.counts', { saved: saved ?? t('consent.unknown'), pending: pending === null ? t('consent.unknown') : pending })
+      : refused > 0 ? t('consent.pausedCount', { count: refused }) : t('consent.paused');
+    row.append(checkbox, label, status);
+    section.appendChild(row);
+  }
+}
+
+let consentDialogPlatform: string | null = null;
+
+async function choosePlatformConsent(platform: string, checkbox: HTMLInputElement): Promise<void> {
+  const store = browserLocalStore();
+  if (!store) return;
+  if (checkbox.checked) {
+    await setPlatformConsent(store, platform, true);
+    try { await browser.runtime.sendMessage({ type: POPUP_SYNC_ALARM_MESSAGE }); } catch { /* next alarm remains the fallback */ }
+    await refreshConsentSettings();
+    return;
+  }
+  consentDialogPlatform = platform;
+  text('consent-dialog-copy', t('consent.confirm', { platform }));
+  text('consent-dialog-retention', t('consent.retention'));
+  for (const [choice, key] of [['pause', 'consent.pauseOnly'], ['clear', 'consent.pauseAndClear'], ['cancel', 'consent.cancel']] as const) {
+    const button = document.querySelector<HTMLButtonElement>(`[data-consent-choice="${choice}"]`);
+    if (button) button.textContent = t(key);
+  }
+  const dialog = document.getElementById('consent-dialog') as HTMLDialogElement | null;
+  dialog?.showModal();
+}
+
+async function finishConsentChoice(choice: string): Promise<void> {
+  const platform = consentDialogPlatform;
+  consentDialogPlatform = null;
+  const dialog = document.getElementById('consent-dialog') as HTMLDialogElement | null;
+  dialog?.close();
+  if (!platform || choice === 'cancel') {
+    await refreshConsentSettings();
+    return;
+  }
+  const store = browserLocalStore();
+  const platformRow = platformsForChannel(currentReleaseChannel()).find((item) => item.id === platform);
+  if (!store || !platformRow) return;
+  await setPlatformConsent(store, platform, false);
+  if (choice === 'clear') {
+    try {
+      await clearPlatformLocalData(store, platform, platformRow.origins);
+    } catch (err) {
+      console.warn('[chat-stasher] platform local cleanup failed', (err as Error).message);
+      const section = document.getElementById('platform-consent');
+      if (section) section.append(t('consent.cleanupFailed'));
+    }
+  }
+  try { await browser.runtime.sendMessage({ type: POPUP_SYNC_ALARM_MESSAGE }); } catch { /* next alarm remains the fallback */ }
+  await refreshConsentSettings();
+}
+
+document.getElementById('platform-consent')?.addEventListener('change', (event) => {
+  const checkbox = event.target;
+  if (!(checkbox instanceof HTMLInputElement) || !checkbox.dataset.platform) return;
+  void choosePlatformConsent(checkbox.dataset.platform, checkbox).catch((err) => {
+    console.warn('[chat-stasher] platform consent update failed', (err as Error).message);
+    void refreshConsentSettings();
+  });
+});
+
+document.querySelectorAll<HTMLButtonElement>('[data-consent-choice]').forEach((button) => {
+  button.addEventListener('click', () => {
+    void finishConsentChoice(button.dataset.consentChoice ?? 'cancel').catch((err) => {
+      console.warn('[chat-stasher] platform consent choice failed', (err as Error).message);
+      void refreshConsentSettings();
+    });
+  });
+});
+
+document.getElementById('consent-dialog')?.addEventListener('cancel', (event) => {
+  event.preventDefault();
+  void finishConsentChoice('cancel');
+});
 
 function paintInstallIdentity(install: BackfillRuntimeStatus['install']): void {
   const label = document.getElementById('install-label');
@@ -920,45 +1033,12 @@ async function onOpenDashboard(): Promise<void> {
  * own `storage.onChanged`, which is why this message is a second request rather
  * than the only one.
  */
-async function askAlarmSync(): Promise<string> {
-  try {
-    const reply = await browser.runtime.sendMessage({ type: POPUP_SYNC_ALARM_MESSAGE });
-    const result = (reply as { result?: unknown } | undefined)?.result;
-    if (typeof result === 'string') return result;
-    return 'unknown';
-  } catch (err) {
-    console.warn('[chat-stasher] popup alarm sync request failed', (err as Error).message);
-    return 'unknown';
-  }
-}
-
-async function onToggle(on: boolean): Promise<void> {
-  const store = browserLocalStore();
-  // If it cannot be saved, do not pretend the flip worked: repaint at once and
-  // the UI falls back to the real value.
-  await setBackfillEnabled(store, on);
-  // 🔴 C19 + W87: the switch and the alarm must change together, and the worker
-  //    is the only thing that changes an alarm. `setBackfillEnabled` has already
-  //    returned, so the value the worker will read is committed.
-  const result = await askAlarmSync();
-  console.log('[chat-stasher] backfill alarm ->', result);
-  await refresh();
-}
-
 /** 🔴 The language switch: persist the choice, then repaint in the new language immediately. */
 async function onLocaleChange(value: string): Promise<void> {
   const applied: UiLocale = await setUiLocale(normalizeUiLocale(value));
   console.log('[chat-stasher] ui locale ->', applied);
   await refresh();
 }
-
-document.getElementById('toggle')?.addEventListener('change', (ev) => {
-  const on = (ev.target as HTMLInputElement).checked;
-  void onToggle(on).catch((err) => {
-    console.warn('[chat-stasher] popup toggle failed', (err as Error).message);
-    void refresh();
-  });
-});
 
 document.getElementById('locale')?.addEventListener('change', (ev) => {
   const value = (ev.target as HTMLSelectElement).value;
