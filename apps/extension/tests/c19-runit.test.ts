@@ -464,7 +464,10 @@ describe('C19 task 1 · the alarm: on ⇒ created, off ⇒ cleared', () => {
     const { isBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
 
-    // One switch read — the first one issued from here on — takes 25 ms to come
+    const { setBackfillEnabled } = await import('../lib/backfill/schedule');
+    await setBackfillEnabled(browserLocalStore(), false);
+
+    // One consent read — the first one issued from here on — takes 25 ms to come
     // back, and answers with the value the switch held when it was *issued*. That
     // is the real storage semantics the race needs: the answer is decided at the
     // request, not at the reply.
@@ -473,7 +476,7 @@ describe('C19 task 1 · the alarm: on ⇒ created, off ⇒ cleared', () => {
     const realGet = area.get;
     area.get = async (query: any) => {
       const asksSwitch = Boolean(query) && !Array.isArray(query)
-        && 'cs_backfill_enabled_v1' in query;
+        && 'cs_platform_consent_v1' in query;
       const answer = await realGet(query);
       if (asksSwitch && slowNextSwitchRead) {
         slowNextSwitchRead = false;
@@ -482,8 +485,8 @@ describe('C19 task 1 · the alarm: on ⇒ created, off ⇒ cleared', () => {
       return answer;
     };
     try {
-      const stale = mod.syncAlarmWithSwitch();      // reads `false`, answers 25 ms later
-      // A macrotask, so that read has certainly been issued (and answered `false`)
+      const stale = mod.syncAlarmWithSwitch();      // reads the all-off consent record, answers 25 ms later
+      // A macrotask, so that read has certainly been issued against the all-off record
       // before the switch is turned on.
       await new Promise((resolve) => { setTimeout(resolve, 0); });
       await enableBackfill();                       // the user turns it on
@@ -493,6 +496,9 @@ describe('C19 task 1 · the alarm: on ⇒ created, off ⇒ cleared', () => {
 
       // The switch really did end up on, so the alarms being armed is the only
       // correct end state and the assertion below cannot pass by accident.
+      // The hook must have fired: without the 25 ms hold this test is a plain
+      // ordering check that passes for the wrong reason (see header).
+      expect(slowNextSwitchRead).toBe(false);
       expect(await isBackfillEnabled(browserLocalStore())).toBe(true);
       console.log('[C19-1] switch on during a slow startup read -> alarm ops:', alarmLog, 'alarms now:', [...alarmBook.keys()]);
       expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(true);
