@@ -554,6 +554,22 @@ under its own heading below.
 
 #### Changed
 
+- **A pass that needs a few sessions from the archive reads those, not every
+  tree.** The destination probe that closes a round's debts — and `verify`'s
+  manifest reconcile, which asks the same question — used to list every file
+  of every snapshot of a cumulative walk before filtering to the sessions it
+  actually owed, so a round with a handful of remotely-provable sessions
+  still paid a cost that grew with the archive (on a long-built archive this
+  one read was measured at 89–91 % of a round's collect, ~20 minutes of a
+  25-minute pass). A walk that is handed a wanted set now resolves, per
+  snapshot, exactly the directories the set names plus the machine-log
+  subtree, reusing the subtree resolution `read --session` already has; a
+  snapshot whose stage is not the writer's own layout, or a subtree that cannot
+  be read, keeps the full recursive listing and the walk's existing warnings,
+  so no odd tree is guessed at, and reads that ask for everything (`read
+  --all-machines`, duplicate inventories) still walk every tree exactly as
+  before. The `wanted=N` line each cumulative read logs now stands for the
+  cost shape too: a small `N` is a small read.
 - **An hourly pass costs what the hour changed, not what the archive totals
   (ISSUE-008).** The collector re-proved many things that nearly always still
   held, at a cost that grew with the archive instead of with the day's change:
