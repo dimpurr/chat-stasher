@@ -1708,6 +1708,102 @@ const FAST_PATH_STAGE_TOPLEVEL: &[&str] = &[
     crate::inbox::STAGE_LOCK_FILE,
 ];
 
+/// One directory child by name, read from the directory's own tree blob —
+/// the single step W1059's stage descent repeats: `Ok(None)` for a missing
+/// child (or an empty directory, the same answer for this purpose),
+/// `Err` when the tree blob itself cannot be read.
+fn tree_child<S: rustic_core::IndexedFull>(
+    repo: &Repository<S>,
+    dir: &rustic_core::repofile::Node,
+    name: &std::ffi::OsStr,
+    unknown: &dyn Fn(&str) -> String,
+) -> anyhow::Result<Option<rustic_core::repofile::Node>> {
+    let Some(id) = dir.subtree else {
+        return Ok(None);
+    };
+    let tree = repo.get_tree(&id).with_context(|| unknown("tree walk"))?;
+    Ok(tree.nodes.into_iter().find(|n| n.name() == name))
+}
+
+/// Every `snapshot.paths` entry resolved to its stage-root directory node,
+/// with the stage-relative path it was found at — or `None` when the tree does
+/// not carry a recorded path as a directory, the odd shape a fast path must
+/// answer with "list me in full" rather than a guess (W1059).
+fn stage_dir_nodes<S: rustic_core::IndexedFull>(
+    repo: &Repository<S>,
+    snap: &SnapshotFile,
+    root: &rustic_core::repofile::Node,
+    unknown: &dyn Fn(&str) -> String,
+) -> anyhow::Result<Option<Vec<(PathBuf, rustic_core::repofile::Node)>>> {
+    let stage_paths: Vec<PathBuf> = (&snap.paths).into_iter().map(PathBuf::from).collect();
+    if stage_paths.is_empty() {
+        return Ok(None);
+    }
+    let mut out = Vec::with_capacity(stage_paths.len());
+    for stage_path in stage_paths {
+        let rel: PathBuf = stage_path
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+            .collect();
+        let mut stage = root.clone();
+        for comp in rel.components() {
+            match tree_child(repo, &stage, comp.as_os_str(), unknown)? {
+                Some(next) if next.node_type == NodeType::Dir => stage = next,
+                _ => return Ok(None),
+            }
+        }
+        out.push((rel, stage));
+    }
+    Ok(Some(out))
+}
+
+/// The stage root's `sessions/` directory, read the way the writer's own
+/// layout justifies a shortcut: the stage tree may hold nothing outside
+/// [`FAST_PATH_STAGE_TOPLEVEL`], and `sessions` must be one of its
+/// directories. `Ok(None)` is the refusal — the caller lists the snapshot in
+/// full — while a tree blob that cannot be read is the `Err` either path
+/// treats as the snapshot's answer.
+///
+/// The unrecognized-entry rule is W1059's, unchanged: one name beside the
+/// writer's own is enough to lose the shortcut for the whole snapshot,
+/// because the fast path cannot prove it still sees every
+/// `sessions/<machine>/<session>/` subtree the full listing would have
+/// matched — slower, never a false absence.
+fn stage_sessions_dir<S: rustic_core::IndexedFull>(
+    repo: &Repository<S>,
+    stage: &rustic_core::repofile::Node,
+    unknown: &dyn Fn(&str) -> String,
+) -> anyhow::Result<Option<rustic_core::repofile::Node>> {
+    let Some(stage_tree_id) = stage.subtree else {
+        return Ok(None);
+    };
+    let stage_tree = repo
+        .get_tree(&stage_tree_id)
+        .with_context(|| unknown("tree walk"))?;
+    if stage_tree
+        .nodes
+        .iter()
+        .any(|node| match node.name().to_str() {
+            Some(name) => !FAST_PATH_STAGE_TOPLEVEL.contains(&name),
+            None => true,
+        })
+    {
+        return Ok(None);
+    }
+    let sessions_dir = std::ffi::OsStr::new(SESSIONS_DIR);
+    let Some(sessions) = stage_tree
+        .nodes
+        .iter()
+        .find(|node| node.name() == sessions_dir)
+    else {
+        return Ok(None);
+    };
+    if sessions.node_type != NodeType::Dir {
+        return Ok(None);
+    }
+    Ok(Some(sessions.clone()))
+}
+
 /// `Some(entries)` when every stage root resolved and holds `sessions/` under
 /// the writer's layout alone; `None` to ask for the full listing.
 fn fast_session_entries<S: rustic_core::IndexedFull>(
@@ -1719,70 +1815,17 @@ fn fast_session_entries<S: rustic_core::IndexedFull>(
     want_provenance: bool,
     unknown: &dyn Fn(&str) -> String,
 ) -> anyhow::Result<Option<Vec<(PathBuf, rustic_core::repofile::Node)>>> {
-    fn child<S: rustic_core::IndexedFull>(
-        repo: &Repository<S>,
-        dir: &rustic_core::repofile::Node,
-        name: &std::ffi::OsStr,
-        unknown: &dyn Fn(&str) -> String,
-    ) -> anyhow::Result<Option<rustic_core::repofile::Node>> {
-        let Some(id) = dir.subtree else {
-            return Ok(None);
-        };
-        let tree = repo.get_tree(&id).with_context(|| unknown("tree walk"))?;
-        Ok(tree.nodes.into_iter().find(|n| n.name() == name))
-    }
-
-    let stage_paths: Vec<PathBuf> = (&snap.paths).into_iter().map(PathBuf::from).collect();
-    if stage_paths.is_empty() {
+    let Some(stages) = stage_dir_nodes(repo, snap, root, unknown)? else {
         return Ok(None);
-    }
+    };
     let mut out = Vec::new();
-    for stage_path in stage_paths {
-        let rel: PathBuf = stage_path
-            .components()
-            .filter(|c| matches!(c, std::path::Component::Normal(_)))
-            .collect();
-        let mut stage = root.clone();
-        for comp in rel.components() {
-            match child(repo, &stage, comp.as_os_str(), unknown)? {
-                Some(next) if next.node_type == NodeType::Dir => stage = next,
-                _ => return Ok(None),
-            }
-        }
-        let Some(stage_tree_id) = stage.subtree else {
+    for (rel, stage) in stages {
+        let Some(sessions) = stage_sessions_dir(repo, &stage, unknown)? else {
             return Ok(None);
         };
-        let stage_tree = repo
-            .get_tree(&stage_tree_id)
-            .with_context(|| unknown("tree walk"))?;
-        // One unrecognized entry beside the writer's layout is enough to lose
-        // the shortcut for the whole snapshot: the fast path cannot prove it
-        // still sees every `sessions/<machine>/<session>/` subtree the full
-        // listing would have matched, so the snapshot is walked in full
-        // instead — slower, never a false absence.
-        if stage_tree
-            .nodes
-            .iter()
-            .any(|node| match node.name().to_str() {
-                Some(name) => !FAST_PATH_STAGE_TOPLEVEL.contains(&name),
-                None => true,
-            })
-        {
-            return Ok(None);
-        }
-        let sessions_dir = std::ffi::OsStr::new(SESSIONS_DIR);
-        let Some(sessions) = stage_tree
-            .nodes
-            .iter()
-            .find(|node| node.name() == sessions_dir)
-        else {
-            return Ok(None);
-        };
-        if sessions.node_type != NodeType::Dir {
-            return Ok(None);
-        }
-        if let Some(machine_dir) = child(repo, sessions, machine.as_ref(), unknown)? {
-            if let Some(session_dir) = child(repo, &machine_dir, session_id.as_ref(), unknown)? {
+        if let Some(machine_dir) = tree_child(repo, &sessions, machine.as_ref(), unknown)? {
+            if let Some(session_dir) = tree_child(repo, &machine_dir, session_id.as_ref(), unknown)?
+            {
                 if session_dir.node_type == NodeType::Dir {
                     let base = rel.join(SESSIONS_DIR).join(machine).join(session_id);
                     let listed = repo
@@ -1794,9 +1837,123 @@ fn fast_session_entries<S: rustic_core::IndexedFull>(
             }
         }
         if want_provenance {
-            if let Some(meta) = child(repo, &stage, "meta".as_ref(), unknown)? {
-                if let Some(mdir) = child(repo, &meta, machine.as_ref(), unknown)? {
-                    if let Some(file) = child(repo, &mdir, "provenance-v1.jsonl".as_ref(), unknown)?
+            if let Some(meta) = tree_child(repo, &stage, "meta".as_ref(), unknown)? {
+                if let Some(mdir) = tree_child(repo, &meta, machine.as_ref(), unknown)? {
+                    if let Some(file) =
+                        tree_child(repo, &mdir, "provenance-v1.jsonl".as_ref(), unknown)?
+                    {
+                        out.push((
+                            rel.join("meta").join(machine).join("provenance-v1.jsonl"),
+                            file,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+/// The batched shape of [`fast_session_entries`] for a cumulative walk with a
+/// wanted set (W1093, PERF-NEXT ②): the entries of one snapshot that walk can
+/// possibly care about, resolved as directories instead of a full recursive
+/// listing. Same path form as `ls` of the root yields, so the walk's bucketing
+/// and ordering are unchanged, and the same refusal: `Ok(None)` when the stage
+/// is not the writer's layout, so the caller lists the snapshot in full.
+///
+/// What it reads per snapshot, and why the set is closed:
+///
+/// * every wanted session's `sessions/<machine>/<session>/` subtree — the one
+///   machine-partition tree is fetched once and its session directories are
+///   located inside it, so the cost is the wanted set's, not the machine's
+///   (the measurement behind that claim is W1059's: 150 snapshots, 300
+///   sessions, one session's read 31-34 s before → 6.6 s after);
+/// * the whole `machine-logs/` subtree — a cumulative walk reports machine-log
+///   generations whether a session set was given or not, and a generation
+///   only an older snapshot holds is retained, so nothing below that
+///   directory may be skipped;
+/// * `meta/<machine>/provenance-v1.jsonl` when a collapsing policy asks —
+///   the single file the full listing would match for a machine under
+///   `want_provenance`.
+///
+/// Everything a full recursive listing contributes to the caller's buckets
+/// comes from those directories: a path that buckets as a session shard must
+/// end in `sessions/<machine>/<session>/…`, and one that buckets as a
+/// machine-log generation must end in `machine-logs/…`. The two narrowings
+/// are those of W1059, stated there: a `sessions` root parked outside the
+/// writer's layout is not searched for (the stage-root entry screen above
+/// refuses the whole snapshot instead, so an unrecognized layout costs time
+/// rather than a false absence), and a wanted session held only there would
+/// be missed by the fast path — a tree the writer cannot produce.
+pub(crate) fn fast_directed_entries<S: rustic_core::IndexedFull>(
+    repo: &Repository<S>,
+    snap: &SnapshotFile,
+    root: &rustic_core::repofile::Node,
+    machine: &str,
+    wanted: &BTreeSet<&str>,
+    want_provenance: bool,
+    unknown: &dyn Fn(&str) -> String,
+) -> anyhow::Result<Option<Vec<(PathBuf, rustic_core::repofile::Node)>>> {
+    let Some(stages) = stage_dir_nodes(repo, snap, root, unknown)? else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for (rel, stage) in stages {
+        let Some(sessions) = stage_sessions_dir(repo, &stage, unknown)? else {
+            return Ok(None);
+        };
+        // The machine partition's tree is fetched once and shared by every
+        // wanted session: per-session lookups then cost a subtree each, not a
+        // walk of every session name the partition holds.
+        let machine_tree = tree_child(repo, &sessions, machine.as_ref(), unknown)?
+            .and_then(|machine_dir| machine_dir.subtree);
+        if let Some(tree_id) = machine_tree {
+            let tree = repo
+                .get_tree(&tree_id)
+                .with_context(|| unknown("tree walk"))?;
+            for session in wanted {
+                let Some(session_dir) = tree
+                    .nodes
+                    .iter()
+                    .find(|node| node.name() == std::ffi::OsStr::new(session))
+                else {
+                    continue;
+                };
+                if session_dir.node_type != NodeType::Dir {
+                    continue;
+                }
+                let base = rel.join(SESSIONS_DIR).join(machine).join(session);
+                let listed = repo
+                    .ls(session_dir, &LsOptions::default())
+                    .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
+                    .with_context(|| unknown("tree walk"))?;
+                out.extend(listed.into_iter().map(|(p, n)| (base.join(p), n)));
+            }
+        }
+        // Machine logs accumulate across snapshots and are reported whatever
+        // the wanted set is (see `materialize_machine_logs`), so their
+        // subtree is listed here too — every machine's, because the walk's
+        // bucketing for machine logs is not partitioned by hostname.
+        if let Some(machine_logs) = tree_child(
+            repo,
+            &stage,
+            std::ffi::OsStr::new(MACHINE_LOGS_DIR),
+            unknown,
+        )? {
+            if machine_logs.node_type == NodeType::Dir {
+                let base = rel.join(MACHINE_LOGS_DIR);
+                let listed = repo
+                    .ls(&machine_logs, &LsOptions::default())
+                    .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
+                    .with_context(|| unknown("tree walk"))?;
+                out.extend(listed.into_iter().map(|(p, n)| (base.join(p), n)));
+            }
+        }
+        if want_provenance {
+            if let Some(meta) = tree_child(repo, &stage, "meta".as_ref(), unknown)? {
+                if let Some(mdir) = tree_child(repo, &meta, machine.as_ref(), unknown)? {
+                    if let Some(file) =
+                        tree_child(repo, &mdir, "provenance-v1.jsonl".as_ref(), unknown)?
                     {
                         out.push((
                             rel.join("meta").join(machine).join("provenance-v1.jsonl"),

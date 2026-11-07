@@ -817,14 +817,14 @@ impl BackupStore {
         apply_control_policy: bool,
     ) -> anyhow::Result<ReadAllReport> {
         // W1091 (PERF-NEXT ①): one stderr line per cumulative read, saying
-        // how many sessions this read was asked to resolve. The walk itself
-        // lists every snapshot of every host whatever the set is — only the
-        // data-blob downloads below are filtered — so a collect pass that
-        // needs one session and a `read --all-machines` that needs them all
-        // cost a comparable amount of tree walking, and this line is what
-        // makes that visible per round in the scheduled logs (stdout is not
-        // used: `--json` consumers own stdout; stderr is the log channel
-        // `docs/cli.md`'s "Where output goes" gives diagnostics).
+        // how many sessions this read was asked to resolve. With a wanted set
+        // the walk below resolves each snapshot by descending to exactly the
+        // directories the set names (W1093, PERF-NEXT ②), so this line is
+        // what lets the scheduled logs show the two shapes apart: a
+        // `wanted=N` read costs N subtrees per snapshot, a `wanted=all` read
+        // still lists every tree in full. Stderr, not stdout: `--json`
+        // consumers own stdout (docs/cli.md's "Where output goes" gives
+        // diagnostics the log channel).
         eprintln!(
             "[readback] cumulative read: wanted={}",
             match wanted {
@@ -921,6 +921,21 @@ impl BackupStore {
             let mut sequence_paths: BTreeMap<(String, u64), String> = BTreeMap::new();
             let mut ambiguous_sequences: BTreeSet<(String, u64)> = BTreeSet::new();
 
+            // W1093 (PERF-NEXT ②): this host's slice of the wanted set. A
+            // wanted-set walk answers per snapshot by resolving exactly these
+            // session directories plus the machine-log subtree
+            // (`fast_directed_entries`) instead of listing every tree in
+            // full, so its cost is the set's, not the archive's; the
+            // per-path bucketing below is applied to either listing and is
+            // what makes the two interchangeable (the DEPLOY-1107 rounds
+            // read all of every snapshot for wanted=208).
+            let wanted_here: Option<BTreeSet<&str>> = wanted.map(|set| {
+                set.iter()
+                    .filter(|(machine, _)| machine == &hostname)
+                    .map(|(_, session)| session.as_str())
+                    .collect()
+            });
+
             for snap in &snaps {
                 let snap_id = snap.id.to_hex().as_str().to_string();
                 let short = snap_id[..8.min(snap_id.len())].to_string();
@@ -938,27 +953,66 @@ impl BackupStore {
                     }
                 };
 
-                let entries = match repo.ls(&root, &LsOptions::default()) {
-                    Ok(it) => match it.collect::<rustic_core::RusticResult<Vec<_>>>() {
-                        Ok(e) => e,
+                // W1093 (PERF-NEXT ②): the directed listing is tried only for
+                // a wanted-set read without a control policy — the readers
+                // that ask what the archive *physically holds* (`read
+                // --all-machines`, duplicate inventory) deliberately pass no
+                // set and keep the full walk, unrepresented semantics
+                // untouched. A refusal (`Ok(None)`: the snapshot's stage is
+                // not the writer's layout) falls back to the same full
+                // listing the walk has always done; a failure is this
+                // snapshot's tree answer — warning plus incomplete mark, the
+                // READ-RACE classification included — exactly as a full
+                // listing that cannot be read.
+                let entries = {
+                    let directed = match wanted_here.as_ref() {
+                        Some(sessions) if !apply_control_policy => {
+                            crate::store::fast_directed_entries(
+                                &repo,
+                                snap,
+                                &root,
+                                &hostname,
+                                sessions,
+                                shard_policy.collapses(),
+                                &|what| format!("snapshot {short}: {what}"),
+                            )
+                        }
+                        _ => Ok(None),
+                    };
+                    match directed {
+                        Ok(Some(listed)) => listed,
+                        Ok(None) => match repo.ls(&root, &LsOptions::default()) {
+                            Ok(it) => match it.collect::<rustic_core::RusticResult<Vec<_>>>() {
+                                Ok(e) => e,
+                                Err(e) => {
+                                    raced_index = raced_index || index_race_rustic(&e);
+                                    report.incomplete_machines.insert(hostname.clone());
+                                    report.warnings.push(format!(
+                                        "host `{hostname}` snapshot {}: cannot collect entries: {e}",
+                                        snap.id.to_hex().as_str()
+                                    ));
+                                    continue;
+                                }
+                            },
+                            Err(e) => {
+                                raced_index = raced_index || index_race_rustic(&e);
+                                report.incomplete_machines.insert(hostname.clone());
+                                report.warnings.push(format!(
+                                    "host `{hostname}` snapshot {}: cannot ls tree: {e}",
+                                    snap.id.to_hex().as_str()
+                                ));
+                                continue;
+                            }
+                        },
                         Err(e) => {
-                            raced_index = raced_index || index_race_rustic(&e);
+                            raced_index = raced_index || index_race_in(&e);
                             report.incomplete_machines.insert(hostname.clone());
                             report.warnings.push(format!(
-                                "host `{hostname}` snapshot {}: cannot collect entries: {e}",
+                                "host `{hostname}` snapshot {}: cannot ls tree: {e}",
                                 snap.id.to_hex().as_str()
                             ));
                             continue;
                         }
-                    },
-                    Err(e) => {
-                        raced_index = raced_index || index_race_rustic(&e);
-                        report.incomplete_machines.insert(hostname.clone());
-                        report.warnings.push(format!(
-                            "host `{hostname}` snapshot {}: cannot ls tree: {e}",
-                            snap.id.to_hex().as_str()
-                        ));
-                        continue;
                     }
                 };
 
