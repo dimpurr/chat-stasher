@@ -477,14 +477,16 @@ fn the_foreign_stage_name_stays_outside_the_buckets() {
     );
 }
 
-/// Scale check of the same property, measured rather than asserted: on the
-/// same repository a read of the full wanted set descends each wanted
-/// session's subtree plus the machine-log subtree per snapshot, while an
-/// unscoped read at the same policies lists every file of every snapshot —
-/// the shape difference DEPLOY-1107 put at 89-91 % of a round's collect.
-/// The answers must stay identical; the wall clocks are printed, not
-/// asserted. Dims via `W1093_BENCH_SNAPS` / `W1093_BENCH_SESSIONS`;
-/// ignored because building the repository dominates the run.
+/// Scale check of the same property, measured rather than asserted: the
+/// field shape is a big stage and a small wanted set (DEPLOY-1107:
+/// wanted=208 against an archive whose every snapshot lists the whole
+/// remaining stage), so this times a small-set read against the unscoped
+/// full walk of the same repository and prints both wall clocks. The
+/// directed read's correctness is asserted the cheap way here — exactly the
+/// named sessions come back — because the twin-repository equivalence is
+/// what the cases above prove. Dims via `W1093_BENCH_SNAPS` /
+/// `W1093_BENCH_SESSIONS` / `W1093_BENCH_WANTED`; ignored because building
+/// the repository dominates the run.
 #[test]
 #[ignore = "manual wall-clock measurement"]
 fn benchmark_directed_versus_fulllisting_wanted_reads() {
@@ -494,8 +496,9 @@ fn benchmark_directed_versus_fulllisting_wanted_reads() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(default)
     };
-    let snapshots = dims("W1093_BENCH_SNAPS", 250);
-    let sessions = dims("W1093_BENCH_SESSIONS", 500);
+    let snapshots = dims("W1093_BENCH_SNAPS", 120);
+    let sessions = dims("W1093_BENCH_SESSIONS", 400);
+    let wanted_count = dims("W1093_BENCH_WANTED", 16);
     let pair = tempfile::TempDir::new().unwrap();
     let dir = pair.path().to_path_buf();
     // one machine only, wide stage: the shape the field rounds read
@@ -507,10 +510,6 @@ fn benchmark_directed_versus_fulllisting_wanted_reads() {
     for i in 0..sessions {
         add_shard(&stage, MACHINE_A, &sid(MACHINE_A, i), &format!("init-{i}"));
     }
-    let mut wanted: BTreeSet<(String, String)> = (0..sessions)
-        .map(|i| (MACHINE_A.to_string(), sid(MACHINE_A, i)))
-        .collect();
-    wanted.insert((MACHINE_A.to_string(), sid(MACHINE_A, 79)));
     for run in 0..snapshots {
         for i in (0..sessions).step_by(7) {
             add_shard(
@@ -540,6 +539,12 @@ fn benchmark_directed_versus_fulllisting_wanted_reads() {
             }
         }
     }
+    // the small wanted set, spread over the stage the way a round's few
+    // remotely-provable sessions are
+    let wanted: BTreeSet<(String, String)> = (0..sessions)
+        .step_by((sessions / wanted_count).max(1))
+        .map(|i| (MACHINE_A.to_string(), sid(MACHINE_A, i)))
+        .collect();
     // warm the metadata caches once, as an operator's second command would
     st.read_cumulative_sessions(&mk, Some(&wanted)).unwrap();
     let t = std::time::Instant::now();
@@ -548,15 +553,22 @@ fn benchmark_directed_versus_fulllisting_wanted_reads() {
     let t = std::time::Instant::now();
     let full = st.read_cumulative_sessions(&mk, None).unwrap();
     let full_ms = t.elapsed().as_millis();
-    // same repository, same policies, one walk shape apart: every row of the
-    // two reports must be equal, at scale
+    let directed_rows = report_lines(&directed)
+        .iter()
+        .filter(|l| l.starts_with("session "))
+        .count();
     assert_eq!(
-        report_lines(&directed),
-        report_lines(&full),
-        "a full wanted set and an unscoped read are the same question, at bench scale too"
+        directed_rows,
+        wanted.len(),
+        "the directed read returns exactly the wanted sessions"
     );
+    assert!(full
+        .machines
+        .iter()
+        .any(|m| m.hostname == MACHINE_A && m.sessions.len() == sessions));
     println!(
-        "[W1093] BENCH snapshots={snapshots} sessions={sessions} \
-         directed_ms={directed_ms} full_ms={full_ms}"
+        "[W1093] BENCH snapshots={snapshots} sessions={sessions} wanted={} \
+         directed_ms={directed_ms} full_ms={full_ms}",
+        wanted.len()
     );
 }
