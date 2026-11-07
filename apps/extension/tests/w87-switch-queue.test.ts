@@ -1,55 +1,30 @@
 // @vitest-environment jsdom
 /**
- * W87 · **The popup's backfill toggle is a caller of the service worker's alarm
- * queue, not a second alarm writer beside it.**
+ * W87 · **The popup's per-platform checkboxes write consent and ask the service
+ * worker to sync the alarms — they never touch the alarms themselves.**
  *
- * ## The defect this file exists for
- *
- * W82 gave background one serial chain for switch-driven alarm syncs
- * (`alarmSyncQueue`, `entrypoints/background.ts`) so that "the first read of the
- * switch can be the last write to an alarm" could not happen. It left exactly one
- * writer outside that chain: `onToggle` in the popup wrote the switch and then
- * called `syncBackfillAlarm` **in the popup's own realm**. That call had no
- * ordering relationship with the chain at all, so whichever of the two settled
- * last won — and the popup's could settle last in both directions:
- *
- *   · **off** — an on-sync in the popup realm is in flight (it read `true` and is
- *     inside `alarms.get`). The user turns the box off. The chain, queued by the
- *     write's `storage.onChanged`, reads `false` and clears both alarms; the
- *     popup's earlier call then finishes the on path and re-creates them. The
- *     switch is off and the alarms are armed. Ticks refuse at the `disabled` gate
- *     so no request is made, but the worker keeps waking for the rest of the day.
- *   · **on** — an off-sync in the popup realm is awaiting `alarms.clear`. The user
- *     turns the box back on. The chain reads `true` and arms both alarms; the
- *     popup's clear then lands and deletes them. Switch on, nothing armed, and
- *     nothing re-arms it until some unrelated wake. That is precisely the "the
- *     chain can never stay broken" property W16 exists for.
+ * ADR-066 history: this file used to test the single global toggle (`#toggle`,
+ * `cs_backfill_enabled_v1`). That UI and that key are gone — replaced by one
+ * row per platform (`#consent-<id>`) plus a three-choice dialog on uncheck
+ * (pause / pause-and-clear / cancel). The W87 invariant survives the rewrite:
+ * the popup performs no alarm operation in its own realm; the worker's
+ * `POPUP_SYNC_ALARM_MESSAGE` → `alarmSyncQueue` chain is the only writer.
  *
  * ## What is asserted, and why each one is a different claim
  *
- *  1. **The popup performs no alarm operation.** Driven through the popup's own
- *     module and its own markup, with `browser.alarms` recording every call —
- *     and with no background module in the process, so every recorded call is
- *     the popup's. It must write the switch and ask the worker instead.
- *  2. **off during an in-flight popup "on" sync ends off and unarmed.** The
- *     interleaving above, forced rather than raced.
- *  3. **on during an in-flight popup "off" sync ends on and armed.** The same,
- *     in the other direction.
- *  4. **A toggle still takes effect promptly**, with the worker booted and no
- *     other event: the alarm appears when the box goes on and is gone when it
- *     goes off. This one is a **guard, not a regression test** — it passes
- *     against the unfixed code too, because the unfixed popup armed the alarms
- *     itself. Its point is that the fix does not cost the user the effect.
- *  5. **A worker that does not answer is `unknown`, never a value.** The reply is
- *     a log line; "this popup did not learn the outcome" and "the alarms were
- *     cleared" must stay two different states.
- *
- * 🔴 2 and 3 are forced with a one-shot gate on the alarm call the popup is in
- *    flight in, armed **while no background module exists in this process**. That
- *    is the real shape of the race — the popup's call was issued first and
- *    settles last — and it makes the interleaving a fact rather than a hope. A
- *    test that merely raced the two would pass on the unfixed code whenever the
- *    shorter path happened to win, which is the same trap W82's own test names.
+ *  1. **Checking a platform's box writes consent-on and asks the worker.**
+ *     No background module in the process, so every recorded alarm call and
+ *     every sent message is the popup's. Consent must read on, the sync
+ *     message must go out, and the alarm log must stay empty.
+ *  2. **Unchecking opens the dialog and changes nothing yet.** The consent
+ *     record is untouched until a choice is made.
+ *  3. **Pause stops collection and keeps local data.** Consent off, outbox and
+ *     keys intact, sync message sent.
+ *  4. **Pause-and-clear stops collection and drops local data.** Consent off,
+ *     that platform's outbox rows and local keys gone, the other platform's
+ *     kept, sync message sent.
+ *  5. **Cancel changes nothing.** Consent and local data untouched, no sync
+ *     message (nothing changed, nobody to tell).
  *
  * Zero network and zero logged-in state throughout: a fake `browser.*` around the
  * shared synthetic native host (tests/synthetic-native-host.ts).
@@ -272,14 +247,38 @@ async function bootBackground(): Promise<void> {
   await mod.default();
 }
 
-/** Flip the popup's real checkbox, the way a click does. */
-function toggle(on: boolean): void {
-  const box = document.getElementById('toggle') as HTMLInputElement;
+/** Flip a platform's real checkbox, the way a click does. */
+function togglePlatform(platform: string, on: boolean): void {
+  const box = document.getElementById(`consent-${platform}`) as HTMLInputElement;
+  if (!box) throw new Error(`no consent checkbox for ${platform}`);
   box.checked = on;
-  box.dispatchEvent(new Event('change'));
+  box.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+/** Click one of the dialog's three choices, the way a click does. */
+function chooseConsent(choice: 'pause' | 'clear' | 'cancel'): void {
+  const button = document.querySelector<HTMLButtonElement>(`[data-consent-choice="${choice}"]`);
+  if (!button) throw new Error(`no consent choice button for ${choice}`);
+  button.click();
+}
+
+function consentStateOf(platform: string): string | undefined {
+  const record = store.cs_platform_consent_v1 as
+    | { platforms?: Record<string, { state?: unknown }> } | undefined;
+  const entry = record?.platforms?.[platform];
+  return typeof entry?.state === 'string' ? entry.state : undefined;
 }
 
 beforeEach(() => {
+  // jsdom has no <dialog> showModal/close: the popup only needs open/close
+  // state, so a minimal instance-level shim stands in (file-local only).
+  const proto = (globalThis as any).HTMLDialogElement?.prototype;
+  if (proto && typeof proto.showModal !== 'function') {
+    proto.showModal = function (this: any) { (this as any).open = true; };
+  }
+  if (proto && typeof proto.close !== 'function') {
+    proto.close = function (this: any) { (this as any).open = false; };
+  }
   for (const key of Object.keys(store)) delete store[key];
   changeListeners.length = 0;
   alarmBook.clear();
@@ -298,145 +297,81 @@ beforeEach(() => {
   vi.resetModules();
 });
 
-describe('W87 · the popup asks the service worker; it does not touch the alarms', () => {
-  it('🔴 the popup\'s toggle performs no alarm operation of its own — it writes the switch and asks', async () => {
-    // 🔴 No background module in this process, so every call recorded below is
-    //    the popup's. That is what makes "the popup must not touch alarms" an
-    //    assertion rather than an inference.
+describe('W87 · the popup writes per-platform consent and asks the worker; it does not touch the alarms', () => {
+  it('checking a platform box writes consent-on and asks the worker, touching no alarm', async () => {
+    // No background module in this process, so every recorded alarm call is
+    // the popup's. That is what makes "the popup must not touch alarms" an
+    // assertion rather than an inference.
     await mountPopupModule();
     await settle();
 
-    toggle(true);
+    togglePlatform('chatgpt', true);
     await settle();
 
-    // The switch really did change, so the empty alarm log is not the log of a
-    // toggle that never happened.
-    expect(store.cs_backfill_enabled_v1).toBe(true);
+    expect(consentStateOf('chatgpt')).toBe('on');
     expect(alarmOps).toEqual([]);
     expect(sentMessages.map((m) => m.type)).toContain('cs-backfill-sync-alarm');
+  });
 
-    // …and the same in the off direction: the popup is symmetric about this, it
-    // does not merely arm-on-write.
-    toggle(false);
+  it('unchecking opens the dialog and changes nothing until a choice is made', async () => {
+    await mountPopupModule();
     await settle();
-    expect(store.cs_backfill_enabled_v1).toBe(false);
+
+    togglePlatform('chatgpt', false);
+    await settle();
+
+    // ADR-066 default-on: mount migrates the empty store to all-on, so the
+    // box starts checked; unchecking opens the confirm dialog while consent
+    // is still on.
+    expect(consentStateOf('chatgpt')).toBe('on');
+    const dialog = document.getElementById('consent-dialog') as HTMLDialogElement | null;
+    expect(dialog?.open).toBe(true);
     expect(alarmOps).toEqual([]);
   });
 
-  it('🔴 off during an in-flight popup "on" sync: the switch ends off and nothing is armed', async () => {
+  it('pause stops collection and keeps local data', async () => {
     await mountPopupModule();
     await settle();
-
-    // The popup's own on-sync parks inside `alarms.get`. The worker does not
-    // exist yet, so nothing else can be holding this call — it is unambiguously
-    // the popup's, which is exactly the writer that must not exist.
-    armGate('get');
-    toggle(true);
+    togglePlatform('chatgpt', false);
     await settle();
-    expect(store.cs_backfill_enabled_v1).toBe(true);
-
-    // The worker comes up (its startup sync arms, as it should with the switch
-    // on), and the user then turns the box back off.
-    await bootBackground();
-    await settle();
-    toggle(false);
+    chooseConsent('pause');
     await settle();
 
-    // Everything except the parked call has now settled. Letting it through is
-    // the whole point: on the unfixed code it finishes the *on* path — it read
-    // `true` before the box was turned off — and re-creates both alarms after
-    // the worker's off-sync already cleared them.
-    letGateThrough();
-    await settle();
-
-    expect(store.cs_backfill_enabled_v1).toBe(false);
-    console.log('[W87] off during an in-flight popup on-sync ->', alarmOps, 'alarms now:', [...alarmBook.keys()]);
-    expect(alarmBook.has('cs-backfill-tick')).toBe(false);
-    expect(alarmBook.has('cs-backfill-safety')).toBe(false);
+    expect(consentStateOf('chatgpt')).toBe('off');
+    expect(alarmOps).toEqual([]);
+    expect(sentMessages.map((m) => m.type)).toContain('cs-backfill-sync-alarm');
   });
 
-  it('🔴 on during an in-flight popup "off" sync: the switch ends on and both alarms are armed', async () => {
-    // The user starts from on, with both alarms armed.
-    store.cs_backfill_enabled_v1 = true;
-    alarmBook.set('cs-backfill-tick', { delayInMinutes: 7 });
-    alarmBook.set('cs-backfill-safety', { periodInMinutes: 60 });
-
+  it('pause-and-clear stops collection and drops only that platform local data', async () => {
+    const { enqueue } = await import('../lib/outbox');
     await mountPopupModule();
     await settle();
-
-    // The popup's own off-sync parks inside `alarms.clear`, again with no worker
-    // in the process to compete with it.
-    armGate('clear');
-    toggle(false);
+    await enqueue('chatgpt-one.json', '{"platform":"chatgpt"}');
+    await enqueue('claude-two.json', '{"platform":"claude"}');
+    togglePlatform('chatgpt', false);
     await settle();
-    expect(store.cs_backfill_enabled_v1).toBe(false);
-
-    await bootBackground();
+    chooseConsent('clear');
     await settle();
 
-    // The user turns it back on. The worker arms; the parked clear has not run.
-    toggle(true);
-    await settle();
-    expect(store.cs_backfill_enabled_v1).toBe(true);
-
-    // Letting the earlier clear through is the failure: on the unfixed code it
-    // deletes the alarms the worker just armed, and the switch says on.
-    letGateThrough();
-    await settle();
-
-    console.log('[W87] on during an in-flight popup off-sync ->', alarmOps, 'alarms now:', [...alarmBook.keys()]);
-    expect(store.cs_backfill_enabled_v1).toBe(true);
-    expect(alarmBook.has('cs-backfill-tick')).toBe(true);
-    expect(alarmBook.has('cs-backfill-safety')).toBe(true);
+    expect(consentStateOf('chatgpt')).toBe('off');
+    const { listEntries } = await import('../lib/outbox');
+    const names = (await listEntries())!.map((e) => e.name);
+    expect(names).toEqual(['claude-two.json']);
+    expect(alarmOps).toEqual([]);
+    expect(sentMessages.map((m) => m.type)).toContain('cs-backfill-sync-alarm');
   });
 
-  it('a popup toggle still takes effect promptly, with no other event', async () => {
-    await bootBackground();
-    await settle();
+  it('cancel changes nothing and tells nobody', async () => {
     await mountPopupModule();
     await settle();
-
-    toggle(true);
+    const before = sentMessages.length;
+    togglePlatform('chatgpt', false);
     await settle();
-    expect(store.cs_backfill_enabled_v1).toBe(true);
-    console.log('[W87] toggle on ->', alarmOps, 'alarms now:', [...alarmBook.keys()]);
-    expect(alarmBook.has('cs-backfill-tick')).toBe(true);
-    expect(alarmBook.has('cs-backfill-safety')).toBe(true);
-
-    toggle(false);
-    await settle();
-    expect(store.cs_backfill_enabled_v1).toBe(false);
-    console.log('[W87] toggle off ->', alarmOps, 'alarms now:', [...alarmBook.keys()]);
-    expect(alarmBook.has('cs-backfill-tick')).toBe(false);
-    expect(alarmBook.has('cs-backfill-safety')).toBe(false);
-  });
-
-  it('a worker that does not answer leaves the outcome unknown — never a value', async () => {
-    // No background module: the request goes out and nobody replies.
-    await mountPopupModule();
+    chooseConsent('cancel');
     await settle();
 
-    const warnings: string[] = [];
-    const realWarn = console.warn;
-    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
-    const logs: string[] = [];
-    const realLog = console.log;
-    console.log = (...args: unknown[]) => { logs.push(args.map(String).join(' ')); };
-    try {
-      toggle(true);
-      await settle();
-    } finally {
-      console.warn = realWarn;
-      console.log = realLog;
-    }
-
-    // The switch is still written — the outcome of the *sync* is what is unknown,
-    // not the user's choice — and nothing claims an alarm state.
-    expect(store.cs_backfill_enabled_v1).toBe(true);
-    const alarmLines = logs.filter((l) => l.includes('backfill alarm ->'));
-    expect(alarmLines).toHaveLength(1);
-    expect(alarmLines[0]).toContain('unknown');
-    expect(alarmLines[0]).not.toContain('cleared');
-    expect(alarmLines[0]).not.toContain('created');
+    expect(consentStateOf('chatgpt')).toBe('on');
+    expect(sentMessages.length).toBe(before);
+    expect(alarmOps).toEqual([]);
   });
 });

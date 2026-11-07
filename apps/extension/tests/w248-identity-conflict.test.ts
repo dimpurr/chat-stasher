@@ -253,6 +253,7 @@ describe('the wire carries the sequence', () => {
       tick_stopped: 'no-targets',
       tick_halted: null,
       build_stamp: null,
+      consent: { version: 1, platforms: { chatgpt: { state: 'off', updatedAt: AT } } },
       platforms: [],
     };
   }
@@ -268,6 +269,8 @@ describe('the wire carries the sequence', () => {
     const status = host.requests().find((request) => request.type === 'status')!;
     const delivery = host.requests().find((request) => request.type === 'deliver')!;
     expect((status.status as Record<string, unknown>).report_seq).toBe(1);
+    expect((status.status as Record<string, unknown>).consent)
+      .toEqual({ version: 1, platforms: { chatgpt: { state: 'off', updatedAt: AT } } });
     expect((status.status as Record<string, unknown>).report_nonce).toMatch(UUID);
     expect(delivery.report_seq).toBe(2);
     expect(delivery.report_nonce).toMatch(UUID);

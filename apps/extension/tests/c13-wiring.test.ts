@@ -204,13 +204,20 @@ describe('C13 · the backfill leg wired into the runtime', () => {
     console.log('[C13] host answered -> pause cleared, tick reason =', mod.lastBackfillTick()?.reason);
   });
 
-  it('off by default: with nothing set, the same path reaches the last gate without running', async () => {
+  it('ADR-066: all platforms off ⇒ the same path reaches the last gate without running (the default itself is on)', async () => {
+    const { setBackfillEnabled } = await import('../lib/backfill/schedule');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    await setBackfillEnabled(browserLocalStore(), false);
+    // A registered target, so the tick reaches the platform gate (not the
+    // empty-registry 'no-targets' branch). The live dispatch below is refused
+    // under all-off and registers nothing — the target is seeded directly.
+    await browserLocalStore()!.save('cs_backfill_targets_v1', [{ platform: 'chatgpt', origin: 'https://chatgpt.com', scope: 'fixture', at: 1 }]);
     const mod: any = await import('../entrypoints/background');
     mod.configureBackfillTransport(async () => ({ status: 200, text: '{}' }));
     await bootBackgroundAndDispatch(fakeCapture());
     expect(runBackfillSpy).not.toHaveBeenCalled();
-    expect(mod.lastBackfillTick()?.reason).toBe('disabled');
-    console.log('[C13] default state -> tick reason =', mod.lastBackfillTick()?.reason);
+    expect(mod.lastBackfillTick()?.reason).toBe('platform-disabled');
+    console.log('[C13] all-off state -> tick reason =', mod.lastBackfillTick()?.reason);
   });
 
   it('the production state: switch on but nobody injected an http port ⇒ no-http-port, never any network activity', async () => {
@@ -226,12 +233,14 @@ describe('C13 · the backfill leg wired into the runtime', () => {
   });
 
   it('the MV3 reality: no in-memory state is relied on between ticks — the debt set lives only in storage', async () => {
-    const { BACKFILL_ENABLED_KEY } = await import('../lib/backfill/schedule');
     const { setBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
     await setBackfillEnabled(browserLocalStore(), true);
-    // The switch itself is persistent too: when the SW is reclaimed and wakes again, the user need not click it a second time.
-    expect(store[BACKFILL_ENABLED_KEY]).toBe(true);
-    console.log('[C13] enabled flag persisted in storage.local =', store[BACKFILL_ENABLED_KEY]);
+    // The consent record itself is persistent too: when the SW is reclaimed and wakes again, the user need not click it a second time.
+    const { CONSENT_KEY } = await import('../lib/platform-consent');
+    const record = store[CONSENT_KEY] as { version?: unknown; platforms?: Record<string, { state?: unknown }> };
+    expect(record?.version).toBe(1);
+    expect(Object.values(record?.platforms ?? {}).every((e) => e?.state === 'on')).toBe(true);
+    console.log('[C13] consent record persisted in storage.local =', JSON.stringify(record)?.slice(0, 120));
   });
 });

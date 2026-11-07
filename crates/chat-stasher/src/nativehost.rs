@@ -2578,6 +2578,19 @@ fn validate_status(
             .is_some_and(|v| {
                 !v.is_null() && v.as_str().is_none_or(|s| s.is_empty() || s.len() > 80)
             })
+        || status.get("consent").is_some_and(|v| {
+            let Some(consent) = v.as_object() else { return true };
+            if consent.get("version").and_then(|v| v.as_u64()) != Some(1) { return true; }
+            let Some(platforms) = consent.get("platforms").and_then(|v| v.as_object()) else { return true };
+            consent.keys().any(|key| !matches!(key.as_str(), "version" | "platforms"))
+                || platforms.iter().any(|(id, entry)| {
+                    id.is_empty() || id.len() > 80 || entry.as_object().is_none_or(|row| {
+                        row.len() != 2
+                            || row.get("state").and_then(|v| v.as_str()).is_none_or(|state| !matches!(state, "on" | "off"))
+                            || row.get("updatedAt").and_then(|v| v.as_u64()).is_none()
+                    })
+                })
+        })
     {
         return Err("malformed status fields");
     }
@@ -2596,6 +2609,7 @@ fn validate_status(
                 | "tick_stopped"
                 | "tick_halted"
                 | "build_stamp"
+                | "consent"
                 | "platforms"
         )
     }) {
@@ -4833,6 +4847,7 @@ mod tests {
             "profile_label": null,
             "extension_version": "0.2.0.24",
             "build_stamp": "bmtq3x1f",
+            "consent": {"version": 1, "platforms": {"chatgpt": {"state": "off", "updatedAt": 1791321600000i64}}},
             "reported_at": "2026-10-07T00:00:00Z",
             "platforms": [],
         });
@@ -4859,7 +4874,7 @@ mod tests {
             Err("unknown status field")
         );
 
-        let mut malformed = status;
+        let mut malformed = status.clone();
         malformed["build_stamp"] = serde_json::json!(7);
         assert_eq!(
             validate_status(malformed.as_object().expect("object")),
@@ -4876,6 +4891,14 @@ mod tests {
         malformed["build_stamp"] = serde_json::json!("");
         assert_eq!(
             validate_status(malformed.as_object().expect("object")),
+            Err("malformed status fields")
+        );
+
+        let mut malformed_consent = status;
+        malformed_consent["consent"]["platforms"]["chatgpt"]["state"] =
+            serde_json::json!("pending");
+        assert_eq!(
+            validate_status(malformed_consent.as_object().expect("object")),
             Err("malformed status fields")
         );
     }

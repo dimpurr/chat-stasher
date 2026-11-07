@@ -78,17 +78,18 @@ function seedState(platform = 'chatgpt', scope = 'acct-1'): BackfillHeader {
 // 1 · Switch persistence
 // ---------------------------------------------------------------------------
 describe('C18-1 · turning the switch on persists, and it is still on after a restart', () => {
-  it('off by default; after setBackfillEnabled(true), reloading the module still reads on', async () => {
+  it('ADR-066 on by default; setBackfillEnabled(true/false) persists all-on/all-off across a restart', async () => {
     const first = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
 
-    // 🔴 The default itself was not changed.
-    expect(first.BACKFILL_DEFAULT_ENABLED).toBe(false);
-    expect(await first.isBackfillEnabled(browserLocalStore())).toBe(false);
+    // 🔴 ADR-066 D1: the default is on (no wizard, no explicit choice needed).
+    expect(first.BACKFILL_DEFAULT_ENABLED).toBe(true);
+    expect(await first.isBackfillEnabled(browserLocalStore())).toBe(true);
 
-    // That one click in the popup does exactly this.
+    // That one action in the popup does exactly this (all-platform compat write).
     await first.setBackfillEnabled(browserLocalStore(), true);
-    expect(store[first.BACKFILL_ENABLED_KEY]).toBe(true);
+    const { CONSENT_KEY } = await import('../lib/platform-consent');
+    expect(Object.values((store[CONSENT_KEY] as { platforms: Record<string, { state: unknown }> }).platforms).every((e) => e.state === 'on')).toBe(true);
 
     // "A browser restart": module state cleared, storage.local kept.
     vi.resetModules();
@@ -162,9 +163,7 @@ describe('C18-2 · on, but the fetch channel is not connected', () => {
       expect(out).not.toContain(forbidden);
     }
 
-    // The switch itself must honestly show as ON; it must not pretend to be off because nothing can run.
-    expect(view.toggle.checked).toBe(true);
-    expect(view.status).toContain('the switch is ON');
+    expect(view.status).toContain('controlled separately for each platform');
   });
 
   it('the gate decision is the same function tickBackfill uses — really running one tick reaches the same conclusion', async () => {
@@ -239,16 +238,12 @@ describe('C18-3 · the host-paused state', () => {
     });
     const out = popupText(view);
 
-    expect(view.status).toContain('host is unreachable');
     expect(view.running).toContain('NOT running');
     // 🔴 A pause is a **named** outcome: it says which machine's host cannot be reached, that no debt was lost, and when it was noticed.
     expect(view.pause).not.toBeNull();
     expect(view.pause!).toContain('PAUSED');
     expect(view.pause!).toContain(HOST_UNAVAILABLE);
     expect(view.pause!).toContain('untouched');
-    // 🔴 A pause does not take away the user's right to flip the switch.
-    expect(view.toggle.disabled).toBe(false);
-    expect(view.toggle.checked).toBe(true);
     expect(out).not.toContain('%');
   });
 });

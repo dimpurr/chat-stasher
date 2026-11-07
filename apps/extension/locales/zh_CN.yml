@@ -173,8 +173,6 @@ popup:
     saveSucceeded: 配置文件名称已保存。
     saveFailed: 无法保存配置文件名称。请重试。
   buttonTag: "[按钮] {label}"
-  toggle:
-    label: 自动回溯历史对话
   clearFailures:
     label: 我知道了，清空这份清单
   startBackfill:
@@ -251,6 +249,7 @@ popup:
         <你的 stage 路径>`。
       failed: "打开仪表盘不可用：{detail}"
   status:
+    platforms: "状态：下方的每个平台分别控制捕获。"
     hostPaused: 状态：开关是开的，但本机 host 够不着，回溯已自动暂停（欠账一条没动）
     on: 状态：开关是开的
     off: 状态：开关是关的（这是默认值，需要你手动打开）
@@ -447,10 +446,9 @@ popup:
         有个页面的实时抓取报告在 {when} 送到了，但没有被记下来（{reason}）：
         当前这个版本不认识这个原因代码。同一条报告连续被拒绝次数：{count}。
     whatOpening: >-
-      打开之后会做什么：只要有一个受支持平台的页面开着，就在后台悄悄补历史对话，
-      间隔刻意不固定，大约每 {minMinutes} 到 {maxMinutes} 分钟取一批，用的是你
-      自己那个页面的登录态；每天最多 {maxPerDay} 笔，好几天里慢慢补完。关掉即停
-      （定时器也会一并清掉）。
+      打开某个平台之后会做什么：只要该平台的页面开着，就会在后台回填历史对话，
+      间隔刻意不固定，大约每 {minMinutes} 到 {maxMinutes} 分钟取一批，用的是该页面的登录态；
+      每天最多 {maxPerDay} 笔，好几天里慢慢补完。每个平台都可以单独关闭。
     relisted: >-
       这个平台的历史回溯：{when} 发现它的进度记录里列着 {recorded} 条对话 id，
       而这个浏览器持有的欠账清单只剩 {held} 条。已经补过哪些的记录无法恢复，所以
@@ -593,6 +591,8 @@ tick:
     # 而那一次请求就是这一跳的全部。
     scopeAsked: 问了平台该读哪个账号，这一跳就到此为止
     disabled: 开关当时是关的
+    # 🔴 ADR-066 D3 · 用户在此浏览器配置里暂停了这个平台；被措辞的行已经点名平台。
+    platformDisabled: 这个平台的开关在此浏览器配置里是关的，所以这一跳没有为它取任何东西
     noStore: 浏览器存储当时不可用
     hostPaused: 本机 host 够不着，这条腿在等到它答话之前暂停了
     # 🔴 EXT-12 · 堵住的出口，不是坏掉的出口：helper 可能应答正常，只是暂存区到了
@@ -616,6 +616,8 @@ tick:
     dailyCap: 这个平台今天的正文额度已经用完了
     stateUnreadable: 这个平台保存的进度记录读不出来，所以原样没动
     accountSuspended: 这个平台在为它自己的账号占着位置，等那个账号再被用起来就会继续
+    # 🔴 ADR-066 D3 · 与 tick.reason.platformDisabled 同一个暂停，这是给单目标跳过行的措辞。
+    platformDisabled: 这个平台的开关在此浏览器配置里是关的，所以这一轮跳过了它
     unknown: "这个 build 不认识的跳过原因：{reason}"
 
 progress:
@@ -855,3 +857,18 @@ coverage:
       但它确实是这里唯一一个对平台要求更高的设置，所以它不是默认。
     failed: "速度设置没能保存（{detail}），所以什么都没有变。"
     what: "每天最多 {cap} 条，每次唤醒 {tick} 条"
+
+consent:
+  unavailable: 无法读取此浏览器配置中的平台设置。
+  counts: "已存 {saved} 条 · 待发送 {pending} 条"
+  paused: 已暂停
+  pausedCount: "已暂停 · 已拒收 {count} 次捕获"
+  unknown: 未知
+  confirm: "要在此浏览器配置中暂停 {platform} 吗？这会影响该平台的所有账号。"
+  retention: >-
+    清理本地数据会移除此配置中排队的对话、回填进度和平台状态行。stage 中的数据会保留。
+    可使用 CLI 命令 `hide <session>` 逐个隐藏会话（可撤销）。本版本没有彻底删除（purge）。
+  pauseOnly: 只暂停
+  pauseAndClear: 暂停并清理本地数据
+  cancel: 取消
+  cleanupFailed: 未能完成本地清理。平台仍处于暂停状态；请检查此配置中的本地数据。

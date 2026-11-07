@@ -1,5 +1,5 @@
 /**
- * W843 (W662) · **`describeTickReason` — the ten outcomes a tick can record, and
+ * W843 (W662) · **`describeTickReason` — the eleven outcomes a tick can record, and
  * every code it cannot.**
  *
  * `describeTickReason` (lib/popup-view.ts) is the only place a scheduler outcome
@@ -10,7 +10,7 @@
  *
  *   1. **Each code is worded by its own catalog entry.** The codes are kebab case
  *      on the record and camel case in `locales/*.yml`, so code → key is a
- *      hand-written mapping. Two of the ten exist precisely because they are easy
+ *      hand-written mapping. Two of the eleven exist precisely because they are easy
  *      to confuse — `host-paused` and `outbox-near-full` are both "this leg is
  *      waiting", and `no-targets` vs `no-http-port` were once conflated in the
  *      scheduler itself (C30). A mapping that swapped a pair would leave every
@@ -54,6 +54,7 @@ const WORDING: Record<TickReason, string> = {
   'no-runnable-target': 'tick.reason.noRunnableTarget',
   'scope-asked': 'tick.reason.scopeAsked',
   disabled: 'tick.reason.disabled',
+  'platform-disabled': 'tick.reason.platformDisabled',
   'no-store': 'tick.reason.noStore',
   'host-paused': 'tick.reason.hostPaused',
   'outbox-near-full': 'tick.reason.outboxNearFull',
@@ -92,7 +93,7 @@ describe('W843 · describeTickReason', () => {
       }
     });
 
-    it('all ten are worded in the language the popup is rendering in', async () => {
+    it('all eleven are worded in the language the popup is rendering in', async () => {
       // These sentences come from the catalog, not from source text: a string
       // pasted into popup-view.ts matches the English catalog byte for byte, so
       // every assertion above passes with one in place and nothing notices. Two
@@ -139,7 +140,7 @@ describe('W843 · describeTickReason', () => {
       // The unknown entry is the only tick sentence with a placeholder, so
       // this is the one mapping whose zh_CN rendering depends on the
       // substitution surviving the locale switch. Same two-assertion shape
-      // as the ten named codes above: the equality says "the new locale's
+      // as the eleven named codes above: the equality says "the new locale's
       // entry for this key with the reason in it", and the difference says
       // "and it really changed" — a zh_CN entry that silently fell back to
       // English would satisfy the equality alone.

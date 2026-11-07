@@ -223,8 +223,6 @@ popup:
   # How `popupText` renders a button in the flattened text, so a test can see
   # whether the button appeared at all.
   buttonTag: "[Button] {label}"
-  toggle:
-    label: Backfill past conversations automatically
   clearFailures:
     label: Got it — clear this list
   startBackfill:
@@ -317,6 +315,7 @@ popup:
         re-run `chat-stasher install-native-host --stage <your stage path>`.
       failed: "Open dashboard is unavailable: {detail}"
   status:
+    platforms: "Status: capture is controlled separately for each platform below."
     hostPaused: >-
       Status: the switch is ON, but this machine's host is unreachable, so
       backfill paused itself (not one debt was touched)
@@ -635,12 +634,11 @@ popup:
         recorded ({reason}); this build does not know that reason code. The same
         report refused in a row so far: {count}.
     whatOpening: >-
-      What turning it on does: as long as one page of a supported platform is
-      open, it quietly backfills past conversations in the background at an
-      irregular interval of about {minMinutes} to {maxMinutes} minutes (never a
-      fixed period), using the login of that page of yours; at most {maxPerDay}
-      a day, so a long history fills in over several days. Turning it off stops
-      it (and clears the timer with it).
+      What turning on a platform does: while a page for that platform is open,
+      it backfills past conversations in the background at an irregular
+      interval of about {minMinutes} to {maxMinutes} minutes (never a fixed
+      period), using that page's login; at most {maxPerDay} a day, so a long
+      history fills in over several days. Turn off each platform separately.
     # 🔴 W45 · The durable half of the `ledger-mismatch` refusal (see
     # `popup.lastTick.ledgerMismatch`). That sentence is a run's halt record and
     # is gone as soon as the scope is re-listed — which is the point of the
@@ -883,6 +881,9 @@ tick:
     # (an unresolved account scope), and that request is the whole of one wake.
     scopeAsked: it asked a platform which account to read, and that was the whole of this wake
     disabled: the switch was off at the time
+    # 🔴 ADR-066 D3 · The user paused this platform in this browser profile; the
+    # row being worded already names the platform.
+    platformDisabled: this platform's switch was off in this browser profile, so the wake fetched nothing for it
     noStore: browser storage was unavailable at the time
     hostPaused: this machine's host is unreachable, so this leg paused until it answers
     # 🔴 EXT-12 · A congested delivery exit rather than a broken one: the helper may
@@ -910,6 +911,9 @@ tick:
     dailyCap: today's body quota for this platform was already spent
     stateUnreadable: this platform's saved progress record could not be read, so it was left untouched
     accountSuspended: this platform is holding its place for its own account, and resumes once that account is used again
+    # 🔴 ADR-066 D3 · Same stop as `tick.reason.platformDisabled`, worded for the
+    # per-target skip row rather than the whole-wake record.
+    platformDisabled: this platform's switch was off in this browser profile, so it was skipped this round
     unknown: "a skip reason this build does not know: {reason}"
 
 # ---------------------------------------------------------------------------
@@ -1264,3 +1268,20 @@ coverage:
       it is not the default.
     failed: "The speed setting could not be saved ({detail}), so nothing changed."
     what: "at most {cap} conversations a day, {tick} per wake"
+
+consent:
+  unavailable: Platform settings could not be read from this browser profile.
+  counts: "{saved} saved · {pending} waiting to send"
+  paused: Paused
+  pausedCount: "Paused · {count} capture(s) refused"
+  unknown: unknown
+  confirm: "Pause {platform} on this browser profile? This applies to every account on this platform."
+  retention: >-
+    Clear local removes this profile's queued captures, backfill progress, and
+    platform status rows. Data already in the stage stays there. Use the CLI
+    command `hide <session>` to hide sessions one at a time (reversible).
+    Permanent deletion (purge) is not available in this version.
+  pauseOnly: Pause only
+  pauseAndClear: Pause and clear local
+  cancel: Cancel
+  cleanupFailed: Local cleanup could not be completed. The platform remains paused; review this profile's local data.

@@ -35,37 +35,44 @@ import { runBackfill, type BackfillOptions, type HttpPort, type RunReport } from
 import { loadHostPause, resumeBackfill } from '../host-status';
 import { summary as outboxSummary } from '../outbox';
 import type { BackfillStore } from './store';
+import { isPlatformConsented } from '../platform-consent';
 
 /** The switch's storage key. Same cs_* key family; no new permission. */
 export const BACKFILL_ENABLED_KEY = 'cs_backfill_enabled_v1';
 
 /**
- * 🔴 **Off** by default. The argument is in the C13 report; the one-line version:
- * the live leg only archives "the conversation the user has open right now", so
- * defaulting it on is imperceptible; the backfill leg takes the user's login and
- * walks **an entire account's history**, writing hundreds or thousands of shards
- * into the local host's stage —
- * that is a different kind of behaviour and needs an explicit "on" first. Once it
- * has been turned on it is persisted, so the user is not asked over and over.
+ * 🔴 ADR-066 D2/D7 · **On** by default. The old C13 argument (backfill walks an
+ * entire account's history, so it needs an explicit "on" first) is superseded:
+ * Dim 2026-11-05 decided every platform ships on, each switchable. The legacy
+ * key below is kept as a migration source only (explicit `false` ⇒ all off,
+ * everything else ⇒ all on); the per-platform record is the authority.
  */
-export const BACKFILL_DEFAULT_ENABLED = false;
+export const BACKFILL_DEFAULT_ENABLED = true;
 
 export async function isBackfillEnabled(store: BackfillStore | null): Promise<boolean> {
   if (!store) return false;
-  const raw = await store.load(BACKFILL_ENABLED_KEY);
-  // Only a strict true counts. Unreadable / wrong shape ⇒ fall back to the default (off); never "guess that the user agreed".
-  return raw === true ? true : BACKFILL_DEFAULT_ENABLED;
+  // ADR-066 compat read: the per-platform record is the authority; the legacy
+  // key only matters through the migration inside loadPlatformConsent.
+  const { anyPlatformConsented } = await import('../platform-consent');
+  try {
+    return await anyPlatformConsented(store);
+  } catch {
+    return BACKFILL_DEFAULT_ENABLED;
+  }
 }
 
 /**
- * The explicit switch.
- * C13 wrote "the function is the interface, this task builds no UI" — with the
- * result that **no production code called it** and the user could not turn it on
- * at all. C18 supplied the call site: the checkbox in entrypoints/popup/main.ts.
+ * ADR-066 compat write. The global checkbox UI is gone (replaced by one row per
+ * platform); this remains for tests and any external caller that means "every
+ * platform". `true` ⇒ all on, `false` ⇒ all off, and the legacy key is left
+ * untouched so a later migration read cannot contradict what was just written.
  */
 export async function setBackfillEnabled(store: BackfillStore | null, on: boolean): Promise<boolean> {
   if (!store) return false;
-  await store.save(BACKFILL_ENABLED_KEY, on === true);
+  const { setPlatformConsent, platformsForConsent } = await import('../platform-consent');
+  for (const id of platformsForConsent()) {
+    await setPlatformConsent(store, id, on === true);
+  }
   return on === true;
 }
 
@@ -87,6 +94,8 @@ export type TickReason =
   | 'no-store'
   /** The switch is off (the default state). */
   | 'disabled'
+  /** The target's platform was explicitly paused by the user. */
+  | 'platform-disabled'
   /**
    * 🔴 W2 · The last delivery found this machine's host unreachable, so this leg
    * is paused, and this heartbeat's `hello` still did not succeed. Not one debt
@@ -353,9 +362,12 @@ export async function tickBackfill(deps: TickDeps): Promise<TickResult> {
   if (inFlight) return { ran: false, reason: 'already-running', report: null };
   inFlight = true;
   try {
+    if (deps.store && !(await isPlatformConsented(deps.store, deps.platform))) {
+      return { ran: false, reason: 'platform-disabled', report: null };
+    }
     const gate = deps.host ?? productionHostGate(deps.store);
     // With the switch off, not even a hello is sent: no consent, no periodic behaviour.
-    if (deps.store && await isBackfillEnabled(deps.store) && await gate.paused()) {
+    if (deps.store && await gate.paused()) {
       const resumed = await gate.resume();
       if (!resumed) return { ran: false, reason: 'host-paused', report: null };
     }
@@ -363,7 +375,7 @@ export async function tickBackfill(deps: TickDeps): Promise<TickResult> {
     // 🔴 The gates go through tickBlockReason — **the same decision the popup makes**.
     const blocked = await tickBlockReason({
       hasStore: deps.store !== null,
-      isEnabled: () => isBackfillEnabled(deps.store),
+      isEnabled: async () => true,
       isHostPaused: () => gate.paused(),
       // 🔴 EXT-12 · The engine's own pass of the near-full gate. Without this line
       //    the gate was a sentence on the popup and nothing else: this function is

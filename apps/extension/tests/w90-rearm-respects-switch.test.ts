@@ -53,8 +53,24 @@ import {
 import type { RandomFn } from '../lib/backfill/random';
 
 const ORIGIN = 'https://chatgpt.com';
-const ENABLED_KEY = 'cs_backfill_enabled_v1';
+// ADR-066: the global switch is gone; the compat layer maps it to all-platform
+// consent. Tests seed the consent record directly; the change event the popup
+// used to fire under the old key is fired under the consent key.
+const CONSENT_KEY = 'cs_platform_consent_v1';
 const TARGETS_KEY = 'cs_backfill_targets_v1';
+
+function consentRecord(on: boolean): Record<string, unknown> {
+  const platforms: Record<string, { state: 'on' | 'off'; updatedAt: number }> = {};
+  for (const id of ['chatgpt', 'claude', 'deepseek', 'gemini', 'grok', 'kimi', 'perplexity']) platforms[id] = { state: on ? 'on' : 'off', updatedAt: 1 };
+  return { version: 1, platforms };
+}
+
+function consentState(): 'on' | 'off' | null {
+  const raw = stored[CONSENT_KEY] as { platforms?: Record<string, { state?: unknown }> } | undefined;
+  const states = raw && typeof raw === 'object' ? Object.values(raw.platforms ?? {}).map((e) => e?.state) : [];
+  if (states.length === 0) return null;
+  return states.every((s) => s === 'off') ? 'off' : states.every((s) => s === 'on') ? 'on' : null;
+}
 
 const stored: Record<string, unknown> = {};
 const alarmBook = new Map<string, { periodInMinutes?: number; delayInMinutes?: number }>();
@@ -157,7 +173,7 @@ async function setSwitch(mod: any, on: boolean): Promise<void> {
   const { setBackfillEnabled } = await import('../lib/backfill/schedule');
   const { browserLocalStore } = await import('../lib/backfill/store');
   await setBackfillEnabled(browserLocalStore(), on);
-  for (const fn of storageChangeListeners) fn({ [ENABLED_KEY]: { newValue: on } }, 'local');
+  for (const fn of storageChangeListeners) fn({ [CONSENT_KEY]: { newValue: stored[CONSENT_KEY] } }, 'local');
   await waitForAsyncEvent();
   await waitForAsyncEvent();
 }
@@ -180,7 +196,7 @@ beforeEach(() => {
 
 describe('W90 · the tick re-arm reads the switch through the one alarm queue', () => {
   it('🔴 off during an in-flight tick: nothing is armed after the tick, and no later disabled wake re-arms it', async () => {
-    stored[ENABLED_KEY] = true;
+    stored[CONSENT_KEY] = consentRecord(true);
     stored[TARGETS_KEY] = [{ platform: 'chatgpt', origin: ORIGIN, scope: 'fixture', at: 1 }];
     const mod = await boot(fixed(0));
 
@@ -209,7 +225,7 @@ describe('W90 · the tick re-arm reads the switch through the one alarm queue', 
     await waitForAsyncEvent();
     await waitForAsyncEvent();
 
-    expect(stored[ENABLED_KEY]).toBe(false);
+    expect(consentState()).toBe('off');
     expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(false);
 
     // …and a later wake with the switch still off must not re-arm it. This is the
@@ -224,7 +240,7 @@ describe('W90 · the tick re-arm reads the switch through the one alarm queue', 
   });
 
   it('on, no interleaving: the tick re-arms the next one with a fresh draw, as before', async () => {
-    stored[ENABLED_KEY] = true;
+    stored[CONSENT_KEY] = consentRecord(true);
     stored[TARGETS_KEY] = [{ platform: 'chatgpt', origin: ORIGIN, scope: 'fixture', at: 1 }];
     let draw = 0;
     const mod = await boot(() => draw);
@@ -247,7 +263,7 @@ describe('W90 · the tick re-arm reads the switch through the one alarm queue', 
   });
 
   it('on → off → on during a tick: the last decision wins and the leg ends armed', async () => {
-    stored[ENABLED_KEY] = true;
+    stored[CONSENT_KEY] = consentRecord(true);
     stored[TARGETS_KEY] = [{ platform: 'chatgpt', origin: ORIGIN, scope: 'fixture', at: 1 }];
     const mod = await boot(fixed(0));
 
@@ -265,7 +281,7 @@ describe('W90 · the tick re-arm reads the switch through the one alarm queue', 
     await waitForAsyncEvent();
     await waitForAsyncEvent();
 
-    expect(stored[ENABLED_KEY]).toBe(true);
+    expect(consentState()).toBe('on');
     expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(true);
     expect(alarmBook.has(BACKFILL_SAFETY_ALARM_NAME)).toBe(true);
   });

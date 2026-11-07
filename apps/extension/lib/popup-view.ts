@@ -518,7 +518,6 @@ export interface PopupView {
   dashboard: { label: string; enabled: boolean; reason: string | null };
   /** Supplementary notes, possibly empty. */
   notes: string[];
-  toggle: { label: string; checked: boolean; disabled: boolean };
   /**
    * 🔴 EXT-12 · The persistent "Only in this browser — not a backup yet" notice.
    * Present (non-null) exactly when the outbox holds undelivered captures and
@@ -584,10 +583,6 @@ export interface PopupView {
 }
 
 /** The switch row's fixed wording. The switch only means "the user agreed", never "it is running". */
-export function toggleLabel(): string {
-  return t('popup.toggle.label');
-}
-
 /** The clear button's fixed wording. "Got it" rather than "retry" — pressing it re-fetches nothing. */
 export function clearFailuresLabel(): string {
   return t('popup.clearFailures.label');
@@ -831,7 +826,7 @@ export function exportLine(model: PopupModel): string {
 }
 
 export function renderPopup(model: PopupModel): PopupView {
-  const status = statusLine(model);
+  const status = statusLine();
   const channel = channelLine(model);
   const running = runningLine(model);
   const missing = missingLine(model) || null;
@@ -866,15 +861,6 @@ export function renderPopup(model: PopupModel): PopupView {
     notes: notesFor(model),
     clearFailures: { label: clearFailuresLabel(), visible: hasFailures },
     startBackfill: { label: startBackfillLabel(), visible: canStartBackfillHere(model) },
-    toggle: {
-      label: toggleLabel(),
-      checked: model.enabled,
-      // 🔴 The switch stays operable while paused: the pause is a problem with
-      //    the delivery exit, not "the user may not change their mind". It is
-      //    disabled only when storage is unavailable, because then a flip cannot
-      //    be saved — and the missing line says why.
-      disabled: model.block === 'no-store',
-    },
     onlyInBrowser: onlyInBrowserView(model),
     identityRepair: identityRepairView(model),
     firstRun: firstRunView(model),
@@ -888,10 +874,8 @@ export function renderPopup(model: PopupModel): PopupView {
   };
 }
 
-function statusLine(model: PopupModel): string {
-  if (model.block === 'host-paused') return t('popup.status.hostPaused');
-  if (model.enabled) return t('popup.status.on');
-  return t('popup.status.off');
+function statusLine(): string {
+  return t('popup.status.platforms');
 }
 
 /**
@@ -1194,6 +1178,12 @@ export function describeTickReason(reason: string): string {
       return t('tick.reason.scopeAsked');
     case 'disabled':
       return t('tick.reason.disabled');
+    case 'platform-disabled':
+      // 🔴 ADR-066 D3 · A per-platform stop the user chose, distinct from the
+      //    retired global `disabled` one line above: which platform is off is
+      //    already the row being worded, so the sentence says where the switch
+      //    lives rather than naming the platform again.
+      return t('tick.reason.platformDisabled');
     case 'no-store':
       return t('tick.reason.noStore');
     case 'host-paused':

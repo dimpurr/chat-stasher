@@ -67,8 +67,6 @@ import {
 } from '../lib/host-status';
 import { HELLO_PROBE_TIMEOUT_MS } from '../lib/native-host';
 import {
-  BACKFILL_ENABLED_KEY,
-  isBackfillEnabled,
   productionOutboxNearFull,
   tickBackfill,
   tickBlockReason,
@@ -139,6 +137,7 @@ import {
   type BackfillRuntimeStatus,
 } from '../lib/popup-view';
 import { initUiLocale } from '../lib/i18n';
+import { anyPlatformConsented, isPlatformConsented, loadPlatformConsent, CONSENT_KEY } from '../lib/platform-consent';
 /**
  * The outcome of one live-leg capture.
  *
@@ -343,6 +342,29 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   // memoised per area anyway (lib/backfill/store.ts's W33 note) — asking once keeps
   // it obvious that they share one area.
   const recaptureStore = browserLocalStore();
+  const routedPlatform = findPlatformForUrl(captured.url)
+    ?? (captured.pageUrl ? findPlatformForUrl(captured.pageUrl) : null);
+  if (routedPlatform && recaptureStore) {
+    try {
+      if (!(await isPlatformConsented(recaptureStore, routedPlatform.id))) {
+        const key = `cs_consent_refusals_v1:${routedPlatform.id}`;
+        const previous = await recaptureStore.load(key);
+        let count: number;
+        if (previous === null) count = 0;
+        else if (previous && typeof previous === 'object'
+          && Number.isSafeInteger((previous as { count?: unknown }).count)
+          && (previous as { count: number }).count >= 0) count = (previous as { count: number }).count;
+        else return { saved: false, status: 'refused', reason: 'platform-disabled-counter-unreadable' };
+        if (count === Number.MAX_SAFE_INTEGER) {
+          return { saved: false, status: 'refused', reason: 'platform-disabled-counter-full' };
+        }
+        await recaptureStore.save(key, { count: count + 1, updatedAt: Date.now() });
+        return { saved: false, status: 'refused', reason: 'platform-disabled' };
+      }
+    } catch {
+      return { saved: false, status: 'refused', reason: 'platform-consent-unavailable' };
+    }
+  }
   const prepared = await preparePayload(captured, recaptureStore);
   if (!prepared.ok) {
     return { saved: false, status: 'refused', reason: prepared.reason };
@@ -1004,6 +1026,9 @@ async function acquireBackfillLease(platform: string, accountId?: string): Promi
       async request<T>(segment: 'enumerate' | 'detail', send: () => Promise<T>): Promise<T> {
         if (!held) throw new Error('backfill lease is not held');
         for (let attempt = 0; attempt < 3; attempt += 1) {
+          if (!(await isPlatformConsented(browserLocalStore(), platform))) {
+            throw new Error('platform-disabled');
+          }
           const token = await coordinate({ mode: 'token', platform, installId, segment, accountId: comparableAccountId });
           if (!token.ok) {
             await pauseForCoordinationFailure(token.reason ?? 'unknown');
@@ -2340,7 +2365,7 @@ function rearmBackfillTickThroughQueue(): Promise<void> {
 async function runBackfillTickRearm(): Promise<void> {
   const alarms = alarmsApi();
   if (!alarms) return;
-  if (!(await isBackfillEnabled(browserLocalStore()))) {
+  if (!(await anyPlatformConsented(browserLocalStore()))) {
     await syncBackfillAlarm(alarms, false, backfillRandom());
     return;
   }
@@ -2548,6 +2573,16 @@ async function runAlarmTickBody(): Promise<TickResult> {
   await noteConnectDelivery(store, drain);
 
   const targets = await loadTargets(store);
+  const schedule: TickSchedule = { served: null, skipped: [] };
+  const activeTargets: BackfillTarget[] = [];
+  if (store) {
+    const consent = await loadPlatformConsent(store);
+    for (const target of targets) {
+      if (consent.platforms[target.platform]?.state === 'off') {
+        schedule.skipped.push({ platform: target.platform, reason: 'platform-disabled' });
+      } else activeTargets.push(target);
+    }
+  } else activeTargets.push(...targets);
 
   // 🔴 W36/W36b · The storage layout moves **here**, before any gate decides
   //    whether this tick may fetch anything, and the sweep scans `storage.local`
@@ -2586,7 +2621,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
     // can tell the truth.
     const blocked = await tickBlockReason({
       hasStore: store !== null,
-      isEnabled: () => isBackfillEnabled(store),
+      isEnabled: async () => true,
       isHostPaused: () => isBackfillHostPaused(store),
       // 🔴 EXT-12 · The same near-full probe the engine and the popup use, so this
       //    last-tick record cannot disagree with either about why nothing ran.
@@ -2605,7 +2640,12 @@ async function runAlarmTickBody(): Promise<TickResult> {
   }
 
   let last: TickResult = { ran: false, reason: 'no-http-port', report: null };
-  const schedule: TickSchedule = { served: null, skipped: [] };
+  if (targets.length > 0 && activeTargets.length === 0) {
+    last = { ran: false, reason: 'platform-disabled', report: null };
+    lastTick = last;
+    await recordAlarmTick(store, last, targets.length, preflightRefusal, null, schedule);
+    return last;
+  }
   let claudeScopeSource: 'observed' | 'cookie' | 'organizations-endpoint' | undefined;
   /**
    * 🔴 W51 · The recovery sweep runs **at most once per tick**, and only when a
@@ -2665,7 +2705,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
    *    and this probe must not spend a request (`resolveScopeForTick`). The
    *    registry is not empty here: the `no-targets` case returned above.
    */
-  const head = targets[0]!;
+  const head = activeTargets[0]!;
   const gateProbe = await tickBackfill({
     platform: head.platform,
     origin: head.origin,
@@ -2706,14 +2746,14 @@ async function runAlarmTickBody(): Promise<TickResult> {
   //    never-served, i.e. the registry in its own order, which examines every row
   //    and so can never skip a platform.
   const cursor = await loadTickCursor(store);
-  const order = tickWalkOrder(targets, cursor);
+  const order = tickWalkOrder(activeTargets, cursor);
 
   for (const idx of order) {
     // 🔴 `noUncheckedIndexedAccess`: `idx` is in `[0, n)` by construction (above),
     //    so a missing row means the registry shrank between the read above and this
     //    step. Skip it rather than throw: a registry that lost a row mid-walk is a
     //    reason to serve nothing, not a reason to lose the whole tick.
-    const target = targets[idx];
+    const target = activeTargets[idx];
     if (!target) continue;
     const scopeResolution = await resolveScopeForTick(store, target, async () => {
       // Claude's organization fallback is a platform request too. Take the same
@@ -2975,7 +3015,7 @@ export async function runBackfillWatchdog(): Promise<WatchdogOutcome> {
   const store = browserLocalStore();
   // With the switch off there is nothing to watch: no consent, no periodic
   // behaviour, not even a wake-up that reads anything else.
-  if (!(await isBackfillEnabled(store))) return 'disabled';
+  if (!(await anyPlatformConsented(store))) return 'disabled';
   if (await isBackfillChainArmed(alarmsApi())) return 'idle';
   console.warn(
     '[chat-stasher] backfill watchdog: the jittered tick alarm was not armed'
@@ -3146,6 +3186,7 @@ async function recordAlarmTick(
       // W913 (c4) · The build stamp, the same identity a halt record carries
       // (W59b): `extension_version` names the release, this names the build.
       build_stamp: bakedBuildStamp(),
+      consent: await loadPlatformConsent(store),
     });
   } catch (err) {
     console.warn('[chat-stasher] install status report failed', (err as Error).message);
@@ -3247,7 +3288,7 @@ export function syncAlarmWithSwitch(): Promise<string> {
 }
 
 async function syncAlarmWithSwitchNow(): Promise<string> {
-  const enabled = await isBackfillEnabled(browserLocalStore());
+  const enabled = await anyPlatformConsented(browserLocalStore());
   return syncBackfillAlarm(alarmsApi(), enabled, backfillRandom());
 }
 
@@ -3262,7 +3303,7 @@ function addBackfillSwitchListener(): void {
     };
   }).storage;
   storage?.onChanged?.addListener((changes, areaName) => {
-    if (areaName !== 'local' || !(BACKFILL_ENABLED_KEY in changes)) return;
+    if (areaName !== 'local' || !(CONSENT_KEY in changes)) return;
     // storage.onChanged fires after the write is committed. Re-read through the
     // same gate as startup so remove/non-boolean values also fail closed.
     void syncAlarmWithSwitch().catch((err) => {

@@ -431,7 +431,14 @@ describe('W16-5 · the transient backoff gains jitter and keeps its cap', () => 
 // not one request really goes out.
 // ===========================================================================
 
-const ENABLED_KEY = 'cs_backfill_enabled_v1';
+const CONSENT_KEY = 'cs_platform_consent_v1';
+
+function consentRecord(on: boolean): Record<string, unknown> {
+  const platforms: Record<string, { state: 'on' | 'off'; updatedAt: number }> = {};
+  for (const id of ['chatgpt', 'claude', 'deepseek', 'gemini', 'grok', 'kimi', 'perplexity']) platforms[id] = { state: on ? 'on' : 'off', updatedAt: 1 };
+  return { version: 1, platforms };
+}
+
 const TARGETS_KEY = 'cs_backfill_targets_v1';
 
 const stored: Record<string, unknown> = {};
@@ -532,7 +539,7 @@ beforeEach(() => {
 
 describe('W16-4 · the chain is never broken, and a healthy chain is never ticked', () => {
   it('🔴 a worker killed before re-arming: the watchdog’s wake leaves an alarm armed again', async () => {
-    stored[ENABLED_KEY] = true;
+    stored[CONSENT_KEY] = consentRecord(true);
     stored[TARGETS_KEY] = [{ platform: 'chatgpt', origin: ORIGIN, scope: 'fixture', at: 1 }];
     const mod = await boot(fixed(0));
 
@@ -557,7 +564,7 @@ describe('W16-4 · the chain is never broken, and a healthy chain is never ticke
   });
 
   it('🔴 a real tick re-arms the next one with a FRESH draw', async () => {
-    stored[ENABLED_KEY] = true;
+    stored[CONSENT_KEY] = consentRecord(true);
     stored[TARGETS_KEY] = [{ platform: 'chatgpt', origin: ORIGIN, scope: 'fixture', at: 1 }];
     let draw = 0;
     const mod = await boot(() => draw);
@@ -582,7 +589,7 @@ describe('W16-4 · the chain is never broken, and a healthy chain is never ticke
   });
 
   it('🔴 the watchdog does NOT tick a healthy chain: it adds no create and no request', async () => {
-    stored[ENABLED_KEY] = true;
+    stored[CONSENT_KEY] = consentRecord(true);
     stored[TARGETS_KEY] = [{ platform: 'chatgpt', origin: ORIGIN, scope: 'fixture', at: 1 }];
     const mod = await boot(fixed(0));
 
@@ -601,7 +608,7 @@ describe('W16-4 · the chain is never broken, and a healthy chain is never ticke
   });
 
   it('🔴 the watchdog refuses to work with the switch off — no consent, no periodic behaviour', async () => {
-    stored[ENABLED_KEY] = false;
+    stored[CONSENT_KEY] = consentRecord(false);
     const mod = await boot(fixed(0));
 
     expect(await mod.runBackfillWatchdog()).toBe('disabled');
@@ -611,7 +618,7 @@ describe('W16-4 · the chain is never broken, and a healthy chain is never ticke
   });
 
   it('🔴 switch off clears BOTH alarms, through the real storage-change path', async () => {
-    stored[ENABLED_KEY] = true;
+    stored[CONSENT_KEY] = consentRecord(true);
     stored[TARGETS_KEY] = [{ platform: 'chatgpt', origin: ORIGIN, scope: 'fixture', at: 1 }];
     await boot(fixed(0));
     expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(true);
@@ -622,7 +629,7 @@ describe('W16-4 · the chain is never broken, and a healthy chain is never ticke
     const { setBackfillEnabled } = await import('../lib/backfill/schedule');
     const { browserLocalStore } = await import('../lib/backfill/store');
     await setBackfillEnabled(browserLocalStore(), false);
-    for (const fn of storageChangeListeners) fn({ [ENABLED_KEY]: { newValue: false } }, 'local');
+    for (const fn of storageChangeListeners) fn({ [CONSENT_KEY]: { newValue: stored[CONSENT_KEY] } }, 'local');
     await waitForAsyncEvent();
 
     expect(alarmBook.has(BACKFILL_ALARM_NAME)).toBe(false);

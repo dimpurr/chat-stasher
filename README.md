@@ -102,7 +102,7 @@ For web chats, the extension works alongside the CLI. It is not in any extension
 
 **Do steps 3 and 4 in every browser profile you chat in.** An extension belongs to one profile, so a copy in Chrome's Personal profile captures nothing in its Work profile. Each copy has its own queue and its own backfill settings; all of them deliver into the one stage above, so the archive is still one archive.
 
-Past conversations are a separate, opt-in step: switch on **backfill** in the popup. Backfill works through an open, logged-in tab of that platform, and goes gently by default. Its daily cap is **per install**: three profiles with backfill on are three schedules, so the account can see about three times one install's rate. The full walkthrough is in [docs/install.md](docs/install.md#the-browser-extension).
+Backfill of past conversations follows the popup's per-platform switches, which are on by default. It works through an open, logged-in tab of that platform, and goes gently by default. Its daily cap is **per install**: three profiles with the same platform on are three schedules, so the account can see about three times one install's rate. The full walkthrough is in [docs/install.md](docs/install.md#the-browser-extension).
 
 ## Your first archive
 
