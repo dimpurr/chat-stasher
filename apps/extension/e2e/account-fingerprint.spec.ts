@@ -103,9 +103,18 @@ test('a Claude capture fingerprints the current user id and never archives the r
   // The organization stays the capture namespace and is not used as the account id.
   expect(bundle.url).toContain(ORG);
 
-  // Nothing left the machine, and the only traffic was the fixture's own.
+  // Nothing left the machine. The fixture's own traffic is the page load, the
+  // conversation response, and the who-am-I lookup — plus exactly one more
+  // same-origin request: the live leg's backfill kick. EXT-CONSENT (O4/D2)
+  // retired the global backfill switch, so consent-on (the default) lets the
+  // kick that every capture triggers proceed to the Claude list endpoint; the
+  // harness answers it 404, the run halts there, and nothing is archived from
+  // it. If this list ever gains a sibling, that sibling is new traffic and
+  // this assertion must fail.
   expect(log.escaped).toEqual([]);
-  expect(log.unexpected).toEqual([]);
+  expect(log.unexpected).toEqual([
+    `GET /api/organizations/${ORG}/chat_conversations`,
+  ]);
   expect(log.pageLoads).toEqual([`GET ${PAGE_PATH}`]);
   expect(log.apiResponses).toEqual([`GET ${API_PATH}`]);
   expect(whoamiRequests).toBe(1);
