@@ -211,6 +211,8 @@ A `[mirror]` line is added when the machine's local mirror has something to say:
 
 When something is off, pending or undecided, a `[sources]` line says what is collected, what you turned off and which detected tools are pending; the `[scan]` counts mark sessions in an off or pending tool as `(off)` or `(pending)`, so a session that was found is never read as one that was archived. `status --json` carries the same under `sources`. `doctor` prints the same line and counts neither off nor pending as a gap.
 
+Extension consent is separate from `[sources]`. For each locally reported installation and platform, `status` prints `[ext] ext.<install>:<platform>=on|off machine=<machine> updatedAt=<milliseconds>` and appends `stale` when the report is more than 48 hours old or its report time is unreadable. `status --json` exposes the same rows under `extension_consent`; an unavailable stage or unreadable report is unknown. These are read-only observations, not controls, and are never summed across installations. Older reports without consent do not establish a choice. Extension off states do not count as doctor gaps.
+
 ### `dest-init`
 
 Seeds a new destination, once. It re-collects this machine's sessions from their sources, copies in what other destinations still hold for this machine that the machine no longer has, and pushes the result. It covers **this machine's** part of the archive only. See [destinations.md](destinations.md).

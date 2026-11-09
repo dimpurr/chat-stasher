@@ -591,3 +591,35 @@ fn backfill_refuses_a_source_that_is_not_on() {
         );
     }
 }
+
+#[test]
+fn extension_consent_does_not_create_doctor_gaps() {
+    let sb = Sandbox::new();
+    let stage = sb.stage();
+    sb.write_config(&format!(
+        "[native_host]\nstage = {:?}\n",
+        stage.to_str().unwrap()
+    ));
+    let reports = stage.join("ext-status").join("fixture-machine");
+    fs::create_dir_all(&reports).unwrap();
+    let path = reports.join("fixture-install.json");
+    let write = |state: &str| {
+        fs::write(
+            &path,
+            serde_json::json!({
+                "schema":"chat-stasher/ext-status@1", "machine":"fixture-machine",
+                "install_id":"fixture-install", "reported_at":"2026-01-01T00:00:00Z",
+                "consent":{"version":1,"platforms":{"alpha":{"state":state,"updatedAt":1000}}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    };
+    write("on");
+    let on = sb.run(&["doctor", "--json"]);
+    let on: serde_json::Value = serde_json::from_slice(&on.stdout).unwrap();
+    write("off");
+    let off = sb.run(&["doctor", "--json"]);
+    let off: serde_json::Value = serde_json::from_slice(&off.stdout).unwrap();
+    assert_eq!(on["archive_gaps"], off["archive_gaps"]);
+}

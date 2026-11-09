@@ -275,6 +275,13 @@ fn status_json_unreadable_run_state_is_unreadable() {
 /// before it can tell its user which `-destination` values would work from
 /// this process at all. Consumers that only decode the fields they declare
 /// (the menubar's Decodable structs) are unaffected.
+///
+/// `extension_consent` (EXT-CONSENT D6) is the next one: the read-only
+/// per-install × per-platform on/off rows from the extension's local
+/// `ext-status` reports, with a `stale` flag past 48h without a report.
+/// `unknown` on a machine with no local stage (there is no extension to
+/// report on); consumers that only decode the fields they declare are
+/// unaffected.
 #[test]
 fn status_json_top_level_schema_is_stable() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -292,6 +299,7 @@ fn status_json_top_level_schema_is_stable() {
             "destinations",
             "exit_code",
             "exit_semantics",
+            "extension_consent",
             "healthy",
             "keys",
             "local",
@@ -307,6 +315,11 @@ fn status_json_top_level_schema_is_stable() {
     // on a machine that declares none, because an empty declaration list
     // is a fact, not a failure to look.
     assert_eq!(v["destinations"], serde_json::json!([]));
+    // No local stage on this machine, so no extension to report on.
+    assert_eq!(
+        v["extension_consent"],
+        serde_json::json!({"kind": "unknown", "why": "no local stage is configured"})
+    );
     assert_eq!(
         v["remote_inboxes"],
         serde_json::json!({"state": "known", "inboxes": []})

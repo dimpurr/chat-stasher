@@ -22402,6 +22402,140 @@ fn display_consent(config: &Config) -> Option<chat_stasher::sources::Consent> {
     ))
 }
 
+/// Read the local extension reports without interpreting missing consent as a choice.
+fn extension_consent_status(config: &Config, now: i64) -> serde_json::Value {
+    let Some(stage) = config.native_host.as_ref().and_then(|n| n.stage.as_deref()) else {
+        return serde_json::json!({"kind":"unknown", "why":"no local stage is configured"});
+    };
+    match read_extension_consent(Path::new(stage), now) {
+        Ok(rows) => serde_json::json!({"kind":"known", "rows":rows}),
+        Err(_) => {
+            serde_json::json!({"kind":"unknown", "why":"extension reports could not be read"})
+        }
+    }
+}
+
+fn read_extension_consent(stage: &Path, now: i64) -> anyhow::Result<Vec<serde_json::Value>> {
+    let root = stage.join("ext-status");
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            for child in std::fs::read_dir(entry.path())? {
+                let child = child?;
+                if child.file_type()?.is_file()
+                    && child.path().extension().is_some_and(|e| e == "json")
+                {
+                    paths.push(child.path());
+                }
+            }
+        } else if ty.is_file() && entry.path().extension().is_some_and(|e| e == "json") {
+            paths.push(entry.path());
+        }
+    }
+    let mut installs = Vec::new();
+    for path in paths {
+        let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        let location = extension_status_location(&path).context("invalid extension status path")?;
+        let id = value.get("install_id").and_then(|v| v.as_str());
+        let machine = value.get("machine").and_then(|v| v.as_str());
+        if value.get("schema").and_then(|v| v.as_str()) != Some("chat-stasher/ext-status@1")
+            || id.is_none()
+            || id != path.file_stem().and_then(|v| v.to_str())
+            || machine.is_none()
+            || location
+                .machine_dir
+                .is_some_and(|d| Some(d) != machine.map(std::ffi::OsStr::new))
+        {
+            anyhow::bail!("invalid extension status identity");
+        }
+        if location.machine_dir.is_none() {
+            value[LEGACY_STATUS_LAYOUT] = serde_json::Value::Bool(true);
+        }
+        installs.push(value);
+    }
+    overview::normalize_extension_installs(&mut installs);
+    let mut rows = Vec::new();
+    for install in installs {
+        let Some(consent) = install.get("consent") else {
+            continue;
+        };
+        if consent.get("version").and_then(|v| v.as_u64()) != Some(1) {
+            anyhow::bail!("invalid consent version");
+        }
+        let platforms = consent
+            .get("platforms")
+            .and_then(|v| v.as_object())
+            .context("invalid consent platforms")?;
+        let stale = overview::extension_status_is_stale(
+            install.get("reported_at").and_then(|v| v.as_str()),
+            now,
+        );
+        for (platform, entry) in platforms {
+            let state = entry
+                .get("state")
+                .and_then(|v| v.as_str())
+                .context("invalid consent state")?;
+            let updated = entry
+                .get("updatedAt")
+                .and_then(|v| v.as_u64())
+                .context("invalid consent timestamp")?;
+            if state != "on" && state != "off" {
+                anyhow::bail!("invalid consent state");
+            }
+            rows.push(serde_json::json!({"machine":install["machine"], "install":install["install_id"], "platform":platform, "state":state, "updatedAt":updated, "stale":stale}));
+        }
+    }
+    rows.sort_by_key(|row| {
+        (
+            row["machine"].to_string(),
+            row["install"].to_string(),
+            row["platform"].to_string(),
+        )
+    });
+    Ok(rows)
+}
+
+fn render_extension_consent(value: &serde_json::Value) -> String {
+    if value["kind"] != "known" {
+        // Byte-identity contract (b78): a machine with no local stage has no
+        // extension to report on, so it stays silent. Only a configured stage
+        // whose reports cannot be read earns the unknown line.
+        if value["why"] == "no local stage is configured" {
+            return String::new();
+        }
+        return "[ext] extension consent unknown (reports unavailable)\n".into();
+    }
+    let mut output = String::new();
+    if let Some(rows) = value["rows"].as_array() {
+        for row in rows {
+            // Infallible String sink, no fmt::Result: push_str/push express that
+            // in the type (repo clippy convention, no let_ = on must_use).
+            output.push_str("[ext] ext.");
+            output.push_str(row["install"].as_str().unwrap_or("?"));
+            output.push(':');
+            output.push_str(row["platform"].as_str().unwrap_or("?"));
+            output.push('=');
+            output.push_str(row["state"].as_str().unwrap_or("?"));
+            output.push_str(" machine=");
+            output.push_str(row["machine"].as_str().unwrap_or("?"));
+            output.push_str(" updatedAt=");
+            output.push_str(&row["updatedAt"].to_string());
+            if row["stale"] == true {
+                output.push_str(" stale");
+            }
+            output.push('\n');
+        }
+    }
+    output
+}
+
 fn render_setup_scan(report: &scanner::ScanReport) -> String {
     render_status(report, false)
 }
@@ -22491,6 +22625,7 @@ fn cmd_status(
         }
     }
 
+    let extension_consent = extension_consent_status(&config, chrono::Utc::now().timestamp());
     let scan = scanner::scan(&config);
     // ADR-065: the states the scan above is read against. Evaluated against the
     // one stage the config names, because `status` is not given one.
@@ -22615,12 +22750,35 @@ fn cmd_status(
             Ok(report) => {
                 println!(
                     "{}",
+                    status_with_extension_consent(
+                        status_with_inboxes(
+                            status_json(
+                                config.source,
+                                &info,
+                                &local,
+                                Ok(report),
+                                exit_code,
+                                writer_versions.as_deref(),
+                                writer_version_error.as_deref(),
+                                &keys_value,
+                                display_consent.as_ref(),
+                                &availability_value,
+                            ),
+                            &inboxes
+                        ),
+                        &extension_consent
+                    )
+                )
+            }
+            Err(e) => println!(
+                "{}",
+                status_with_extension_consent(
                     status_with_inboxes(
                         status_json(
                             config.source,
                             &info,
                             &local,
-                            Ok(report),
+                            Err(e.to_string()),
                             exit_code,
                             writer_versions.as_deref(),
                             writer_version_error.as_deref(),
@@ -22629,25 +22787,8 @@ fn cmd_status(
                             &availability_value,
                         ),
                         &inboxes
-                    )
-                )
-            }
-            Err(e) => println!(
-                "{}",
-                status_with_inboxes(
-                    status_json(
-                        config.source,
-                        &info,
-                        &local,
-                        Err(e.to_string()),
-                        exit_code,
-                        writer_versions.as_deref(),
-                        writer_version_error.as_deref(),
-                        &keys_value,
-                        display_consent.as_ref(),
-                        &availability_value,
                     ),
-                    &inboxes
+                    &extension_consent
                 )
             ),
         }
@@ -22660,6 +22801,7 @@ fn cmd_status(
             render_status_with_sources(report, sessions, display_consent.as_ref())
         );
     }
+    eprint!("{}", render_extension_consent(&extension_consent));
     inboxes.print();
     // A destination needs its own key backed up: a second machine reads that
     // copy with `masterkey-<name>.json`, never with the local key (W281 BUG-2).
@@ -23037,6 +23179,13 @@ fn dest_reconciliation(
             .and_then(|native_host| native_host.stage.as_deref())
             .map(Path::new),
     })
+}
+
+fn status_with_extension_consent(rendered: String, consent: &serde_json::Value) -> String {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&rendered).expect("status renderer produces valid JSON");
+    value["extension_consent"] = consent.clone();
+    json_string(&value)
 }
 
 fn status_with_inboxes(rendered: String, inboxes: &chat_stasher::inbox_status::Report) -> String {
@@ -26080,5 +26229,52 @@ mod collect_exit_tests {
         };
         assert_eq!(collect_exit_code(&partial_with_unknown), ExitCode::from(3));
         assert!(collect_narrates_unknown(&partial_with_unknown));
+    }
+}
+
+#[cfg(test)]
+mod extension_consent_status_tests {
+    use super::*;
+
+    #[test]
+    fn reports_each_platform_and_report_freshness() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ext-status").join("machine");
+        std::fs::create_dir_all(&root).unwrap();
+        let report = |id: &str, at: &str| {
+            serde_json::json!({
+                "schema":"chat-stasher/ext-status@1", "machine":"machine", "install_id":id,
+                "reported_at":at, "consent":{"version":1,"platforms":{
+                    "alpha":{"state":"on","updatedAt":1000},
+                    "beta":{"state":"off","updatedAt":2000}
+                }}
+            })
+        };
+        std::fs::write(
+            root.join("fresh.json"),
+            report("fresh", "2026-01-03T00:00:00Z").to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("old.json"),
+            report("old", "2025-12-31T23:59:59Z").to_string(),
+        )
+        .unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-03T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let rows = read_extension_consent(dir.path(), now).unwrap();
+        let rendered = render_extension_consent(&serde_json::json!({"kind":"known", "rows":rows}));
+        assert!(rendered.contains("ext.fresh:alpha=on machine=machine updatedAt=1000\n"));
+        assert!(rendered.contains("ext.fresh:beta=off machine=machine updatedAt=2000\n"));
+        assert!(rendered.contains("ext.old:beta=off machine=machine updatedAt=2000 stale\n"));
+        assert!(!overview::extension_status_is_stale(
+            Some("2026-01-01T00:00:00Z"),
+            now
+        ));
+        assert!(overview::extension_status_is_stale(
+            Some("2025-12-31T23:59:59Z"),
+            now
+        ));
     }
 }
