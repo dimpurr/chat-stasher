@@ -27,6 +27,11 @@ use std::collections::BTreeMap;
 
 pub const SCHEMA: &str = "chat-stasher/message-audit@1";
 pub const FILE_NAME: &str = "message-audit-v1.jsonl";
+/// The reason a body carries when its capture stamped no fidelity metadata.
+/// One spelling, shared by the audit sidecar's legacy path and every reader
+/// surface that resolves the same state, so the two cannot drift into two
+/// different euphemisms for one fact.
+pub const NOT_RECORDED_REASON: &str = "capture metadata was not recorded";
 
 /// Does not implement Debug or Serialize: the archive secret must stay private.
 pub struct JoinPolicy {
@@ -247,7 +252,7 @@ impl BodyMetadata {
             fidelity: FidelityMetadata {
                 source: MetadataSource::Declared,
                 fidelity: Fidelity::Unknown {
-                    reason: "capture metadata was not recorded".into(),
+                    reason: NOT_RECORDED_REASON.into(),
                 },
             },
             producer: None,

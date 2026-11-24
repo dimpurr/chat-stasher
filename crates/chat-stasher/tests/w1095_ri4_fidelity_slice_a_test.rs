@@ -64,7 +64,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn fixture_bytes(name: &str) -> Vec<u8> {
     fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/fixtures/inbox").join(name),
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../contracts/fixtures/inbox")
+            .join(name),
     )
     .expect("committed synthetic inbox fixture")
 }
@@ -140,7 +142,10 @@ fn archive(sandbox: &test_support::Sandbox) -> (PathBuf, PathBuf) {
     store
         .push(&sandbox.root().join("stage"), &key)
         .expect("synthetic archive push");
-    (sandbox.root().join("repo"), sandbox.root().join("masterkey.json"))
+    (
+        sandbox.root().join("repo"),
+        sandbox.root().join("masterkey.json"),
+    )
 }
 
 /// Build the activity index over the stage with the real binary and require
@@ -178,8 +183,7 @@ fn index_row(root: &Path, session: &str) -> Value {
     let text = fs::read_to_string(&index)
         .unwrap_or_else(|e| panic!("read activity index {}: {e}", index.display()));
     for line in text.lines() {
-        let row: Value =
-            serde_json::from_str(line).expect("activity index lines are JSON objects");
+        let row: Value = serde_json::from_str(line).expect("activity index lines are JSON objects");
         if row["session_id"] == json!(session) {
             return row;
         }
@@ -374,10 +378,7 @@ fn captured_fidelity_is_not_overridden_by_a_declared_peer_nor_stale_index_state(
     // previous state format, and a previous index row carrying a declared
     // fidelity for this session. Both parse in the current tree (additive
     // reading); neither may make the captured value invisible.
-    let meta = root
-        .join("stage")
-        .join("meta")
-        .join(MACHINE);
+    let meta = root.join("stage").join("meta").join(MACHINE);
     fs::create_dir_all(&meta).unwrap();
     let previous_state = json!({
         "format": 3,
@@ -433,16 +434,17 @@ fn disagreeing_captured_values_become_captured_unknown_never_a_silent_pick() {
     let root = sb.root();
     let session = "deepseek.synthetic-session";
     seal(&sb, &fixture_bytes("web-full.json"));
-    // A second, later capture of the same session: a different raw body (so
-    // it does not dedupe) whose producer stamped a different fidelity value.
-    let second = json!({
-        "schema": "chat-stasher/inbox@3",
-        "platform": "deepseek",
-        "sessionId": "synthetic-session",
-        "kind": "web-capture",
-        "raw": {"text": "{\"capture\":2}", "bytes": 13},
-        "fidelity": {"value": "raw"},
-    });
+    // A second, later capture of the same session: the same valid fixture
+    // with a different raw body (so it does not dedupe) whose producer
+    // stamped a different fidelity value. (A web capture may not stamp
+    // `raw` — the contract reserves that value for harness-file captures —
+    // so the disagreeing second stamp is an honest unknown with a reason.)
+    let second: Value = {
+        let mut bundle: Value = serde_json::from_slice(&fixture_bytes("web-full.json")).unwrap();
+        bundle["raw"] = json!({"text": "{\"capture\":2}", "bytes": 13});
+        bundle["fidelity"] = json!({"value": "unknown", "reason": "Synthetic unverified re-read"});
+        bundle
+    };
     seal(&sb, &serde_json::to_vec(&second).unwrap());
     archive(&sb);
     run_activity_index(root, &sb, false);

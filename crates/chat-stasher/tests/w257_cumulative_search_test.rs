@@ -125,6 +125,8 @@ fn write_activity_index(stage: &Path, sessions: &[&str], first: i64, last: i64) 
             dimensions: Default::default(),
             account_keys: Vec::new(),
             measured_body: None,
+
+            fidelity: None,
         };
         body.push_str(&serde_json::to_string(&row).unwrap());
         body.push('\n');

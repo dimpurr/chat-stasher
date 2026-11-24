@@ -127,6 +127,35 @@ pub struct ActivityRow {
     /// deserialize rather than failing the whole index read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured_body: Option<MeasuredBody>,
+    /// The session's capture fidelity — `raw`, `full (+representation)`,
+    /// `partial (+note)` or `unknown (+reason)` — resolved from the capture
+    /// metadata the body's own sealed record headers stamped at capture time
+    /// (ADR-051 D1/D2/D3, [`session_capture_fidelity`]).
+    ///
+    /// - `source: captured` with a value: this body's sealed records carry
+    ///   capture metadata (inbox@3 bundles, and the collectors that stamp
+    ///   fidelity at seal as they are wired), and every stamped value agrees.
+    ///   A captured value is never downgraded, overridden or back-filled by a
+    ///   declared reading.
+    /// - `source: captured` with `unknown` and the disagreement or
+    ///   unreadable-field reason: the records stamped fidelity but the stamps
+    ///   conflict, or one cannot be parsed; an unreadable or conflicting set
+    ///   of claims is not a silent pick and not "not recorded".
+    /// - `source: declared` with `unknown` and the not-recorded reason
+    ///   ([`crate::message_audit::NOT_RECORDED_REASON`]): the body's records
+    ///   predate capture metadata (raw local captures, inbox@1/@2 bundles).
+    ///   It is displayed as an explicit unknown, never as empty, `raw` or
+    ///   `full`, and never inferred from the harness name.
+    ///
+    /// `None` is a row written by a build that recorded no fidelity — a
+    /// pre-fidelity index line carried forward verbatim for a reclaimed body.
+    /// It is a different, older state than the explicit declared unknown, and
+    /// consumers report it as its own state rather than as either value.
+    ///
+    /// Additive for the same reason as [`ActivityRow::source_zone`]: an
+    /// index written before this field existed deserializes as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fidelity: Option<crate::message_audit::FidelityMetadata>,
 }
 
 /// Privacy-safe provenance captured from a source path during collection.
@@ -3224,6 +3253,152 @@ pub fn build_row(session_id: &str, machine: &str, harness: &str, lines: &[&str])
         // body from a stage (which is the only place the manifest is the
         // authority on it) stamps the identity itself.
         measured_body: None,
+        // Capture fidelity, unlike the measured identity, is a fact *inside*
+        // the lines: the capture envelope of each sealed record carries it
+        // (see [`session_capture_fidelity`]). A caller with no lines at all
+        // resolves the same explicit unknown.
+        fidelity: Some(session_capture_fidelity(lines)),
+    }
+}
+
+/// Resolve one session's capture fidelity from the lines its body holds
+/// (ADR-051 D1/D2/D3, applied at the metadata tier).
+///
+/// The authority is the same one the record headers are: a sealed inbox
+/// record's `fidelity` field, stamped by the producer at capture time. This
+/// reader never consults the harness registry, never infers from the harness
+/// or session name, and never upgrades a legacy record by guessing: a body
+/// with no capture metadata anywhere resolves to the explicit
+/// `declared/unknown` carrying [`crate::message_audit::NOT_RECORDED_REASON`]
+/// — the same sentence the audit sidecar's legacy path writes — which is a
+/// recorded fact, not a placeholder for empty.
+///
+/// Aggregation, because a session can hold several captures over its life:
+/// - every readable stamp agrees → that value, `source: captured`;
+/// - readable stamps disagree → `captured/unknown` naming the disagreement:
+///   a set of conflicting claims is not established, and picking one would
+///   hide the conflict (an unknown is never shown as a value, D1);
+/// - some stamp cannot be parsed (bytes a restored, corrupted record would
+///   write back) → `captured/unknown` naming the unreadable field: staged but
+///   unreadable is a different fact from not recorded, and neither is a
+///   crash;
+/// - no record carries capture metadata (raw local captures, inbox@1/@2
+///   bundles) or there are no records at all → `declared/unknown` with the
+///   not-recorded reason.
+///
+/// A mixed body — records that stamp fidelity beside older ones that predate
+/// it — keeps the captured value: the older record's absent stamp is not a
+/// competing claim (a web bundle is a whole-conversation capture, and a
+/// partial one is a refused bundle, not a sealed `partial`), while two stamps
+/// that both exist and disagree are exactly the conflict case above. A
+/// registry's declared value, where slices after this one wire one in, is a
+/// fallback display for shards archived before this field and never
+/// overrides what the records say (D2).
+///
+/// `harness-resend` records are provenance references, not bodies, and are
+/// skipped exactly as [`crate::audit_store::project_shard`] skips them; a
+/// line that is not a sealed record at all contributes nothing, which is how
+/// a locally collected body of raw harness lines reaches the not-recorded
+/// state.
+pub fn session_capture_fidelity(lines: &[&str]) -> crate::message_audit::FidelityMetadata {
+    use crate::message_audit::{Fidelity, FidelityMetadata, MetadataSource, NOT_RECORDED_REASON};
+    /// The disagreement reason: one sentence, pinned by the tests.
+    const DISAGREEMENT_REASON: &str = "this session's sealed records disagree on capture fidelity";
+    /// The unreadable-stamp reason: the field is there and cannot be read.
+    const UNREADABLE_REASON: &str = "a sealed record's capture fidelity is unreadable";
+
+    let mut stamps: Vec<Fidelity> = Vec::new();
+    for line in lines {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        // The same sealed-record shape `audit_store::project_shard` keys on:
+        // an inbox envelope carrying its own content digest. Neither half
+        // alone is a record: raw harness lines carry no `schema`, and a
+        // platform's payload could name either key by coincidence.
+        let sealed = value
+            .get("schema")
+            .is_some_and(serde_json::Value::is_string)
+            && value
+                .get("file_sha256")
+                .is_some_and(serde_json::Value::is_string)
+            && value["schema"]
+                .as_str()
+                .is_some_and(|schema| schema.starts_with("chat-stasher/inbox@"));
+        if !sealed || value["kind"] == "harness-resend" {
+            continue;
+        }
+        match value.get("fidelity") {
+            Some(stamp) => match serde_json::from_value::<Fidelity>(stamp.clone()) {
+                Ok(parsed) => {
+                    if !stamps.contains(&parsed) {
+                        stamps.push(parsed);
+                    }
+                }
+                Err(_) => {
+                    return FidelityMetadata {
+                        source: MetadataSource::Captured,
+                        fidelity: Fidelity::Unknown {
+                            reason: UNREADABLE_REASON.into(),
+                        },
+                    }
+                }
+            },
+            // A sealed record with no `fidelity` key is a capture that
+            // recorded none; it contributes no claim, and the
+            // not-recorded state below is the honest report for it.
+            None => continue,
+        }
+    }
+    match stamps.as_slice() {
+        [] => FidelityMetadata {
+            source: MetadataSource::Declared,
+            fidelity: Fidelity::Unknown {
+                reason: NOT_RECORDED_REASON.into(),
+            },
+        },
+        [single] => FidelityMetadata {
+            source: MetadataSource::Captured,
+            fidelity: single.clone(),
+        },
+        // Every distinct stamp parsed, and at least two disagree.
+        [_, _, ..] => FidelityMetadata {
+            source: MetadataSource::Captured,
+            fidelity: Fidelity::Unknown {
+                reason: DISAGREEMENT_REASON.into(),
+            },
+        },
+    }
+}
+
+/// One line stating a resolved fidelity for the text reports (ADR-051 D3:
+/// `read` headers; also the wording the UI badge in a later slice keeps to,
+/// so the phrase lives here rather than in the CLI).
+///
+/// `declared` is always visible (D2: visibly marked, never a silent
+/// downgrading of captured), an unknown always carries its reason, a partial
+/// its note, and a full its representation.
+pub fn fidelity_line(meta: &crate::message_audit::FidelityMetadata) -> String {
+    let source = match meta.source {
+        crate::message_audit::MetadataSource::Captured => "captured",
+        crate::message_audit::MetadataSource::Declared => "declared",
+    };
+    match &meta.fidelity {
+        crate::message_audit::Fidelity::Raw => format!("{source} raw"),
+        crate::message_audit::Fidelity::Full { representation } => format!(
+            "{source} full (representation: {})",
+            match representation {
+                crate::message_audit::Representation::Api => "api",
+                crate::message_audit::Representation::Decoded => "decoded",
+                crate::message_audit::Representation::Export => "export",
+            }
+        ),
+        crate::message_audit::Fidelity::Partial { note } => {
+            format!("{source} partial (note: {note})")
+        }
+        crate::message_audit::Fidelity::Unknown { reason } => {
+            format!("{source} unknown (reason: {reason})")
+        }
     }
 }
 
@@ -6919,6 +7094,120 @@ mod tests {
             provenance.supplement.as_ref().unwrap()["observedAt"],
             "2026-09-25T12:00:00.000Z"
         );
+    }
+
+    // ------------------------------------------------ W1095 · capture fidelity
+    /// The resolver states what the sealed record headers stamped, in every
+    /// recorded state (ADR-051 D1/D2): an agreed captured value kept exactly,
+    /// the explicit not-recorded unknown for bodies with no metadata, the
+    /// disagreement unknown for conflicting stamps, and the unreadable
+    /// unknown for a stamp this build cannot parse.
+    #[test]
+    fn capture_fidelity_resolves_every_recorded_state() {
+        use crate::message_audit::{Fidelity, FidelityMetadata, MetadataSource};
+        fn refs(lines: &[String]) -> Vec<&str> {
+            lines.iter().map(String::as_str).collect()
+        }
+        let sealed = |fidelity: &str| {
+            format!(
+                r#"{{"schema":"chat-stasher/inbox@3","kind":"web-capture","platform":"deepseek","sessionId":"s","file_sha256":"{sha}","file_bytes":2,"raw":{{"text":"{{}}","bytes":2}},{fidelity}}}"#,
+                sha = "a".repeat(64),
+            )
+        };
+        let captured_full = |meta: &FidelityMetadata| {
+            meta.source == MetadataSource::Captured
+                && meta.fidelity
+                    == Fidelity::Full {
+                        representation: crate::message_audit::Representation::Api,
+                    }
+        };
+
+        let lines = vec![sealed(
+            r#""fidelity":{"value":"full","representation":"api"}"#,
+        )];
+        let meta = session_capture_fidelity(&refs(&lines));
+        assert!(captured_full(&meta), "{meta:?}");
+        assert_eq!(fidelity_line(&meta), "captured full (representation: api)");
+
+        // Raw local harness lines: no records at all.
+        let lines = vec![cc_epoch(1)];
+        let meta = session_capture_fidelity(&refs(&lines));
+        assert_eq!(
+            meta.fidelity,
+            Fidelity::Unknown {
+                reason: crate::message_audit::NOT_RECORDED_REASON.into(),
+            }
+        );
+        assert_eq!(meta.source, MetadataSource::Declared);
+
+        // A legacy bundle (a sealed record with no `fidelity` key) beside an
+        // agreeing modern one keeps the captured value.
+        let legacy = format!(
+            r#"{{"schema":"chat-stasher/inbox@1","kind":"bundle","platform":"deepseek","sessionId":"s","file_sha256":"{sha}","file_bytes":2,"raw":{{"text":"{{}}","bytes":2}}}}"#,
+            sha = "b".repeat(64),
+        );
+        let lines = vec![
+            legacy,
+            sealed(r#""fidelity":{"value":"full","representation":"api"}"#),
+        ];
+        assert!(captured_full(&session_capture_fidelity(&refs(&lines))));
+
+        // Two stamps that disagree: explicit captured unknown, the reason on
+        // record — never either value, never the declared fallback.
+        let lines = vec![
+            sealed(r#""fidelity":{"value":"full","representation":"api"}"#),
+            sealed(r#""fidelity":{"value":"raw"}"#),
+        ];
+        let meta = session_capture_fidelity(&refs(&lines));
+        assert_eq!(meta.source, MetadataSource::Captured);
+        let Fidelity::Unknown { reason } = &meta.fidelity else {
+            panic!("disagreeing stamps must resolve to unknown: {meta:?}")
+        };
+        assert_eq!(
+            reason,
+            "this session's sealed records disagree on capture fidelity"
+        );
+
+        // An unparseable stamp (bytes a restored, corrupted record carries):
+        // explicit unknown naming the unreadable field, never "not recorded".
+        let lines = vec![sealed(r#""fidelity":{"value":"not-a-state"}"#)];
+        let meta = session_capture_fidelity(&refs(&lines));
+        assert_eq!(meta.source, MetadataSource::Captured);
+        let Fidelity::Unknown { reason } = &meta.fidelity else {
+            panic!("an unreadable stamp must resolve to unknown: {meta:?}")
+        };
+        assert_eq!(reason, "a sealed record's capture fidelity is unreadable");
+
+        // A resend reference is not a body: it contributes no stamp.
+        let lines = vec![format!(
+            r#"{{"schema":"chat-stasher/inbox@3","kind":"harness-resend","platform":"deepseek","sessionId":"s","file_sha256":"{sha}","file_bytes":2,"content_ref":"{ref}"}}"#,
+            sha = "c".repeat(64),
+            ref = "d".repeat(64),
+        )];
+        let meta = session_capture_fidelity(&refs(&lines));
+        assert_eq!(meta.source, MetadataSource::Declared);
+    }
+
+    /// The row field is additive: an index line written before the field
+    /// exists deserializes with `fidelity: None` (a different, older state
+    /// than the explicit declared unknown), and a derived row both carries
+    /// and round-trips the resolved fidelity.
+    #[test]
+    fn the_fidelity_field_is_additive_over_pre_fidelity_index_lines() {
+        let old = r#"{"session_id":"s","machine":"m","harness":"codex","first_unix":null,"last_unix":null,"line_count":0,"time_source":{"kind":"exact"}}"#;
+        let row: ActivityRow = serde_json::from_str(old).unwrap();
+        assert_eq!(row.fidelity, None);
+        // And the same line re-serialized does not gain the key: a carried
+        // pre-fidelity row stays byte-shape the way it was read.
+        let value = serde_json::to_value(&row).unwrap();
+        assert!(value.get("fidelity").is_none());
+
+        let line = codex_ms(1);
+        let row = build_row("s", "mbp", "codex", &[line.as_str()]);
+        assert!(row.fidelity.is_some());
+        let round: ActivityRow =
+            serde_json::from_str(&serde_json::to_string(&row).unwrap()).unwrap();
+        assert_eq!(round.fidelity, row.fidelity);
     }
 
     // helpers -----------------------------------------------------------------

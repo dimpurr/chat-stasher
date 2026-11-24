@@ -191,6 +191,8 @@ fn index_row(machine: &str, session: &str, first: i64, last: i64) -> ActivityRow
         dimensions: Default::default(),
         account_keys: Vec::new(),
         measured_body: None,
+
+        fidelity: None,
     }
 }
 

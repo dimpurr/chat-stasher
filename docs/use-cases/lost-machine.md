@@ -270,9 +270,19 @@ chat-stasher read --destination offsite --machine 0123456789abcdef0123456789abcd
 [read] shards (seq order):
   000001.jsonl  sha256=5dad533ebab6e1903567933dbc84cf7f1c755f0e3a7b384e9bfb774a7eb49e1a
 [read] concat len      : 516  sha256=5dad533ebab6e1903567933dbc84cf7f1c755f0e3a7b384e9bfb774a7eb49e1a
+[read] fidelity       : declared unknown (reason: capture metadata was not recorded)
 [read] expected src    : not compared (no --stage given; the archive's own sha256 above is the answer)
 EXIT=0
 ```
+
+The `fidelity` line says what kind of copy the archived session is — whether it is the
+tool's own transcript file byte for byte (`captured raw`), a complete conversation in
+another representation (`captured full`, with the representation named), a capture with
+known gaps (`captured partial`, with the note the capture stamped), or not established.
+A session whose captures recorded no fidelity — everything archived before the field
+existed, or by a collector that does not yet stamp it — says so as `declared unknown`
+with the reason on the line, which is a recorded fact, not an empty value: it never
+silently claims the session is complete.
 
 That digest is the checksum of the conversation as the archive holds it, shard by shard and then concatenated. Two things it is not:
 

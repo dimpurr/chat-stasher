@@ -469,7 +469,7 @@ different facts and stay different. A later observation may add a **supplement**
 beside that record: the project a source reported, the source's name, and the
 time it was observed; it never replaces what the capture recorded, so the archive
 shows both what was known then and what was learned afterwards
-(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:3303-3352`). A project name is a label from
+(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:3478-3527`). A project name is a label from
 the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
@@ -511,9 +511,9 @@ not store the source path, and collection leaves the session's raw bytes alone.
 The activity index carries these fields into the archive, and `search --json`
 returns them with each matched or unplaced session that has a provenance row;
 older archives without one omit the field
-(`crates/chat-stasher/src/activity.rs:132-213`,
+(`crates/chat-stasher/src/activity.rs:161-242`,
 `crates/chat-stasher/src/collect.rs:3087-3098`,
-`crates/chat-stasher/src/main.rs:3435-3448`,
+`crates/chat-stasher/src/main.rs:3441-3454`,
 `crates/chat-stasher/src/search.rs:769-815`). The parent id is still session
 metadata in plaintext in the stage and inside the encrypted archive; it can link
 a subagent to its parent conversation.
@@ -523,7 +523,7 @@ which is a different fact from where the archive found them. A Claude Code
 transcript names the working directory it ran in and the organization that
 authored it — the account, where there is no organization — and both land on the
 session's row beside the collection-time provenance
-(`crates/chat-stasher/src/activity.rs:2335-2624`,
+(`crates/chat-stasher/src/activity.rs:2364-2653`,
 `crates/chat-stasher/src/provenance.rs:22-55`). Two things about that are worth
 stating plainly. A working directory is a **path, not a repository**: it says
 where the harness ran, never which project or repository the work belonged to,
@@ -611,7 +611,7 @@ paths and ids above.
 A DeepSeek Harness session states one fact of its own: the working
 directory its header frame opens with, measured on every session file this
 build has seen — a non-empty absolute path, and the only authoritative cwd the
-harness records (`crates/chat-stasher/src/activity.rs:2881-2912`). It lands on
+harness records (`crates/chat-stasher/src/activity.rs:2910-2941`). It lands on
 the session's row as its `cwd` under the same path rule as Claude Code's. The
 append records after the header carry no directory, and the lossy `<slug-of-cwd>`
 segment of the source path is forbidden by the registry's own notes, so a
@@ -627,13 +627,13 @@ core, and the index now reads what each half states plainly. The event records
 of that core — the message, reasoning and call records of both harnesses,
 measured on their installed builds — carry the session's working directory
 beside their payload, and it is recorded the way Claude Code's per-line
-directory is (`crates/chat-stasher/src/activity.rs:2976-3000`). A WorkBuddy
+directory is (`crates/chat-stasher/src/activity.rs:3005-3029`). A WorkBuddy
 session adds the store row the desktop app keeps a sealed copy of: beside the
 same directory, the `user_id` of the account the app scoped the row to — a
 namespace one account's many sessions share, the same reading Hermes Agent's
 gateway peer and Claude Code's organization id get — and the `project_id` the
 row can name, an opaque project key the harness recorded and a path can never
-replace (`crates/chat-stasher/src/activity.rs:2914-2974`). The row's `status`
+replace (`crates/chat-stasher/src/activity.rs:2943-3003`). The row's `status`
 column is deliberately not read: measured as `Pending` then `completed`, it is
 the state of a generation run, not a session lifecycle, and a soft-deleted row
 exports a bare tombstone that carries no row payload and no dimension at all
@@ -922,7 +922,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:116`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:374-614,3283-3285,3325-3335`; `crates/chat-stasher/src/main.rs:10864-10869`).
+kept on your machine (`crates/chat-stasher/src/store.rs:374-614,3283-3285,3325-3335`; `crates/chat-stasher/src/main.rs:10890-10895`).
 
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
@@ -1291,7 +1291,7 @@ There is one key file per repository — `rustic_key_file` for the local archive
 that copy alone, and a copy of one does not restore another. A second machine
 reads a destination with that destination's key and does not use the local one,
 which is why every key file has to be backed up
-(`crates/chat-stasher/src/main.rs:10729-10734`).
+(`crates/chat-stasher/src/main.rs:10755-10760`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin

@@ -596,7 +596,7 @@ enum Command {
         keep_ssh_masters: bool,
     },
     /// Read one session from the repository (sequence-concatenated) and
-    /// report its length and sha256 without printing content. With `--all-machines`, walk
+    /// report its length, sha256 and recorded capture fidelity without printing content. With `--all-machines`, walk
     /// **every snapshot of every machine** cumulatively and report per-session
     /// digests.
     Read {
@@ -3409,8 +3409,14 @@ struct ActivityIndexState {
 /// rework raised it to 3: a fold now needs re-seal evidence, so rows derived
 /// under the content-only folds no longer describe what a build keeps —
 /// a genuine consecutive repeat that the 2-format build collapsed out of its
-/// counts must re-derive to be counted at all.
-const ACTIVITY_INDEX_STATE_FORMAT: u32 = 3;
+/// counts must re-derive to be counted at all. W1095 raised it to 4: rows now
+/// carry the session's capture fidelity resolved from the body's sealed
+/// record headers, and a 3-format state describes sessions measured by a
+/// build that recorded none — carrying those rows verbatim would keep the
+/// archive's own captured fidelity invisible (and, once a declared fallback
+/// exists, let a stale declared value stand over a captured one), so one
+/// re-derivation is forced instead.
+const ACTIVITY_INDEX_STATE_FORMAT: u32 = 4;
 
 /// Name of the incremental state file inside `meta/<machine>/`.
 const ACTIVITY_INDEX_STATE_FILE: &str = ".activity-index-state-v1.json";
@@ -4060,6 +4066,7 @@ fn build_activity_index(
                     row.time_source = activity::TimeSource::Unknown {
                         why: why.to_string(),
                     };
+                    row.fidelity = Some(body_absent_capture_fidelity());
                     row
                 }
                 None if reclaimed => {
@@ -4068,6 +4075,7 @@ fn build_activity_index(
                     row.time_source = activity::TimeSource::Unknown {
                         why: RECLAIMED_BODY_WHY.to_string(),
                     };
+                    row.fidelity = Some(body_absent_capture_fidelity());
                     row
                 }
                 // A session directory with no body and no manifest row: nothing
@@ -4215,6 +4223,24 @@ const RESEALED_BODY_WHY: &str = "the session was re-sealed after the previous in
 const UNBOUND_PREVIOUS_ROW_WHY: &str = "the previous index row cannot be bound to the body the \
                                         manifest records for this session, so whether it \
                                         describes the reclaimed body is unknown";
+
+/// The capture fidelity of a body-less session this build could not re-read.
+/// Distinct from the not-recorded reason on purpose: the capture may well
+/// have stamped its fidelity into the body it sealed — the body is *here*
+/// that is unknown — so "not recorded" would be a claim about the capture,
+/// and this is a claim about the stage. Impossible to read here is not empty
+/// (invariant 1) and is never allowed to look like a value, so it resolves
+/// to the explicit `declared unknown` carrying this reason.
+fn body_absent_capture_fidelity() -> chat_stasher::message_audit::FidelityMetadata {
+    chat_stasher::message_audit::FidelityMetadata {
+        source: chat_stasher::message_audit::MetadataSource::Declared,
+        fidelity: chat_stasher::message_audit::Fidelity::Unknown {
+            reason: "the session's body is not on this stage, so its capture fidelity \
+                     could not be read"
+                .to_string(),
+        },
+    }
+}
 
 /// The rows of the activity index already at `path`, keyed by session id.
 ///
@@ -12744,6 +12770,22 @@ fn cmd_read(
             bytez.len(),
             sha256_hex(&bytez)
         );
+        // ADR-051 D3: the read header states the fidelity this body's own
+        // sealed records stamped at capture time — captured with its value,
+        // or an explicit unknown naming why nothing stamped one. It is
+        // derived from the bytes just read, so it reports this body exactly
+        // as the archive holds it, mirrors what the activity row records for
+        // the same session, and never consults the registry or the session
+        // name. `--all-machines` deliberately prints no fidelity line: its
+        // per-session listing is digests, not per-session verdicts.
+        {
+            let lossy = String::from_utf8_lossy(&bytez);
+            let lines: Vec<&str> = lossy.lines().collect();
+            println!(
+                "[read] fidelity       : {}",
+                activity::fidelity_line(&activity::session_capture_fidelity(&lines))
+            );
+        }
         if include_deleted {
             println!(
                 "[read] view            : include-deleted (deleted records are marked inline)"

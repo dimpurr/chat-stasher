@@ -872,6 +872,7 @@ mod tests {
             dimensions: Default::default(),
             account_keys: Vec::new(),
             measured_body: None,
+            fidelity: None,
         };
         let o = to_overview_row(&exact);
         assert_eq!(o.session_id, "s1");

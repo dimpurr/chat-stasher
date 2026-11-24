@@ -171,6 +171,8 @@ fn index_row(machine: &str, session: &str, harness: &str, first: i64, last: i64)
         dimensions: Default::default(),
         account_keys: Vec::new(),
         measured_body: None,
+
+        fidelity: None,
     }
 }
 

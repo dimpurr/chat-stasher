@@ -120,6 +120,8 @@ fn index_row(first: i64, last: i64, surfaces: &[&str]) -> ActivityRow {
         dimensions,
         account_keys: Vec::new(),
         measured_body: None,
+
+        fidelity: None,
     }
 }
 

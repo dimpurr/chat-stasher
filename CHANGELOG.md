@@ -15,6 +15,24 @@ under its own heading below.
 
 #### Added
 
+- **`read` states each session's capture fidelity, and the activity index records it
+  (ADR-051 slice A, W1095).** A single-session `read` now carries a `fidelity` line:
+  `captured full (representation: api)` for a session whose archived records stamped
+  what kind of copy they made at capture time — `captured raw`, `captured partial
+  (note: …)` and `captured unknown (reason: …)` read the same way — while a session
+  whose captures recorded no fidelity (everything archived before the field existed,
+  and collectors that do not stamp it yet) says so as `declared unknown (reason:
+  capture metadata was not recorded)`: an explicit state, never an empty value and
+  never a guess from the tool's name. The same verdict is recorded as a `fidelity`
+  field on the session's activity-index row, so lists can show it without downloading
+  content. Captures that disagree read as a `captured unknown` naming the
+  disagreement, and a capture field that cannot be parsed is reported as unreadable
+  rather than crashing or masquerading as "not recorded" — an unreadable fact is
+  still not the same as an absent one. Values are read, never inferred: the session's
+  own sealed record headers are the authority, and a registry's declared value, where
+  one is later wired in, will only ever mark shards archived before this field, never
+  overwrite a captured one. `read --all-machines` keeps printing per-session digests
+  only.
 - **Every pass runs against a time budget (ISSUE-008 ②, W1084).** `run-once` measures
   each round against an explicit budget — the scheduling interval it is scheduled at,
   or `run_budget_secs` when the machine wants a different line — and records it in
